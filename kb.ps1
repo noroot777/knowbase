@@ -9,11 +9,11 @@ Knowbase 的 Windows 操作入口 —— `kb.sh` 的对等物,一条命令一条
 
   kb.sh                           kb.ps1
   ─────────────────────────────── ──────────────────────────────────────────────
-  daemonize()  fork + setsid      scripts/win_daemon.py spawn(自己的隐藏控制台)
+  daemonize()  fork + setsid      scripts/win_daemon.py spawn(隐藏控制台 + Job Object)
   lsof -ti tcp:N                  Get-NetTCPConnection -LocalPort N -State Listen
-  ps -o ppid=/command=  pgrep -P  Get-CimInstance Win32_Process(一次取全表)
-  kill -INT                       win_daemon.py ctrlbreak(CTRL_BREAK → SIGBREAK)
-  kill -TERM / -KILL              Stop-Process -Force(TerminateProcess)
+  ps -o ppid=/command=  pgrep -P  QueryInformationJobObject(实例成员)
+  kill -INT                       win_daemon.py stop(CTRL_BREAK → SIGBREAK)
+  kill -TERM / -KILL              TerminateJobObject(整个受管理实例)
   env -i HOME=… PATH=…            白名单拼环境,见 scripts/win_env.ps1
   collector/.venv/bin/python      collector\.venv\Scripts\python.exe
   . scripts/web_env.sh            . scripts/win_env.ps1
@@ -69,7 +69,6 @@ $script:Curl = Join-Path $env:SystemRoot 'System32\curl.exe'
 $script:CurlArgs = @('-s', '--connect-timeout', '2', '--max-time', '5', '--noproxy', '*')
 
 $script:Force = $false
-$script:ProcTable = $null
 
 function Write-Note { param([string]$Text) [Console]::Error.WriteLine($Text) }
 function Die { param([string]$Text) [Console]::Error.WriteLine("错误:$Text"); exit 1 }
@@ -387,7 +386,7 @@ function Invoke-Graph {
 
 function Invoke-CollectorCli {
     <#  `cli()` 的对等物:`-m cli` 要在 collector 目录里跑才找得到模块。  #>
-    param([string[]]$Arg)
+    param([string[]]$Arg, [switch]$Capture)
     if (-not (Test-Path -LiteralPath $script:Py -PathType Leaf)) {
         Die @"
 采集器环境还没装好(找不到 $($script:Py))。
@@ -395,7 +394,10 @@ function Invoke-CollectorCli {
 "@
     }
     Push-Location $script:Collector
-    try { Invoke-NativeLive $script:Py (@('-m', 'cli') + $Arg) } finally { Pop-Location }
+    try {
+        if ($Capture) { return (Invoke-Native $script:Py (@('-X', 'utf8', '-m', 'cli') + $Arg) -StdoutOnly) }
+        Invoke-NativeLive $script:Py (@('-m', 'cli') + $Arg)
+    } finally { Pop-Location }
 }
 
 function Get-Status {
@@ -431,8 +433,9 @@ function Get-Status {
     # 所以照原样问它一句、原样打出来,不在这儿替它编一句话。
     $ok = $false
     if (Test-Path -LiteralPath $script:Py -PathType Leaf) {
-        $out = Invoke-CollectorCli @('status') 2>$null
-        $last = @($out | Where-Object { $_ }) | Select-Object -Last 1
+        $result = Invoke-CollectorCli @('status') -Capture
+        $last = @($result.Text -split "`n" | Where-Object { $_ }) | Select-Object -Last 1
+        if ($result.Code -ne 0) { $last = $null }
         if ($last) {
             try {
                 $d = $last | ConvertFrom-Json
@@ -512,7 +515,7 @@ Knowbase 操作入口(Windows)—— 每条命令跑完就还你终端,不用挂
     .\kb.ps1 sync --channel rss     只跑某一个来源(wechat_local|social|rss)
     .\kb.ps1 status                 服务 / 同步进度 / 来源 一屏看全
 
-  服务(后台守护进程;restart 会先杀掉在跑的那份,不管是谁起的)
+  服务(后台守护进程;restart 只停止本入口登记的当前端口实例)
     .\kb.ps1 start | stop | restart
     .\kb.ps1 web   start|stop|restart|status      面板 $($script:Port)
     .\kb.ps1 logs [行数]

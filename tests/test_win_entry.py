@@ -129,7 +129,7 @@ class LineLimitTest(unittest.TestCase):
     """700 行上限(全局约定)。超了就按职责再拆一份,别往下堆。"""
 
     def test_under_limit(self) -> None:
-        for rel in PS_FILES + ('scripts/win_daemon.py', 'kb/filelock.py'):
+        for rel in PS_FILES + ('scripts/win_daemon.py', 'scripts/win_job.py', 'kb/filelock.py'):
             with self.subTest(rel):
                 n = len((REPO / rel).read_text(encoding='utf-8').splitlines())
                 self.assertLessEqual(n, LINE_LIMIT, f'{rel} 有 {n} 行,超过 {LINE_LIMIT}')

@@ -6,7 +6,7 @@
 
 `kb.ps1` 是 `kb.sh` 的对等物:**同一组命令、同一套安全语义**,只是换成 PowerShell + Win32。
 它不是「简化版」,也不是容器驱动壳 —— `kb.sh` 里每一条用事故换来的判据(端口写进 pidfile
-名字、按端口认服务、往上走到顶层属主、不跨端口杀、不碰别人占着的端口、三态管道闸门、起服务
+名字、严格核验实例归属、不跨端口杀、不碰别人占着的端口、三态管道闸门、起服务
 一律 `--offline`、副作用前先校验参数、worktree 闸门、提示而不代劳)在这边逐条翻过来了。
 
 ## 硬约束
@@ -97,47 +97,61 @@
 
 ### 问系统:三态,不许塌成两态
 
-- **`确定没有` / `成功有结果` / `无法确定` 是三件事,接口上也必须是三件事。**
-  `scripts/win_proc.ps1` 里问端口、问进程表的那几个函数**不许返回布尔**,也不许用
-  `catch { return @() }` 收口:布尔和空集都只装得下两种答案,于是「问不出来」被静默记成
-  「确定没有」。能转成空集的**只有**「问到了、确实没有匹配」那一种 —— 判据是
-  `FullyQualifiedErrorId` 以 `CmdletizationQuery_NotFound` 开头、或
-  `CategoryInfo.Category -eq 'ObjectNotFound'`(实测 `Get-NetTCPConnection` 无匹配时就报这个;
-  它**不是**返回空,是抛)。权限不足、CIM 坏掉、被网络过滤驱动拦下,一律 `Known = $false`。
-- **三处消费方各自要有一档。** `start` 问不出来就不起(否则往一个已被占的端口上再起一份,
-  服务死在绑定上,而这边报的是启动超时);`status` 问不出来打「问不出来」**不许打「未运行」**;
-  `stop` 问不出来**什么都不做,连 pidfile 都不删**(删了之后服务还在后台跑着,而下一次连找
-  回它的线索都没有)。`Get-PipelineState` 的端口那一问落 `unknown`,**不是 `idle`** —— 那是
-  停机保护最要命的一处,塌成 idle 等于 `stop` 不问就砍掉正在跑的同步。
-- **`Get-ProcTable` 问不出来就抛。** 空表会让上面每条判断都答出「这个号不存在」,于是
-  stop 什么都没杀却报成功。外加一条反向钉:**查成了的话表里一定有本进程自己**(实测),
-  没有就说明这一份不完整,照样当「无法确定」—— 防的是「没报错、却答出一份残的」。
+- **确定没有 / 成功有结果 / 无法确定必须分开。** 只有完整错误标识
+  `CmdletizationQuery_NotFound,Get-NetTCPConnection` **且**类别为
+  `ObjectNotFound` 才能转成端口空闲。命令不存在、其它 provider 的对象不存在、权限或
+  CIM 故障一律保留 unknown；只比较宽泛类别或错误标识前缀都不够。
+- start/status/stop 及管道闸门共同消费这一个三态适配层。未知时不起、不认作未运行、不停，
+  实例记录也不删；即使加 --force，也不会绕过端口查询失败和实例身份检查。
 
-### pid 是会被回收的号
+### 实例身份不是 PID、命令名或时间窗口
 
-- **pidfile 那条路只核命令行不够,还要核身份。** 号被回收给另一份 kb-web 实例时命令行一模
-  一样(就是 `kb-web`),于是 stop 杀掉别人那一份 —— 跨端口误杀的同一个病根,换成了跨时间。
-  判据:**那个进程的起跑时间不晚于 pidfile 的写入时间**(守护进程先拉起服务、再写记录,
-  所以真身必然满足;回收后的新主必然破,它起跑在原主死掉之后)。宽 5 秒吸收文件时间戳
-  精度。**端口那条路不用核**:「正占着我们这个端口」是系统现在就答出来的事实。
-- **动手杀之前再核一遍**(`Test-SameProc`):收树和真正动手之间隔着一次 CTRL_BREAK 和最多
-  5 秒等待,这中间号完全可能已经被分给别人。CIM 的 `CreationDate` 只到微秒、
-  `Process.StartTime` 到 100ns(实测差 `5e-07` 秒),所以按 1 秒容差比,不按相等比。
-- **起跑时间问不出来就不动手。** 判不准一律拒 —— 认下来的后果是 TerminateProcess,不可挽回。
-- **pidfile 只认第一行,而且先 TryParse 再判范围。** 整份删非数字字符的写法(`-replace
-  '[^0-9]', ''`)在记录多出一行时会把两个号**接成一个**;直接 `[int]` / `[int64]` 转在记录
-  被写坏成满屏数字时抛(40 个 9 连 int64 都装不下,实测),而顶上是 `Stop` —— 一句 status
-  整条红掉,话里是「值对于 Int64 太大或太小」,指不到 pidfile。
+- **服务在第一次执行前就加入独占的命名 Job Object。** 隐藏的管理进程持有 Job 句柄；实例
+  记录原子写入 version、根 PID、GetProcessTimes 原始 100ns 创建标识、随机 Job 名和管理器 PID。
+  字段中的 PID 只用于诊断与向已核验的根发送控制台事件，不是终止权限。
+- **认领只认该 Job 的成员。** 监听端口上的属主也必须属于登记的 Job；不再按命令名向父 PID
+  追溯、不从文件 mtime 推断创建身份，也没有端口残留裸 PID 强杀的后路。其它实例或手动
+  启动的同名进程不会被接管。缺记录就不认领；损坏或旧版纯数字记录明确拒绝并保留。
+- **发送 CTRL_BREAK 前用同一稳定进程句柄核验精确创建标识和 Job 成员资格。** 不设秒级容差，
+  不混用精度不同的 CIM 时间。核验期间一直持有句柄，不在核验后重新凭 PID 打开终止目标。
+- **旧版升级不能猜。** 旧服务没有 Job 登记，不能靠修改 pidfile 时间或加 --force 自动接管。
+  先人工确认并关闭那一个旧服务，再移走对应端口的旧记录，才用新版入口启动；其它端口不动。
 
-### 停树:根退干净了,后代照样要扫
+### 服务就绪不是 Job 还有成员
 
-- **不许「根没了就 return」。** 那恰恰是最常见的那条路:uvicorn 收到 CTRL_BREAK 自己走
-  shutdown、退得很快。可它拉起的东西不跟着走 —— 向量子进程、CDP 起的
-  chrome-headless-shell、采集器子进程都是独立进程,**Windows 没有进程组连坐**,父进程退了
-  只是把它们挂到别的父亲下面。留下来的后果是 chrome 常驻吃内存、下一轮同步撞上一个还握着
-  kb.db 的残留,而 `status` 看着干干净净。kb.sh 那边是对整棵树逐个 `kill`,这一侧不该少做。
-- 所以顺序是:**趁根还活着收全树 + 记下每个号的起跑时间** → 送控制台事件 → 等 → **不管根
-  死没死都扫一遍后代**(后代先走,核过身份才杀)→ 根还在才杀根。
+- **成员存活、端口归属、HTTP 可用是三件事。** Get-ServiceState 保留完整 Job 成员集合、
+  根是否仍在及监听者归属；没有监听不能把残留成员丢掉，也不能把成员非空解释为 Web 可用。
+- **只有端口全部监听者属于登记实例，且 /api/health 返回 200 和 status=ok，才能报告
+  启动成功或运行中。** 健康检查后再次确认端口归属；查询或实例读取失败保留 unknown。
+  首次启动、重复启动、等待结束和 status 全部消费同一个 Get-WebState 判据，不能另设捷径。
+- 根仍活但尚未就绪时等待，默认最多约 20 秒（单次 HTTP 另有有界超时）；超时后再次 start
+  继续等待原实例，不再初始化环境或另起一份。根退出而剩下不提供服务的后代时明确报残留。
+  这两种失败都保留实例记录及成员，交给原有安全停止入口处理，不能为了恢复而自动强杀。
+  根已退出但后代仍提供归属正确、健康的服务时，仍允许报告可用。
+
+### 停机的终态是受管理工作全部结束
+
+- **宽限期间新生的后代也受同一 Job 管理。** 根先退出、子进程另开控制台、子进程再起孙进程，
+  都不靠一次父子快照来追。未开放 breakaway；正常子进程继承 Job 归属。
+- 先向核过身份的根控制台送 CTRL_BREAK，再等整个 Job 空闲，超时用 TerminateJobObject
+  终止该实例全部成员，继续查询直到成员数为零。最后才在同一实例锁内删除记录。
+  查询、终止或确认失败都以非零失败返回并保留线索，不能 SilentlyContinue 后宣称成功。
+- Job 设置 KILL_ON_JOB_CLOSE；管理器异常退出时不留下后台工作。启动期间命令以 suspended
+  创建，登记/分配失败会清理尚未运行的进程；只有登记成功才恢复执行。管理器隐藏运行，
+  不弹出控制台、不激活窗口。实例锁串行化登记与停止，不允许删除新实例刚写的记录。
+- 管理器直接由基础解释器启动，避免把 venv 重定向壳的 PID 当成实际管理器；启动器持有
+  真正管理器的 Popen 句柄。握手文件关闭后才原子发布，临时握手文件清理失败只留诊断，
+  不把已经运行的服务误报成启动失败。
+- 发送事件的辅助进程必须安装真正的控制台处理函数。SetConsoleCtrlHandler(NULL, TRUE)
+  只忽略 CTRL_C，不忽略 CTRL_BREAK；仅靠它会让停机助手被自己发送的事件杀掉。
+
+### 机器输出必须有明确 UTF-8 边界
+
+- `Invoke-Native` 捕获期间临时设 Console.OutputEncoding=UTF-8，并在 finally 恢复。
+  解析 realpath、git common-dir、uv python find、采集器 JSON 的调用都走这一层，
+  不直接捕获流式助手的 stdout。Python 机器输出显式用 -X utf8，不能依赖调用方控制台代码页。
+- 路径助手的中文根、外置数据、junction 目标，以及 JSON/git 路径必须在 CP936 下回归；
+  用例结束后还要确认控制台编码仍为 936，不能靠悄悄改全局终端编码让测试变绿。
 
 ### 取值参数在副作用之前校验完
 
@@ -447,20 +461,14 @@
 
 ## 回归
 
-- `tests/test_win_proc.py` —— Windows 入口的**行为**判据,每条都真跑一次 PowerShell(验的就是
-  PowerShell 自己那几样:异常分类、参数绑定、进程起跑时间),没有 powershell 的机器上整份
-  skip。七组,每组都带反向的那一边:
-  端口三态(查询失败 → `unknown`;**真·无匹配 → `free`**;`Get-PipelineState` 把 `unknown`
-  原样往上递,**这一条按 AST 从 kb.ps1 里取真函数执行**,只替掉端口适配层);
-  pidfile 身份(记录早于起跑时间 → 不认领,**记录是新的 → 要认**,外加一条单独钉
-  「`Get-ServicePids` 真的用了那个判据」—— 判据自己对不等于有人用它);
-  取值参数四种写错法各一条 + **正常写法照旧放行且取值原样**;
-  `f @(a,b) + $c` 的形态本身 + 源码里不许再出现那种写法;
-  端点脱敏(主机名要在、token / `user:` / query 一个字都不许在);
-  `Get-BootPython` 退到项目 venv;
-  停树(造一棵真的父子进程,把「送 CTRL_BREAK」换成「根从容退出」,断言子进程被扫掉)。
-  **挑子进程必须按名字挑**:隐藏窗口的根会带一个 conhost.exe,而 conhost 跟着根一起走 ——
-  挑中它的话这一条在「不扫后代」的实现上也绿(本轮真飘过一次:同一条注入一次红一次绿)。
+- `tests/test_win_proc.py` —— 真跑 PowerShell 的三态、参数、脱敏和解释器选择；
+  命令缺失/其它 ObjectNotFound 必须 unknown，真实端口无匹配才 free；最近两秒的旧式 PID 记录
+  也不能认领。CP936 下验证中文 realpath/junction、git common-dir 和非 ASCII JSON，并确认
+  编码恢复。停止失败必须上抛，记录保留。
+- `tests/test_win_daemon.py` —— 真跑 Windows Job Object：辅助启动器退出后的成员仍可查询，
+  根先退出且宽限期新生孙进程也会被清理；两个实例互不干扰。精确创建标识差 100ns 或不属于
+  该 Job 都不能发送事件。查询/终止/最终确认失败保留记录，损坏/旧记录拒绝，重复启动不覆盖。
+  管理器崩溃清理整组；登记失败时 suspended 进程未执行便被回收。
 
 - `tests/test_filelock.py` —— 结构:`kb/`、`scripts/`、`collector/`、**`tests/`** 四棵树下没有
   顶层 `import fcntl`,**而且探针串里也没有** `fcntl.flock(` / `fcntl.LOCK_`(例外名单连它的
@@ -503,7 +511,9 @@
   夹具自己先用 urllib 自检一次 —— 夹具坏掉要在 setUp 就红,不许伪装成那条断言
   (实测:第一版响应体多了一个 `}`,就是这道自检当场抓出来的)。
 
-## 反向验证(定点注入,全红)
+## 历史反向验证与现行锚点
+
+下表保留历史注入与现行回归入口的映射，不代表每一轮都重跑整表。本次实际重做的项目见文末。
 
 | 注入 | 红在 |
 |---|---|
@@ -521,9 +531,9 @@
 | `Get-PortOwners` 的 catch 改回 `return @()` | `PortQueryIsThreeStateTest` |
 | 反过来:任何失败都算 `Known=$false` | `test_a_real_no_match_is_free` |
 | `Get-PipelineState` 把 `unknown` 翻成 `idle` | `test_pipeline_state_carries_the_unknown_up` |
-| `Test-RecordedProc` 永远返回 `$true` | `PidFileIdentityTest.test_identity` |
-| 拆掉 `Get-ServicePids` 里那句身份检查 | `test_get_service_pids_actually_uses_it` |
-| `Read-PidFile` 改回整份删非数字 | `PidFileIdentityTest` |
+| 发送事件不比精确创建标识或 Job 归属 | `WindowsJobTest` 的两条身份反向用例 |
+| 拆掉端口属主的 Job 成员检查 | `PidFileIdentityTest.test_port_owners_must_belong_to_the_recorded_job` |
+| 重新接受旧版纯 PID 记录 | `PidFileIdentityTest` 与损坏记录用例 |
 | 取值缺失/空值不拦(改回 `${2:-}` 那种写法) | `OptionValidationTest` |
 | 「取值其实是下一个参数」那道闸拿掉 | `test_a_following_option_is_not_a_value` |
 | 不认识的键不拦 | `test_unknown_key_is_refused` |
@@ -532,7 +542,7 @@
 | `Invoke-BootPython @(…) + $Arg` 去掉括号 | `SplatIsOneCallTest` |
 | `Get-BootPython` 的候选只留采集器 venv | `BootPythonFindsProjectVenvTest` |
 | 端点改回用正则剪(凭证留在 netloc 里) | `EgressLineDoesNotLeakCredentialsTest` |
-| `Stop-ProcTree` 改回「根没了就 return」 | `StopTreeSweepsSurvivorsTest` |
+| 只杀根或初始成员，不终止整个 Job | `WindowsJobTest.test_late_descendant_after_root_exit_is_still_killed` |
 | `CleanEnvKeep` 里加上 `KB_DATA_DIR` | `WebEnvTest` |
 | 空值也透传 | `WebEnvTest` |
 | 白名单改成「全都继承」 | `WebEnvTest` |
@@ -545,9 +555,74 @@
 | `Invoke-NativeLive` 不再降级、改成 `2>&1` | `NativeCallTest`(流式那一条) |
 | Windows 那支撞锁退回 `ctypes.WinError`(errno=EACCES) | `ContentionIsItsOwnErrorTest` + `test_two_imports_cannot_interleave` |
 
-注入前后的基线都全绿,**而且每一条都确认过红在它该红的那条用例上**(只数「红了几条」会
+第一轮修复时注入前后的基线都全绿,**而且每一条都确认过红在它该红的那条用例上**(只数「红了几条」会
 把「锚点打偏、红在别的用例上」当成验过了 —— 本轮就撞上过一次:改坏 `LOCK_UN` 的那版
 第一次注到了 POSIX 分支,广域回归照旧全绿)。
 **不许整份换回旧版做反向验证** —— 那样满屏 ImportError,证明不了行为。
 注入脚本要注意 **kb.ps1 是 CRLF**:锚点在归一化之后的文本上匹配,写回去换回 CRLF,
 最后一律用原始字节还原(顺手确认 BOM 还在)。
+
+## 2026-10-23 第二轮审查修复与验证
+
+- R1：严格限定唯一已确认的端口无匹配错误；缺命令和其它 ObjectNotFound 都为 unknown。
+- R2/R4：删除按命令名、父 PID、mtime 和时间容差认领/强杀的实现，改为命名 Job Object。
+  根身份用原始创建标识严格比较；动态后代、管理器崩溃、停止失败及最终确认都有实际回归。
+- R3：机器输出统一经过临时 UTF-8 捕获并恢复控制台编码；中文 junction/真实目录、git 路径、
+  JSON 及真实采集器调用接线均在 CP936 下通过。
+- 验证中发现并修复启动握手竞争：先前刚创建 ready 文件就会被父进程看到，删除时可能撞上
+  写入句柄，造成服务已启动却返回失败。现在关闭后原子发布，清理临时文件失败只提示；
+  管理器由基础解释器启动，不让 venv 重定向壳代替真实管理器接受超时终止。
+
+实际运行（Windows PowerShell 5.1；PYTHONUTF8=1 与入口强制环境一致）：
+
+- `.venv/Scripts/python.exe -m unittest tests.test_win_entry tests.test_win_proc tests.test_win_daemon tests.test_win_status_encoding -q`：
+  **60 项通过，88.537 秒**，无 skip。
+- `.venv/Scripts/python.exe -m unittest tests.test_filelock tests.test_grab_cli_input tests.test_grab_cli_channel tests.test_feed_egress tests.test_egress_api tests.test_tiers -q`：
+  **125 项通过，34.142 秒**。只给父进程 -X utf8 的首次运行因子进程 CP936 与父进程 UTF-8
+  解码不一致而失败；按入口实际环境设置 PYTHONUTF8=1 后重跑通过，未修改无关分层测试。
+  夹具中断请求的 ConnectionAbortedError 和既有弃用提示不影响最终 OK。
+- 5 项定点内存注入：去掉精确创建标识、去掉 Job 成员判据、去掉停机最终确认、放宽
+  ObjectNotFound 分类、去掉 UTF-8 捕获。**每项各红 1 条后果断言，均为 0 条执行错误**。
+  产品源码没有在这些注入过程中来回改写。
+- 最终真实服务验证在隔离临时 data/vault 下加载原入口并调用 Start-Web/Stop-Web；测试夹具
+  仅为此补入两项隔离环境变量，产品环境白名单未放宽。端口 11584：两次健康检查均 200，
+  重启后的 Job 身份不同，日志有两次完整优雅 shutdown；末态端口 free、实例记录删除。
+- 9 份 PowerShell 文件 AST 解析通过，`kb.cmd --help` 退出 0，Python 编译与
+  `git diff --check` 通过；改动代码文件最大 632 行，未超过 700 行。
+
+没有操作浏览器、没有改动正式数据，也没有停止默认端口的旧服务；本轮隔离测试服务已停止。
+没有重跑完整 fast/full，环境未安装 ruff，不能将这些定向结果称作全仓或页面验收通过。
+旧版纯数字 PID 记录的迁移按本文件「实例身份」节处理，不冒险自动接管旧服务。
+
+## 服务就绪判据验证
+
+- 根退出、后代存活且端口空闲的原审查探针重新执行：status 显示残留进程，start 退出 1，
+  不再输出已运行或成功标记；记录和两个 Job 成员均保留，最后由夹具安全停止。
+- 定向回归覆盖根仍活但未监听、已监听但 HTTP 非 200/JSON 无效/健康字段不符、首次启动
+  等待健康、超时后重复 start 不再 spawn、正常实例幂等启动、健康后端口归属变化。
+  真实 Job 用例还覆盖根退出的非监听后代，以及同一实例从未就绪超时到延迟就绪后重用。
+- 新夹具首次运行的后果断言通过，但清理日志时遇到管理器尚未关闭句柄；夹具改为持有
+  稳定管理器句柄并等待退出后清理，重跑通过。没有为清场改动产品停止协议。
+
+实际运行设置 PYTHONUTF8=1、PYTHONDONTWRITEBYTECODE=1、PYTHONPATH=tests，以及模型离线变量：
+
+~~~powershell
+.venv\Scripts\python.exe -m unittest tests.test_win_entry tests.test_win_proc tests.test_win_daemon tests.test_win_status_encoding tests.test_win_web tests.test_filelock tests.test_grab_cli_input tests.test_grab_cli_channel tests.test_feed_egress tests.test_egress_api tests.test_tiers -q
+~~~
+
+- 195 项全部通过，171.692 秒，无 skip；夹具主动中断连接的既有诊断和 Starlette 弃用提示
+  没有导致用例失败。此前单独运行就绪及身份定向检查也通过。
+- 三项定点内存注入分别把未监听当就绪、忽略健康 HTTP 状态、让重复 start 只看成员数。
+  每项各触发一个后果断言失败，均无执行错误；产品源码没有为注入来回改写。
+- 隔离的真实 kb-web 使用端口 8983，初次/重复启动、status、停止、再启动和重复停止通过。
+  两次 API 检查均 200，重启 Job 不同，最终端口 free、记录不存在，日志有完整优雅退出。
+- 原探针只重放本任务阻塞项；证据在任务运行目录 windows-ready-fix 下的
+  critical-probe-r1.log、service-smoke.log、real-service-web.log、mutations.json。
+- 9 份 PowerShell AST/BOM 检查、相关 Python 内存编译、700 行上限、kb.cmd --help 和
+  git diff --check 通过。新代码未增加内联注释或放宽环境白名单。
+
+只修复服务就绪这一阻塞项；非阻塞的并发停机协议等没有顺手扩大修改。未重跑完整 fast/full、
+其他系统或浏览器页面，也未重跑报告里既有的 Windows 归档路径断言。没有使用浏览器或降级
+浏览器通道，没有操作默认端口服务、正式资料、采集或图谱发布；所有本轮隔离实例已清场。
+末次复核两个实测端口均空闲，本轮验证进程为零。首次失败夹具的两个系统临时目录仍各留
+一份小型脚本和空日志；删除命令被执行策略拦截，未改用其它通道绕过，后续夹具正常清理。

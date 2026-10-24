@@ -51,13 +51,19 @@ function Invoke-Native {
           [string[]]$Arg = @(),
           [switch]$StdoutOnly)
     $ErrorActionPreference = 'Continue'
-    if ($StdoutOnly) {
-        $out = & $Exe @Arg 2>$null
-    } else {
-        $out = & $Exe @Arg 2>&1
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+        if ($StdoutOnly) {
+            $out = & $Exe @Arg 2>$null
+        } else {
+            $out = & $Exe @Arg 2>&1
+        }
+        return @{ Code = $LASTEXITCODE
+                  Text = (@($out | ForEach-Object { "$_" }) -join "`n") }
+    } finally {
+        [Console]::OutputEncoding = $previousEncoding
     }
-    return @{ Code = $LASTEXITCODE
-              Text = (@($out | ForEach-Object { "$_" }) -join "`n") }
 }
 
 function Invoke-NativeLive {
@@ -149,6 +155,11 @@ $script:BootPyCache = $null
 function Invoke-BootPython { param([string[]]$Arg)
     $p = Get-BootPython
     Invoke-NativeLive $p.Exe @($p.Pre + $Arg)
+}
+
+function Invoke-BootPythonCapture { param([string[]]$Arg)
+    $python = Get-BootPython
+    return (Invoke-Native $python.Exe (@($python.Pre) + $Arg) -StdoutOnly)
 }
 
 function Get-Uv {

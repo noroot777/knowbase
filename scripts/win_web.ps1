@@ -53,52 +53,82 @@ $($r.Text)
     } finally { Pop-Location }
 }
 
-function Start-Web {
-    # **端口先问一次,三态各走各的。** 问不出来时既不能当「空着」(往一个已经被占
-    # 的端口上再起一份,服务死在绑定上,而这边报的是一个莫名其妙的启动超时),也不
-    # 能当「占着」(明明空着却拒绝起)—— 只能说「问不出来」。
-    $port = Get-PortState $script:Port
-    if ($port -eq 'unknown') {
-        Die @"
-问不出端口 $($script:Port) 上有没有人,不敢就这么起 —— 要是已经被占着,
-     起出来的那份会死在绑定上,而这儿只会报一个启动超时。
-     查询失败的原因:$((Get-PortOwners $script:Port).Why)
-"@
+function Get-WebState {
+    $state = @{ Name = 'unknown'; Why = ''; Pids = @() }
+    try { $service = Get-ServiceState $script:WebPid $script:Port }
+    catch { $state.Why = $_.Exception.Message; return $state }
+    $state.Pids = @($service.Pids)
+    if (@($service.Owners).Count -gt 0 -and -not $service.Owned) {
+        $state.Name = 'conflict'
+        $state.Why = "端口 $($script:Port) 被未登记的进程占着"
+        return $state
     }
-    if (@(Get-ServicePids $script:WebPid $script:Port $script:WebPat).Count -gt 0) {
+    if ($state.Pids.Count -eq 0) {
+        $state.Name = 'stopped'
+        $state.Why = '受管理进程已全部结束'
+        return $state
+    }
+    $state.Name = if ($service.RootAlive) { 'starting' } else { 'residual' }
+    $state.Why = if ($service.RootAlive) { '进程仍在，但服务尚未就绪' } else { '根进程已退出，仍有受管理的后代' }
+    if (-not $service.Owned) { return $state }
+    try {
+        $response = Invoke-Api -Path '/api/health'
+        if ($response.Code -ne 200) { $state.Why = '端口已监听，但健康检查未通过'; return $state }
+        $health = $response.Body | ConvertFrom-Json
+        if ((Get-Prop $health 'status' '') -cne 'ok') {
+            $state.Why = '健康检查未返回 status=ok'
+            return $state
+        }
+    } catch { $state.Why = "健康检查失败:$($_.Exception.Message)"; return $state }
+    try { $confirmed = Get-ServiceState $script:WebPid $script:Port }
+    catch { $state.Name = 'unknown'; $state.Why = $_.Exception.Message; return $state }
+    if (-not $confirmed.Owned) {
+        $state.Name = 'unknown'
+        $state.Why = '健康检查后端口归属发生变化'
+        return $state
+    }
+    $state.Name = 'ready'
+    $state.Why = ''
+    return $state
+}
+
+function Wait-WebReady {
+    param([int]$TimeoutSeconds = 20)
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    do {
+        $state = Get-WebState
+        if ($state.Name -ne 'starting' -or [DateTime]::UtcNow -ge $deadline) { return $state }
+        Start-Sleep -Milliseconds 500
+    } while ($true)
+}
+
+function Start-Web {
+    param([int]$TimeoutSeconds = 20)
+    $state = Get-WebState
+    if ($state.Name -eq 'ready') {
         Write-Note "[web] 已在 $($script:Api)"
         Show-CodeStale; Show-EgressLines; Show-GraphStale
         return
     }
-    # 端口有人占但不是 kb-web:说清楚,别等它「起完」再报一个莫名其妙的超时
-    if ($port -eq 'busy') {
-        Die @"
-端口 $($script:Port) 被别的进程占着,kb-web 起不来。
-     换个端口:`$env:KB_WEB_PORT=8788; .\kb.ps1 web start
-"@
+    if ($state.Name -in @('unknown', 'conflict', 'residual')) {
+        Die "kb-web 未就绪:$($state.Why)。未启动新实例，已有记录和进程保留；请先检查日志或用 web stop 安全停止。"
     }
     if (-not (Test-Path -LiteralPath $script:Curl -PathType Leaf)) {
         Die "找不到 $($script:Curl) —— 这个入口靠系统自带的 curl 跟面板说话(Win10 1803+ 都有)"
     }
-    Initialize-WebEnv
-    $envPairs = @(Build-WebEnv) + @("PORT=$($script:Port)")
-    $spawn = @($script:WinDaemon, 'spawn', $script:WebPid,
-               (Join-Path $script:LogDir 'web.log'), $script:Root)
-    foreach ($e in $envPairs) { $spawn += @('--env', $e) }
-    $spawn += @('--', (Get-Uv), 'run', '--offline', 'kb-web')
-    $null = Invoke-BootPython $spawn
-    if ($LASTEXITCODE -ne 0) { Die 'win_daemon.py spawn 没起成(上面有原因)' }
-    $n = 0
-    while ($n -lt 40 -and (Get-PortState $script:Port) -ne 'busy') { Start-Sleep -Milliseconds 500; $n++ }
-    $port = Get-PortState $script:Port
-    if ($port -eq 'unknown') {
-        Die @"
-起没起来问不出来(端口查不了:$((Get-PortOwners $script:Port).Why))。
-     服务可能已经起着了 —— 先看 $(Join-Path $script:LogDir 'web.log'),别急着再起一份。
-"@
+    if ($state.Name -eq 'stopped') {
+        Initialize-WebEnv
+        $envPairs = @(Build-WebEnv) + @("PORT=$($script:Port)")
+        $spawn = @($script:WinDaemon, 'spawn', $script:WebPid,
+                   (Join-Path $script:LogDir 'web.log'), $script:Root)
+        foreach ($e in $envPairs) { $spawn += @('--env', $e) }
+        $spawn += @('--', (Get-Uv), 'run', '--offline', 'kb-web')
+        $null = Invoke-BootPython $spawn
+        if ($LASTEXITCODE -ne 0) { Die 'win_daemon.py spawn 没起成(上面有原因)' }
     }
-    if ($port -ne 'busy') {
-        Die "kb-web 起不来,看 $(Join-Path $script:LogDir 'web.log')"
+    $state = Wait-WebReady -TimeoutSeconds $TimeoutSeconds
+    if ($state.Name -ne 'ready') {
+        Die "kb-web 未就绪:$($state.Why)。看 $(Join-Path $script:LogDir 'web.log')；实例记录和进程已保留，未自动强杀或另起一份。"
     }
     Write-Note "[web] $($script:Api)"
     Show-EgressLines
@@ -132,21 +162,17 @@ function Stop-Web {
 }
 
 function Get-WebStatus {
-    # **这一问答不出来时不许说「未运行」。** 人看 status 就是为了决定下一步做什么
-    # (要不要 stop、要不要再起一份),说错的代价是他照着错话去做。
-    $port = Get-PortState $script:Port
-    if ($port -eq 'unknown') {
-        Write-Output "kb-web    问不出来(端口 $($script:Port) 查不了:$((Get-PortOwners $script:Port).Why))"
-        return
-    }
-    $pids = @(Get-ServicePids $script:WebPid $script:Port $script:WebPat)
-    if ($pids.Count -gt 0) {
-        Write-Output "kb-web    运行中 ($($script:Api))"
-        Show-CodeStale
-        Show-EgressLines
-    } elseif ($port -eq 'busy') {
-        Write-Output "kb-web    未运行(端口 $($script:Port) 被别的进程占着)"
-    } else {
-        Write-Output 'kb-web    未运行'
+    $state = Get-WebState
+    switch ($state.Name) {
+        'ready' {
+            Write-Output "kb-web    运行中 ($($script:Api))"
+            Show-CodeStale
+            Show-EgressLines
+        }
+        'unknown' { Write-Output "kb-web    问不出来($($state.Why))" }
+        'stopped' { Write-Output 'kb-web    未运行' }
+        'starting' { Write-Output "kb-web    未就绪($($state.Why)，实例记录已保留)" }
+        'residual' { Write-Output "kb-web    残留进程($($state.Why)，实例记录已保留)" }
+        'conflict' { Write-Output "kb-web    未就绪($($state.Why)，未接管或清理)" }
     }
 }

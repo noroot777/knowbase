@@ -62,6 +62,12 @@ $script:WinDaemon = Join-Path $script:Root 'scripts\win_daemon.py'
 $script:ProcTable = $null
 $script:Port = 8787
 $script:WebPat = 'kb-web'
+$entryAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Join-Path $script:Root 'kb.ps1'), [ref]$null, [ref]$null)
+$propertyFunction = $entryAst.FindAll({ param($node)
+    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-Prop'
+}, $true)
+Invoke-Expression $propertyFunction[0].Extent.Text
 function Write-Note { param([string]$Text) [Console]::Error.WriteLine($Text) }
 function Die { param([string]$Text) throw "DIE:$Text" }
 function Get-Setting {
@@ -164,6 +170,22 @@ function Get-NetTCPConnection {
         """
         self.assertIn('state=free', self.ps_lines(self._NOMATCH))
 
+    def test_missing_command_and_other_not_found_errors_are_unknown(self) -> None:
+        body = '''
+function Get-NetTCPConnection { this_command_does_not_exist_knowbase_probe }
+"missing=$(Get-PortState 8787)"
+function Get-NetTCPConnection {
+    $errorRecord = [Management.Automation.ErrorRecord]::new(
+        [Exception]::new('provider missing'), 'OtherProvider_NotFound',
+        [Management.Automation.ErrorCategory]::ObjectNotFound, $null)
+    throw $errorRecord
+}
+"provider=$(Get-PortState 8787)"
+'''
+        out = self.ps_lines(body)
+        self.assertIn('missing=unknown', out)
+        self.assertIn('provider=unknown', out)
+
     def test_pipeline_state_carries_the_unknown_up(self) -> None:
         """`Get-PipelineState` 要把 unknown 原样往上递,不许就地翻成 idle。
 
@@ -187,57 +209,41 @@ function Invoke-Api { throw '问不出端口时压根不该发这个请求' }
 
 
 class PidFileIdentityTest(_Probe):
-    """pidfile 那条路:号对不上身份就不许认领(认下来的后果是杀)。"""
-
-    _BODY = '''
-$f = Join-Path $env:TEMP 'probe.pid'
-$me = $PID
-Set-Content -LiteralPath $f -Value "$me" -Encoding ascii
-# 这份记录「写在」一小时前:那时本进程还没起跑 —— 典型的号被回收形态
-$old = (Get-Date).AddHours(-1)
-(Get-Item -LiteralPath $f).LastWriteTime = $old
-"recycled=$(Test-RecordedProc $me (Get-Item -LiteralPath $f).LastWriteTime)"
-# 反过来:记录是现在写的,那就是真身
-(Get-Item -LiteralPath $f).LastWriteTime = (Get-Date)
-"genuine=$(Test-RecordedProc $me (Get-Item -LiteralPath $f).LastWriteTime)"
-# 两行数字不许被接成一个号
-Set-Content -LiteralPath $f -Value "123`n456" -Encoding ascii
-"firstline=$(@(Read-PidFile $f).Pids -join ',')"
-# 写坏成满屏数字:要返回空,不许抛 OverflowException
-Set-Content -LiteralPath $f -Value ('9' * 40) -Encoding ascii
-"overflow=$(@((Read-PidFile $f).Pids).Count)"
-'''
-
-    def test_identity(self) -> None:
-        out = self.ps_lines(self._BODY)
-        self.assertIn('recycled=False', out,
-                      'pidfile 比进程起跑时间早 —— 这个号已经被回收给别人了,不许认领')
-        self.assertIn('genuine=True', out,
-                      '反过来钉一边:记录确实是这个进程起来之后写的,就得认 —— '
-                      '不认的话服务还在启动、端口还没开时 stop 一律说「没在跑」')
-        self.assertIn('firstline=123', out, '只认第一行,两行数字不许接成 123456')
-        self.assertIn('overflow=0', out)
-
-    def test_get_service_pids_actually_uses_it(self) -> None:
-        """**上一条只证明那个判据自己对,不证明有人用它。**
-
-        原先的事故就在这条接线上:`Get-ServicePids` 从 pidfile 拿到号之后只核命令行
-        (另一份 kb-web 的命令行一模一样),身份那一关压根没有。所以这里走真实入口 ——
-        `Port` 给 0 把端口那条路关掉,只留 pidfile 这一条。
-        """
+    def test_a_recent_legacy_pidfile_is_not_an_identity(self) -> None:
         body = '''
-$f = Join-Path $env:TEMP 'wire.pid'
+$f = Join-Path $env:TEMP 'legacy.pid'
 Set-Content -LiteralPath $f -Value "$PID" -Encoding ascii
-(Get-Item -LiteralPath $f).LastWriteTime = (Get-Date).AddHours(-1)
-"stale=$(@(Get-ServicePids $f 0 'powershell').Count)"
-(Get-Item -LiteralPath $f).LastWriteTime = (Get-Date)
-"fresh=$(@(Get-ServicePids $f 0 'powershell').Count)"
+(Get-Item -LiteralPath $f).LastWriteTime = (Get-Date).AddSeconds(-2)
+try { Get-ServiceState $f 0; 'ACCEPTED' }
+catch { 'REFUSED' }
+"retained=$(Test-Path -LiteralPath $f)"
 '''
         out = self.ps_lines(body)
-        self.assertIn('stale=0', out,
-                      '这份记录写在本进程起跑之前 —— 号被回收了,不该认领(认了就杀)')
-        self.assertIn('fresh=1', out,
-                      '反过来钉一边:记录是新的就得认出来,否则 stop 什么都停不掉')
+        self.assertIn('REFUSED', out)
+        self.assertIn('retained=True', out)
+        self.assertNotIn('ACCEPTED', out)
+
+    def test_port_owners_must_belong_to_the_recorded_job(self) -> None:
+        body = '''
+$record = Join-Path $env:TEMP 'record.pid'
+Set-Content -LiteralPath $record -Value 'stub'
+function Get-PortOwners { param([int]$P)
+    return @{ Known = $true; Owners = @(222); Why = '' }
+}
+function Invoke-Instance { param([string]$Action, [string]$PidFile)
+    return [pscustomobject]@{ managed = $true; pids = @(111); root_alive = $true }
+}
+$foreign = Get-ServiceState $record 8787
+"foreign=$($foreign.Owned) members=$(@($foreign.Pids).Count)"
+function Get-PortOwners { param([int]$P)
+    return @{ Known = $true; Owners = @(111); Why = '' }
+}
+$own = Get-ServiceState $record 8787
+"own=$($own.Owned) members=$(@($own.Pids).Count)"
+'''
+        out = self.ps_lines(body)
+        self.assertIn('foreign=False members=1', out)
+        self.assertIn('own=True members=1', out)
 
 
 class OptionValidationTest(_Probe):
@@ -368,62 +374,92 @@ $p = Get-BootPython
                       '采集器 venv 不在时要退到项目 venv,而不是直接去 PATH 上赌运气')
 
 
-class StopTreeSweepsSurvivorsTest(_Probe):
-    """根进程退干净了,后代照样要扫 —— 那恰恰是最常见的那条路。"""
-
-    def test_a_child_outliving_the_root_is_killed(self) -> None:
-        """注入点:把「送 CTRL_BREAK」那一步换成「根当场退出」。
-
-        这正是 uvicorn 收到 CTRL_BREAK 之后那条路的形状(从容退出、退得很快),
-        原先的实现到这里就 `return` 了,子进程留在后台 —— 向量子进程、CDP 起的
-        chrome 都是这么漏出去的。
-        """
+class StopFailureRetainsRecordTest(_Probe):
+    def test_a_failed_stop_is_not_reported_as_success(self) -> None:
         body = '''
-$root = Start-Process -FilePath 'powershell.exe' -PassThru -WindowStyle Hidden `
-    -ArgumentList '-NoProfile', '-NonInteractive', '-Command',
-                  'Start-Process powershell.exe -ArgumentList @(''-NoProfile'',''-Command'',''Start-Sleep 120'') -WindowStyle Hidden; Start-Sleep 120'
-# **不许叫 $root。** Stop-ProcTree 的参数就是 `$Root`,而 PowerShell 的变量名不分
-# 大小写、查找又是按调用栈来的 —— 注入的函数里 `$root` 会拿到那个 int 参数,
-# 报的是一句「找不到属性 Id」(本轮真踩了一次)。
-$script:ProbeRootPid = $root.Id
-$n = 0
-$kid = $null
-while ($n -lt 50 -and -not $kid) {
-    Start-Sleep -Milliseconds 200
-    $null = Get-ProcTable -Fresh
-    $t = Get-ProcTable
-    # **必须按名字挑,不能拿「第一个子进程」。** 隐藏窗口的那个根会带一个
-    # conhost.exe 子进程,而 conhost 是跟着根一起走的 —— 挑中它的话,这一条在
-    # 「不扫后代」的实现上也会绿(本轮真这么飘过一次:同一条注入一次红一次绿)。
-    $kid = @($t.Keys | Where-Object {
-                 $t[$_].Parent -eq $script:ProbeRootPid -and
-                 $_ -ne $script:ProbeRootPid -and
-                 $t[$_].Name -eq 'powershell.exe' }) |
-           Select-Object -First 1
-    $n++
+$f = Join-Path $env:TEMP 'failed-stop.pid'
+Set-Content -LiteralPath $f -Value 'diagnostic-record' -Encoding ascii
+function Get-PortOwners { param([int]$P)
+    return @{ Known = $true; Owners = @(); Why = '' }
 }
-if (-not $kid) {
-    Stop-Process -Id $script:ProbeRootPid -Force -EA SilentlyContinue
-    "NOCHILD"; exit 0
+function Invoke-Instance { param([string]$Action, [string]$PidFile)
+    if ($Action -eq 'stop') { throw 'termination denied' }
+    return [pscustomobject]@{ managed = $true; pids = @(123) }
 }
-"child=$kid"
-# 「送控制台事件」换成「根从容退出」
-function Invoke-BootPython { param([string[]]$Arg)
-    Stop-Process -Id $script:ProbeRootPid -Force -EA SilentlyContinue
-}
-Stop-ProcTree $script:ProbeRootPid
-Start-Sleep -Milliseconds 500
-"root_alive=$(Test-Alive $script:ProbeRootPid)"
-"child_alive=$(Test-Alive $kid)"
-Stop-Process -Id $kid -Force -EA SilentlyContinue
+try { Stop-Service_ 'probe' $f 0 'probe'; 'SUCCESS' }
+catch { 'FAILED' }
+"retained=$(Test-Path -LiteralPath $f)"
 '''
-        out = self.ps_lines(body, timeout=240)
-        if 'NOCHILD' in out:
-            self.skipTest('没能造出父子进程(这台机器上 Start-Process 被拦了?)'
-                          '—— 不假装验过')
-        self.assertIn('root_alive=False', out)
-        self.assertIn('child_alive=False', out,
-                      '根退了就返回的话,这个子进程会留在后台:它不跟着父进程走')
+        out = self.ps_lines(body)
+        self.assertIn('FAILED', out)
+        self.assertIn('retained=True', out)
+        self.assertNotIn('SUCCESS', out)
+
+
+class NativeUtf8CaptureTest(_Probe):
+    def test_collector_json_capture_uses_the_same_utf8_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / 'cli.py').write_text(
+                "import json,sys; print('诊断', file=sys.stderr); "
+                "print(json.dumps(dict(message='中文'), ensure_ascii=False))", encoding='utf-8')
+            body = '''
+$source = [IO.File]::ReadAllText((Join-Path $script:Root 'kb.ps1'))
+$ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$null, [ref]$null)
+$functions = @($ast.FindAll({ $args[0] -is [Management.Automation.Language.FunctionDefinitionAst] -and
+    $args[0].Name -eq 'Invoke-CollectorCli' }, $true))
+if ($functions.Count -ne 1) { throw 'missing collector entry function' }
+Invoke-Expression $functions[0].Extent.Text
+$script:Collector = $env:KB_PROBE_COLLECTOR
+$script:Py = (Get-BootPython).Exe
+[Console]::OutputEncoding = [Text.Encoding]::GetEncoding(936)
+$result = Invoke-CollectorCli @('status') -Capture
+$data = $result.Text | ConvertFrom-Json
+"code=$($result.Code)"
+"json=$($data.message -eq '中文')"
+"encoding=$([Console]::OutputEncoding.CodePage)"
+'''
+            out = self.ps_lines(body, extra_env={'KB_PROBE_COLLECTOR': directory})
+        self.assertIn('code=0', out)
+        self.assertIn('json=True', out)
+        self.assertIn('encoding=936', out)
+
+    def test_chinese_realpath_and_junction_under_cp936(self) -> None:
+        with tempfile.TemporaryDirectory(prefix='知识库 目录 ') as directory:
+            target = Path(directory) / '真实数据'
+            target.mkdir()
+            body = '''
+[Console]::OutputEncoding = [Text.Encoding]::GetEncoding(936)
+$target = $env:KB_PROBE_UNICODE
+$link = Join-Path $env:TEMP '联接 目录'
+New-Item -ItemType Junction -Path $link -Target $target | Out-Null
+$resolved = Resolve-RealPath $link
+"equal=$($resolved -eq $target)"
+"exists=$(Test-Path -LiteralPath $resolved -PathType Container)"
+"encoding=$([Console]::OutputEncoding.CodePage)"
+'''
+            out = self.ps_lines(body, extra_env={'KB_PROBE_UNICODE': str(target)})
+        self.assertIn('equal=True', out)
+        self.assertIn('exists=True', out)
+        self.assertIn('encoding=936', out)
+
+    def test_json_and_git_paths_under_cp936(self) -> None:
+        body = '''
+[Console]::OutputEncoding = [Text.Encoding]::GetEncoding(936)
+$python = Get-BootPython
+$code = 'import json; print(json.dumps(dict(message=chr(20013)+chr(25991)), ensure_ascii=False))'
+$result = Invoke-Native $python.Exe (@($python.Pre) + @('-X', 'utf8', '-c', $code)) -StdoutOnly
+$data = $result.Text | ConvertFrom-Json
+"json=$($data.message -eq '中文')"
+$directory = Join-Path $env:TEMP '中文 仓库'
+$null = Invoke-Native 'git' @('init', $directory)
+$result = Invoke-Native 'git' @('-C', $directory, 'rev-parse', '--path-format=absolute', '--git-common-dir') -StdoutOnly
+"git=$(Test-Path -LiteralPath $result.Text.Trim() -PathType Container)"
+"encoding=$([Console]::OutputEncoding.CodePage)"
+'''
+        out = self.ps_lines(body)
+        self.assertIn('json=True', out)
+        self.assertIn('git=True', out)
+        self.assertIn('encoding=936', out)
 
 
 if __name__ == '__main__':
