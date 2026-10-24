@@ -65,7 +65,7 @@ function Resolve-RealPath {
     param([string]$Path)
     if (-not $Path) { return '' }
     $code = 'import os,sys; sys.stdout.write(os.path.realpath(sys.argv[1]))'
-    $out = Invoke-BootPython @('-c', $code, $Path)
-    if ($LASTEXITCODE -ne 0) { return '' }
-    return ([string]((@($out) -join "`n") -split "`n")[0]).Trim().TrimEnd('\', '/')
+    $result = Invoke-BootPythonCapture @('-X', 'utf8', '-c', $code, $Path)
+    if ($result.Code -ne 0) { return '' }
+    return ([string](($result.Text -split "`n")[0])).Trim().TrimEnd('\', '/')
 }
