@@ -133,7 +133,7 @@ try {
   await click(`${editor("claude")} button[type="button"]`);
   check("取消不保存名称", (await settings()).presets.find(preset => preset.key === "claude").label === "Claude 研究专用");
   await click(`${editor("claude")} button`);
-  check("名称上限来自后端", await evalJs(`document.querySelector('${editor('claude')} input').maxLength`) === initial.preset_name_max_length);
+  check("不使用 UTF-16 长度截断组名", await evalJs(`!document.querySelector('${editor('claude')} input').hasAttribute('maxlength')`));
   await setInput(`${editor("claude")} input`, "   ");
   await clearToasts();
   await click(`${editor("claude")} button[type="submit"]`);
@@ -269,7 +269,8 @@ try {
     await evalJs("window.fetch = window.presetRealFetch");
   }
 
-  await evalJs(`window.fetch = async (url, options) => options?.method === 'POST' && String(url).startsWith('/api/stages')
+  await evalJs(`document.querySelectorAll('#stages-presets form').forEach(form => cancelStagePresetName(form));
+    window.fetch = async (url, options) => options?.method === 'POST' && String(url).startsWith('/api/stages')
     ? new Response('upstream unavailable', {status: 503}) : window.presetRealFetch(url, options);`);
   const beforeFailure = JSON.stringify(await settings());
   await click(card("gpt"));

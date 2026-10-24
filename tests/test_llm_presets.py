@@ -212,6 +212,7 @@ class ModelPresetTests(unittest.TestCase):
         self.assertEqual(save.call_count, 1)
         current = self.read()
         self.assertEqual(current.pop("stage_preset_names"), {"gpt": "日常 GPT 组"})
+        self.assertEqual(current.pop("settings_revision"), before.pop("settings_revision") + 1)
         self.assertEqual(current, before)
         self.assertEqual(self.presets()["gpt"]["label"], "日常 GPT 组")
         self.assertEqual(self.presets()["claude"]["label"], "Claude 默认")

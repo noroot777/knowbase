@@ -130,7 +130,7 @@ def configured(key: str) -> dict | None:
     return {"provider": prov, "model": model} if prov else None
 
 
-def set_stage(key: str, provider: str | None, model: str | None) -> None:
+def set_stage(key: str, provider: str | None, model: str | None, **write_options) -> dict:
     """保存某阶段的模型。model 传空 = 清除该阶段的配置,回落到内置默认。
 
     provider 留空时按模型 id 猜一把(命令行/老调用方便),猜不出来才报错——
@@ -139,10 +139,10 @@ def set_stage(key: str, provider: str | None, model: str | None) -> None:
     校验先做完,**改盘走 llm.update_settings**:它在锁内重读当前文件再改,
     面板里连着改两个阶段时两次保存才会叠加,而不是后一次把前一次整个盖掉。
     """
-    set_stages({key: {"provider": provider or "", "model": model or ""}})
+    return set_stages({key: {"provider": provider or "", "model": model or ""}}, **write_options)
 
 
-def set_stages(updates: dict[str, dict]) -> None:
+def set_stages(updates: dict[str, dict], **write_options) -> dict:
     """先校验全部阶段,再在同一个配置事务内保存;任一项非法则整组不落盘。"""
     entries = {}
     for key, value in updates.items():
@@ -175,7 +175,7 @@ def set_stages(updates: dict[str, dict]) -> None:
         else:
             data.pop("stages", None)
 
-    llm.update_settings(mutate)
+    return llm.update_settings(mutate, **write_options)
 
 
 def _candidates(st: Stage) -> list[tuple[str, str]]:

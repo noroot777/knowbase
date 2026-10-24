@@ -17,6 +17,8 @@ OpenAI 侧支持原生 Responses 或转换为 Chat Completions;旧配置默认�
 from __future__ import annotations
 
 import contextlib
+import copy
+import contextvars
 import json
 import os
 import tempfile
@@ -62,9 +64,31 @@ PROVIDER_LABEL = {"anthropic": "Anthropic / Claude", "openai": "OpenAI / GPT"}
 _SECRETS_PATH = DATA_DIR / "secrets.json"
 
 _clients: dict[str, object] = {}
+_settings_view = contextvars.ContextVar("llm_settings_view", default=None)
+
+
+class SettingsConflict(RuntimeError):
+    pass
+
+
+@contextlib.contextmanager
+def settings_snapshot(data: dict | None = None):
+    snapshot = _file_secrets() if data is None else data
+    token = _settings_view.set(snapshot)
+    try:
+        yield snapshot
+    finally:
+        _settings_view.reset(token)
+
+
+def settings_revision(data: dict | None = None) -> int:
+    return (read_settings() if data is None else data).get("settings_revision", 0)
 
 
 def _file_secrets() -> dict:
+    snapshot = _settings_view.get()
+    if snapshot is not None:
+        return copy.deepcopy(snapshot)
     try:
         return json.loads(_SECRETS_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -176,18 +200,34 @@ def _settings_guard() -> Iterator[None]:
             os.close(fd)                  # 关 fd 即释放 flock
 
 
-def update_settings(mutate) -> dict:
+def update_settings(mutate, *, expected_revision: int | None = None,
+                    operation_id: str | None = None) -> dict:
     """在锁内重新读盘 → 交给 mutate 就地改 → 原子写回,返回写进去的那份。
 
     mutate 收到的是**临界区里刚读出来的**最新内容,所以并发的两次改动会叠加,
     不会互相覆盖。校验之类的活在调用前做完,别放进 mutate 里拖长临界区,
     更别在 mutate 里再调一次 update_settings(临界区里干等自己)。
     """
-    with _settings_guard():
-        data = _file_secrets()
-        mutate(data)
-        _save_secrets(data)
-        return data
+    token = _settings_view.set(None)
+    try:
+        with _settings_guard():
+            data = _file_secrets()
+            revision = settings_revision(data)
+            if expected_revision is not None and expected_revision != revision:
+                raise SettingsConflict("配置已被其他操作更新,请重新读取后再保存")
+            operations = dict(data.get("settings_operations") or {})
+            if operation_id and operation_id in operations:
+                raise SettingsConflict("这次保存已经提交,请重新读取当前配置")
+            with settings_snapshot(data):
+                mutate(data)
+            data["settings_revision"] = revision + 1
+            if operation_id:
+                operations[operation_id] = revision + 1
+                data["settings_operations"] = dict(list(operations.items())[-128:])
+            _save_secrets(data)
+            return data
+    finally:
+        _settings_view.reset(token)
 
 
 def set_config(updates: dict) -> None:
@@ -354,14 +394,14 @@ def get_fav_model() -> str:
     return qualify(m) if m else get_default_model()
 
 
-def set_fav_model(model: str) -> None:
+def set_fav_model(model: str, **write_options) -> dict:
     """保存收藏整理模型(收藏页下拉);传空 = 清除,回落默认问答模型。
 
     和设置面板里的「收藏 · 分诊与行动卡」写的是同一处,两边不会各存一份。
     收藏页传来的就是 "provider:model_id",set_stage 认这个前缀。
     """
     from kb import llm_stages
-    llm_stages.set_stage("fav", None, model)
+    return llm_stages.set_stage("fav", None, model, **write_options)
 
 
 def parse_model(model: str, provider: str | None = None) -> Model | None:

@@ -13,6 +13,7 @@ from tests import fixture_life  # noqa: E402
 def main():
     parser = ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=18881)
+    parser.add_argument("--races", action="store_true")
     args = parser.parse_args()
     from tests.fixture_root import fixture_root
 
@@ -28,7 +29,7 @@ def main():
         from fastapi import FastAPI
         import uvicorn
         from kb import llm, llm_presets
-        from kb.web import pages, settings_api
+        from kb.web import favorites_api, pages, settings_api
 
         llm.set_config({
             "anthropic": {"key": "sk-fake-presets-a", "base_url": "http://provider.invalid",
@@ -46,9 +47,11 @@ def main():
         app.include_router(settings_api.router)
         app.include_router(pages.router)
 
-        @app.get("/api/favorites/settings")
-        def favorite_settings():
-            return {"model": llm.get_fav_model()}
+        app.get("/api/favorites/settings")(favorites_api.api_favorite_settings)
+        app.post("/api/favorites/settings")(favorites_api.api_favorite_settings_set)
+        if args.races:
+            from tests.stage_race_gates import install
+            install(app)
 
         @app.get("/api/{path:path}")
         def fixture(path: str):

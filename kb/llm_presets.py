@@ -24,7 +24,7 @@ def _clean_name(name: str) -> str:
     return name
 
 
-def rename(key: str, name: str) -> str:
+def rename(key: str, name: str, **write_options) -> str:
     """仅修改显示名称,保留预设标识、模型分配和其他设置。"""
     if key not in _PRESETS:
         raise KeyError(f"未知模型预设: {key}")
@@ -36,7 +36,7 @@ def rename(key: str, name: str) -> str:
         labels[key] = name
         data["stage_preset_names"] = labels
 
-    llm.update_settings(mutate)
+    llm.update_settings(mutate, **write_options)
     return name
 
 
@@ -68,7 +68,7 @@ def _describe(key: str) -> dict:
     if not llm.has_key(provider):
         reason = f"先在「API Key」中配置 {llm.PROVIDER_LABEL[provider]} 的 key"
     elif not candidates:
-        reason = f"先在「API Key」中勾选可用的 {family.upper() if key == 'gpt' else 'Claude'} 模型"
+        reason = f"当前勾选的模型里没有 {family.upper() if key == 'gpt' else 'Claude'} 系列,请在「API Key」中选择"
     active = bool(assignments)
     for stage_key, entry in assignments.items():
         current = llm_stages.resolve_stage(stage_key)
@@ -89,10 +89,12 @@ def describe() -> list[dict]:
     return [_describe(key) for key in _PRESETS]
 
 
-def apply(key: str) -> dict:
+def apply(key: str, **write_options) -> dict:
     """重新按当前候选生成整组并一次落盘;不支持的阶段完整保留。"""
-    preset = _describe(key)
-    if not preset["ready"]:
-        raise ValueError(preset["reason"])
-    llm_stages.set_stages(preset["assignments"])
+    with llm.settings_snapshot() as snapshot:
+        preset = _describe(key)
+        if not preset["ready"]:
+            raise ValueError(preset["reason"])
+        write_options.setdefault("expected_revision", llm.settings_revision(snapshot))
+        llm_stages.set_stages(preset["assignments"], **write_options)
     return preset

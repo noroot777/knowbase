@@ -191,7 +191,7 @@ body.overlay-open { overflow: hidden; }
   .ask-invitation { display: none; }
   .chat-side { width: 150px; }
   .fav-tools { margin-left: 0; }
-  .stage-row { grid-template-columns: 1fr; }
+  .stage-row { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 760px) {
   #main-content { padding: 20px 16px; }

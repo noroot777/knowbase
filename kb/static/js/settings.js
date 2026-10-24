@@ -69,9 +69,13 @@ function copyMcpConfig() {
 // ── 问答模型下拉 ──────────────────────────────────────────────────────────
 // option 的 value 是带家的 "provider:model_id":裸 id 传回后端只能靠前缀猜家,
 // 同一个 id 两家中转站都可能有,猜错就是拿 A 家 key 打 B 家的站。
-async function loadModels() {
+async function loadModels(preserveSelection = false) {
+  const read = beginModelRead('ask');
+  const selected = preserveSelection ? $('ask-model').value : '';
   try {
-    const d = await fetch('/api/models').then(r => r.json());
+    const d = await fetch('/api/models', { cache: 'no-store' }).then(r => r.json());
+    if (!ownsModelRead('ask', read, d)) return;
+    recordModelSettings(d);
     const sel = $('ask-model');
     sel.innerHTML = '';
     for (const m of d.models) {
@@ -95,6 +99,7 @@ async function loadModels() {
       const first = [...sel.options].find(o => !o.disabled);
       if (first) first.selected = true;
     }
+    if (selected && [...sel.options].some(option => option.value === selected && !option.disabled)) sel.value = selected;
   } catch { /* 保底:留空下拉,发送时后端用默认模型 */ }
 }
 
@@ -212,8 +217,8 @@ function editStagePresetName(button, keyEvent) {
   const errorId = 'stage-preset-name-error-' + editor.dataset.preset;
   editor.innerHTML = `<form onsubmit="saveStagePresetName(event, this)">
     <input name="name" aria-label="组名" value="${esc(editor.dataset.name)}"
-           maxlength="${esc(editor.dataset.nameMaxLength)}" aria-describedby="${esc(errorId)}"
-           aria-invalid="false" title="回车保存,Esc 取消" required oninput="clearStagePresetNameError(this.form)">
+           aria-describedby="${esc(errorId)}"
+           aria-invalid="false" title="最多 ${esc(editor.dataset.nameMaxLength)} 个字符；回车保存,Esc 取消" required oninput="clearStagePresetNameError(this.form)">
     <button type="submit" class="stage-preset-icon" aria-label="保存组名" title="保存组名">${icon('check')}</button>
     <button type="button" class="stage-preset-icon" aria-label="取消" title="取消"
             onclick="cancelStagePresetName(this)">${icon('close')}</button>
@@ -246,7 +251,7 @@ function saveStagePresetName(event, form) {
   const preset = form.closest('.stage-preset-editor').dataset.preset;
   const input = form.elements.namedItem('name');
   const name = input.value;
-  return queueStageSave(() => persistStages('/api/stages/preset/name', { preset, name }, false))
+  return queueStageSave(() => persistStages('/api/stages/preset/name', { preset, name }))
     .then(() => {
       if (generation === stageSaveGeneration && form.isConnected
           && input.getAttribute('aria-invalid') === 'true') input.focus();
@@ -258,27 +263,58 @@ function clearStagePresetNameError(form) {
   form.elements.namedItem('name').setAttribute('aria-invalid', 'false');
 }
 
-function renderStages(data) {
+function renderStages(data, savedPreset) {
+  const editors = [...$('stages-presets').querySelectorAll('.stage-preset-editor:has(form)')]
+    .filter(editor => editor.dataset.preset !== savedPreset);
+  const focused = document.activeElement;
+  stageConfigRevision = data.revision;
+  recordModelSettings(data);
   $('stages-presets').innerHTML = (data.presets || []).map(preset => stagePresetCard({
     ...preset, name_max_length: data.preset_name_max_length,
   })).join('');
+  for (const editor of editors) {
+    const replacement = [...$('stages-presets').querySelectorAll('.stage-preset-editor')]
+      .find(element => element.dataset.preset === editor.dataset.preset);
+    if (!replacement) continue;
+    editor.dataset.name = replacement.dataset.name;
+    replacement.replaceWith(editor);
+    if (editor.contains(focused)) focused.focus();
+  }
   $('stages-list').innerHTML = data.stages.map(stage => stageRow(stage, data.providers)).join('');
   setStageBusy();
 }
 
-async function refreshStages() {
+async function refreshStages(retry = true) {
   const generation = stageSaveGeneration;
   const readVersion = ++stageReadVersion;
   try {
-    const response = await fetch('/api/stages');
+    const operation = stageUnconfirmedOperation;
+    const response = await fetch('/api/stages' + (operation ? '?operation_id=' + encodeURIComponent(operation.id) : ''), { cache: 'no-store' });
     if (!response.ok) throw new Error(response.status);
     const data = await response.json();
     if (generation !== stageSaveGeneration || readVersion !== stageReadVersion) return;
+    if (Number.isSafeInteger(data.revision) && data.revision < modelSettingsRevision) {
+      if (retry) return refreshStages(false);
+      throw new Error('配置读取已过期');
+    }
+    const newer = data.revision > modelSettingsRevision;
     renderStages(data);
+    if (newer) refreshModelConsumers(data);
+    if (operation && stageUnconfirmedOperation?.id === operation.id) {
+      const committed = data.operation?.status === 'committed';
+      const superseded = data.revision > operation.revision;
+      $('stages-msg').textContent = committed ? '上次保存已提交,当前配置已读取。'
+        : superseded ? '上次保存已被后续设置取代,当前配置已读取。'
+        : '当前配置已读取,上次保存仍未确认；可重新选择,旧请求不能覆盖新的成功设置。';
+      if (committed || superseded) rememberStageOperation(null);
+    } else if ($('stages-msg').textContent.includes('正在重新读取')) $('stages-msg').textContent = '';
+    return true;
   } catch (e) {
     if (generation !== stageSaveGeneration || readVersion !== stageReadVersion) return;
     $('stages-presets').innerHTML = '';
     $('stages-list').innerHTML = '<div class="empty">状态获取失败</div>';
+    $('stages-msg').textContent = '读取配置失败,请重新打开面板核对。';
+    return false;
   }
 }
 
@@ -303,7 +339,22 @@ let stageSavePending = 0;
 let stageSaveGeneration = 0;
 let stageReadVersion = 0;
 let stageSaveController = null;
+let stageConfigRevision;
+let stageUnconfirmedOperation = readStageOperation();
 const STAGE_SAVE_TIMEOUT_MS = 20000;
+
+function readStageOperation() {
+  try { return JSON.parse(sessionStorage.getItem('stage-save-operation') || 'null'); }
+  catch { return null; }
+}
+
+function rememberStageOperation(operation) {
+  stageUnconfirmedOperation = operation;
+  try {
+    if (operation) sessionStorage.setItem('stage-save-operation', JSON.stringify(operation));
+    else sessionStorage.removeItem('stage-save-operation');
+  } catch {}
+}
 
 function setStageBusy() {
   $('stages-content').setAttribute('aria-busy', String(stageSavePending > 0));
@@ -331,7 +382,7 @@ function saveStage(key, value) {
 }
 
 function saveStagePreset(preset) {
-  return queueStageSave(() => persistStages('/api/stages/preset', { preset }, true));
+  return queueStageSave(() => persistStages('/api/stages/preset', { preset }));
 }
 
 async function _saveStage(key, value) {
@@ -339,14 +390,17 @@ async function _saveStage(key, value) {
   const i = value.indexOf(':');
   const body = i < 0 ? { key, provider: '', model: '' }
     : { key, provider: value.slice(0, i), model: value.slice(i + 1) };
-  return persistStages('/api/stages', body, key === 'fav');
+  return persistStages('/api/stages', body);
 }
 
-async function persistStages(url, body, refreshFavorites) {
+async function persistStages(url, body) {
   const generation = stageSaveGeneration;
   const controller = new AbortController();
   stageSaveController = controller;
   stageReadVersion++;
+  invalidateModelSettings();
+  const operation = { id: modelOperationId(), revision: stageConfigRevision };
+  rememberStageOperation(operation);
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -356,14 +410,15 @@ async function persistStages(url, body, refreshFavorites) {
   try {
     const r = await fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ ...body, revision: stageConfigRevision, operation_id: operation.id }),
       signal: controller.signal,
     });
     if (!r.ok) {
       const detail = await apiFail(r, '保存失败');
       if (timedOut) throw new Error('保存超时');
       if (generation !== stageSaveGeneration) return;
-      $('stages-msg').textContent = '';
+      if (r.status < 500) rememberStageOperation(null);
+      $('stages-msg').textContent = r.status >= 500 ? '保存结果尚未确认,请重开面板核对。' : '';
       const editor = [...$('stages-presets').querySelectorAll('.stage-preset-editor')]
         .find(element => element.dataset.preset === body.preset);
       const fieldError = editor?.querySelector('.field-err');
@@ -374,29 +429,42 @@ async function persistStages(url, body, refreshFavorites) {
         return;
       }
       toast('保存失败', { detail });
+      if (r.status === 409) {
+        await refreshStages();
+        refreshModelConsumers();
+      }
       return;
     }
     const d = await r.json();
     if (timedOut) throw new Error('保存超时');
     if (generation !== stageSaveGeneration) return;
-    renderStages(d);
+    rememberStageOperation(null);
+    if (Number.isSafeInteger(d.revision) && d.revision < modelSettingsRevision) {
+      const refreshed = await refreshStages();
+      if (refreshed) $('stages-msg').textContent = '配置已有后续更新,已读取当前配置。';
+      return;
+    }
+    renderStages(d, d.renamed_preset ? body.preset : null);
+    if (d.operation_revision !== undefined && d.operation_revision !== d.revision) {
+      refreshModelConsumers(d);
+      $('stages-msg').textContent = '这次保存后配置又有更新,已显示当前配置。';
+      return;
+    }
     if (d.renamed_preset) {
+      loadModels(true);
+      initFavTools(true);
       $('stages-msg').textContent = '✓ 组名已保存：' + d.renamed_preset;
       return;
     }
+    refreshModelConsumers(d);
     $('stages-msg').textContent = d.applied_preset
       ? `✓ 已切换为${d.applied_preset},即时生效${d.preserved.length ? '(研究阶段保持原配置)' : ''}`
       : '✓ 已保存,即时生效';
-    loadModels();       // 问答下拉的默认项跟着「问答 · 回答」阶段走
     refreshWechatSetup();
-    if (refreshFavorites) { // 收藏页那个下拉和「收藏 · 分诊与行动卡」是同一处配置
-      favToolsInited = false;
-      initFavTools();
-    }
   } catch (e) {
     if (generation !== stageSaveGeneration) return;
     const detail = timedOut ? '保存超时,结果尚未确认。请重新打开面板核对后再试。' : e.message;
-    $('stages-msg').textContent = timedOut ? detail : '';
+    $('stages-msg').textContent = timedOut ? detail : '保存结果尚未确认,请重开面板核对。';
     toast('保存失败', { detail });
   } finally {
     clearTimeout(timer);
@@ -458,6 +526,7 @@ async function saveKeys() {
     body.openai_protocol_conversion_enabled = $('openai-protocol-conversion').checked;
   }
   if (Object.keys(body).length === 0) { $('keys-msg').textContent = '没有可改的项'; return; }
+  invalidateModelSettings();
   $('keys-msg').textContent = '保存中…';
   try {
     const r = await fetch('/api/keys', {
@@ -468,7 +537,7 @@ async function saveKeys() {
     $('keys-msg').textContent = '✓ 已保存,即时生效';
     $('key-anthropic').value = ''; $('key-openai').value = '';
     refreshKeys();
-    loadModels();   // 刷新下拉:刚配好 key 的模型解除置灰
+    refreshModelConsumers();
     refreshWechatSetup();
   } catch (e) {
     $('keys-msg').textContent = '保存失败: ' + e.message;
@@ -507,6 +576,7 @@ async function fetchModels(p) {
 }
 
 async function saveModels(p) {
+  invalidateModelSettings();
   const ids = [...$('models-' + p + '-box').querySelectorAll('input:checked')].map(x => x.value);
   $('models-' + p + '-msg').textContent = '保存中…';
   try {
@@ -516,6 +586,6 @@ async function saveModels(p) {
     });
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
     $('models-' + p + '-msg').textContent = `✓ 已保存 ${ids.length} 个`;
-    loadModels();   // 刷新主下拉
+    refreshModelConsumers(await r.json());
   } catch (e) { $('models-' + p + '-msg').textContent = '保存失败: ' + e.message; }
 }
