@@ -42,6 +42,8 @@ def score(rows, settings, scope, now=None):
         reason = ''
         if not policy.get('ranking_enabled', True):
             reason = '观察或隔离名单，不自动进入排名'
+        elif row['state'] == 'excluded':
+            reason = row['reason'] or '已确认不可自动处理'
         elif not published:
             reason = '缺少可靠的发布时间'
         elif scope.ranged and not scope.since <= published.astimezone(TZ).date().isoformat() <= scope.until:
@@ -55,7 +57,7 @@ def score(rows, settings, scope, now=None):
             reason = '标题与简介未发现明确的 AI 相关信息'
         if reason:
             storage.update(row['video_id'], heat_rank=0, value_rank=0)
-            if row['state'] not in ('ready', 'processing'):
+            if row['state'] not in ('ready', 'processing', 'excluded'):
                 storage.update(row['video_id'], state='filtered', reason=reason, heat_rank=0, value_rank=0)
             continue
         hours = max(1, (now - published).total_seconds() / 3600)

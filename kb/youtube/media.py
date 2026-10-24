@@ -85,16 +85,29 @@ def ytdlp(arguments, output, deadline, stopped):
          '--extractor-retries', '1', *arguments], output, deadline, stopped)
 
 
-def probe(row, deadline, stopped):
+def fresh_metadata(path, video_id):
+    cached = read_json(path)
+    if not isinstance(cached, dict) or cached.get('id') != video_id:
+        return None
+    lifetime = 900 if tracks(cached, False) or tracks(cached, True) else 120
+    try:
+        age = time.time() - path.stat().st_mtime
+    except OSError:
+        return None
+    if age > lifetime:
+        return None
+    return cached
+
+
+def probe(row, deadline, stopped, force=False):
     directory = cache_dir(row['video_id'])
-    cached = read_json(directory / 'metadata.json')
-    if isinstance(cached, dict) and cached.get('id') == row['video_id']:
+    cached = None if force else fresh_metadata(directory / 'metadata.json', row['video_id'])
+    if cached:
         return cached
-    if VIDEOS_ROOT.is_dir():
+    if not force and VIDEOS_ROOT.is_dir():
         for previous in sorted(VIDEOS_ROOT.glob('*' + row['video_id'] + '*')):
-            cached = read_json(previous / 'metadata' / 'youtube_metadata.json')
-            if isinstance(cached, dict) and cached.get('id') == row['video_id']:
-                save_json(directory / 'metadata.json', cached)
+            cached = fresh_metadata(previous / 'metadata' / 'youtube_metadata.json', row['video_id'])
+            if cached:
                 return cached
     output = directory / 'probe.log'
     ytdlp(['--skip-download', '--dump-single-json', row['entry']['url']], output, deadline, stopped)
@@ -122,7 +135,7 @@ def tracks(metadata, automatic=False):
             keys = [key for key in keys if key.split('-')[0] == original]
     keys.sort(key=lambda key: (key.split('-')[0] != original if original else not key.endswith('-orig'),
                                not key.startswith('en'), key))
-    return keys[:1]
+    return keys
 
 
 def local_transcript(video_id, duration):
@@ -145,29 +158,47 @@ def captions(row, metadata, automatic, deadline, stopped):
     languages = tracks(metadata, automatic)
     if not languages:
         return None
-    directory = cache_dir(row['video_id']) / ('automatic' if automatic else 'uploaded')
-    directory.mkdir(exist_ok=True)
-    ytdlp(['--skip-download', '--write-auto-subs' if automatic else '--write-subs',
-           '--sub-langs', languages[0], '--sub-format', 'json3/vtt',
-           '-o', str(directory / 'captions.%(ext)s'), row['entry']['url']],
-          directory / 'download.log', deadline, stopped)
-    for path in sorted(directory.glob('captions.*')):
-        if path.suffix not in ('.json3', '.vtt'):
-            continue
-        segments = transcripts.validate(transcripts.parse(path.read_text(encoding='utf-8'), path.suffix),
-                                       float(metadata['duration']))
-        return {'origin': 'automatic_captions' if automatic else 'uploaded_captions',
-                'language': languages[0].removesuffix('-orig'), 'segments': segments}
-    raise RuntimeError('工具未生成预期的字幕文件')
+    failures = []
+    for position, language in enumerate(languages):
+        directory = cache_dir(row['video_id']) / (('automatic' if automatic else 'uploaded') + f'-{position}')
+        directory.mkdir(exist_ok=True)
+        for stale in directory.glob('captions.*'):
+            stale.unlink()
+        try:
+            ytdlp(['--skip-download', '--write-auto-subs' if automatic else '--write-subs',
+                   '--sub-langs', language, '--sub-format', 'json3/vtt',
+                   '-o', str(directory / 'captions.%(ext)s'), row['entry']['url']],
+                  directory / 'download.log', deadline, stopped)
+            for path in sorted(directory.glob('captions.*')):
+                if path.suffix not in ('.json3', '.vtt'):
+                    continue
+                segments = transcripts.validate(transcripts.parse(path.read_text(encoding='utf-8'), path.suffix),
+                                               float(metadata['duration']))
+                return {'origin': 'automatic_captions' if automatic else 'uploaded_captions',
+                        'language': language.removesuffix('-orig'), 'segments': segments}
+            failures.append('工具未生成预期的字幕文件')
+        except Interrupted:
+            raise
+        except (ValueError, OSError, RuntimeError, TypeError, AttributeError) as error:
+            failures.append(str(error))
+    raise RuntimeError('；'.join(failures))
 
 
 def asr(row, metadata, settings, deadline, stopped):
+    directory = cache_dir(row['video_id'])
+    output = directory / 'whisper.json'
+    if output.is_file():
+        try:
+            segments = transcripts.validate(transcripts.parse(output.read_text(encoding='utf-8'), '.json'),
+                                           float(metadata['duration']))
+            return {'origin': 'local_asr', 'language': metadata.get('language') or '', 'segments': segments}
+        except (ValueError, OSError, TypeError):
+            pass
     status = tools(settings)
     if not status['asr_enabled']:
         raise RuntimeError('没有可用字幕，且本地语音转录已关闭')
     if not all(status[key] for key in ('ffmpeg', 'whisper', 'model')):
         raise RuntimeError('没有可用字幕；本地转录需要 FFmpeg、whisper-cli 和 Whisper 模型')
-    directory = cache_dir(row['video_id'])
     original_tracks = tracks(metadata, True)
     language = str(metadata.get('language') or (original_tracks[0] if original_tracks else 'auto'))
     language = language.removesuffix('-orig').split('-')[0]
@@ -193,8 +224,6 @@ def asr(row, metadata, settings, deadline, stopped):
         directory / 'asr.log', deadline, stopped)
     segments = transcripts.validate(transcripts.parse(output.with_suffix('.json').read_text(encoding='utf-8'), '.json'),
                                    float(metadata['duration']))
-    for path in [wave, *audio_files]:
-        path.unlink(missing_ok=True)
     return {'origin': 'local_asr', 'language': language, 'segments': segments}
 
 
@@ -220,8 +249,13 @@ def obtain(row, metadata, settings, deadline, stopped):
             raise
         except (ValueError, OSError, RuntimeError, TypeError, AttributeError) as error:
             errors.append(str(error)[:300])
+    if errors or not payload:
+        (directory / 'metadata.json').unlink(missing_ok=True)
     if not payload:
         payload = asr(row, metadata, settings, deadline, stopped)
     payload.update(video_id=row['video_id'], caption_warnings=errors)
     save_json(directory / 'transcript.json', payload)
+    for path in [directory / 'speech.wav', *directory.glob('audio.*')]:
+        if path.is_file():
+            path.unlink(missing_ok=True)
     return payload

@@ -401,6 +401,8 @@ def get_settings(kind: str) -> dict:
 
 def save_settings(kind: str, values: dict) -> dict:
     cur = get_settings(kind)
+    if kind == 'youtube' and isinstance(values.get('youtube'), dict):
+        values = {**values, 'youtube': {**cur['youtube'], **values['youtube']}}
     cur.update(values)
     if kind == 'youtube':
         from kb.youtube.settings import of

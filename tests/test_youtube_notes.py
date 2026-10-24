@@ -22,8 +22,10 @@ class YouTubeNotes(YouTubeFixture):
     def reply(self, prompt, *rest):
         self.prompts.append(prompt)
         if prompt.startswith('将以下字幕'):
-            return '\n\n'.join(marker + ' 本段完整中文译文，保留数字、事实和限制。'
-                                for marker in re.findall(r'\[\d{2}:\d{2}:\d{2}\]', prompt))
+            parts = re.split(r'(\[\d{2}:\d{2}:\d{2}\])', prompt)[1:]
+            return '\n\n'.join(parts[position] + ' 本段完整中文译文，保留数字、事实和限制。' *
+                                max(1, len(parts[position + 1]) // 50)
+                                for position in range(0, len(parts), 2))
         if '只输出 JSON' in prompt:
             return json.dumps({'title': '智能体代码生成的实践', 'summary': '作者展示代码生成方法，并提示核验限制。',
                                'body': '## 具体方法\n作者认为每次修改都应该验证。'}, ensure_ascii=False)

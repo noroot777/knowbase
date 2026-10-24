@@ -40,17 +40,19 @@ def process(rows, settings, scope, summary, deadline):
     spent = 0
     attempts = 0
     probes = 0
-    for row in chosen:
+    for position, row in enumerate(chosen):
         if stopped() or time.monotonic() >= deadline:
             summary['stopped'] = stopped()
             summary['message'] = '视频处理已停止或时间预算用尽，未完成的内容留待下轮'
+            for pending in chosen[position:]:
+                storage.update(pending['video_id'], state='deferred', reason=summary['message'])
             break
         if not ready or attempts >= policy['max_videos'] or probes >= policy['max_videos'] * 3:
             storage.update(row['video_id'], state='deferred', reason=why or '本轮数量预算已用完，留待下轮')
             continue
         try:
             probes += 1
-            metadata = media.probe(row, deadline, stopped)
+            metadata = media.probe(row, deadline, stopped, scope.force)
             if reason := gate(metadata, policy):
                 storage.update(row['video_id'], state='deferred' if '预算' in reason else 'excluded', reason=reason)
                 continue
@@ -66,10 +68,11 @@ def process(rows, settings, scope, summary, deadline):
             transcript = media.obtain(row, metadata, settings, deadline, stopped)
             entry = notes.build(row, transcript, deadline, stopped)
             storage.update(row['video_id'], state='ready', note=json.dumps(entry, ensure_ascii=False),
-                           reason='中文内容笔记已完成', retry_at=0)
+                           reason='中文内容笔记已完成', retry_at=0, last_error='')
             summary['processed'] += 1
         except media.Interrupted as error:
-            storage.update(row['video_id'], state='deferred', reason=str(error))
+            for pending in chosen[position:]:
+                storage.update(pending['video_id'], state='deferred', reason=str(error))
             summary['message'] = str(error)
             summary['stopped'] = stopped()
             break
@@ -99,10 +102,10 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
             urls = {entry['url'] for entry in entries}
             for row in completed:
                 if row['entry']['url'] in urls:
-                    connection.execute('UPDATE youtube_candidates SET committed=1 WHERE video_id=?', (row['video_id'],))
+                    storage.mark_committed(connection, source, row['video_id'])
             if pending_failure:
                 connection.execute('UPDATE subscriptions SET last_attempt=?,last_notice=? WHERE id=?',
-                                   (reg.now(), summary['message'], source['id']))
+                                   (reg.now(), summary['message'] or '视频仍有未完成处理或待重试错误', source['id']))
             else:
                 connection.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
                     failures=0,retry_at=0,last_notice=? WHERE id=?''',
@@ -151,19 +154,19 @@ def collect(scope):
     ranked = ranking.score(rows, of(settings), scope)
     summary['ranked'] = len(ranked)
     failures = process(ranked, settings, scope, summary, time.monotonic() + of(settings)['run_seconds'])
-    unresolved = {row['source_id'] for row in storage.rows([source['id'] for source in succeeded])
-                  if row['state'] == 'failed'}
     for source in succeeded:
+        outstanding = any(row['last_error'] or row['state'] in ('deferred', 'processing')
+                          for row in storage.rows([source['id']]))
         completed = storage.ready(source)
         if scope.ranged:
             completed = [row for row in completed if scope.since <= row['entry']['published'][:10] <= scope.until]
         try:
-            if not commit_notes(source, completed, summary, source['id'] in unresolved, scope.ranged):
+            if not commit_notes(source, completed, summary, outstanding, scope.ranged):
                 summary['repointed'] += 1
                 continue
             if source['id'] in failures:
                 _save_failure(source, RuntimeError('；'.join(failures[source['id']])), summary)
-            elif source['id'] in unresolved:
+            elif outstanding:
                 summary['deferred'] += 1
             else:
                 summary['succeeded_ids'].append(str(source['id']))

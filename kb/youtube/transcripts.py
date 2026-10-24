@@ -74,6 +74,8 @@ def deduplicate(segments):
 
 
 def validate(segments, duration):
+    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
+        raise ValueError('视频时长不正确')
     if not isinstance(segments, list) or any(not isinstance(item, dict) or
             not isinstance(item.get('text'), str) or any(isinstance(item.get(field), bool) or
             not isinstance(item.get(field), (float, int)) or not math.isfinite(item[field])
@@ -86,6 +88,19 @@ def validate(segments, duration):
         raise ValueError('字幕时间戳超出视频时长')
     if duration > 180 and max(item['end'] for item in segments) < duration * .75:
         raise ValueError('字幕疑似不完整，不能作为完整内容输入')
+    ordered = sorted(segments, key=lambda item: item['start'])
+    cursor, covered = 0, 0
+    gap_limit = max(15, min(60, duration * .1))
+    if ordered[0]['start'] > max(5, min(30, duration * .05)):
+        raise ValueError('字幕缺少视频开头，不能确认完整')
+    for segment in ordered:
+        start, end = segment['start'], min(duration, segment['end'])
+        if start - cursor > gap_limit:
+            raise ValueError('字幕中间存在异常缺段，不能确认完整')
+        covered += max(0, end - max(cursor, start))
+        cursor = max(cursor, end)
+    if covered < duration * .65:
+        raise ValueError('字幕时间覆盖不足，不能确认完整')
     return segments
 
 

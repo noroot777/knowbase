@@ -1,14 +1,13 @@
 import hashlib
 import json
 import re
-import time
 
 from kb import llm, llm_stages
 from kb.feeds.registry import text_language
 from kb.youtube import media, transcripts
 
 
-VERSION = 'youtube-notes-v1'
+VERSION = 'youtube-notes-v2'
 ORIGINS = {'local_cache': '已有本地原文转录', 'uploaded_captions': '作者提供的字幕',
            'automatic_captions': 'YouTube 自动字幕', 'local_asr': '本地语音转录'}
 
@@ -30,15 +29,8 @@ def available():
 
 
 def call(prompt, selected, deadline, stopped):
-    remaining = int(deadline - time.monotonic())
-    if stopped() or remaining < 2:
-        raise media.Interrupted('已停止或本轮视频处理时间预算不足')
-    output = llm.chat(prompt, selected, max_tokens=6000, timeout=min(180, remaining)).strip()
-    if stopped():
-        raise media.Interrupted('已停止视频处理')
-    if not output:
-        raise RuntimeError('模型返回空内容，未生成中文成品')
-    return output
+    from kb.youtube.llm_request import request
+    return request(prompt, selected, deadline, stopped)
 
 
 def cached(directory, cache, key, create):
@@ -65,6 +57,13 @@ def translate(text, selected, deadline, stopped):
     expected = re.findall(r'\[\d{2}:\d{2}:\d{2}\]', text)
     if re.findall(r'\[\d{2}:\d{2}:\d{2}\]', output) != expected:
         raise RuntimeError('译文缺失或改变了字幕时间标记，未保存为中文成品')
+    source_parts = re.split(r'\[\d{2}:\d{2}:\d{2}\]', text)[1:]
+    translated_parts = re.split(r'\[\d{2}:\d{2}:\d{2}\]', output)[1:]
+    for original, translated in zip(source_parts, translated_parts):
+        source_size = sum(char.isalnum() for char in original)
+        translated_size = sum(char.isalnum() for char in translated)
+        if not translated.strip() or translated_size < max(1, source_size * .15):
+            raise RuntimeError('译文段落为空或明显过短，不能确认全文已翻译')
     return output
 
 

@@ -92,14 +92,19 @@ class YouTubeMedia(YouTubeFixture):
         with patch.object(media, 'tools', return_value=dict(asr_enabled=True, ffmpeg=True, whisper=True, model=True)), \
                 patch.object(media, 'model_path', return_value=model), patch.object(media, 'ytdlp', side_effect=download), \
                 patch.object(media, 'run', side_effect=run):
+            with self.assertRaisesRegex(RuntimeError, '多语言模型'):
+                media.asr(self.row, {**self.metadata, 'language': 'ja'}, {'youtube': {}}, self.deadline, lambda: False)
             result = media.asr(self.row, self.metadata, {'youtube': {}}, self.deadline, lambda: False)
             self.assertEqual('local_asr', result['origin'])
             self.assertEqual('bestaudio[abr<=160]/bestaudio', commands[0][1])
             self.assertEqual(['-t', '2'], commands[-1][-2:])
-            self.assertFalse((directory / 'audio.webm').exists())
-            self.assertFalse((directory / 'speech.wav').exists())
-            with self.assertRaisesRegex(RuntimeError, '多语言模型'):
-                media.asr(self.row, {**self.metadata, 'language': 'ja'}, {'youtube': {}}, self.deadline, lambda: False)
+        self.assertTrue((directory / 'audio.webm').exists())
+        self.assertTrue((directory / 'speech.wav').exists())
+        with patch.object(media, 'captions', return_value=None), patch.object(media, 'ytdlp') as redownload:
+            self.obtain()
+        redownload.assert_not_called()
+        self.assertFalse((directory / 'audio.webm').exists())
+        self.assertFalse((directory / 'speech.wav').exists())
 
     def test_public_tool_arguments_and_stop(self):
         with patch.object(media, 'run') as run:
