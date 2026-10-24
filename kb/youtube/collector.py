@@ -116,7 +116,6 @@ def collect(scope):
                'stopped': False, 'failed_ids': [], 'succeeded_ids': [],
                'discovered': 0, 'ranked': 0, 'processed': 0}
     pending = []
-    products.prepare([source['id'] for source in sources])
     for source in sources:
         if source['retry_at'] > time.time() and not scope.force:
             summary['deferred'] += 1

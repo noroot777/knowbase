@@ -98,6 +98,7 @@ class YouTubeIntegrity(YouTubeFixture):
                 heat_rank INTEGER DEFAULT 0,value_rank INTEGER DEFAULT 0,state TEXT,
                 reason TEXT,attempts INTEGER DEFAULT 0,retry_at REAL DEFAULT 0,
                 duration REAL DEFAULT 0,note TEXT DEFAULT '',committed INTEGER DEFAULT 0,updated_at TEXT)''')
+            connection.execute("DELETE FROM feed_meta WHERE key='youtube-ownership-v2'")
             connection.execute('''INSERT INTO youtube_candidates(video_id,source_id,source_url,entry,state,reason,updated_at)
                 VALUES(?,?,?,?,?,?,?)''', (self.entry_value['video_id'], self.source['id'], self.source['url'],
                 json.dumps(self.entry_value), 'failed', '旧格式失败', reg.now()))

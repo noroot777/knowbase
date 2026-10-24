@@ -31,6 +31,7 @@ class YouTubeProducts(YouTubeFixture):
     def legacy(self, committed=False):
         with reg.db() as connection:
             connection.execute(OLD_SCHEMA)
+            connection.execute("DELETE FROM feed_meta WHERE key='youtube-ownership-v2'")
             connection.execute('''INSERT INTO youtube_candidates
                 (video_id,source_id,source_url,entry,state,reason,duration,note,committed,updated_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?)''',

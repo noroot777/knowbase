@@ -7,6 +7,65 @@
 - 测试使用临时数据库、vault、转录与模型替身，没有修改生产库，也没有调用真实媒体下载、ASR 或付费 LLM。
 - 浏览器夹具只替换远端发现、媒体获取与模型回复；真实执行排名准入、全文分块翻译编排、笔记构建、数据库提交、导出、索引、API 和 UI。
 
+## 追加审查四项修复验证（2026-10-24）
+
+对应审查 `lSOeb3YBCdN_/round-1`，F1–F4 均认可并按原 YouTube 链路修复。
+最终新执行的 284 项全部通过，包含 76 项 YouTube 检查及 13 个共享模块的 208 项检查，无跳过。
+这是执行者在隔离夹具上的回归记录，不是独立验收结论；未重跑整个 fast/probes，不声称全仓通过。
+
+### 最终命令与证据
+
+哨兵 `sPDMdHzsjzw3` 正常退出，退出码 0，耗时 151.893 秒。
+工作目录为 `/Users/fjh/code/knowledge-base/.worktrees/wnYGhulNzmEH`，原始命令：
+
+```sh
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin PYTHONPATH=/Users/fjh/code/knowledge-base/.worktrees/wnYGhulNzmEH/tests:/Users/fjh/code/knowledge-base/.worktrees/wnYGhulNzmEH TMPDIR=/private/tmp KB_DATA_DIR=/private/tmp/kb-youtube-lSOe-fix-final TZ=Asia/Shanghai HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests/test_youtube*.py tests.test_failure_sources tests.test_feed_sources tests.test_source_aliases tests.test_fulltext_extract_stale tests.test_doc_rewrite_roster tests.test_feed_translate tests.test_feed_trim tests.test_feed_trim_pending tests.test_feed_drop tests.test_feed_drop_paths tests.test_feed_fulltext tests.test_feed_budget tests.test_subs_layout -v
+```
+
+完整日志：`/Users/fjh/code/harness/data/runs/wnYGhulNzmEH/regression/sPDMdHzsjzw3.log`。
+日志结尾为 `Ran 284 tests in 151.893s`、`OK`；存在上游 Starlette 和 pkg_resources 弃用警告，未见模型请求管道的 ResourceWarning。
+没有复用旧结果或用代码树相等代替不可变输入证明。
+
+### 发现、修复路径与回归
+
+下表证据均包含在上述新日志内；本轮新增 10 项 YouTube 用例，没有跳过旧用例。
+
+|发现|根因修复路径|执行证据与结果|
+|---|---|---|
+|F1：旧残缺成品可经停用、删除或改址来源绕过校验|`registry.db` 初始化事务调用 `storage.initialize`，统一迁移和 `products.quarantine`，不依赖采集范围；无资格正文改为明确待校验说明，清旧译文并置提取失效，不触发网络或模型|`tests/test_youtube_consumers.py` 覆盖启用、停用、删除、改址及孤儿内容的真实 API 与导出；均不再返回旧残缺正文，合格无归属存档仍可读。原有重建、重导出、索引及旧提取失效用例同时通过|
+|F2：归属的 committed 与实际关联分离|订阅改址事务触发器清理所有旧归属，删除关联触发器撤销提交标记；查询和提交边界均核验实际关联，永久排除仍生效|真实 PATCH A→B→A 且不运行发现，之后复用成品恢复订阅关联，不调用媒体或模型；伪提交标记、历史清理和永久移除契约通过|
+|F3：失败归并缓存使重试永远失败|`notes.cached` 对命中及新输出统一执行阶段校验，坏缓存只删除当前阶段；译文、分段要点、归并及最终 JSON 均先校验后保存|`tests/test_youtube_stage_cache.py` 验证 16 块长文归并失败后恢复，旧坏结果自动失效，仅重做两次归并和一次最终笔记；不重复合格翻译及 map。空、英文、超长要点和坏译文/JSON 同时覆盖|
+|F4：真实 Shorts 枚举未被排除|准入层识别 yt-dlp 的 `media_type=short`，兼容旧 `shorts` 和地址后备，不依赖 watch/Shorts URL 形状|`tests/test_youtube_admission.py` 以实际单数字段覆盖 watch 和 Shorts 地址，均不进入 obtain/build；普通 60 秒视频仍可处理|
+
+共享回归还覆盖通用来源、失败身份、来源别名、翻译、历史清理、永久移除与路径清理、全文和预算，以及公共订阅布局。
+F2 的改址/关联不变量在原单表实现也存在缺口，本轮不将其误当作仅由前一轮分表修复衍生的独立任务。
+
+### 过程失败与纠正
+
+- `W0rwkyufdC6F`：76 项 YouTube 全部通过，退出码 0，11.690 秒。
+- `EA9vv3tXkI4L`：177 项，退出码 1，3 个错误，138.707 秒。两个旧清理模块通过顶层 `feed_trim_fixture` 导入，初次命令未把 tests 目录加入 PYTHONPATH；修正最终运行环境，没有改动无关导入实现。
+- 另一个错误来自通用翻译夹具：伪造的无资格 YouTube 英文成品现在按 F1 先被隔离，不应产生通用模型翻译错误。修正测试为断言待校验 provenance、没有翻译调用且 errors 为空；YouTube 的导出失败身份断言继续执行，其他来源仍验证翻译失败身份，没有跳过来源。
+- 最终 `sPDMdHzsjzw3` 在夹具修正后重新执行全部 284 项，实际包含此前未成功导入的历史清理模块；未以先前的成功记录代替最终版本验证。
+
+过程完整日志位于同一 regression 目录的 `W0rwkyufdC6F.log` 和 `EA9vv3tXkI4L.log`。
+
+### 本次页面与剩余边界
+
+最终合并回归真实启动隔离服务和独立无头临时 profile。
+本次 `output/youtube/checks.json` 的 14 项行为断言、`output/subs-layout/results.json` 的 527 项公共布局断言全部通过，后者生成于 2026-10-24 20:15:18（Asia/Shanghai）。
+人工查看本次 `output/youtube/subscriptions-desktop.png`、`chinese-reader-desktop.png`、`subscriptions-mobile.png`，以及 `output/subs-layout/manage-1440.png`、`responsive-390-844.png`：
+中文阅读、免责声明、原视频时间链接可见；桌面订阅与 390px 窄屏未见新增布局遮挡或页面横向溢出。同步完成提示为夹具正常通知，不是错误弹层。
+
+首选 Chrome 扩展具名会话的后台创建此前多次返回 `Capability is not available: visibility`，未创建验证标签；本轮沿用已证降级。
+没有连接用户 Chrome/CDP、接管已有标签、激活窗口或启动有头浏览器，不访问生产库，也不运行真实媒体下载、ASR 或付费 LLM。
+页面和模型替身只能证明本地编排、缓存及存储契约，不证明真实 YouTube 可用性或翻译质量。
+
+审查列为非阻断的边界保留：强杀父进程后的子进程回收、发现阶段停止延迟、并发设置覆盖、首次排除不补位、缓存保留/磁盘配额及异常清理残留、混合/日文语言判定、完整性启发式的误拒与语义限制、榜单排序重置、归并签名未含原题。
+已有日报来源范围仍需用户手动加入 YouTube；无真实 Windows、真实长视频性能或外网限流的通过结论。
+历史公共浏览器 `passed=null` 记录仍只作历史说明，不作为本次通过或独立验收依据。
+收尾静态检查覆盖共同起点以来的 44 个改动代码文件：Python AST/编译、Node 语法和 diff 空白检查通过，全部不超过 700 行，registry 为 699 行。
+按本轮临时数据标识、页面探针、夹具服务及模型请求入口检查进程，未发现匹配的遗留进程；截图和 JSON 保留为忽略的运行产物，不加入提交。
+
 ## 第二轮审查修复验证（2026-10-24）
 
 F1–F3 均认可并在原 YouTube 链路内修复，没有改动无关的平台或通用设置实现。

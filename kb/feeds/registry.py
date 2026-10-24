@@ -322,8 +322,8 @@ def db():
         conn.execute('BEGIN IMMEDIATE')
         _migrate(conn)
         _seed_defaults(conn)
-        from kb.youtube.channels import seed
-        seed(conn, now(), history_floor())
+        from kb.youtube.storage import initialize
+        initialize(conn)
         conn.commit()
         yield conn
         conn.commit()

@@ -23,7 +23,8 @@ def gate(metadata, settings):
         return Decision('duration', 'deferred', '没有可靠时长，不开始下载或转录；稍后重新确认', 120)
     if metadata.get('live_status') in ('was_live', 'post_live') or metadata.get('was_live'):
         return Decision('replay', 'excluded', '直播回放不进入自动处理')
-    if '/shorts/' in str(metadata.get('webpage_url', '')) or metadata.get('media_type') == 'shorts':
+    media_type = str(metadata.get('media_type', '')).strip().lower()
+    if '/shorts/' in str(metadata.get('webpage_url', '')) or media_type in ('short', 'shorts'):
         return Decision('shorts', 'excluded', 'Shorts 不进入自动处理')
     if duration > settings['max_video_minutes'] * 60:
         return Decision('duration_budget', 'deferred', '超过单条视频时长预算')

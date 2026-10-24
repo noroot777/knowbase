@@ -85,7 +85,7 @@ class YouTubeCollector(YouTubeFixture):
 
     def test_filters_and_duration_gates(self):
         self.assertIn('直播', collector.gate({'duration': 60, 'was_live': True}, self.settings()['youtube']).reason)
-        self.assertIn('Shorts', collector.gate({'duration': 60, 'media_type': 'shorts'}, self.settings()['youtube']).reason)
+        self.assertIn('Shorts', collector.gate({'duration': 60, 'media_type': 'short'}, self.settings()['youtube']).reason)
         for duration in (float('nan'), -1, True, None):
             self.assertTrue(collector.gate({'duration': duration}, self.settings()['youtube']))
         entries = [self.entry(1), {**self.entry(2), 'title': 'Travel weekend', 'description': ''}]

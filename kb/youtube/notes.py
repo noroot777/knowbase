@@ -33,11 +33,18 @@ def call(prompt, selected, deadline, stopped):
     return request(prompt, selected, deadline, stopped)
 
 
-def cached(directory, cache, key, create):
-    if key not in cache:
-        cache[key] = create()
-        media.save_json(directory / 'notes-cache.json', cache)
-    return cache[key]
+def cached(directory, cache, key, create, validate):
+    if key in cache:
+        try:
+            return validate(cache[key])
+        except (RuntimeError, ValueError, TypeError):
+            cache.pop(key)
+            media.save_json(directory / 'notes-cache.json', cache)
+    output = create()
+    result = validate(output)
+    cache[key] = output
+    media.save_json(directory / 'notes-cache.json', cache)
+    return result
 
 
 def signature(stage, selected, text):
@@ -52,6 +59,12 @@ def translate(text, selected, deadline, stopped):
               '不要摘要、删减或添加事实，不输出前言或代码围栏。保留每个 [HH:MM:SS] 时间标记，'
               '保持段落顺序；产品名、人名、代码、URL 和 token 等技术术语保留原文。\n\n' + text)
     output = call(prompt, selected, deadline, stopped)
+    return translated_output(text, output)
+
+
+def translated_output(text, output):
+    if not isinstance(output, str):
+        raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
     if text_language(output) != 'zh':
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
     expected = re.findall(r'\[\d{2}:\d{2}:\d{2}\]', text)
@@ -74,6 +87,26 @@ def summary(text, title, selected, deadline, stopped):
                 '\n视频原题：' + title + '\n\n' + text, selected, deadline, stopped)
 
 
+def summary_output(output, source=None):
+    if not isinstance(output, str) or not output.strip() or text_language(output) != 'zh':
+        raise RuntimeError('视频分段要点不是有效中文，原文和译文已缓存')
+    if len(output) > 1000 or (source is not None and len(output) >= len(source)):
+        raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
+    return output
+
+
+def note_payload(output):
+    try:
+        payload = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', output.strip()))
+    except (ValueError, TypeError, AttributeError):
+        raise RuntimeError('视频笔记返回格式无效，原文与译文已缓存') from None
+    if (not isinstance(payload, dict) or any(not isinstance(payload.get(field), str) or
+            not payload[field].strip() for field in ('title', 'summary', 'body')) or
+            any(text_language(payload[field]) != 'zh' for field in ('title', 'summary', 'body'))):
+        raise RuntimeError('视频笔记不是完整中文成品，未入库')
+    return payload
+
+
 def build(row, transcript, deadline, stopped):
     directory = media.cache_dir(row['video_id'])
     cache = media.read_json(directory / 'notes-cache.json')
@@ -84,12 +117,14 @@ def build(row, transcript, deadline, stopped):
     for block in transcripts.blocks(transcript['segments']):
         key = signature('translate', translator, block)
         translated.append(cached(directory, cache, key,
-                                 lambda block=block: translate(block, translator, deadline, stopped)))
+                                 lambda block=block: translate(block, translator, deadline, stopped),
+                                 lambda output, block=block: translated_output(block, output)))
     facts = []
     for block in translated:
         key = signature('summary', summarizer, row['entry']['title'] + '\n' + block)
         facts.append(cached(directory, cache, key,
-                            lambda block=block: summary(block, row['entry']['title'], summarizer, deadline, stopped)))
+                            lambda block=block: summary(block, row['entry']['title'], summarizer, deadline, stopped),
+                            summary_output))
     combined = '\n\n'.join(facts)
     while len(combined) > 14000:
         reduced = []
@@ -97,7 +132,8 @@ def build(row, transcript, deadline, stopped):
             block = combined[position:position + 12000]
             key = signature('reduce', summarizer, block)
             reduced.append(cached(directory, cache, key,
-                                  lambda block=block: summary(block, row['entry']['title'], summarizer, deadline, stopped)))
+                                  lambda block=block: summary(block, row['entry']['title'], summarizer, deadline, stopped),
+                                  lambda output, block=block: summary_output(output, block)))
         smaller = '\n\n'.join(reduced)
         if len(smaller) >= len(combined):
             raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
@@ -107,19 +143,7 @@ def build(row, transcript, deadline, stopped):
               'body（分主题的中文 Markdown 笔记）。不要添加资料之外的事实，不要把作者声称当成独立核验。'
               '\n原题：' + row['entry']['title'] + '\n\n' + combined)
     key = signature('note', summarizer, prompt)
-    output = cached(directory, cache, key, lambda: call(prompt, summarizer, deadline, stopped))
-    try:
-        payload = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', output.strip()))
-    except (ValueError, TypeError):
-        cache.pop(key, None)
-        media.save_json(directory / 'notes-cache.json', cache)
-        raise RuntimeError('视频笔记返回格式无效，原文与译文已缓存') from None
-    if (not isinstance(payload, dict) or any(not isinstance(payload.get(field), str) or
-            not payload[field].strip() for field in ('title', 'summary', 'body')) or
-            any(text_language(payload[field]) != 'zh' for field in ('title', 'summary', 'body'))):
-        cache.pop(key, None)
-        media.save_json(directory / 'notes-cache.json', cache)
-        raise RuntimeError('视频笔记不是完整中文成品，未入库')
+    payload = cached(directory, cache, key, lambda: call(prompt, summarizer, deadline, stopped), note_payload)
     origin = ORIGINS.get(transcript['origin'], transcript['origin'])
     complete = '\n\n'.join(translated)
     complete = re.sub(r'\[(\d{2}):(\d{2}):(\d{2})\]', lambda match:

@@ -80,7 +80,7 @@ class YouTubeAdmission(YouTubeFixture):
                 storage.update(row['video_id'], state='candidate', note='', validation='')
 
     def test_permanent_exclusion_does_not_rank_but_explicit_retry_rechecks(self):
-        self.collect({'duration': 60, 'media_type': 'shorts'})
+        self.collect({'duration': 60, 'media_type': 'short'})
         self.assertEqual(('excluded', 'shorts'), tuple(storage.rows()[0][field] for field in ('state', 'gate_code')))
         result, probe = self.collect({'duration': 600})
         self.assertEqual(0, result['processed'])
@@ -96,3 +96,28 @@ class YouTubeAdmission(YouTubeFixture):
         result, probe = self.collect({'duration': 600})
         self.assertEqual(1, result['processed'])
         self.assertTrue(probe.call_args.args[-1])
+
+    def test_real_short_metadata_blocks_watch_and_shorts_urls_before_media(self):
+        for number, path in enumerate(('watch?v=', 'shorts/'), 2):
+            with self.subTest(path=path):
+                entry = self.entry(number)
+                metadata = {'id': entry['video_id'], 'duration': 60, 'media_type': 'short',
+                            'webpage_url': 'https://www.youtube.com/' + path + entry['video_id']}
+                with patch.object(discovery, 'fetch', return_value=[entry]), \
+                        patch.object(notes, 'available', return_value=(True, '')), \
+                        patch.object(media, 'probe', return_value=metadata), \
+                        patch.object(media, 'obtain') as obtain, patch.object(notes, 'build') as build:
+                    result = collector.collect(FetchScope(force=True))
+                obtain.assert_not_called()
+                build.assert_not_called()
+                self.assertEqual((0, 0), (result['processed'], result['admitted']))
+                row = next(row for row in storage.rows() if row['video_id'] == entry['video_id'])
+                self.assertEqual(('excluded', 'shorts'), (row['state'], row['gate_code']))
+
+    def test_short_type_normalization_does_not_exclude_ordinary_short_videos(self):
+        policy = self.settings()['youtube']
+        for media_type in ('short', 'shorts', ' SHORT '):
+            self.assertEqual('shorts', collector.gate({'duration': 60, 'media_type': media_type}, policy).code)
+        for media_type in ('video', None, ''):
+            self.assertIsNone(collector.gate({'duration': 60, 'media_type': media_type,
+                                            'webpage_url': self.entry_value['url']}, policy))

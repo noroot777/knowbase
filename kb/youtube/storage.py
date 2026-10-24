@@ -38,21 +38,37 @@ def migrate(connection):
     connection.execute("INSERT INTO feed_meta VALUES('youtube-ownership-v2',?)", (reg.now(),))
 
 
+def initialize(connection):
+    from kb.youtube.channels import seed
+    from kb.youtube.products import quarantine
+    seed(connection, reg.now(), reg.history_floor())
+    connection.execute(SCHEMA)
+    connection.execute(OWNERS)
+    columns = {column['name'] for column in connection.execute('PRAGMA table_info(youtube_videos)')}
+    for name, definition in (('validation', "TEXT NOT NULL DEFAULT ''"),
+                             ('repair_pending', 'INTEGER NOT NULL DEFAULT 0'),
+                             ('gate_code', "TEXT NOT NULL DEFAULT ''")):
+        if name not in columns:
+            connection.execute(f'ALTER TABLE youtube_videos ADD COLUMN {name} {definition}')
+    migrate(connection)
+    connection.execute("UPDATE youtube_videos SET state='deferred',gate_code='legacy',retry_at=0 "
+                       "WHERE state='excluded' AND gate_code=''")
+    connection.execute('''CREATE TRIGGER IF NOT EXISTS youtube_subscription_reset
+        AFTER UPDATE OF url,feed_url,mode ON subscriptions
+        WHEN OLD.kind='youtube' AND (NEW.url<>OLD.url OR NEW.feed_url<>OLD.feed_url OR NEW.mode<>OLD.mode)
+        BEGIN DELETE FROM youtube_video_sources WHERE source_id=OLD.id; END''')
+    connection.execute('''CREATE TRIGGER IF NOT EXISTS youtube_membership_removed
+        AFTER DELETE ON subscription_items
+        BEGIN UPDATE youtube_video_sources SET committed=0 WHERE source_id=OLD.subscription_id
+        AND video_id IN (SELECT video.video_id FROM youtube_videos video JOIN feed_items item
+            ON item.url=json_extract(video.entry,'$.url') WHERE item.key=OLD.item_key AND item.kind='youtube'); END''')
+    quarantine(connection)
+
+
 @contextmanager
 def db():
     with reg.db() as connection:
         connection.execute('BEGIN IMMEDIATE')
-        connection.execute(SCHEMA)
-        connection.execute(OWNERS)
-        columns = {column['name'] for column in connection.execute('PRAGMA table_info(youtube_videos)')}
-        for name, definition in (('validation', "TEXT NOT NULL DEFAULT ''"),
-                                 ('repair_pending', 'INTEGER NOT NULL DEFAULT 0'),
-                                 ('gate_code', "TEXT NOT NULL DEFAULT ''")):
-            if name not in columns:
-                connection.execute(f'ALTER TABLE youtube_videos ADD COLUMN {name} {definition}')
-        migrate(connection)
-        connection.execute("UPDATE youtube_videos SET state='deferred',gate_code='legacy',retry_at=0 "
-                           "WHERE state='excluded' AND gate_code=''")
         yield connection
 
 
@@ -87,7 +103,12 @@ def rows(source_ids=None, connection=None):
         with db() as current:
             return rows(source_ids, connection=current)
     result = connection.execute('''SELECT candidate.*,owner.source_id,owner.source_url,
-            owner.committed,source.name AS channel,source.config,source.history_floor,
+            owner.committed AND EXISTS(SELECT 1 FROM subscription_items link JOIN feed_items item ON item.key=link.item_key
+                WHERE link.subscription_id=owner.source_id AND item.kind='youtube'
+                AND item.url=json_extract(candidate.entry,'$.url')) AS committed,
+            EXISTS(SELECT 1 FROM feed_item_exclusions removed WHERE removed.kind='youtube'
+                AND removed.url=json_extract(candidate.entry,'$.url')) AS excluded,
+            source.name AS channel,source.config,source.history_floor,
             source.id AS owner_id
             FROM youtube_videos candidate JOIN youtube_video_sources owner ON owner.video_id=candidate.video_id
             JOIN subscriptions source ON source.id=owner.source_id
@@ -122,15 +143,18 @@ def failed(row, error):
 
 
 def mark_committed(connection, source, video_id):
-    connection.execute('''UPDATE youtube_video_sources SET committed=1
+    connection.execute('''UPDATE youtube_video_sources SET committed=EXISTS(
+        SELECT 1 FROM subscription_items link JOIN feed_items item ON item.key=link.item_key
+        JOIN youtube_videos video ON item.url=json_extract(video.entry,'$.url')
+        WHERE link.subscription_id=? AND item.kind='youtube' AND video.video_id=?)
         WHERE video_id=? AND source_id=? AND source_url=?''',
-        (video_id, source['id'], source['url']))
+        (source['id'], video_id, video_id, source['id'], source['url']))
 
 
 def ready(source):
     from kb.youtube.products import valid
     return [row for row in rows([source['id']]) if row['state'] == 'ready'
-            and not row['committed'] and row['source_url'] == source['url'] and valid(row)]
+            and not row['committed'] and not row['excluded'] and row['source_url'] == source['url'] and valid(row)]
 
 
 def listing(source_id=None, limit=100):

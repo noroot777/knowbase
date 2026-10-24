@@ -2,7 +2,6 @@ import hashlib
 import json
 
 from kb.feeds import registry as reg
-from kb.maintenance import maintenance_lock
 from kb.youtube import transcripts
 
 
@@ -52,22 +51,34 @@ def replace(connection, entry):
          reg.text_language(entry['title'], entry['body']), key, content_hash)).rowcount
 
 
-def prepare(source_ids):
-    from kb.youtube import storage
-    with maintenance_lock(), storage.db() as connection:
-        for row in storage.rows(source_ids, connection=connection):
-            if row['state'] != 'ready' or valid(row):
-                continue
-            connection.execute('''UPDATE youtube_videos SET state='candidate',repair_pending=1,
-                reason=?,last_error=?,validation='',retry_at=0 WHERE video_id=?''',
-                (PENDING, PENDING, row['video_id']))
-            connection.execute('UPDATE youtube_video_sources SET committed=0 WHERE video_id=?', (row['video_id'],))
-            existing = connection.execute('SELECT * FROM feed_items WHERE key=? AND kind=\'youtube\'',
-                                          (reg.item_key('youtube', row['entry']['url']),)).fetchone()
-            if existing:
-                replace(connection, {field: existing[field] for field in
-                        ('url', 'title', 'author', 'published', 'content_kind', 'body_provenance')}
-                        | {'body': PENDING, 'body_provenance': 'youtube:pending-validation'})
+def quarantine(connection):
+    approved = {}
+    for candidate in connection.execute('SELECT * FROM youtube_videos').fetchall():
+        row = dict(candidate)
+        row['entry'] = json.loads(row['entry'])
+        if row['state'] == 'ready':
+            if valid(row):
+                approved[row['entry']['url']] = json.loads(row['note'])
+            else:
+                connection.execute('''UPDATE youtube_videos SET state='candidate',repair_pending=1,
+                    reason=?,last_error=?,validation='',retry_at=0 WHERE video_id=?''',
+                    (PENDING, PENDING, row['video_id']))
+                connection.execute('UPDATE youtube_video_sources SET committed=0 WHERE video_id=?', (row['video_id'],))
+    for item in connection.execute("SELECT * FROM feed_items WHERE kind='youtube'").fetchall():
+        note = approved.get(item['url'])
+        if note and all(item[field] == note.get(field, '') for field in ('title', 'body', 'author', 'published')):
+            continue
+        if item['body'] == PENDING and item['body_provenance'] == 'youtube:pending-validation':
+            continue
+        replace(connection, {field: item[field] for field in
+                ('url', 'title', 'author', 'published', 'content_kind', 'body_provenance')}
+                | {'body': PENDING, 'body_provenance': 'youtube:pending-validation'})
+        if not note:
+            connection.execute('''UPDATE youtube_videos SET repair_pending=1,
+                last_error=CASE WHEN last_error='' THEN ? ELSE last_error END
+                WHERE json_extract(entry,'$.url')=?''', (PENDING, item['url']))
+        connection.execute('''UPDATE youtube_video_sources SET committed=0 WHERE video_id IN
+            (SELECT video_id FROM youtube_videos WHERE json_extract(entry,'$.url')=?)''', (item['url'],))
 
 
 def publish(connection, source, row):
