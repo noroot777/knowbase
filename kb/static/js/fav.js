@@ -65,34 +65,59 @@ function switchFavView(view) {
   loadFavPanel();
 }
 
+let favSettingsRevision;
+
 async function initFavTools(force = false) {
   if (favToolsInited && !force) return;
   favToolsInited = true;
+  const read = beginModelRead('fav');
   try {
     const [models, settings] = await Promise.all([
-      favJson('/api/models'), favJson('/api/favorites/settings'),
+      favJson('/api/models', { cache: 'no-store' }), favJson('/api/favorites/settings', { cache: 'no-store' }),
     ]);
+    if (!ownsModelRead('fav', read, models, settings)) {
+      if (ownsModelRead('fav', read)) favToolsInited = false;
+      return;
+    }
+    if (Number.isSafeInteger(models.revision) && Number.isSafeInteger(settings.revision)
+        && models.revision !== settings.revision) throw new Error('配置已变动,请重新读取模型');
+    recordModelSettings(settings);
+    recordModelSettings(models);
+    favSettingsRevision = settings.revision;
     const select = $('fav-model');
     select.innerHTML = models.models.map(model => `<option value="${esc(model.key)}"${model.enabled ? '' : ' disabled'}>${esc(model.label)}</option>`).join('');
     if (![...select.options].some(option => option.value === settings.model)) {
       select.insertAdjacentHTML('afterbegin', `<option value="${esc(settings.model)}">${esc(modelLabel(settings.model))}</option>`);
     }
     select.value = settings.model;
+    appliedModelSettings('fav', settings);
     $('fav-model-state').textContent = '';
   } catch (error) {
+    if (!ownsModelRead('fav', read)) return;
     favToolsInited = false;
     $('fav-model-state').textContent = '模型读取失败：' + error.message;
-  }
+  } finally { finishModelRead('fav', read); }
 }
 
 async function saveFavModel() {
+  invalidateModelSettings();
+  const epoch = modelSettingsEpoch;
   try {
-    await favJson('/api/favorites/settings', {
+    const data = await favJson('/api/favorites/settings', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: $('fav-model').value }),
+      body: JSON.stringify({ model: $('fav-model').value, revision: favSettingsRevision,
+        operation_id: modelOperationId() }),
     });
-    $('fav-model-state').textContent = '模型已保存';
-  } catch (error) { $('fav-model-state').textContent = '保存失败：' + error.message; }
+    if (epoch !== modelSettingsEpoch) return;
+    favSettingsRevision = data.revision;
+    refreshModelConsumers(data, true);
+    $('fav-model-state').textContent = data.operation_revision !== undefined && data.operation_revision !== data.revision
+      ? '配置已有后续更新,已显示当前模型' : '模型已保存';
+  } catch (error) {
+    if (epoch !== modelSettingsEpoch) return;
+    $('fav-model-state').textContent = '保存失败：' + error.message;
+    initFavTools(true);
+  }
 }
 
 function favOriginal(item) {

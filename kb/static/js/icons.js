@@ -9,6 +9,8 @@ const ICON_PATHS = {
   bookmark: '<path d="M6 4h12v17l-6-4-6 4V4Z"/>',
   sync: '<path d="M20 10a8 8 0 0 0-14-5L3 8M3 3v5h5M4 14a8 8 0 0 0 14 5l3-3M21 21v-5h-5"/>',
   close: '<path d="m6 6 12 12M18 6 6 18"/>',
+  pencil: '<path d="M16 3a2.8 2.8 0 0 1 4 4L7 20l-5 2 2-5L16 3ZM14 5l4 4"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
   network: '<circle cx="5" cy="6" r="2.5"/><circle cx="19" cy="5" r="2.5"/><circle cx="13" cy="19" r="2.5"/><path d="m7.5 6 9-1M6 8l6 9M18 7l-4 10"/>',
   layers: '<path d="m12 3 10 5-10 5L2 8l10-5ZM2 12l10 5 10-5M2 17l10 5 10-5"/>',
   orbit: '<circle cx="12" cy="12" r="3"/><ellipse cx="12" cy="12" rx="10" ry="5" transform="rotate(-40 12 12)"/>',

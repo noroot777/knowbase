@@ -15,8 +15,9 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StrictBool
 
-from kb import llm, llm_stages
+from kb import llm, llm_presets, llm_stages
 from kb.feeds import egress
+from kb.web.model_settings import SettingsWriteRequest, operation_status, write_settings
 
 router = APIRouter()
 
@@ -24,29 +25,50 @@ router = APIRouter()
 @router.get("/api/models")
 def api_models():
     """问答可选模型列表(含各 provider 是否已配 API key),给前端下拉用。"""
-    return {"models": llm.available_models(), "default": llm.get_default_model()}
+    with llm.settings_snapshot() as snapshot:
+        return {"models": llm.available_models(), "default": llm.get_default_model(),
+                "revision": llm.settings_revision(snapshot)}
 
 
 # ── 各阶段用哪个模型 ──────────────────────────────────────────────────────────
 # 「阶段」= 代码里一处会调大模型的活,注册表在 kb.llm_stages。这里只做读写转发。
 
 @router.get("/api/stages")
-def api_stages():
+def api_stages(operation_id: str | None = None):
+    with llm.settings_snapshot() as snapshot:
+        response = _stages_response()
+        response["revision"] = llm.settings_revision(snapshot)
+        if operation_id:
+            response["operation"] = operation_status(snapshot, operation_id)
+        return response
+
+
+def _stages_response():
     """所有阶段 + 当前取值 + 可选模型(按供应商分组),给「模型分配」面板用。
 
     可选模型走 llm.model_pool():除了「API Key」面板里勾选的候选,还带上各阶段
     当前实际指向的模型——不然一个没被勾选的阶段模型在下拉里根本没有对应项。
     """
     pool = llm.model_pool()
+    stages = llm_stages.describe()
+    presets = llm_presets.describe()
+    active = next((preset for preset in presets if preset["active"]), None)
+    if active:
+        for stage in stages:
+            entry = active["assignments"].get(stage["key"])
+            if entry:
+                stage["recommend"] = llm.qualify(llm.Model(entry["provider"], entry["model"]))
     return {
-        "stages": llm_stages.describe(),
+        "stages": stages,
+        "presets": presets,
+        "preset_name_max_length": llm_presets.NAME_MAX_LENGTH,
         "providers": [{"key": p, "label": llm.PROVIDER_LABEL.get(p, p),
                        "has_key": llm.has_key(p),
                        "models": pool.get(p, [])} for p in llm.PROVIDERS],
     }
 
 
-class StageRequest(BaseModel):
+class StageRequest(SettingsWriteRequest):
     key: str
     provider: str = ""   # 显式指定供应商:同一个 id 两家都可能有,猜错就是用错 key
     model: str = ""      # 空 = 清除该阶段的配置,回落内置默认
@@ -54,13 +76,32 @@ class StageRequest(BaseModel):
 
 @router.post("/api/stages")
 def api_stage_set(body: StageRequest):
-    try:
-        llm_stages.set_stage(body.key, body.provider, body.model)
-    except KeyError as e:
-        raise HTTPException(404, str(e))
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    return api_stages()
+    _, revision = write_settings(body, lambda **options: llm_stages.set_stage(
+        body.key, body.provider, body.model, **options))
+    return {**api_stages(), "operation_revision": revision}
+
+
+class StagePresetRequest(SettingsWriteRequest):
+    preset: str
+
+
+@router.post("/api/stages/preset")
+def api_stage_preset_set(body: StagePresetRequest):
+    preset, revision = write_settings(body, lambda **options: llm_presets.apply(body.preset, **options))
+    return {**api_stages(), "operation_revision": revision,
+            "applied_preset": preset["label"], "preserved": preset["preserved"]}
+
+
+class StagePresetNameRequest(SettingsWriteRequest):
+    preset: str
+    name: str
+
+
+@router.post("/api/stages/preset/name")
+def api_stage_preset_rename(body: StagePresetNameRequest):
+    name, revision = write_settings(body, lambda **options: llm_presets.rename(
+        body.preset, body.name, **options))
+    return {**api_stages(), "operation_revision": revision, "renamed_preset": name}
 
 
 @router.get("/api/models/remote")
@@ -81,7 +122,7 @@ class ModelsSelectRequest(BaseModel):
 def api_models_select(body: ModelsSelectRequest):
     """保存某家要在下拉里暴露的模型 id 列表。"""
     llm.set_models(body.provider, body.models)
-    return {"models": llm.available_models(), "default": llm.get_default_model()}
+    return api_models()
 
 
 class KeysRequest(BaseModel):

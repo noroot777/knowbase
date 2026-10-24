@@ -17,6 +17,7 @@ from kb.favorite_metadata import FAVORITE_DOCUMENT_COLUMNS, FAVORITE_DOCUMENT_JO
 from kb.maintenance import LockBusy, maintenance_lock
 from kb.scanner import body_version
 from kb.web.common import VAULT_NAME, read_doc_text, now as _now
+from kb.web.model_settings import SettingsWriteRequest, write_settings
 
 router = APIRouter()
 
@@ -517,20 +518,21 @@ def api_favorite_archive_stale():
         conn.close()
 
 
-class FavSettingsRequest(BaseModel):
+class FavSettingsRequest(SettingsWriteRequest):
     model: str = ""   # 空 = 清除,回落默认问答模型
 
 
 @router.get("/api/favorites/settings")
 def api_favorite_settings():
     """收藏整理(行动卡/分诊)当前用的模型;下拉候选用 /api/models。"""
-    return {"model": llm.get_fav_model()}
+    with llm.settings_snapshot() as snapshot:
+        return {"model": llm.get_fav_model(), "revision": llm.settings_revision(snapshot)}
 
 
 @router.post("/api/favorites/settings")
 def api_favorite_settings_set(body: FavSettingsRequest):
-    llm.set_fav_model(body.model)
-    return {"model": llm.get_fav_model()}
+    _, revision = write_settings(body, lambda **options: llm.set_fav_model(body.model, **options))
+    return {**api_favorite_settings(), "operation_revision": revision}
 
 
 @router.get("/api/favorites/triage")
