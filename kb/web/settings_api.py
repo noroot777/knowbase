@@ -87,6 +87,22 @@ def api_stage_preset_set(body: StagePresetRequest):
     return {**api_stages(), "applied_preset": preset["label"], "preserved": preset["preserved"]}
 
 
+class StagePresetNameRequest(BaseModel):
+    preset: str
+    name: str
+
+
+@router.post("/api/stages/preset/name")
+def api_stage_preset_rename(body: StagePresetNameRequest):
+    try:
+        name = llm_presets.rename(body.preset, body.name)
+    except KeyError as error:
+        raise HTTPException(404, str(error))
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    return {**api_stages(), "renamed_preset": name}
+
+
 @router.get("/api/models/remote")
 def api_models_remote(provider: str):
     """从中转站拉取可用模型 id(需该家已配 key+base_url),给面板勾选用。"""

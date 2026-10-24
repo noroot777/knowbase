@@ -263,8 +263,13 @@ body.chat-mode { padding-bottom: 28px; }
 
 /* ── 模型分配弹窗(每个用到大模型的阶段各选一家一模型) ── */
 .stage-presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.stage-preset-item { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.stage-preset-editor { text-align: right; }
+.stage-preset-editor form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 7px; align-items: center; }
+.stage-preset-editor input { width: 100%; min-width: 0; font-size: 12px; }
+.stage-preset-editor .text-button { font-size: 12px; min-height: 32px; padding: 3px 0; }
 .stage-preset {
-  display: flex; flex-direction: column; gap: 7px; padding: 12px; min-width: 0;
+  display: flex; flex: 1; flex-direction: column; gap: 7px; padding: 12px; min-width: 0; width: 100%;
   text-align: left; color: var(--ink); background: var(--card);
   border: 1px solid var(--line); border-radius: 10px; white-space: normal;
 }
@@ -273,7 +278,7 @@ body.chat-mode { padding-bottom: 28px; }
 }
 .stage-preset:disabled { opacity: .65; cursor: not-allowed; }
 .stage-preset-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; width: 100%; }
-.stage-preset-head b { font-size: 13px; }
+.stage-preset-head b { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
 .stage-preset-head > span { margin-left: auto; font-size: 11px; color: var(--brand-deep); }
 .stage-preset-models { font: 11px/1.7 var(--font-mono); color: var(--muted); white-space: pre-line; overflow-wrap: anywhere; }
 .stage-preset-warning { font-size: 11px; line-height: 1.5; color: var(--danger); }

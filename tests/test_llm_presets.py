@@ -203,6 +203,75 @@ class ModelPresetTests(unittest.TestCase):
         self.assertEqual(self.api.post("/api/stages/preset", json={}).status_code, 422)
         self.assertEqual(self.secrets.read_bytes(), before)
 
+    def test_rename_persists_only_name_and_keeps_stable_preset_identity(self):
+        llm_presets.apply("claude")
+        before = self.read()
+        with patch.object(llm, "_save_secrets", wraps=llm._save_secrets) as save:
+            self.assertEqual(llm_presets.rename("gpt", "  日常 GPT 组  "), "日常 GPT 组")
+        self.assertEqual(save.call_count, 1)
+        current = self.read()
+        self.assertEqual(current.pop("stage_preset_names"), {"gpt": "日常 GPT 组"})
+        self.assertEqual(current, before)
+        self.assertEqual(self.presets()["gpt"]["label"], "日常 GPT 组")
+        self.assertEqual(self.presets()["claude"]["label"], "Claude 默认")
+        self.assertTrue(self.presets()["claude"]["active"])
+        self.assertFalse(self.presets()["gpt"]["active"])
+        self.assertEqual(self.secrets.stat().st_mode & 0o777, 0o600)
+
+    def test_renamed_label_is_used_in_api_and_apply_response(self):
+        name = '我的 GPT "主力" <组>'
+        response = self.api.post("/api/stages/preset/name", json={"preset": "gpt", "name": name})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["renamed_preset"], name)
+        self.assertEqual(next(preset for preset in response.json()["presets"]
+                              if preset["key"] == "gpt")["label"], name)
+        self.assertNotIn("sk-fake", response.text)
+        response = self.api.post("/api/stages/preset", json={"preset": "gpt"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["applied_preset"], name)
+        self.assertEqual(llm.get_default_model(), "openai:gpt-5.5")
+        self.assertEqual(self.presets()["gpt"]["label"], name)
+
+    def test_each_preset_can_be_renamed_independently_without_key(self):
+        llm.set_config({"openai": {"key": ""}})
+        llm_presets.rename("gpt", "GPT 自用组")
+        llm_presets.rename("claude", "Claude 自用组")
+        self.assertEqual(self.read()["stage_preset_names"],
+                         {"gpt": "GPT 自用组", "claude": "Claude 自用组"})
+        self.assertFalse(self.presets()["gpt"]["ready"])
+        self.assertNotIn("stages", self.read())
+
+    def test_invalid_names_are_rejected_without_writing(self):
+        for name in ("", "  ", "x" * 41, "组名\n换行", "组名\t控制", "组名\x00", "组名\x7f", None):
+            with self.subTest(name=name):
+                before = self.secrets.read_bytes()
+                with self.assertRaises(ValueError):
+                    llm_presets.rename("gpt", name)
+                self.assertEqual(self.secrets.read_bytes(), before)
+        llm_presets.rename("gpt", "组" * 40)
+        self.assertEqual(self.presets()["gpt"]["label"], "组" * 40)
+
+    def test_rename_api_validation_does_not_change_settings(self):
+        for payload, expected in (({"preset": "missing", "name": "组名"}, 404),
+                                  ({"preset": "gpt", "name": " "}, 400),
+                                  ({"preset": "gpt", "name": 123}, 422),
+                                  ({"preset": "gpt"}, 422)):
+            with self.subTest(payload=payload):
+                before = self.secrets.read_bytes()
+                response = self.api.post("/api/stages/preset/name", json=payload)
+                self.assertEqual(response.status_code, expected)
+                self.assertEqual(self.secrets.read_bytes(), before)
+
+    def test_invalid_stored_names_fall_back_and_can_be_repaired(self):
+        for labels in ([], "broken", {"gpt": None}, {"gpt": " "}, {"gpt": "x" * 41}):
+            with self.subTest(labels=labels):
+                data = self.read()
+                data["stage_preset_names"] = labels
+                self.write(data)
+                self.assertEqual(self.presets()["gpt"]["label"], "GPT 默认")
+                llm_presets.rename("gpt", "已修复组名")
+                self.assertEqual(self.presets()["gpt"]["label"], "已修复组名")
+
 
 if __name__ == "__main__":
     unittest.main()

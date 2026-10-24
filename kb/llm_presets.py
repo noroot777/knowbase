@@ -11,10 +11,43 @@ _PRESETS = {
 }
 
 
+def _clean_name(name: str) -> str:
+    if not isinstance(name, str):
+        raise ValueError("组名必须是文字")
+    name = name.strip()
+    if not name or len(name) > 40:
+        raise ValueError("组名需为 1–40 个字符")
+    if any(ord(character) < 32 or ord(character) == 127 for character in name):
+        raise ValueError("组名不能包含换行或控制字符")
+    return name
+
+
+def rename(key: str, name: str) -> str:
+    """仅修改显示名称,保留预设标识、模型分配和其他设置。"""
+    if key not in _PRESETS:
+        raise KeyError(f"未知模型预设: {key}")
+    name = _clean_name(name)
+
+    def mutate(data: dict) -> None:
+        labels = data.get("stage_preset_names")
+        labels = dict(labels) if isinstance(labels, dict) else {}
+        labels[key] = name
+        data["stage_preset_names"] = labels
+
+    llm.update_settings(mutate)
+    return name
+
+
 def _describe(key: str) -> dict:
     if key not in _PRESETS:
         raise KeyError(f"未知模型预设: {key}")
     label, provider, family = _PRESETS[key]
+    labels = llm.read_settings().get("stage_preset_names")
+    if isinstance(labels, dict) and key in labels:
+        try:
+            label = _clean_name(labels[key])
+        except ValueError:
+            pass
     candidates = [(provider, model) for model in llm.configured_models(provider)
                   if family in model.lower()]
     fallback = llm_stages.recommended(llm_stages.stage("ask"), candidates)

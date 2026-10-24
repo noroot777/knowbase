@@ -177,10 +177,15 @@ function stageRow(st, providers) {
   </div>`;
 }
 
+function stagePresetRenameButton() {
+  return '<button type="button" class="text-button" aria-label="修改组名" onclick="editStagePresetName(this)">改名</button>';
+}
+
 function stagePresetCard(preset) {
   const models = preset.main_model
     ? `主力 · ${preset.main_model}\n轻量 · ${preset.cheap_model}` : '按已勾选的模型分配';
-  return `<button class="stage-preset${preset.active ? ' active' : ''}"
+  return `<div class="stage-preset-item" role="group" aria-label="${esc(preset.label)}预设">
+    <button class="stage-preset${preset.active ? ' active' : ''}"
     data-preset="${esc(preset.key)}" data-unavailable="${!preset.ready}"
     aria-label="应用${esc(preset.label)}" aria-pressed="${preset.active}"
     ${preset.ready ? '' : 'disabled'} onclick="saveStagePreset(this.dataset.preset)">
@@ -188,7 +193,35 @@ function stagePresetCard(preset) {
       <span>${preset.active ? '当前方案' : '一键应用'}</span></span>
     <span class="stage-preset-models">${esc(models)}</span>
     ${preset.reason ? `<span class="stage-preset-warning">${esc(preset.reason)}</span>` : ''}
-    </button>`;
+    </button>
+    <div class="stage-preset-editor" data-preset="${esc(preset.key)}" data-name="${esc(preset.label)}">
+      ${stagePresetRenameButton()}
+    </div></div>`;
+}
+
+function editStagePresetName(button) {
+  const editor = button.closest('.stage-preset-editor');
+  editor.innerHTML = `<form onsubmit="saveStagePresetName(event, this)">
+    <input name="name" aria-label="组名" value="${esc(editor.dataset.name)}" maxlength="40" required>
+    <button type="submit" class="text-button">保存组名</button>
+    <button type="button" class="text-button" onclick="cancelStagePresetName(this)">取消</button>
+    </form>`;
+  const input = editor.querySelector('input');
+  input.focus();
+  input.select();
+}
+
+function cancelStagePresetName(button) {
+  const editor = button.closest('.stage-preset-editor');
+  editor.innerHTML = stagePresetRenameButton();
+  editor.querySelector('button').focus();
+}
+
+function saveStagePresetName(event, form) {
+  event.preventDefault();
+  const preset = form.closest('.stage-preset-editor').dataset.preset;
+  const name = form.elements.namedItem('name').value;
+  return queueStageSave(() => persistStages('/api/stages/preset/name', { preset, name }, false));
 }
 
 function renderStages(data) {
@@ -222,7 +255,7 @@ let stageSavePending = 0;
 
 function setStageBusy() {
   $('stages-content').setAttribute('aria-busy', String(stageSavePending > 0));
-  $('stages-content').querySelectorAll('select, button').forEach(control => {
+  $('stages-content').querySelectorAll('select, button, input').forEach(control => {
     control.disabled = stageSavePending > 0 || control.dataset.unavailable === 'true';
   });
 }
@@ -263,6 +296,10 @@ async function persistStages(url, body, refreshFavorites) {
     if (await toastIfFail(r, '保存失败')) { $('stages-msg').textContent = ''; return; }
     const d = await r.json();
     renderStages(d);
+    if (d.renamed_preset) {
+      $('stages-msg').textContent = '✓ 组名已保存：' + d.renamed_preset;
+      return;
+    }
     $('stages-msg').textContent = d.applied_preset
       ? `✓ 已切换为${d.applied_preset},即时生效${d.preserved.length ? '(研究阶段保持原配置)' : ''}`
       : '✓ 已保存,即时生效';
