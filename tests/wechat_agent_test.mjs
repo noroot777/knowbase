@@ -7,6 +7,35 @@ const source = readFileSync(new URL('../kb/static/js/wechat_setup.js', import.me
 const markup = readFileSync(new URL('../kb/static/index.html', import.meta.url), 'utf8');
 const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 
+test('unavailable status exposes only explicit backup/reset, never automatic acquisition', async () => {
+  const {context, element, requests} = fixture(undefined);
+  vm.runInContext('wechatSetup = {state:"status_unavailable",running:false,can_connect:false,can_reset_status:true}; renderWechatSetup()', context);
+  assert.equal(element('wechat-check').disabled, true);
+  assert.equal(element('wechat-reset-status').hidden, false);
+  assert.equal(element('wechat-reset-status').disabled, false);
+  await vm.runInContext('startWechatSetup("connect"); startWechatSetup("acquire")', context);
+  assert.equal(requests.length, 0);
+  await vm.runInContext('startWechatSetup("reset_status")', context);
+  const writes = requests.filter(request => request.options?.method === 'POST');
+  assert.deepEqual(writes.map(request => JSON.parse(request.options.body)), [{action:'reset_status'}]);
+  assert.ok(markup.includes('备份并仅重置状态'));
+});
+
+for (const state of [
+  {state:'status_unavailable', running:true, can_connect:false, can_reset_status:false},
+  {state:'status_unavailable', running:null, can_connect:false, can_reset_status:false},
+  {state:'unchecked', running:false},
+  {state:'unchecked', deployment:'docker', running:false, can_connect:false},
+]) {
+  test('reset cannot bypass busy, unknown-lock, normal or container states: ' + JSON.stringify(state), async () => {
+    const {context, element, requests} = fixture(undefined);
+    vm.runInContext('wechatSetup = ' + JSON.stringify(state) + '; renderWechatSetup()', context);
+    assert.equal(element('wechat-reset-status').disabled, true);
+    await vm.runInContext('startWechatSetup("reset_status")', context);
+    assert.equal(requests.length, 0);
+  });
+}
+
 function fixture(clipboard) {
   const elements = new Map();
   const element = id => {
@@ -29,6 +58,54 @@ function fixture(clipboard) {
   vm.runInContext(source, context);
   return {context, element, requests};
 }
+
+test('malformed and irrelevant accounts cannot throw or wedge the request gate', async () => {
+  for (const state of ['failed', 'unchecked', 'authorization_required', 'account_selection_required']) {
+    for (const accounts of [{id: 'old'}, 'old', [null], [{id: []}]]) {
+      const {context, requests} = fixture(undefined);
+      vm.runInContext('wechatSetup = ' + JSON.stringify({state, running: false, accounts}) + '; renderWechatSetup()', context);
+      await vm.runInContext('startWechatSetup()', context);
+      assert.equal(vm.runInContext('wechatRequest', context), false);
+      if (state !== 'account_selection_required') {
+        assert.equal(requests.filter(request => request.options?.method === 'POST').length, 1);
+      }
+      await vm.runInContext('refreshWechatSetup()', context);
+      assert.ok(requests.some(request => !request.options));
+    }
+  }
+});
+
+test('an unexpected render failure releases the request gate and leaves refresh usable', async () => {
+  const {context, requests} = fixture(undefined);
+  const render = context.renderWechatSetup;
+  let attempts = 0;
+  context.renderWechatSetup = () => {
+    if (attempts++ === 0) throw new Error('synthetic render failure');
+    return render();
+  };
+  await vm.runInContext('startWechatSetup()', context);
+  assert.equal(vm.runInContext('wechatRequest', context), false);
+  await vm.runInContext('startWechatSetup()', context);
+  assert.equal(requests.filter(request => request.options?.method === 'POST').length, 1);
+});
+
+test('reset response replaces stale capabilities even if the next GET fails', async () => {
+  const {context, element} = fixture(undefined);
+  let posts = 0;
+  context.fetch = async (url, options) => {
+    if (!options) throw new Error('synthetic refresh failure');
+    posts++;
+    return {ok: true, json: async () => ({state: 'unchecked', running: false})};
+  };
+  vm.runInContext('wechatSetup = {state:"status_unavailable",can_connect:false,can_reset_status:true}; renderWechatSetup()', context);
+  await vm.runInContext('startWechatSetup("reset_status")', context);
+  assert.equal(element('wechat-reset-status').hidden, true);
+  assert.equal(element('wechat-check').disabled, false);
+  assert.equal(vm.runInContext('wechatSetup.can_connect', context), undefined);
+  assert.equal(vm.runInContext('wechatRequest', context), false);
+  await vm.runInContext('startWechatSetup()', context);
+  assert.equal(posts, 2);
+});
 
 test('README names the actual buttons for first connection and an existing connection', () => {
   const {context, element} = fixture(undefined);

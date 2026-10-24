@@ -79,6 +79,8 @@ function renderWechatSetup() {
   $('wechat-dot').className = s.ready ? 'on' : 'off';
   $('wechat-dot').textContent = s.running ? '…' : '●';
   $('wechat-check').disabled = busy || s.can_connect === false;
+  $('wechat-reset-status').hidden = s.state !== 'status_unavailable';
+  $('wechat-reset-status').disabled = busy || s.can_reset_status !== true;
   $('wechat-check').textContent = s.can_connect === false ? '请在 Mac 本机接入' : busy ? '正在处理…' : s.ready ? '重新检查连接' : '检查并接入绿泡泡';
   const authorization = s.state === 'authorization_required' && !busy && s.can_connect !== false;
   $('wechat-authorization').hidden = !authorization;
@@ -86,7 +88,8 @@ function renderWechatSetup() {
   $('wechat-next').hidden = !s.ready;
   $('wechat-account-row').hidden = s.state !== 'account_selection_required';
   const select = $('wechat-account');
-  const accounts = s.accounts || [];
+  const accounts = s.state === 'account_selection_required' && Array.isArray(s.accounts)
+    ? s.accounts.filter(account => account && typeof account.id === 'string' && typeof account.label === 'string') : [];
   const signature = JSON.stringify(accounts);
   if (select.dataset.accounts !== signature) {
     select.innerHTML = '<option value="">请选择本人账号</option>' + accounts.map(a =>
@@ -123,7 +126,9 @@ async function refreshWechatSetup() {
 }
 
 async function startWechatSetup(action = 'connect') {
-  if (wechatRequest || wechatSetup?.running || wechatSetup?.can_connect === false) return;
+  const reset = action === 'reset_status';
+  if (wechatRequest || wechatSetup?.running) return;
+  if (reset ? wechatSetup?.can_reset_status !== true : wechatSetup?.can_connect === false) return;
   const body = { action };
   if (action === 'acquire') {
     if (!$('wechat-consent').checked || wechatSetup?.state !== 'authorization_required') return;
@@ -133,14 +138,15 @@ async function startWechatSetup(action = 'connect') {
     body.account_id = $('wechat-account').value;
   }
   wechatRequest = true; wechatStatusVersion++; clearTimeout(wechatPoll);
-  $('wechat-error').textContent = ''; renderWechatSetup();
+  $('wechat-error').textContent = '';
   try {
+    renderWechatSetup();
     const response = await fetch('/api/wechat/setup', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-KB-Wechat-Action': '1' },
       body: JSON.stringify(body),
     });
     if (!response.ok) throw new Error(await apiFail(response, '接入未启动'));
-    wechatSetup = { ...wechatSetup, ...await response.json() };
+    wechatSetup = await response.json();
     $('wechat-consent').checked = false;
   } catch (error) { $('wechat-error').textContent = error.message; }
   finally { wechatRequest = false; renderWechatSetup(); await refreshWechatSetup(); }

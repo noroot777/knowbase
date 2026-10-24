@@ -603,7 +603,7 @@
       <button id="wechat-acquire" onclick="startWechatSetup('acquire')" disabled>自动获取 key 并验证</button>
     </div>
     <p id="wechat-error" role="alert"></p>
-    <div class="wechat-actions"><button id="wechat-check" onclick="startWechatSetup()">检查并接入绿泡泡</button><button id="wechat-next" class="ghost" onclick="useLocalWechat()" hidden>去同步公众号</button><button class="ghost" onclick="refreshWechatSetup()">刷新状态</button></div>
+    <div class="wechat-actions"><button id="wechat-check" onclick="startWechatSetup()">检查并接入绿泡泡</button><button id="wechat-reset-status" class="ghost" onclick="startWechatSetup('reset_status')" hidden>备份并仅重置状态</button><button id="wechat-next" class="ghost" onclick="useLocalWechat()" hidden>去同步公众号</button><button class="ghost" onclick="refreshWechatSetup()">刷新状态</button></div>
     <p class="hint" id="wechat-runtime-hint">可以关闭窗口，任务继续在后台执行。获取和验证不需要大模型 API。</p>
     <details class="wechat-agent">
       <summary>方式二：让你的智能体协助接入</summary>

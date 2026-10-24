@@ -13,6 +13,7 @@ import time
 
 from kb import filelock
 from kb import wechat_runtime as runtime
+from kb import wechat_setup_contract, wechat_setup_status
 
 MESSAGES = {
     "needs_database_location": "未发现绿泡泡数据库。请在运行本项目的 Mac 上登录自己的绿泡泡并同步消息，再重新检查。",
@@ -27,8 +28,14 @@ MESSAGES = {
     "database_layout_unsupported": "尚未识别到可用绿泡泡数据库结构，请检查登录、同步和绿泡泡版本。",
     "database_layout_ambiguous": "核心数据库候选不唯一，请检查是否混入其他账号。",
     "scan_incomplete": "数据库扫描达到上限，未声称完整可读。请缩小数据库范围。",
+    "account_selection_required": "发现多个本机账号，请选择本人账号后重新检查。",
 }
 _mutex = threading.Lock()
+_state_mutex = threading.Lock()
+
+
+class _LockBusy(runtime.SetupError):
+    """A setup job actually holds the lock."""
 
 
 def account_roots() -> dict[str, Path]:
@@ -42,21 +49,47 @@ def _state_file():
 
 
 def _read():
+    with _state_mutex:
+        return wechat_setup_status.read(_state_file())
+
+
+def _interaction_state(state):
+    state = wechat_setup_status.normalize(state)
+    if state.get("state") not in {"account_selection_required", "authorization_required"}:
+        return state
+    platform = runtime.platform.system().lower()
+    revision = runtime.WXKEY_REV
+    if platform == "windows" and state.get("state") == "authorization_required":
+        try:
+            from kb.wechat_windows import KEY_REV
+        except ModuleNotFoundError as error:
+            if error.name != "kb.wechat_windows":
+                raise
+            revision = ""
+        else:
+            revision = KEY_REV
     try:
-        result = json.loads(_state_file().read_text())
-        if isinstance(result, dict):
-            return result
-    except (OSError, ValueError):
-        pass
-    return {"state": "unchecked", "message": "检查本机绿泡泡，已有可用配置会直接复用。", "running": False}
+        roots = account_roots()
+    except (runtime.SetupError, OSError):
+        roots = {}
+    return wechat_setup_contract.validate(state, roots, revision, platform)
 
 
 def _write(state):
-    target = _state_file()
-    temporary = target.with_suffix(".tmp")
-    temporary.write_text(json.dumps(state, ensure_ascii=False))
-    temporary.chmod(0o600)
-    temporary.replace(target)
+    state = _interaction_state(state)
+    with _state_mutex:
+        target = _state_file()
+        temporary = target.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+        temporary.chmod(0o600)
+        for attempt in range(6):
+            try:
+                temporary.replace(target)
+                return
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                time.sleep(.02 * (attempt + 1))
 
 
 def _lock():
@@ -64,25 +97,67 @@ def _lock():
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
         filelock.flock(fd, filelock.LOCK_EX | filelock.LOCK_NB)
-    except BlockingIOError:
+    except OSError as error:
         os.close(fd)
-        raise runtime.SetupError("已有绿泡泡接入任务正在执行，请等待当前任务结束。") from None
+        if isinstance(error, BlockingIOError) or getattr(error, "winerror", None) == 33:
+            raise _LockBusy("已有绿泡泡接入任务正在执行，请等待当前任务结束。") from None
+        raise
     return fd
 
 
-def snapshot():
+def _snapshot():
     state = _read()
     if state.get("running"):
         # A crashed server must not leave an eternal spinner or auto-resume acquisition.
         try:
             fd = _lock()
-        except runtime.SetupError:
+        except _LockBusy:
             pass
         else:
             os.close(fd)
             state = {"state": "interrupted", "running": False,
                      "message": "上次接入已中断。请检查绿泡泡及系统授权状态，然后重新检查；不会自动重试获取。"}
     return state
+
+
+def snapshot():
+    try:
+        return _interaction_state(_snapshot())
+    except (runtime.SetupError, OSError):
+        running, can_reset = None, False
+        try:
+            descriptor = _lock()
+        except _LockBusy:
+            running = True
+        except (runtime.SetupError, OSError):
+            pass
+        else:
+            os.close(descriptor)
+            can_reset = True
+        return {"state": "status_unavailable", "running": running, "ready": False,
+                "platform": runtime.platform.system().lower(),
+                "can_connect": False, "can_reset_status": can_reset, "retryable": True,
+                "message": "绿泡泡接入状态暂不可用。可刷新重试；确认没有接入任务后，可仅重置状态。原状态会先备份，不会获取材料或修改 Reader 配置。"}
+
+
+def _reset_status():
+    with _mutex:
+        try:
+            descriptor = _lock()
+        except OSError:
+            raise runtime.SetupError("无法确认接入锁空闲，未执行状态重置。请检查本机目录权限与文件系统。") from None
+        try:
+            try:
+                _read()
+            except runtime.SetupError:
+                wechat_setup_status.backup(_state_file())
+                _write({"state": "unchecked", "running": False, "updated_at": time.time(),
+                        "message": "原状态已备份，接入状态已重建。请重新检查；未自动获取材料，已有配置和材料均未改动。"})
+        except OSError:
+            raise runtime.SetupError("状态重建失败，原状态备份已保留。请检查目录权限和磁盘空间后重试。") from None
+        finally:
+            os.close(descriptor)
+    return snapshot()
 
 
 def _reader_ready():
@@ -214,19 +289,24 @@ def start(action="connect", account_id="", confirmation_token="", confirmed=Fals
     from kb.deployment import in_container, wechat_container_status
     if in_container():
         raise runtime.SetupError(wechat_container_status()["message"])
+    if action == "reset_status":
+        return _reset_status()
     with _mutex:
         fd = _lock()
         try:
             if action == "acquire":
-                previous = _read()
+                previous = _interaction_state(_read())
                 token = previous.get("confirmation_token", "")
                 if (previous.get("state") != "authorization_required" or not confirmed or not token
+                        or not isinstance(confirmation_token, str) or not confirmation_token.isascii()
                         or not secrets.compare_digest(token, confirmation_token)
                         or previous.get("expires_at", 0) <= time.time()):
-                    raise runtime.SetupError("获取授权已失效或未确认影响，请重新检查后再执行。")
+                    raise runtime.SetupError("获取授权已失效、授权范围已变化或未确认影响，请重新检查后再执行。")
                 account_id = previous.get("account_id", "")
             elif action != "connect":
                 raise runtime.SetupError("不支持的绿泡泡接入操作。")
+            else:
+                _read()
             _write({"state": "checking", "message": "正在检查绿泡泡接入…", "running": True,
                     "updated_at": time.time()})
             thread = threading.Thread(target=_work, args=(fd, account_id, action == "acquire"), daemon=True)
