@@ -14,6 +14,12 @@ const settings = async () => (await fetch(base + "/api/stages")).json();
 const check = (label, passed) => { assert.ok(passed, label); checks.push(label); };
 const wait = async (label, expression) => check(label, await until(expression));
 const click = async selector => check(`可点击 ${selector}`, await clickAt(selector));
+const press = async (key, text = key === "Enter" ? "\r" : "") => {
+  for (const type of ["keyDown", "keyUp"]) await send("Input.dispatchKeyEvent", {
+    type, key, code: key, windowsVirtualKeyCode: key === "Enter" ? 13 : 27,
+    ...(text && type === "keyDown" ? {text} : {}),
+  });
+};
 const text = selector => `document.querySelector(${JSON.stringify(selector)})?.textContent`;
 const setInput = async (selector, value) => evalJs(`(() => {
   const input = document.querySelector(${JSON.stringify(selector)});
@@ -35,12 +41,10 @@ const reopen = async () => {
 const rename = async (key, name, keyboard = false) => {
   await click(`${editor(key)} button`);
   await setInput(`${editor(key)} input`, name);
-  if (keyboard) {
-    await send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
-    await send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-  } else await click(`${editor(key)} button[type="submit"]`);
+  if (keyboard) await press("Enter");
+  else await click(`${editor(key)} button[type="submit"]`);
   await settle();
-  await wait("组名已保存", `${text(card(key) + ' b')} === ${JSON.stringify(name.trim())}`);
+  await wait("组名已保存", `${text(editor(key) + ' .stage-preset-label')} === ${JSON.stringify(name.trim())}`);
 };
 
 try {
@@ -53,8 +57,48 @@ try {
   await wait("两套预设已显示", "document.querySelectorAll('.stage-preset').length === 2");
   check("Claude 默认已激活", await evalJs(`document.querySelector('${card('claude')}').getAttribute('aria-pressed') === 'true'`));
   const initial = await settings();
+  check("铅笔紧随组名且不另占一行", await evalJs(`(() => {
+    const name = document.querySelector('${editor('claude')} .stage-preset-label');
+    const pencil = name.nextElementSibling;
+    const heading = name.closest('.stage-preset-head');
+    return pencil.getAttribute('aria-label') === '修改组名' && pencil.querySelector('svg path')
+      && heading && pencil.getBoundingClientRect().left >= name.getBoundingClientRect().right
+      && heading.closest('.stage-preset-item') && !document.querySelector('.stage-preset button');
+  })()`));
+  await screenshot("model-presets-pencil-desktop");
+  for (const width of [390, 375]) {
+    await send("Emulation.setDeviceMetricsOverride", {width, height: 667, deviceScaleFactor: 1, mobile: false});
+    await click(`${editor("gpt")} button`);
+    check("原地编辑自动聚焦并选中名称", await evalJs(`(() => {
+      const input = document.querySelector('${editor('gpt')} input');
+      return document.activeElement === input && input.selectionStart === 0 && input.selectionEnd === input.value.length;
+    })()`));
+    await setInput(`${editor("gpt")} input`, "不保存的草稿");
+    check(`手机 ${width} 标题编辑不溢出`, await evalJs(`document.querySelector('${editor('gpt')} form').scrollWidth <= document.querySelector('${editor('gpt')} form').clientWidth && document.querySelector('#stages-modal .modal').scrollWidth <= document.querySelector('#stages-modal .modal').clientWidth`));
+    if (width === 375) await screenshot("model-presets-pencil-edit-mobile");
+    await press("Escape");
+    await wait("Esc 只退出改名,不关闭面板", `!document.querySelector('${editor('gpt')} form') && document.querySelector('#stages-modal').style.display !== 'none'`);
+    check("取消还原名称并返回铅笔焦点", await evalJs(`${text(editor('gpt') + ' .stage-preset-label')} === 'GPT 默认' && document.activeElement === document.querySelector('${editor('gpt')} button')`));
+  }
+  await screenshot("model-presets-pencil-mobile");
+  await send("Emulation.clearDeviceMetricsOverride");
+  check("编辑及取消没有切换模型或保存名称", JSON.stringify(await settings()) === JSON.stringify(initial));
+  await evalJs(`document.querySelector('${editor('gpt')} button').focus()`);
+  await press("Enter");
+  await wait("键盘也能打开原地编辑", `document.querySelector('${editor('gpt')} input') !== null`);
+  await click(`${editor("gpt")} button[type="button"]`);
   const beforeAgent = initial.stages.find(stage => stage.key === "agent").configured;
-  await click(card("gpt"));
+  const preview = await evalJs(`(() => {
+    const models = document.querySelector('${card('gpt')}').closest('.stage-preset-item').querySelector('.stage-preset-models');
+    const bounds = models.getBoundingClientRect();
+    const point = {x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2};
+    return {...point, preset: document.elementFromPoint(point.x, point.y)?.closest('.stage-preset')?.dataset.preset};
+  })()`);
+  check("模型预览区仍命中整组应用按钮", preview.preset === "gpt");
+  for (const type of ["mousePressed", "mouseReleased"]) await send("Input.dispatchMouseEvent", {
+    type, x: preview.x, y: preview.y, button: "left", clickCount: 1,
+  });
+  await wait("点击卡片正文应用整组", `document.querySelector('${card('gpt')}').getAttribute('aria-pressed') === 'true'`);
   await settle();
   const applied = await settings();
   check("研究阶段配置完整保留", JSON.stringify(applied.stages.find(stage => stage.key === "agent").configured) === JSON.stringify(beforeAgent));
@@ -81,9 +125,9 @@ try {
   check("改名不改变模型分配", JSON.stringify((await settings()).stages.map(stage => stage.configured)) === beforeNames);
   check("两个组名独立保存", (await settings()).presets.every(preset => preset.label === (preset.key === "claude" ? "Claude 研究专用" : "GPT 日常工作")));
   await send("Page.reload");
-  await wait("刷新完成", "document.querySelector('#stages-modal').style.display === 'none'");
+  await wait("刷新完成", "document.readyState === 'complete' && document.querySelector('#stages-modal')?.style.display === 'none' && typeof openStages === 'function'");
   await evalJs("openStages()");
-  await wait("刷新保留组名", `${text(card('gpt') + ' b')} === 'GPT 日常工作'`);
+  await wait("刷新保留组名", `${text(editor('gpt') + ' .stage-preset-label')} === 'GPT 日常工作'`);
   await click(`${editor("claude")} button`);
   await setInput(`${editor("claude")} input`, "未保存的名字");
   await click(`${editor("claude")} button[type="button"]`);
@@ -110,7 +154,7 @@ try {
   check("输入后清理旧错误", await evalJs(`${text(editor('claude') + ' .field-err')} === '' && document.querySelector('${editor('claude')} input').getAttribute('aria-invalid') === 'false'`));
   await click(`${editor("claude")} button[type="submit"]`);
   await settle();
-  check("特殊字符按文字显示", await evalJs(`${text(card('claude') + ' b')} === '方案 "A" <轻量>' && !document.querySelector('${card('claude')} img, ${card('claude')} script')`));
+  check("特殊字符按文字显示", await evalJs(`${text(editor('claude') + ' .stage-preset-label')} === '方案 "A" <轻量>' && !document.querySelector('${editor('claude')} img, ${editor('claude')} script')`));
   await click(card("gpt"));
   await settle();
   check("切换提示回显自定义组名", await evalJs(`${message}.includes('GPT 日常工作')`));
@@ -243,10 +287,25 @@ try {
   await reopen();
   check("缺 key 不可应用但仍能改名", await evalJs(`document.querySelector('${card('gpt')}').disabled && !document.querySelector('${editor('gpt')} button').disabled`));
   await rename("gpt", "GPT 待配置");
+  await rename("gpt", "长".repeat(initial.preset_name_max_length));
+  await send("Emulation.setDeviceMetricsOverride", {width: 375, height: 667, deviceScaleFactor: 1, mobile: false});
+  await evalJs("document.querySelector('#stages-content').scrollTop = 0");
+  check("最长名称和铅笔在手机卡片内可见", await evalJs(`(() => {
+    const pencil = document.querySelector('${editor('gpt')} button');
+    const bounds = pencil.getBoundingClientRect();
+    const panel = document.querySelector('#stages-modal .modal');
+    return bounds.left >= 0 && bounds.right <= innerWidth && bounds.width >= 28
+      && panel.scrollWidth <= panel.clientWidth && !pencil.disabled;
+  })()`));
+  await screenshot("model-presets-pencil-long-name-mobile");
+  await click(`${editor("gpt")} button`);
+  await setInput(`${editor("gpt")} input`, "缺 key 也能取消");
+  await press("Escape");
+  check("缺 key 的组仍可用 Esc 取消", await evalJs(`!document.querySelector('${editor('gpt')} form') && document.querySelector('#stages-modal').style.display !== 'none'`));
   check("浏览器无脚本错误", pageErrors.length === 0);
   console.log(JSON.stringify({total: checks.length, checks, pageErrors}, null, 2));
 } catch (error) {
-  console.error(JSON.stringify({passed: checks.length, panel: await evalJs("document.querySelector('#stages-presets')?.innerText"), status: await evalJs(message), pageErrors}));
+  console.error(JSON.stringify({passed: checks.length, panel: await evalJs("document.querySelector('#stages-presets')?.innerText"), status: await evalJs("document.querySelector('#stages-msg')?.textContent"), pageErrors}));
   throw error;
 } finally {
   ws.close();

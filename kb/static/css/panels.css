@@ -263,24 +263,32 @@ body.chat-mode { padding-bottom: 28px; }
 
 /* ── 模型分配弹窗(每个用到大模型的阶段各选一家一模型) ── */
 .stage-presets { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.stage-preset-item { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-.stage-preset-editor { text-align: right; }
-.stage-preset-editor form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 7px; align-items: center; }
-.stage-preset-editor input { width: 100%; min-width: 0; font-size: 12px; }
-.stage-preset-editor .text-button { font-size: 12px; min-height: 32px; padding: 3px 0; }
-.stage-preset-editor .field-err { grid-column: 1 / -1; text-align: left; }
-.stage-preset {
-  display: flex; flex: 1; flex-direction: column; gap: 7px; padding: 12px; min-width: 0; width: 100%;
+.stage-preset-item {
+  position: relative; isolation: isolate; display: flex; flex-direction: column; gap: 7px; padding: 12px; min-width: 0;
   text-align: left; color: var(--ink); background: var(--card);
-  border: 1px solid var(--line); border-radius: 10px; white-space: normal;
+  border: 1px solid var(--line); border-radius: 10px;
 }
-.stage-preset:hover:not(:disabled), .stage-preset.active {
+.stage-preset-item:has(.stage-preset:hover:not(:disabled)), .stage-preset-item:has(.stage-preset.active) {
   border-color: var(--brand); background: var(--brand-tint);
 }
+.stage-preset-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.stage-preset-editor { position: relative; z-index: 1; display: flex; align-items: center; gap: 3px; min-width: 0; pointer-events: none; }
+.stage-preset-editor button, .stage-preset-editor form { pointer-events: auto; }
+.stage-preset-label { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.stage-preset-icon { display: inline-grid; place-items: center; width: 28px; min-height: 28px; padding: 4px; border-radius: 5px; color: var(--muted); background: transparent; }
+.stage-preset-icon:hover { color: var(--brand); background: var(--tag-bg); }
+.stage-preset-icon .icon { width: 14px; height: 14px; }
+.stage-preset-editor:has(form) { flex: 1; }
+.stage-preset-editor form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 4px; align-items: center; width: 100%; }
+.stage-preset-editor input { width: 100%; min-width: 0; font-size: 13px; }
+.stage-preset-editor .field-err { grid-column: 1 / -1; text-align: left; }
+.stage-preset { margin-left: auto; min-height: 28px; padding: 0; border-radius: 0; background: transparent; color: var(--brand-deep); font-size: 11px; }
+.stage-preset:active:not(:disabled) { transform: none; }
+.stage-preset::after { content: ''; position: absolute; inset: 0; border-radius: 10px; }
+.stage-preset:focus-visible { outline: none; }
+.stage-preset:focus-visible::after { outline: 2px solid var(--brand); outline-offset: 2px; }
 .stage-preset:disabled { opacity: .65; cursor: not-allowed; }
-.stage-preset-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; width: 100%; }
-.stage-preset-head b { font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
-.stage-preset-head > span { margin-left: auto; font-size: 11px; color: var(--brand-deep); }
+.stage-preset-item:has(form) .stage-preset { display: none; }
 .stage-preset-models { font: 11px/1.7 var(--font-mono); color: var(--muted); white-space: pre-line; overflow-wrap: anywhere; }
 .stage-preset-warning { font-size: 11px; line-height: 1.5; color: var(--danger); }
 #stages-modal .stage-preset-note { margin: 9px 0 16px; }

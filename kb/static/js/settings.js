@@ -177,38 +177,46 @@ function stageRow(st, providers) {
   </div>`;
 }
 
-function stagePresetRenameButton() {
-  return '<button type="button" class="text-button" aria-label="修改组名" onclick="editStagePresetName(this)">改名</button>';
+function stagePresetName(label) {
+  return `<b class="stage-preset-label">${esc(label)}</b>
+    <button type="button" class="stage-preset-icon" aria-label="修改组名" title="修改组名"
+            onclick="editStagePresetName(this)" onkeydown="editStagePresetName(this, event)">${icon('pencil')}</button>`;
 }
 
 function stagePresetCard(preset) {
   const models = preset.main_model
     ? `主力 · ${preset.main_model}\n轻量 · ${preset.cheap_model}` : '按已勾选的模型分配';
   return `<div class="stage-preset-item" role="group" aria-label="${esc(preset.label)}预设">
+    <div class="stage-preset-head">
+    <div class="stage-preset-editor" data-preset="${esc(preset.key)}" data-name="${esc(preset.label)}"
+         data-name-max-length="${esc(preset.name_max_length)}">
+      ${stagePresetName(preset.label)}
+    </div>
     <button class="stage-preset${preset.active ? ' active' : ''}"
     data-preset="${esc(preset.key)}" data-unavailable="${!preset.ready}"
     aria-label="应用${esc(preset.label)}" aria-pressed="${preset.active}"
     ${preset.ready ? '' : 'disabled'} onclick="saveStagePreset(this.dataset.preset)">
-    <span class="stage-preset-head"><b>${esc(preset.label)}</b>
-      <span>${preset.active ? '当前方案' : '一键应用'}</span></span>
+      ${preset.active ? '当前方案' : '一键应用'}
+    </button></div>
     <span class="stage-preset-models">${esc(models)}</span>
     ${preset.reason ? `<span class="stage-preset-warning">${esc(preset.reason)}</span>` : ''}
-    </button>
-    <div class="stage-preset-editor" data-preset="${esc(preset.key)}" data-name="${esc(preset.label)}"
-         data-name-max-length="${esc(preset.name_max_length)}">
-      ${stagePresetRenameButton()}
-    </div></div>`;
+    </div>`;
 }
 
-function editStagePresetName(button) {
+function editStagePresetName(button, keyEvent) {
+  if (keyEvent) {
+    if (keyEvent.key !== 'Enter' || keyEvent.isComposing) return;
+    keyEvent.preventDefault();
+  }
   const editor = button.closest('.stage-preset-editor');
   const errorId = 'stage-preset-name-error-' + editor.dataset.preset;
   editor.innerHTML = `<form onsubmit="saveStagePresetName(event, this)">
     <input name="name" aria-label="组名" value="${esc(editor.dataset.name)}"
            maxlength="${esc(editor.dataset.nameMaxLength)}" aria-describedby="${esc(errorId)}"
-           aria-invalid="false" required oninput="clearStagePresetNameError(this.form)">
-    <button type="submit" class="text-button">保存组名</button>
-    <button type="button" class="text-button" onclick="cancelStagePresetName(this)">取消</button>
+           aria-invalid="false" title="回车保存,Esc 取消" required oninput="clearStagePresetNameError(this.form)">
+    <button type="submit" class="stage-preset-icon" aria-label="保存组名" title="保存组名">${icon('check')}</button>
+    <button type="button" class="stage-preset-icon" aria-label="取消" title="取消"
+            onclick="cancelStagePresetName(this)">${icon('close')}</button>
     <div id="${esc(errorId)}" class="field-err" role="alert"></div>
     </form>`;
   const input = editor.querySelector('input');
@@ -218,9 +226,18 @@ function editStagePresetName(button) {
 
 function cancelStagePresetName(button) {
   const editor = button.closest('.stage-preset-editor');
-  editor.innerHTML = stagePresetRenameButton();
+  editor.innerHTML = stagePresetName(editor.dataset.name);
   editor.querySelector('button').focus();
 }
+
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape' || event.isComposing) return;
+  const form = event.target.closest?.('#stages-presets .stage-preset-editor form');
+  if (!form || stageSavePending > 0) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  cancelStagePresetName(form);
+}, true);
 
 function saveStagePresetName(event, form) {
   event.preventDefault();
