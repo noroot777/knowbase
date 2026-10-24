@@ -84,36 +84,64 @@ function Build-WebEnv {
     return $out
 }
 
-function Show-EgressGap {
-    <#  配了 DoH 却看不到出口时提一句。**提示而不代劳**(口径同 Show-CodeStale)。
+function Show-EgressLines {
+    <#  起服务 / 看状态时那两三行:可信解析开没开、端点是什么、出口代理走谁。
 
-        **判据是真探测,不是「环境变量里有没有」。** web_env.sh 里记着:按变量判在
-        macOS 上是误报,因为那里 `getproxies()` 读的是系统代理设置。**Windows 同理**
-        —— 它会去读注册表里 IE/系统那份代理,一个 `*_proxy` 都没设也可能有出口。
-        所以直接问一次 `urllib.request.getproxies()`:那正是 httpx 的 trust_env 走的
-        那一份,口径只有一份,而且跨平台自动对。
+        **整段转交给 `kb.feeds.egress.summary()`,这一侧一个字都不判**(口径同
+        `scripts/web_env.sh` 的 `egress_lines`:它也是整段交给同一个函数)。原先这儿
+        自己读环境变量、再用一条正则把端点剪到主机名,两处都错:
 
-        文案是**陈述**:说清「我们这边探到什么」,不断言对方连不上。  #>
-    if (-not (Get-Setting 'KB_FEED_DOH')) { return }
-    $code = 'import sys, urllib.request; sys.exit(0 if urllib.request.getproxies() else 1)'
-    $null = Invoke-ProjectPython @('-c', $code) 2>$null
-    if ($LASTEXITCODE -eq 0) { return }
-    Write-Note @"
-[web] KB_FEED_DOH 配着,但服务那份环境里探不到代理(环境变量和系统代理都没有)
-     —— DoH 端点要是在墙外,解析会报「域名解析服务不可用」
-"@
-}
+          - **那条正则不脱敏凭证。** `^([a-z]+://[^/?]+).*` 留下的是整个 netloc,于是
+            `https://user:s3cret@doh.example/x` 原样进终端、进 runtime_logs —— 而这一行
+            存在的全部理由就是别把凭证写进日志。`egress.mask_endpoint` 是**从解析结果
+            重拼**的,`user:pass@` 一律剪掉,连没有协议头、也没有 `/` 的
+            `doh.example?token=…` 都剪(那一类恰恰最常带 token)。
+          - **只认环境变量就会答错。** 端点也可以配在设置里(面板「出口与解析」那块),
+            那时环境变量是空的、服务其实开着,而这边照旧打一行「关」。
+            `egress.endpoint()` 两处都认,还顺带说清这一项来自哪里。
 
-function Show-DohLine {
-    <#  启动/状态各打一行:DoH 开没开、端点是什么。**端点脱敏到主机名** —— 有人把
-        token 写在 path 或 query 里(NextDNS、AdGuard 那类带 profile id 的端点),
-        日志不该留。少了这一行的后果 web_env.sh 里实测过:服务重启了却没生效,
-        只能靠手工比 pid 和进程环境才看出来。  #>
-    $doh = Get-Setting 'KB_FEED_DOH'
-    if ($doh) {
-        $ep = ($doh -replace '^([a-z]+://[^/?]+).*', '$1')
-        Write-Note "[web] 可信解析:开(端点 $ep)"
-    } else {
-        Write-Note '[web] 可信解析:关(走系统解析;要开:$env:KB_FEED_DOH=''…'',再 .\kb.ps1 restart)'
+        原先那个单独的「配了 DoH 却探不到代理」提示也一并收掉了:那句判断本来就在
+        `summary()` 里(而且只在端点开着时打),在这边再写一遍就是同一个问题判两处。
+
+        **跟 bash 唯一真的不一样的地方:读不到服务进程自己那份环境。**
+        `egress_lines "$pid"` 在 POSIX 上拿的是跑着那个进程的环境;Windows 上要
+        NtQueryInformationProcess + ReadProcessMemory 才办得到。所以这几行按
+        **设置文件 + 当前 shell** 算 —— 跟 bash 读不到进程环境时那条降级路径一个
+        口径(它那时也只说「下面只按设置文件算」)。后果是:起服务时临时设了
+        `$env:KB_FEED_DOH`、之后在一个新终端看 status,这一行会说「关」。
+
+        **输出必须落文件、按 UTF-8 读回来。** PowerShell 解码原生程序的 stdout 用的是
+        `[Console]::OutputEncoding`(这台机器上是 936),而这几行全是中文 —— 直接接
+        stdout 会把它们拆成乱码(同 `Invoke-Api` 那条,病根一样)。
+
+        **先看退出码再决定要不要说话:** 只挡 stderr 不够,一个半路失败的解释器照旧
+        可能在 stdout 上留下半行东西,原样打出来像是出口配置出了问题。一行都没打是
+        正常末态(口径同 web_env.sh 末尾那两处)。  #>
+    $out = [IO.Path]::GetTempFileName()
+    try {
+        # **这一段 python 里不许出现双引号。** PowerShell 5.1 把原生程序参数里的 `"`
+        # 吞掉:实测 `open(sys.argv[1], "w", encoding="utf-8")` 到了 python 手里成了
+        # `open(sys.argv[1], w, encoding=utf-8)`,报一句 SyntaxError —— 而上面那个
+        # `2>$null` 正好把它藏起来,表现成**这几行一声不响地没了**(本轮真踩了一次)。
+        # 所以字符串一律单引号(PS 里写成两个单引号),换行用 `chr(10)` 而不是 `\n`。
+        $code = 'import sys; from kb.feeds import egress; ' +
+                'open(sys.argv[1], ''w'', encoding=''utf-8'').' +
+                'write(chr(10).join(egress.summary()))'
+        # **`$LASTEXITCODE` 在「这个会话里还没成功跑过原生程序」时是未定义的**,而
+        # StrictMode 下读未定义变量会抛。于是一个**起不来**的解释器(半途建坏的
+        # .venv 就是这样,本任务里真遇到过)会让 `status` 死在一句指着
+        # `$LASTEXITCODE` 的红上 —— 跟出口配置毫无关系,也跟那个坏掉的 venv 不沾边。
+        # 实测:解释器压根没启动时 PowerShell 连 `$LASTEXITCODE` 都不设(不是设成
+        # 非 0)。所以先把它摆成 `$null`,再按「有没有被设上」判。
+        $global:LASTEXITCODE = $null
+        $null = Invoke-ProjectPython @('-c', $code, $out) 2>$null
+        if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) { return }
+        $utf8 = New-Object System.Text.UTF8Encoding $false
+        foreach ($line in ([IO.File]::ReadAllText($out, $utf8) -split "`n")) {
+            $t = ([string]$line).Trim()
+            if ($t) { Write-Note "[web] $t" }
+        }
+    } finally {
+        Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
     }
 }

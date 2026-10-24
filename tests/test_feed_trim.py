@@ -437,7 +437,7 @@ class TrimTests(TrimFixture, unittest.TestCase):
 
         探针走 `kb.filelock`(不是直接 `import fcntl`):被测那一侧取锁就是过这一层
         的,两边用同一份后端才算真在验互斥 —— 各用一套的话,后端对不上时这条会绿着
-        骗人。`import fcntl` 还会让这条在 Windows 上直接报 ImportError。
+        骗人。`import fcntl` 还会让这条在 Windows 上直接报 ModuleNotFoundError。
         """
         child = textwrap.dedent('''
             import sys

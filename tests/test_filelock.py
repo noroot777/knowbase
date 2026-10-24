@@ -25,6 +25,12 @@ Windows 上用 `LockFileEx`/`UnlockFileEx` 实现同一组语义。**本文件�
 4. **同线程重入照旧放行**。filelock 故意**不**支持在同一个 handle 上转换锁
    (Windows 那边没有对等语义),所以重入必须留在上层(`maintenance._held`、
    `llm._lock_depth`)—— 这一条红了说明有人把重入挪进了 filelock。
+5. **「有人占着」和「这个平台锁不住」是两档,异常类别必须分开**:前者
+   `BlockingIOError`、后者别的 `OSError`。两处调用方拿这个区别决定说哪句话
+   (`wechat_setup._lock` 只接 BlockingIOError,`x_login_import` 的 OSError 那一支
+   说的是「文件系统可能不支持文件锁」)。混成一档的后果是**两个方向的误报**:
+   一边把正常撞锁说成「你的文件系统有问题」,另一边把真的环境故障说成「有人在跑」
+   —— 两句话都会把人带到完全错的地方去查。
 """
 
 from __future__ import annotations
@@ -348,6 +354,56 @@ class UnlockTest(unittest.TestCase):
                 fh2.close()
         finally:
             fh.close()
+
+
+class ContentionIsItsOwnErrorTest(unittest.TestCase):
+    """撞锁抛 `BlockingIOError`,别的失败抛别的 `OSError` —— 两档不许混。
+
+    这不是品味问题:`wechat_setup._lock` 整段只写了 `except BlockingIOError`,
+    `x_login_import` 则按两档说两句完全不同的话。混成一档之后两个方向都是误报,
+    而两句话各自把人带去一个错的方向(「换个文件系统」/「等那个任务结束」)。
+
+    **这一条在 POSIX 上是冗余带、在 Windows 上承重**:fcntl 本来就抛
+    BlockingIOError,而 `ctypes.WinError` 把 `ERROR_LOCK_VIOLATION` 映到 EACCES,
+    照搬的话这两处调用方在 Windows 上同时坏掉。如实记着,别因为它在开发机上
+    一次没红过就删掉。
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp()
+        self.lockfile = Path(self._tmp) / 'contend.lock'
+        self.lockfile.write_bytes(b'')
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_a_held_lock_raises_blockingioerror(self) -> None:
+        """两个独立句柄锁同一段:第二个要抛 BlockingIOError。
+
+        用同一个进程的两个句柄就够 —— flock 认的是 open file description、
+        LockFileEx 认的是 handle,两边都互斥(`LOCK_SH` 那条用例靠的也是这一点)。
+        """
+        held = self.lockfile.open('a+')
+        self.addCleanup(held.close)
+        filelock.flock(held, filelock.LOCK_EX | filelock.LOCK_NB)
+        second = self.lockfile.open('a+')
+        self.addCleanup(second.close)
+        with self.assertRaises(BlockingIOError):
+            filelock.flock(second, filelock.LOCK_EX | filelock.LOCK_NB)
+
+    def test_other_failures_are_not_blockingioerror(self) -> None:
+        """反过来钉一边:不是撞锁的那些错不许也被翻成 BlockingIOError。
+
+        整段 `except OSError: raise BlockingIOError(...)` 能让上面那条绿,代价是
+        真的环境故障(句柄坏了、文件系统没有锁)被报成「另一个任务正在执行」——
+        人去等一个压根不存在的任务。坏句柄两个平台都抛 OSError(POSIX 是 EBADF,
+        Windows 上 `msvcrt.get_osfhandle` 自己就抛),而两边都不该是 BlockingIOError。
+        """
+        with self.assertRaises(OSError) as caught:
+            filelock.flock(-1, filelock.LOCK_EX | filelock.LOCK_NB)
+        self.assertNotIsInstance(
+            caught.exception, BlockingIOError,
+            '坏句柄被报成了「有人占着」—— 调用方会让人去等一个不存在的任务')
 
 
 if __name__ == '__main__':
