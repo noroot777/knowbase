@@ -139,33 +139,41 @@ def set_stage(key: str, provider: str | None, model: str | None) -> None:
     校验先做完,**改盘走 llm.update_settings**:它在锁内重读当前文件再改,
     面板里连着改两个阶段时两次保存才会叠加,而不是后一次把前一次整个盖掉。
     """
-    st = stage(key)
-    model = (model or "").strip()
-    entry = None
-    if model:
-        # provider 留空时也认 "openai:gpt-5.5" 这种带前缀的写法(收藏页那个只传
-        # id 的老下拉、命令行都走得通),都拿不到才按 id 前缀猜,还猜不出就报错
-        m = llm.parse_model(model, provider=(provider or "").strip() or None)
-        if m is None:
-            raise ValueError(f"认不出模型 {model} 属于哪家,请显式指定供应商")
-        if st.providers and m.provider not in st.providers:
-            raise ValueError(f"「{st.label}」只支持 {'/'.join(st.providers)}")
-        entry = {"provider": m.provider, "model": m.model_id}
+    set_stages({key: {"provider": provider or "", "model": model or ""}})
+
+
+def set_stages(updates: dict[str, dict]) -> None:
+    """先校验全部阶段,再在同一个配置事务内保存;任一项非法则整组不落盘。"""
+    entries = {}
+    for key, value in updates.items():
+        st = stage(key)
+        model = (value.get("model") or "").strip()
+        entry = None
+        if model:
+            provider = (value.get("provider") or "").strip() or None
+            resolved = llm.parse_model(model, provider=provider)
+            if resolved is None:
+                raise ValueError(f"认不出模型 {model} 属于哪家,请显式指定供应商")
+            if st.providers and resolved.provider not in st.providers:
+                raise ValueError(f"「{st.label}」只支持 {'/'.join(st.providers)}")
+            entry = {"provider": resolved.provider, "model": resolved.model_id}
+        entries[key] = entry
 
     def mutate(data: dict) -> None:
         stages = data.get("stages")
         stages = dict(stages) if isinstance(stages, dict) else {}
-        if entry is None:
-            stages.pop(key, None)
-        else:
-            stages[key] = entry
+        for key, entry in entries.items():
+            if entry is None:
+                stages.pop(key, None)
+            else:
+                stages[key] = entry
+            legacy = stage(key).legacy
+            if legacy:
+                data.pop(legacy, None)
         if stages:
             data["stages"] = stages
         else:
             data.pop("stages", None)
-        # 旧顶层键留着只会跟新配置打架(读时优先级更低,但用户改不动它),一并清掉
-        if st.legacy:
-            data.pop(st.legacy, None)
 
     llm.update_settings(mutate)
 
@@ -176,16 +184,19 @@ def _candidates(st: Stage) -> list[tuple[str, str]]:
     return [(p, m) for p in provs for m in llm.configured_models(p)]
 
 
-def recommended(st: Stage) -> str:
+def recommended(st: Stage, candidates: list[tuple[str, str]] | None = None) -> str:
     """该阶段推荐用哪个模型,返回 "provider:model_id";挑不出来返回空串。
 
     在这个阶段允许的候选里按档位关键词挑第一个命中的,**已配 key 的那几家优先**
     ——推荐一个用不了的型号等于没推荐。挑不出来时面板退回 `_TIER_LABEL` 那句话。
+    candidates 可将候选缩到某个预设的供应商和模型系列,阶段本身的供应商限制仍生效。
     """
     hints = _TIERS.get(st.rec)
     if not hints:
         return ""
-    cands = _candidates(st)
+    cands = _candidates(st) if candidates is None else candidates
+    cands = [(provider, model) for provider, model in cands
+             if not st.providers or provider in st.providers]
     pool = [c for c in cands if llm.has_key(c[0])] or cands
     for hint in hints:
         for prov, model in pool:

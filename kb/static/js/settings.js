@@ -177,11 +177,33 @@ function stageRow(st, providers) {
   </div>`;
 }
 
+function stagePresetCard(preset) {
+  const models = preset.main_model
+    ? `主力 · ${preset.main_model}\n轻量 · ${preset.cheap_model}` : '按已勾选的模型分配';
+  return `<button class="stage-preset${preset.active ? ' active' : ''}"
+    data-preset="${esc(preset.key)}" data-unavailable="${!preset.ready}"
+    aria-label="应用${esc(preset.label)}" aria-pressed="${preset.active}"
+    ${preset.ready ? '' : 'disabled'} onclick="saveStagePreset(this.dataset.preset)">
+    <span class="stage-preset-head"><b>${esc(preset.label)}</b>
+      <span>${preset.active ? '当前方案' : '一键应用'}</span></span>
+    <span class="stage-preset-models">${esc(models)}</span>
+    ${preset.reason ? `<span class="stage-preset-warning">${esc(preset.reason)}</span>` : ''}
+    </button>`;
+}
+
+function renderStages(data) {
+  $('stages-presets').innerHTML = (data.presets || []).map(stagePresetCard).join('');
+  $('stages-list').innerHTML = data.stages.map(stage => stageRow(stage, data.providers)).join('');
+  setStageBusy();
+}
+
 async function refreshStages() {
   try {
-    const d = await fetch('/api/stages').then(r => r.json());
-    $('stages-list').innerHTML = d.stages.map(s => stageRow(s, d.providers)).join('');
+    const response = await fetch('/api/stages');
+    if (!response.ok) throw new Error(response.status);
+    renderStages(await response.json());
   } catch (e) {
+    $('stages-presets').innerHTML = '';
     $('stages-list').innerHTML = '<div class="empty">状态获取失败</div>';
   }
 }
@@ -196,10 +218,31 @@ function closeStages() { $('stages-modal').style.display = 'none'; }
 // 连着改两个下拉时,两次保存排队走,不并发:后端已经有锁保证不会互相覆盖,
 // 这里只是免得两个请求的响应交错回来、把列表渲染成旧的那一份。
 let stageSaveChain = Promise.resolve();
+let stageSavePending = 0;
+
+function setStageBusy() {
+  $('stages-content').setAttribute('aria-busy', String(stageSavePending > 0));
+  $('stages-content').querySelectorAll('select, button').forEach(control => {
+    control.disabled = stageSavePending > 0 || control.dataset.unavailable === 'true';
+  });
+}
+
+function queueStageSave(action) {
+  stageSavePending++;
+  setStageBusy();
+  stageSaveChain = stageSaveChain.then(action).catch(() => {}).finally(() => {
+    stageSavePending--;
+    setStageBusy();
+  });
+  return stageSaveChain;
+}
 
 function saveStage(key, value) {
-  stageSaveChain = stageSaveChain.then(() => _saveStage(key, value)).catch(() => {});
-  return stageSaveChain;
+  return queueStageSave(() => _saveStage(key, value));
+}
+
+function saveStagePreset(preset) {
+  return queueStageSave(() => persistStages('/api/stages/preset', { preset }, true));
 }
 
 async function _saveStage(key, value) {
@@ -207,19 +250,25 @@ async function _saveStage(key, value) {
   const i = value.indexOf(':');
   const body = i < 0 ? { key, provider: '', model: '' }
     : { key, provider: value.slice(0, i), model: value.slice(i + 1) };
+  return persistStages('/api/stages', body, key === 'fav');
+}
+
+async function persistStages(url, body, refreshFavorites) {
   $('stages-msg').textContent = '保存中…';
   try {
-    const r = await fetch('/api/stages', {
+    const r = await fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     if (await toastIfFail(r, '保存失败')) { $('stages-msg').textContent = ''; return; }
     const d = await r.json();
-    $('stages-list').innerHTML = d.stages.map(s => stageRow(s, d.providers)).join('');
-    $('stages-msg').textContent = '✓ 已保存,即时生效';
+    renderStages(d);
+    $('stages-msg').textContent = d.applied_preset
+      ? `✓ 已切换为${d.applied_preset},即时生效${d.preserved.length ? '(研究阶段保持原配置)' : ''}`
+      : '✓ 已保存,即时生效';
     loadModels();       // 问答下拉的默认项跟着「问答 · 回答」阶段走
     refreshWechatSetup();
-    if (key === 'fav') { // 收藏页那个下拉和「收藏 · 分诊与行动卡」是同一处配置
+    if (refreshFavorites) { // 收藏页那个下拉和「收藏 · 分诊与行动卡」是同一处配置
       favToolsInited = false;
       initFavTools();
     }

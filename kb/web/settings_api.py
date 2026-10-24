@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StrictBool
 
-from kb import llm, llm_stages
+from kb import llm, llm_presets, llm_stages
 from kb.feeds import egress
 
 router = APIRouter()
@@ -38,8 +38,17 @@ def api_stages():
     当前实际指向的模型——不然一个没被勾选的阶段模型在下拉里根本没有对应项。
     """
     pool = llm.model_pool()
+    stages = llm_stages.describe()
+    presets = llm_presets.describe()
+    active = next((preset for preset in presets if preset["active"]), None)
+    if active:
+        for stage in stages:
+            entry = active["assignments"].get(stage["key"])
+            if entry:
+                stage["recommend"] = llm.qualify(llm.Model(entry["provider"], entry["model"]))
     return {
-        "stages": llm_stages.describe(),
+        "stages": stages,
+        "presets": presets,
         "providers": [{"key": p, "label": llm.PROVIDER_LABEL.get(p, p),
                        "has_key": llm.has_key(p),
                        "models": pool.get(p, [])} for p in llm.PROVIDERS],
@@ -61,6 +70,21 @@ def api_stage_set(body: StageRequest):
     except ValueError as e:
         raise HTTPException(400, str(e))
     return api_stages()
+
+
+class StagePresetRequest(BaseModel):
+    preset: str
+
+
+@router.post("/api/stages/preset")
+def api_stage_preset_set(body: StagePresetRequest):
+    try:
+        preset = llm_presets.apply(body.preset)
+    except KeyError as error:
+        raise HTTPException(404, str(error))
+    except ValueError as error:
+        raise HTTPException(400, str(error))
+    return {**api_stages(), "applied_preset": preset["label"], "preserved": preset["preserved"]}
 
 
 @router.get("/api/models/remote")

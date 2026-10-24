@@ -449,18 +449,20 @@
 <div id="stages-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeStages()">
   <div class="modal" style="width:min(680px,94vw);max-height:88vh;display:flex;flex-direction:column">
     <h2>模型分配</h2>
+    <div id="stages-content" style="overflow-y:auto;flex:1;min-height:0">
+    <div id="stages-presets" class="stage-presets" aria-label="整组模型预设"></div>
+    <div class="hint stage-preset-note">点一下切换整组,按主力 / 轻量分配。GPT 组保留仅支持 Claude 的研究工具循环;下方仍可逐项微调。</div>
     <div class="row hint" style="margin:-8px 0 6px">
-      每个用到大模型的阶段各自选一家供应商的一个模型,改完即时生效(管道下一篇就换过来)。
-      选项按供应商分组,<b>选的是哪家就用哪家的 key</b>,不按模型名去猜。
-      候选来自「API Key」面板里勾选的模型;没选过就用内置默认。
-      每一步下面那行<b>推荐</b>是按这步的活轻重给的:量大的解析活用便宜档,
-      写给人读、决定产物质量的那几步用主力档,点「改用推荐」直接切过去。
+      各阶段可单独微调,改完即时生效(管道从下一篇起使用)。
+      候选来自「API Key」中勾选的模型,未勾选时用内置候选;<b>选哪家就用哪家的 key</b>。
+      下方<b>推荐</b>按工作轻重分档,点「改用推荐」即可应用。
     </div>
-    <div id="stages-list" style="overflow-y:auto;flex:1;min-height:0">
+    <div id="stages-list">
       <div class="empty">加载中…</div>
     </div>
+    </div>
     <div style="display:flex;gap:8px;margin-top:16px;align-items:center">
-      <span id="stages-msg" class="hint"></span>
+      <span id="stages-msg" class="hint" role="status" aria-live="polite"></span>
       <button class="ghost" onclick="closeStages()" style="margin-left:auto">关闭</button>
     </div>
   </div>
