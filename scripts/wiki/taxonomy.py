@@ -79,6 +79,7 @@ def _flock(name: str):
     (和 secrets.json 那把锁同一套理由)。"""
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     p = CACHE_DIR / name
+
     with _io_lock:                       # 同进程内的并发先在这儿排队
         fh = p.open("a+")
         try:

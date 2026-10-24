@@ -74,18 +74,21 @@ if (-not $VenvExplicit -and -not (Test-Path -LiteralPath (Join-Path $VenvHome 'S
 # 空目录也行:库和表由 src/db 在首次连接时建出来
 $null = New-Item -ItemType Directory -Force -Path $DataHome
 
-function Get-Uv {
-    $c = Get-Command 'uv' -ErrorAction SilentlyContinue
-    if ($c) { return $c.Source }
-    foreach ($p in @((Join-Path $env:USERPROFILE '.local\bin\uv.exe'),
-                     (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Links\uv.exe'))) {
-        if ($p -and (Test-Path -LiteralPath $p -PathType Leaf)) { return $p }
-    }
-    return $null
+# **「uv 在哪」的口径只有一份**,在 ../scripts/win_uv.ps1。这里原先自己写了一遍,
+# 而两份已经不一样了:那一份少了 `pip install --user` 装出来的位置
+# (%APPDATA%\Python\Python3XX\Scripts)。后果是这台机器上实测的那一种 ——
+# `.\kb.ps1 start` 找得到 uv,`collector\setup.ps1` 偏说「没有 venv 也没有 uv」,
+# 而人刚亲手装过 uv,只会认为这个脚本坏了。
+# `Find-UvPath` 只回答「在哪」,找不到时说哪句话还是下面自己决定(这里要提
+# KB_COLLECTOR_VENV_PATH,kb.ps1 那边不提)。
+$WinUv = Join-Path (Split-Path $HereDir -Parent) 'scripts\win_uv.ps1'
+if (-not (Test-Path -LiteralPath $WinUv -PathType Leaf)) {
+    Fail "缺 $WinUv —— 它和 kb.ps1 共用「uv 在哪」那一份判据,不在就没法找 uv"
 }
+. $WinUv
 
 if (-not (Test-Path -LiteralPath (Join-Path $VenvHome 'Scripts\python.exe') -PathType Leaf)) {
-    $uv = Get-Uv
+    $uv = Find-UvPath
     if (-not $uv) {
         Fail '没有 venv 也没有 uv。装一个 uv(winget install astral-sh.uv),或用 KB_COLLECTOR_VENV_PATH 指到现成的 venv'
     }
@@ -142,7 +145,15 @@ Write-Output "[setup] .venv -> $VenvHome"
 # `-m cli` 要在 collector 目录里跑才找得到模块
 Push-Location $HereDir
 try {
-    $null = & (Join-Path $HereDir '.venv\Scripts\python.exe') '-m' 'cli' 'status' 2>&1
+    # **这一句不许写 `2>&1`。** 本脚本既可以单跑(那时 $ErrorActionPreference 是
+    # 默认的 Continue),也会被 `.\kb.ps1 setup` 用 `& $ps1` 调起 —— 那条路上它
+    # **继承 kb.ps1 的 `Stop`**,而 `2>&1` 会把 cli 写在 stderr 上的话包成
+    # NativeCommandError 当场终止:于是「自检没通过就打一行警告」这段压根走不到,
+    # 报出来的是一句 PowerShell 内部错误。实测口径与出路见
+    # docs/decisions/windows-entry.md;这里就地降级,因为采集器这份脚本是独立的,
+    # 不 dot-source scripts/win_py.ps1(单跑时那条路径不一定在)。
+    $ErrorActionPreference = 'Continue'
+    $null = & (Join-Path $HereDir '.venv\Scripts\python.exe') '-m' 'cli' 'status'
     if ($LASTEXITCODE -eq 0) { Write-Output '[setup] 自检通过:python -m cli status 可用' }
     else { Note '[setup] 警告:cli status 跑不通,检查上面两个路径' }
 } finally { Pop-Location }

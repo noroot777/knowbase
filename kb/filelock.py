@@ -20,8 +20,17 @@
 对得上(这几条是现有调用方依赖的):
   - **LOCK_SH / LOCK_EX 都是真的**(LockFileEx 不带 `EXCLUSIVE` 就是共享锁),
     所以 `fetch_rounds` 那个「读用共享锁、写用独占锁」照旧成立。
-  - **LOCK_NB 拿不到锁时抛 `OSError`**(`ctypes.WinError` 造出来的就是 OSError),
-    所以一圈 `except OSError:` 的轮询和降级路径一个字都不用改。
+  - **LOCK_NB 拿不到锁时抛 `BlockingIOError`**,跟 POSIX 一个形状。这一道**不是
+    修饰,是承重的**:有两处调用方拿「是 BlockingIOError 还是别的 OSError」区分
+    「有人在跑」和「这个文件系统压根锁不住」,而这两档给用户的话完全不同
+    (`wechat_setup._lock` 只 `except BlockingIOError`,`x_login_import` 的
+    `except OSError` 那一支说的是「文件系统可能不支持文件锁」)。照搬
+    `ctypes.WinError` 的话 `ERROR_LOCK_VIOLATION` 映到的 errno 是 `EACCES` ——
+    于是**正常的并发撞锁**在 Windows 上被报成「你的文件系统有问题」(实测
+    `tests/test_x_login_persist.py::test_two_imports_cannot_interleave` 当场红),
+    绿泡泡接入那一处更糟:那句友好提示换成一个未捕获异常。
+    `BlockingIOError` 是 `OSError` 的子类,所以一圈 `except OSError:` 的轮询和
+    降级路径照旧一个字都不用改。
   - **句柄关掉或进程死掉,锁自动释放。** 这是 `maintenance` 那句「持锁者崩了也不会把
     别人堵死」的前提,Windows 上同样成立。
 
@@ -69,6 +78,7 @@ if _fcntl is not None:
 elif os.name == 'nt':
     import ctypes
     from ctypes import wintypes
+    import errno as _errno
     import msvcrt
 
     #: 这四个值在 Windows 上由我们自己定(没有 libc 的 flock 可以抄),只要
@@ -80,6 +90,9 @@ elif os.name == 'nt':
     _LOCKFILE_FAIL_IMMEDIATELY = 0x00000001
     _LOCKFILE_EXCLUSIVE_LOCK = 0x00000002
     _RANGE = 1                           # 锁第 0 个字节;见模块说明
+    #: 「这一段已经被别人锁着」。LockFileEx 带 FAIL_IMMEDIATELY 拿不到锁时报的
+    #: 就是它,要翻成 `BlockingIOError`(见模块说明里「对得上」那一条)。
+    _ERROR_LOCK_VIOLATION = 33
 
     class _Overlapped(ctypes.Structure):
         # Internal / InternalHigh 是 ULONG_PTR:用 LPVOID 才能在 32 位和 64 位上
@@ -101,7 +114,11 @@ elif os.name == 'nt':
     _k32.UnlockFileEx.restype = wintypes.BOOL
 
     def flock(fd, operation: int) -> None:
-        """`fcntl.flock` 的 Windows 版。拿不到锁、解锁失败都抛 `OSError`。"""
+        """`fcntl.flock` 的 Windows 版。
+
+        拿不到锁抛 `BlockingIOError`,别的失败抛 `OSError` —— 两档要分开,
+        调用方据此说两句完全不同的话(见模块说明)。
+        """
         handle = msvcrt.get_osfhandle(_fd_of(fd))
         over = _Overlapped()
         if operation & LOCK_UN:
@@ -114,7 +131,14 @@ elif os.name == 'nt':
                 flags |= _LOCKFILE_FAIL_IMMEDIATELY
             ok = _k32.LockFileEx(handle, flags, 0, _RANGE, 0, ctypes.byref(over))
         if not ok:
-            raise ctypes.WinError(ctypes.get_last_error())
+            code = ctypes.get_last_error()
+            exc = ctypes.WinError(code)
+            if code == _ERROR_LOCK_VIOLATION:
+                # errno 用 POSIX 那一侧的 EAGAIN(`ctypes.WinError` 映出来的是
+                # EACCES);winerror 留在话里,诊断时还认得出是哪一个。
+                raise BlockingIOError(
+                    _errno.EAGAIN, f'{exc.strerror}(WinError {code})') from None
+            raise exc
 
 else:                                    # pragma: no cover - 既不是 POSIX 也不是 NT
     LOCK_SH, LOCK_EX, LOCK_NB, LOCK_UN = 1, 2, 4, 8

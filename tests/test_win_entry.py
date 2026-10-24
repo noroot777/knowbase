@@ -15,7 +15,7 @@
    实测就是这么进去的。合法的只有 `` `$ ``(故意转义,让 $env:… 原样印出来)。
 3. **命令面不许单边漂移**。`kb.sh` 加了一条命令而 `kb.ps1` 没跟,Windows 上的人
    得到的是「不认识的命令」,而文档和同事都说有这条。两边的 dispatch 现算出来对比。
-4. **dot-source 的文件得在**。kb.ps1 按 700 行上限拆出了四份,少一份则一加载就炸,
+4. **dot-source 的文件得在**。kb.ps1 按 700 行上限拆出了好几份,少一份则一加载就炸,
    而报出来的是一句找不到某个函数 —— 指不到「少拷/少提交了一个文件」。
    (同一个形态在 bash 那边的留痕见 `tests/kb_sh_fixture.py` 的 docstring。)
 5. **700 行上限**(全局约定),顺手钉住。
@@ -23,6 +23,9 @@
 前三条里第 2 条要 PowerShell 的 AST 才判得准,所以它在没有 powershell 的机器上
 显式 skip;其余几条是纯字节/纯文本检查,**在哪台机器上都跑** —— 这很要紧,因为
 日常提交门禁是在 macOS 上过的。
+
+**行为上的那些判据(问不出来算哪一档、pid 怎么核身份、参数怎么校验)在
+`tests/test_win_proc.py`**,那一份全要真跑 PowerShell。
 """
 
 from __future__ import annotations
@@ -40,7 +43,8 @@ REPO = Path(__file__).resolve().parent.parent
 
 #: 这一套的全部 .ps1(仓库内相对路径)。新拆一份出来要加进这里 —— 漏登记的后果
 #: 是它的 BOM 和转义没人看着,而那两样坏起来都不像坏了。
-PS_FILES = ('kb.ps1', 'scripts/win_py.ps1', 'scripts/win_proc.ps1',
+PS_FILES = ('kb.ps1', 'scripts/win_uv.ps1', 'scripts/win_py.ps1',
+            'scripts/win_args.ps1', 'scripts/win_proc.ps1', 'scripts/win_web.ps1',
             'scripts/win_env.ps1', 'scripts/win_stale.ps1', 'collector/setup.ps1')
 
 BOM = b'\xef\xbb\xbf'
@@ -82,6 +86,28 @@ class EncodingTest(unittest.TestCase):
                                  f'{rel} 少了 UTF-8 BOM —— PowerShell 5.1 会按系统'
                                  f'代码页解码,里面每一句中文提示都变成乱码,'
                                  f'而脚本照常执行')
+
+    def test_no_stray_control_bytes(self) -> None:
+        """源码里不许夹着控制字符(除了 tab / 换行)。
+
+        **这一条防的是「守卫被悄悄关掉」。** 控制字符在编辑器和终端里都是看不见的
+        —— 退格符(0x08)还会把它前面那个字符一起吃掉显示。本轮真踩了一次:一条
+        `re.search(r'...param...')` 的开头混进一个退格符,于是那条正则永远不匹配,
+        依赖它的结构守卫**一条都扫不出来、却稳定显示绿色**。一个什么都扫不出来的
+        守卫比没有守卫更坏:它让人以为这件事有人看着。
+
+        (来路是把源码经由 shell here-doc 写进文件时 `\b` 被折成了真的 0x08。
+        所以判据落在**文件里有没有**,不管它是怎么进来的。)
+        """
+        for rel in PS_FILES + ('kb.cmd', 'tests/test_win_entry.py',
+                               'tests/test_win_proc.py'):
+            with self.subTest(rel):
+                txt = (REPO / rel).read_text(encoding='utf-8-sig', errors='replace')
+                found = [(n, repr(line))
+                         for n, line in enumerate(txt.splitlines(), 1)
+                         if any(ord(c) < 32 and ord(c) not in (9, 13)
+                                for c in line)]
+                self.assertEqual(found, [], f'{rel} 里有看不见的控制字符')
 
     def test_cmd_wrapper_stays_ascii(self) -> None:
         """`kb.cmd` 反过来:**不许有 BOM、不许有中文**。
@@ -204,6 +230,13 @@ def _powershell() -> str | None:
         if found:
             return found
     return None
+
+
+def _project_python() -> str | None:
+    """项目 venv 里的 python。`NativeCallTest` 要一个**真会往 stderr 说话**的
+    原生程序,拿它当被试最省事(而且这几条用例只在 Windows 上有意义)。"""
+    exe = REPO / '.venv' / 'Scripts' / 'python.exe'
+    return str(exe) if exe.is_file() else None
 
 
 class _NeedsPowerShell(unittest.TestCase):
@@ -363,6 +396,236 @@ class EscapeTest(_NeedsPowerShell):
         self.assertEqual(hits, [],
                          '双引号串里有误生效的反引号转义 —— 打出来会少字符、'
                          f'还可能响一声,而解析期毫无提示:{pretty}')
+
+
+#: 原生程序往 stderr 写一行、退出码 0 —— uv 建 venv 时那句 `Using CPython 3.11.17`
+#: 就是这个形状。**不带引号**:PowerShell 5.1 传原生参数时会吃掉嵌入的双引号,
+#: 探针自己先踩进那个坑的话,红的原因就不是我们要验的那一条了。
+_STDERR_RC0 = 'import sys; sys.stderr.write(chr(88)); sys.exit(0)'
+
+#: 在 `$ErrorActionPreference = 'Stop'` 下跑一句「会往 stderr 说话」的原生命令。
+#: 判据是**它有没有抛**,不是输出长什么样。
+_NATIVE_PROBE = r'''
+param([string]$WinPy, [string]$Py)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'          # kb.ps1 顶上就是这个,照搬
+$script:Root = (Get-Location).Path
+function Die { param([string]$m) throw $m }
+. $WinPy
+
+$code = 'import sys; sys.stderr.write(chr(88)); sys.exit(0)'
+try {
+    $r = Invoke-Native $Py @('-c', $code)
+    "NATIVE_OK rc=$($r.Code)"
+} catch {
+    "NATIVE_THROW $($_.FullyQualifiedErrorId)"
+}
+try {
+    $null = Invoke-NativeLive $Py @('-c', $code)
+    "LIVE_OK rc=$LASTEXITCODE"
+} catch {
+    "LIVE_THROW $($_.FullyQualifiedErrorId)"
+}
+# 反过来钉一边:**降级不许外泄**。出了那两个函数,调用方的 Stop 还得管事 ——
+# 否则这道修复会顺手把整份脚本的报错纪律关掉,那比原来的 bug 更难查。
+try {
+    $null = & $Py '-c' $code 2>&1
+    'LEAK'
+} catch {
+    'CALLER_STILL_STRICT'
+}
+'''
+
+
+class NativeCallTest(_NeedsPowerShell):
+    """原生程序往 stderr 说一句话,不许把入口掀翻。
+
+    **这条是真进去过的,而且是「`.\\kb.ps1 start` 直接用不了」那一级。**
+    `kb.ps1` 顶上设 `$ErrorActionPreference = 'Stop'`(那是有意的:cmdlet 出错就
+    停,免得像 `status` 那样打一行红再接着给出一个错答案)。但 PowerShell 一看到
+    **原生程序**往 stderr 写了字,就把那几行包成 `NativeCommandError` 错误记录,
+    而在 `Stop` 下那是**终止性**的。
+
+    于是 uv 建 venv 时打的那句进度 `Using CPython 3.11.17` —— 一句**不是错误的
+    话** —— 让 `start` 当场死掉,报出来的是一段 PowerShell 内部机制的话,跟知识库
+    毫无关系。更坏的是它**留下半个 `.venv`**(只有 `CACHEDIR.TAG`),之后 uv 既
+    拒绝用它也不会自己修,于是**后面每一次重试都失败,而且换了个理由** ——
+    人完全看不出这几次失败是同一个根。
+
+    **`2>$null` 挡不住**(反直觉,所以这里连它一起钉):实测 `Stop` 下 `2>&1` 和
+    `2>$null` 都抛。所以口径是统一走 `Invoke-Native` / `Invoke-NativeLive`,它们
+    把 `$ErrorActionPreference` 降回 `Continue`、**只在自己的作用域里**。
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.py = _project_python()
+        if not self.py:
+            self.skipTest('找不到项目 python(.venv) —— 这一条要一个真能往 stderr '
+                          '写字的原生程序才验得了')
+
+    def _run(self):
+        out = self.run_ps(_NATIVE_PROBE,
+                          str(REPO / 'scripts' / 'win_py.ps1'), self.py)
+        self.assertEqual(out.returncode, 0, f'探针本身失败了:{out.stderr}')
+        return out.stdout
+
+    def test_capturing_helper_survives_stderr(self) -> None:
+        text = self._run()
+        self.assertIn('NATIVE_OK rc=0', text,
+                      'Invoke-Native 被 stderr 掀翻了 —— `.\\kb.ps1 start` 会死在 '
+                      'uv 的进度信息上,还会留下半个 .venv 让后续重试全失败')
+
+    def test_streaming_helper_survives_stderr(self) -> None:
+        text = self._run()
+        self.assertIn('LIVE_OK rc=0', text,
+                      'Invoke-NativeLive 被 stderr 掀翻了 —— unittest 把全部输出都'
+                      '写 stderr,`.\\kb.ps1 test` 会一开跑就炸')
+
+    def test_the_relaxation_does_not_leak_to_the_caller(self) -> None:
+        """反过来钉一边:降级只在函数内,出来之后 `Stop` 照旧管事。"""
+        text = self._run()
+        self.assertIn('CALLER_STILL_STRICT', text,
+                      '两个 helper 把调用方的 $ErrorActionPreference 也改了 —— '
+                      '那等于顺手关掉整份脚本的报错纪律')
+
+
+class NoRawRedirectTest(unittest.TestCase):
+    """别处不许再写 `2>&1` / `2>$null` 直接套在原生命令上。
+
+    这是上面那条的**结构版**,不需要 PowerShell 就能跑(日常门禁在 macOS 上过)。
+    判据只盯「`&` 调用 + 重定向」这一种写法:套在 **PowerShell 函数**调用上的
+    `2>$null` 是另一件事(那是压这个函数的错误流),照旧放行。
+    """
+
+    #: `& $something … 2>&1` / `… 2>$null` —— 原生调用自带重定向。
+    _BAD = re.compile(r'^\s*(?:\$\w+\s*=\s*)?&\s*[\$(].*?2>(?:&1|\$null)', re.M)
+
+    #: **唯一允许写重定向的地方就是 `Invoke-Native` 自己的函数体** —— 口径只有
+    #: 一份,那一处就是这一份。整段挖掉再扫,所以这里不需要维护行号。
+    _OWNER = re.compile(r'(?ms)^function Invoke-Native \{.*?^\}\n')
+
+    def test_no_native_call_carries_its_own_redirect(self) -> None:
+        offenders = []
+        for rel in PS_FILES:
+            src = (REPO / rel).read_text(encoding='utf-8-sig')
+            # 挖掉时用等长的空行替换,行号才还对得上
+            def _blank(m):
+                return '\n' * m.group(0).count('\n')
+            src = self._OWNER.sub(_blank, src)
+            for m in self._BAD.finditer(src):
+                line = src[:m.start()].count('\n') + 1
+                offenders.append(f'{rel}:{line}')
+        self.assertEqual(offenders, [],
+                         '原生调用自带 2>&1 / 2>$null:在 $ErrorActionPreference='
+                         "'Stop' 下,对端往 stderr 写一个字就会终止整条命令。"
+                         '改走 Invoke-Native / Invoke-NativeLive')
+
+    def test_the_owner_really_was_exempted(self) -> None:
+        """反过来钉一边:那段豁免真的命中了 `Invoke-Native`。
+
+        正则哪天对不上(函数改名、括号换行),上面那条会**悄悄变回全文扫描**然后
+        永远红;或者更糟,`_BAD` 一起失效而它永远绿。所以这里确认两件事:
+        豁免段落存在,且它里面确实有那两句重定向。
+        """
+        src = (REPO / 'scripts/win_py.ps1').read_text(encoding='utf-8-sig')
+        m = self._OWNER.search(src)
+        self.assertIsNotNone(m, 'Invoke-Native 的函数体没匹配上 —— 先修这条正则')
+        self.assertTrue(self._BAD.search(m.group(0)),
+                        'Invoke-Native 里居然没有重定向了 —— 要么实现换了写法,'
+                        '要么这条豁免已经不需要了,两种都该把它删掉')
+
+
+class CaseCollisionTest(unittest.TestCase):
+    """局部变量不许只靠**大小写**跟函数参数区分。
+
+    PowerShell 的变量名大小写不敏感:函数里写 `$port` 拿到的就是参数 `[int]$Port`。
+    于是 `$port = Get-PortState $Port` 是往一个 int 里塞 `'busy'` —— `stop` /
+    `restart` 当场抛,**而退出码还是 0**:外面看着像停成功了,服务其实一动没动,
+    下一条命令对着一个还活着的服务干活。参数有类型时炸在当场,类型碰巧一样时
+    (两个都是 `[string]`)就什么都不说,悄悄把参数覆盖掉。
+
+    **判据是「大小写不同」而不是「重名」**:同样拼法的再赋值是 PowerShell 里正常
+    的写法(就是要改那个参数),大小写不同才说明写的人以为这是两个变量。
+    顺带把写自动变量(`$pid`、`$args`、`$error` 这些)也圈进来,病根是同一个。
+    """
+
+    #: 这几个是语言给的,函数里赋值就等于把它顶掉。
+    _AUTO = frozenset({'pid', 'args', 'input', 'error', 'host', 'home',
+                       'matches', 'this', 'pwd', 'psitem', '_'})
+
+    @staticmethod
+    def _functions(txt: str):
+        """(函数名, 函数体) —— 按大括号配平切,别用正则去啃嵌套。"""
+        for m in re.finditer(r'function\s+([\w-]+)', txt, re.I):
+            i = txt.find('{', m.end())
+            if i < 0:
+                continue
+            depth = 0
+            for j in range(i, len(txt)):
+                if txt[j] == '{':
+                    depth += 1
+                elif txt[j] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        break
+            yield m.group(1), txt[i:j]
+
+    @staticmethod
+    def _params(body: str) -> list[str]:
+        m = re.search(r'param\s*\(', body, re.I)
+        if not m:
+            return []
+        i, depth = m.end() - 1, 0
+        for j in range(i, len(body)):
+            if body[j] == '(':
+                depth += 1
+            elif body[j] == ')':
+                depth -= 1
+                if depth == 0:
+                    break
+        names = re.findall(r'\$(\w+)', body[i:j])
+        return [n for n in names if n.lower() not in ('true', 'false', 'null')]
+
+    def _scan(self, files=PS_FILES) -> list[str]:
+        hits = []
+        for rel in files:
+            txt = (REPO / rel).read_text(encoding='utf-8-sig')
+            for name, body in self._functions(txt):
+                params = {p for p in self._params(body)}
+                for am in re.finditer(r'(?<![\w$:])\$(\w+)\s*=(?!=)', body):
+                    got = am.group(1)
+                    for p in params:
+                        if got.lower() == p.lower() and got != p:
+                            hits.append(f'{rel}: {name}(): 参数 ${p},函数体里却给 '
+                                        f'${got} 赋值 —— 这是同一个变量')
+                    if got.lower() in self._AUTO:
+                        hits.append(f'{rel}: {name}(): 给自动变量 ${got} 赋值')
+        return sorted(set(hits))
+
+    def test_no_local_differs_from_a_param_only_by_case(self) -> None:
+        self.assertEqual(self._scan(), [])
+
+    def test_the_scan_can_actually_see_one(self) -> None:
+        """反过来钉一边:把真出过事的那一行喂给它,必须抓到。
+
+        不钉这一边的话,一个「什么都扫不出来」的实现(括号配平切错、正则写歪)
+        也能让上面那条永远绿。
+        """
+        bad = REPO / 'tests' / '.case_collision_fixture.ps1'
+        bad.write_text('''function Stop-Service_ {
+    param([string]$Label, [int]$Port)
+    $port = if ($Port -gt 0) { Get-PortState $Port } else { 'free' }
+    if ($port -eq 'unknown') { return }
+}
+''', encoding='utf-8-sig')
+        try:
+            got = self._scan(files=('tests/.case_collision_fixture.ps1',))
+        finally:
+            bad.unlink()
+        self.assertEqual(len(got), 1, got)
+        self.assertIn('$Port', got[0])
+        self.assertIn('$port', got[0])
 
 
 if __name__ == '__main__':
