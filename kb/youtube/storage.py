@@ -13,7 +13,9 @@ SCHEMA = '''CREATE TABLE IF NOT EXISTS youtube_videos (
  state TEXT NOT NULL DEFAULT 'candidate', reason TEXT NOT NULL DEFAULT '',
  attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
  duration REAL NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '',
- last_error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL
+ last_error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
+ validation TEXT NOT NULL DEFAULT '', repair_pending INTEGER NOT NULL DEFAULT 0,
+ gate_code TEXT NOT NULL DEFAULT ''
 )'''
 OWNERS = '''CREATE TABLE IF NOT EXISTS youtube_video_sources (
  video_id TEXT NOT NULL REFERENCES youtube_videos(video_id) ON DELETE CASCADE,
@@ -42,7 +44,15 @@ def db():
         connection.execute('BEGIN IMMEDIATE')
         connection.execute(SCHEMA)
         connection.execute(OWNERS)
+        columns = {column['name'] for column in connection.execute('PRAGMA table_info(youtube_videos)')}
+        for name, definition in (('validation', "TEXT NOT NULL DEFAULT ''"),
+                                 ('repair_pending', 'INTEGER NOT NULL DEFAULT 0'),
+                                 ('gate_code', "TEXT NOT NULL DEFAULT ''")):
+            if name not in columns:
+                connection.execute(f'ALTER TABLE youtube_videos ADD COLUMN {name} {definition}')
         migrate(connection)
+        connection.execute("UPDATE youtube_videos SET state='deferred',gate_code='legacy',retry_at=0 "
+                           "WHERE state='excluded' AND gate_code=''")
         yield connection
 
 
@@ -66,28 +76,35 @@ def discover(source, entries):
                 (entry['video_id'], source['id'], source['url']))
 
 
-def rows(source_ids=None):
+def rows(source_ids=None, connection=None):
     where, arguments = '', []
     if source_ids is not None:
         if not source_ids:
             return []
         where = ' AND owner.source_id IN (' + ','.join('?' for _ in source_ids) + ')'
         arguments = list(source_ids)
-    with db() as connection:
-        result = connection.execute('''WITH active AS (SELECT candidate.*,owner.source_id,owner.source_url,
+    if connection is None:
+        with db() as current:
+            return rows(source_ids, connection=current)
+    result = connection.execute('''SELECT candidate.*,owner.source_id,owner.source_url,
             owner.committed,source.name AS channel,source.config,source.history_floor,
-            ROW_NUMBER() OVER(PARTITION BY candidate.video_id ORDER BY owner.source_id) AS position
+            source.id AS owner_id
             FROM youtube_videos candidate JOIN youtube_video_sources owner ON owner.video_id=candidate.video_id
             JOIN subscriptions source ON source.id=owner.source_id
-            WHERE source.enabled=1 AND source.url=owner.source_url''' + where +
-            ') SELECT * FROM active WHERE position=1',
+            WHERE source.enabled=1 AND source.url=owner.source_url''' + where + ' ORDER BY owner.source_id',
             arguments).fetchall()
-    return [{**dict(row), 'entry': json.loads(row['entry'])} for row in result]
+    grouped = {}
+    for item in result:
+        row = dict(item)
+        owner = {key: row[key] for key in ('source_id', 'source_url', 'committed', 'channel', 'config', 'history_floor')}
+        candidate = grouped.setdefault(row['video_id'], {**row, 'entry': json.loads(row['entry']), 'owners': []})
+        candidate['owners'].append(owner)
+    return list(grouped.values())
 
 
 def update(video_id, **values):
     allowed = {'heat', 'value', 'heat_rank', 'value_rank', 'state', 'reason',
-               'attempts', 'retry_at', 'duration', 'note', 'last_error'}
+               'attempts', 'retry_at', 'duration', 'note', 'last_error', 'validation', 'repair_pending', 'gate_code'}
     if not values or set(values) - allowed:
         raise ValueError('视频处理状态字段不正确')
     with db() as connection:
@@ -111,8 +128,9 @@ def mark_committed(connection, source, video_id):
 
 
 def ready(source):
+    from kb.youtube.products import valid
     return [row for row in rows([source['id']]) if row['state'] == 'ready'
-            and not row['committed'] and row['source_url'] == source['url']]
+            and not row['committed'] and row['source_url'] == source['url'] and valid(row)]
 
 
 def listing(source_id=None, limit=100):

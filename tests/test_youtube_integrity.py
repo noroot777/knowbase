@@ -61,7 +61,7 @@ class YouTubeIntegrity(YouTubeFixture):
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(notes, 'available', return_value=(True, '')), \
                 patch.object(media, 'probe', return_value=self.metadata) as probe, \
-                patch.object(media, 'obtain', return_value={}), patch.object(notes, 'build', side_effect=self.note):
+                patch.object(media, 'obtain', return_value=self.complete_transcript()), patch.object(notes, 'build', side_effect=self.note):
             result = collector.collect(FetchScope())
         self.assertEqual(1, result['processed'])
         probe.assert_called_once()
@@ -81,7 +81,7 @@ class YouTubeIntegrity(YouTubeFixture):
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(notes, 'available', return_value=(True, '')), \
                 patch.object(media, 'probe', return_value=self.metadata), \
-                patch.object(media, 'obtain', return_value={}), patch.object(notes, 'build', side_effect=self.note) as build:
+                patch.object(media, 'obtain', return_value=self.complete_transcript()), patch.object(notes, 'build', side_effect=self.note) as build:
             collector.collect(FetchScope())
         build.assert_called_once()
         for source in (self.source, alias):
@@ -148,7 +148,7 @@ class YouTubeIntegrity(YouTubeFixture):
         self.settings(max_videos=1)
         with patch.object(discovery, 'fetch', return_value=[]), patch.object(notes, 'available', return_value=(True, '')), \
                 patch.object(media, 'probe', return_value=self.metadata) as probe, \
-                patch.object(media, 'obtain', return_value={}), patch.object(notes, 'build', side_effect=self.note):
+                patch.object(media, 'obtain', return_value=self.complete_transcript()), patch.object(notes, 'build', side_effect=self.note):
             result = collector.collect(FetchScope(force=True))
         self.assertEqual(1, probe.call_count)
         self.assert_unresolved(result)
@@ -172,7 +172,7 @@ class YouTubeIntegrity(YouTubeFixture):
     def test_real_success_is_the_only_way_to_clear_content_error(self):
         self.fail_source()
         with patch.object(discovery, 'fetch', return_value=[]), patch.object(notes, 'available', return_value=(True, '')), \
-                patch.object(media, 'probe', return_value=self.metadata), patch.object(media, 'obtain', return_value={}), \
+                patch.object(media, 'probe', return_value=self.metadata), patch.object(media, 'obtain', return_value=self.complete_transcript()), \
                 patch.object(notes, 'build', side_effect=self.note):
             result = collector.collect(FetchScope(force=True))
         self.assertEqual('', reg.subscription('youtube', self.source['id'])['last_error'])
@@ -219,6 +219,6 @@ class YouTubeIntegrity(YouTubeFixture):
 
     def test_excluded_video_does_not_occupy_rank_admission(self):
         storage.discover(self.source, [self.entry_value, self.entry(2, views=1)])
-        storage.update(self.entry_value['video_id'], state='excluded', reason='直播')
+        storage.update(self.entry_value['video_id'], state='excluded', reason='直播', gate_code='replay')
         rows = ranking.score(storage.rows(), self.settings()['youtube'], FetchScope())
         self.assertEqual([self.entry(2)['video_id']], [row['video_id'] for row in rows])

@@ -7,6 +7,51 @@
 - 测试使用临时数据库、vault、转录与模型替身，没有修改生产库，也没有调用真实媒体下载、ASR 或付费 LLM。
 - 浏览器夹具只替换远端发现、媒体获取与模型回复；真实执行排名准入、全文分块翻译编排、笔记构建、数据库提交、导出、索引、API 和 UI。
 
+## 第二轮审查修复验证（2026-10-24）
+
+F1–F3 均认可并在原 YouTube 链路内修复，没有改动无关的平台或通用设置实现。
+本节记录本轮新执行结果，不复用下文历史回归，也不将执行者回归当作独立验收结论。
+
+### 最终合并回归
+
+哨兵 `MazduTH8TScN` 正常退出，退出码 0：136 项全部通过，0 跳过，耗时 41.354 秒。
+工作目录为 `/Users/fjh/code/knowledge-base/.worktrees/wnYGhulNzmEH`，原始命令：
+
+```sh
+PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/private/tmp KB_DATA_DIR=/private/tmp/kb-youtube-round2-final TZ=Asia/Shanghai HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests/test_youtube*.py tests.test_failure_sources tests.test_feed_sources tests.test_source_aliases tests.test_fulltext_extract_stale tests.test_doc_rewrite_roster -v
+```
+
+完整日志：`/Users/fjh/code/harness/data/runs/wnYGhulNzmEH/regression/MazduTH8TScN.log`。
+日志逐段核对，含上游依赖弃用警告，无测试失败或跳过；没有把代码树相等视为输入闭包证明。
+
+范围为 66 项 YouTube 检查（本轮新增 12 项）及 70 项受影响契约：
+
+- F1：旧表未发布成品、已发布残缺正文和上一版全局 ready 都不能绕过当前校验。成品持久化策略版本、完整输入快照及输入/正文指纹，ready 复用和发布边界均重验；篡改策略、输入或正文时拒绝发布。
+- F1：旧正文先隔离为待校验说明，重建后更新同一个条目，不产生重复内容；已收录旧成品可跨默认新视频窗口修复。实测真实导出、索引和旧提取结果失效，清除旧摘要、实体与话题；默认提取关闭时不排队，用户开启后才重新进入待提取列表。
+- F2：不同历史下界的两个有效归属分别准入、逐订阅提交，全局只处理一次。最高合格权重获选，不依赖插入顺序；不合格归属和观察名单不能抬高共享视频权重。
+- F3：缺时长和首映待发布延后 120 秒、直播延后 900 秒，期满重新探测并跳过旧元数据；显式重试可提前核验并恢复。Shorts/回放的排除不占普通排名，显式重试仍可重验；旧版无类型 excluded 在升级后重新开放。
+- 原有字幕、中文输出、数量与时长预算、失败覆盖、模型截止/取消以及隔离无头页面均重新执行；通用来源、失败身份、来源别名、导出旧提取失效和文档改写入口契约一并通过。
+
+### 过程中的失败与纠正
+
+`_odG6iJqXt-r` 首次执行 66 项，仅 1 项失败：新增测试错误假定 YouTube 默认开启知识提取。
+当次真实重建正文、重导出、索引与旧提取清理的断言已经通过；修正测试为先确认默认不排队，再显式开启提取并验证重排。
+没有为迎合测试更改产品默认值。相关 70 项契约由 `0IWbGNmfpkVG` 先行通过（退出码 0，30.071 秒），
+上述最终 136 项又在测试修正后的版本上完整重跑，未以旧记录代替新检查。
+两份过程日志分别为同一 regression 目录下的 `_odG6iJqXt-r.log` 与 `0IWbGNmfpkVG.log`。
+
+### 页面证据与剩余边界
+
+最终合并回归内真实启动隔离服务及独立无头临时 profile，`output/youtube/checks.json` 的 14 项行为断言通过。
+已重新人工查看本次生成的 `subscriptions-desktop.png`、`chinese-reader-desktop.png` 和 `subscriptions-mobile.png`，
+位置均在 `output/youtube/`；中文阅读、原视频时间链接与 390px 窄屏无新增遮挡或页面横向溢出。
+扩展具名会话后的后台创建仍受既有 `Capability is not available: visibility` 限制，沿用已证降级；
+未操作用户已有标签、激活 Chrome、连接用户 Chrome CDP 或启动有头浏览器。截图仅验证本地夹具，不证明真实翻译质量。
+
+本轮未重跑整个 fast/probes，不声称全仓通过，也不拿下文后端 `passed=null` 的历史公共浏览器记录作验收依据。
+未实测真实 YouTube 可访问性、真实 ASR/翻译质量、长视频性能或异常强杀后的子进程回收。
+并发局部设置、首次排除不补足当轮名额及缓存全局保留/磁盘配额仍是已披露边界；未以本轮修复扩大任务范围。
+
 ## 第一轮审查修复验证（2026-10-24）
 
 R1–R6 均按报告修复，无驳回或扩大到无关模块。实现说明见 `docs/decisions/youtube-intake.md`。
@@ -35,7 +80,9 @@ PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/priv
 
 ### 公共浏览器层
 
-哨兵 `cM6GQ-tBTa99`：490 项全部通过，耗时 618.837 秒，无跳过，浏览器用例实际执行 151/151。原始命令：
+历史哨兵 `cM6GQ-tBTa99` 的原始日志显示 490 项 OK，耗时 618.837 秒，无跳过，浏览器用例实际执行 151/151。
+但后端记录为 `passed=null`、`reusable=false`，不认定为后端核定通过，不具备独立验收复用资格；
+这里只保留历史执行结果，不作为本轮通过依据。原始命令：
 
 ```sh
 PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin TMPDIR=/private/tmp KB_DATA_DIR=/private/tmp/kb-youtube-review-probes TZ=Asia/Shanghai HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m tests.tiers probes

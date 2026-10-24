@@ -1,5 +1,4 @@
 import json
-import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -10,26 +9,14 @@ from kb.feeds.sync import _claim_write, _save_failure, _within_history
 from kb.maintenance import maintenance_lock
 from kb.pipeline_segments import note_retry_targets
 from kb.pipeline_state import _stage, _state
-from kb.youtube import discovery, media, notes, ranking, storage
+from kb.youtube import discovery, media, notes, products, ranking, storage
+from kb.youtube.admission import TEMPORARY, gate
 from kb.youtube.channels import config
 from kb.youtube.settings import of
 
 
 def stopped():
     return bool(_state.get('stop_requested'))
-
-
-def gate(metadata, settings):
-    duration = metadata.get('duration')
-    if isinstance(duration, bool) or not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration <= 0:
-        return '没有可靠时长，不开始下载或转录'
-    if metadata.get('live_status') in ('is_live', 'is_upcoming', 'was_live', 'post_live') or metadata.get('is_live') or metadata.get('was_live'):
-        return '直播、预告或直播回放不进入自动处理'
-    if '/shorts/' in str(metadata.get('webpage_url', '')) or metadata.get('media_type') == 'shorts':
-        return 'Shorts 不进入自动处理'
-    if duration > settings['max_video_minutes'] * 60:
-        return '超过单条视频时长预算'
-    return ''
 
 
 def process(rows, settings, scope, summary, deadline):
@@ -52,9 +39,10 @@ def process(rows, settings, scope, summary, deadline):
             continue
         try:
             probes += 1
-            metadata = media.probe(row, deadline, stopped, scope.force)
-            if reason := gate(metadata, policy):
-                storage.update(row['video_id'], state='deferred' if '预算' in reason else 'excluded', reason=reason)
+            metadata = media.probe(row, deadline, stopped, scope.force or row['gate_code'] in TEMPORARY)
+            if decision := gate(metadata, policy):
+                storage.update(row['video_id'], state=decision.state, reason=decision.reason,
+                               gate_code=decision.code, retry_at=time.time() + decision.retry_seconds)
                 continue
             duration = float(metadata['duration'])
             storage.update(row['video_id'], duration=duration)
@@ -63,11 +51,12 @@ def process(rows, settings, scope, summary, deadline):
                 continue
             spent += duration
             attempts += 1
-            storage.update(row['video_id'], state='processing', reason='正在读取字幕或音频，随后翻译为中文')
+            storage.update(row['video_id'], state='processing', gate_code='', reason='正在读取字幕或音频，随后翻译为中文')
             _stage('crawl', 'running', f"YouTube · 处理 {attempts}/{policy['max_videos']} · {row['entry']['title']}")
             transcript = media.obtain(row, metadata, settings, deadline, stopped)
             entry = notes.build(row, transcript, deadline, stopped)
             storage.update(row['video_id'], state='ready', note=json.dumps(entry, ensure_ascii=False),
+                           validation=products.certify(row, metadata, transcript, entry), repair_pending=0,
                            reason='中文内容笔记已完成', retry_at=0, last_error='')
             summary['processed'] += 1
         except media.Interrupted as error:
@@ -78,7 +67,8 @@ def process(rows, settings, scope, summary, deadline):
             break
         except Exception as error:
             storage.failed(row, error)
-            failures.setdefault(row['source_id'], []).append(str(error)[:500])
+            for source_id in row.get('eligible_sources', [row['source_id']]):
+                failures.setdefault(source_id, []).append(str(error)[:500])
     if not ready and chosen:
         summary['message'] = '已完成轻量排名；入选视频待配置翻译和内容笔记模型：' + why
         summary['unconfigured'] = len({row['source_id'] for row in chosen})
@@ -98,10 +88,12 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
             current = connection.execute('SELECT enabled FROM subscriptions WHERE id=?', (source['id'],)).fetchone()
             if not current or not current['enabled']:
                 return False
-            summary['added'] += reg.put_items(source, entries, conn=connection)
             urls = {entry['url'] for entry in entries}
             for row in completed:
-                if row['entry']['url'] in urls:
+                linked = connection.execute('SELECT 1 FROM subscription_items WHERE subscription_id=? AND item_key=?',
+                    (source['id'], reg.item_key('youtube', row['entry']['url']))).fetchone()
+                if row['entry']['url'] in urls or linked:
+                    summary['added'] += products.publish(connection, source, row)
                     storage.mark_committed(connection, source, row['video_id'])
             if pending_failure:
                 connection.execute('UPDATE subscriptions SET last_attempt=?,last_notice=? WHERE id=?',
@@ -124,6 +116,7 @@ def collect(scope):
                'stopped': False, 'failed_ids': [], 'succeeded_ids': [],
                'discovered': 0, 'ranked': 0, 'processed': 0}
     pending = []
+    products.prepare([source['id'] for source in sources])
     for source in sources:
         if source['retry_at'] > time.time() and not scope.force:
             summary['deferred'] += 1

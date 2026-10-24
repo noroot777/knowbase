@@ -29,37 +29,53 @@ def stamp(value):
         return None
 
 
+def rejection(row, settings, scope, now, floor):
+    policy, entry = config(row), row['entry']
+    published = stamp(entry['published'])
+    if not policy.get('ranking_enabled', True):
+        return '观察或隔离名单，不自动进入排名'
+    if row['state'] == 'excluded' and not scope.force:
+        return row['reason'] or '已确认不可自动处理'
+    if not published:
+        return '缺少可靠的发布时间'
+    if scope.ranged and not scope.since <= published.astimezone(TZ).date().isoformat() <= scope.until:
+        return '不在本次指定日期范围'
+    if not scope.ranged and not row['repair_pending'] and (published < floor or
+            (stamp(row['history_floor']) is not None and published < stamp(row['history_floor']))):
+        return '早于本轮窗口或订阅历史下界'
+    if published > now + timedelta(minutes=5):
+        return '尚未发布'
+    if settings['ai_only'] and not AI.search(entry['title'] + ' ' + entry.get('description', '')):
+        return '标题与简介未发现明确的 AI 相关信息'
+    return ''
+
+
 def score(rows, settings, scope, now=None):
     now = now or datetime.now(timezone.utc)
     floor = now - timedelta(days=settings['window_days'])
     baselines = {}
     for row in rows:
-        baselines.setdefault(row['source_id'], []).append(row['views'])
+        for owner in row['owners']:
+            baselines.setdefault(owner['source_id'], []).append(row['views'])
     ranked = []
     for row in rows:
-        entry, policy = row['entry'], config(row)
-        published = stamp(entry['published'])
-        reason = ''
-        if not policy.get('ranking_enabled', True):
-            reason = '观察或隔离名单，不自动进入排名'
-        elif row['state'] == 'excluded':
-            reason = row['reason'] or '已确认不可自动处理'
-        elif not published:
-            reason = '缺少可靠的发布时间'
-        elif scope.ranged and not scope.since <= published.astimezone(TZ).date().isoformat() <= scope.until:
-            reason = '不在本次指定日期范围'
-        elif not scope.ranged and (published < floor or
-                (stamp(row['history_floor']) is not None and published < stamp(row['history_floor']))):
-            reason = '早于本轮窗口或订阅历史下界'
-        elif published > now + timedelta(minutes=5):
-            reason = '尚未发布'
-        elif settings['ai_only'] and not AI.search(entry['title'] + ' ' + entry.get('description', '')):
-            reason = '标题与简介未发现明确的 AI 相关信息'
-        if reason:
+        eligible, reasons = [], []
+        for owner in row['owners']:
+            member = {**row, **owner}
+            reason = rejection(member, settings, scope, now, floor)
+            if reason:
+                reasons.append(reason)
+            else:
+                eligible.append(member)
+        if not eligible:
             storage.update(row['video_id'], heat_rank=0, value_rank=0)
             if row['state'] not in ('ready', 'processing', 'excluded'):
-                storage.update(row['video_id'], state='filtered', reason=reason, heat_rank=0, value_rank=0)
+                storage.update(row['video_id'], state='filtered', reason=reasons[0], heat_rank=0, value_rank=0)
             continue
+        chosen = max(eligible, key=lambda member: (config(member).get('score_multiplier', 1.0), -member['source_id']))
+        row = {**chosen, 'eligible_sources': [member['source_id'] for member in eligible]}
+        entry, policy = row['entry'], config(row)
+        published = stamp(entry['published'])
         hours = max(1, (now - published).total_seconds() / 3600)
         views = row['views']
         uplift = min(4, views / max(100, median(baselines[row['source_id']])))
@@ -76,14 +92,15 @@ def score(rows, settings, scope, now=None):
             row[rank_key] = position
     for row in ranked:
         patch = {key: row[key] for key in ('heat', 'value', 'heat_rank', 'value_rank')}
-        if row['state'] in ('candidate', 'filtered', 'deferred', 'processing'):
+        if row['state'] in ('candidate', 'filtered', 'processing') or (
+                row['state'] == 'deferred' and row['retry_at'] <= time.time()):
             patch.update(state='candidate', reason='等待排名与处理预算准入')
         storage.update(row['video_id'], **patch)
     return ranked
 
 
 def select(rows, settings, force=False):
-    eligible = [row for row in rows if row['state'] not in ('ready', 'excluded') and
+    eligible = [row for row in rows if row['state'] != 'ready' and (row['state'] != 'excluded' or force) and
                 (force or row['retry_at'] <= time.time()) and
                 (row['heat_rank'] <= settings['heat_limit'] or row['value_rank'] <= settings['value_limit'])]
     return sorted(eligible, key=lambda row: (min(row['heat_rank'], row['value_rank']),

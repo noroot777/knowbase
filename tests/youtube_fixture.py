@@ -57,6 +57,10 @@ class YouTubeFixture(unittest.TestCase):
                 'author': row['channel'], 'published': row['entry']['published'],
                 'content_kind': 'markdown', 'body_provenance': 'youtube:uploaded_captions'}
 
+    def complete_transcript(self):
+        return {'origin': 'uploaded_captions', 'language': 'en', 'segments': [
+            {'start': 0, 'end': 600, 'text': 'The AI agent builds code, runs tests and verifies limitations.'}]}
+
     def settings(self, **values):
         current = reg.get_settings('youtube')['youtube']
         return reg.save_settings('youtube', {'youtube': {**current, **values}})

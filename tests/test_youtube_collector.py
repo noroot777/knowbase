@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg
-from kb.youtube import collector, discovery, ranking, storage
+from kb.youtube import collector, discovery, products, ranking, storage
 from tests.youtube_fixture import YouTubeFixture
 
 
@@ -28,7 +28,7 @@ class YouTubeCollector(YouTubeFixture):
         with patch.object(discovery, 'fetch', return_value=self.fetched), \
                 patch.object(collector.notes, 'available', return_value=(True, '')), \
                 patch.object(collector.media, 'probe', side_effect=probe), \
-                patch.object(collector.media, 'obtain', return_value={}), \
+                patch.object(collector.media, 'obtain', return_value=self.complete_transcript()), \
                 patch.object(collector.notes, 'build', side_effect=self.note):
             return collector.collect(FetchScope())
 
@@ -54,7 +54,8 @@ class YouTubeCollector(YouTubeFixture):
         with patch.object(discovery, 'fetch', return_value=self.fetched), \
                 patch.object(collector.notes, 'available', return_value=(True, '')), \
                 patch.object(collector.media, 'probe', return_value={'duration': 600}), \
-                patch.object(collector.media, 'obtain', side_effect=[RuntimeError('字幕访问失败'), {}, {}]), \
+                patch.object(collector.media, 'obtain', side_effect=[RuntimeError('字幕访问失败'),
+                    self.complete_transcript(), self.complete_transcript()]), \
                 patch.object(collector.notes, 'build', side_effect=self.note):
             result = collector.collect(FetchScope())
         self.assertEqual(2, result['added'])
@@ -83,8 +84,8 @@ class YouTubeCollector(YouTubeFixture):
         self.assertEqual(row['source_id'], self.source['id'])
 
     def test_filters_and_duration_gates(self):
-        self.assertIn('直播', collector.gate({'duration': 60, 'was_live': True}, self.settings()['youtube']))
-        self.assertIn('Shorts', collector.gate({'duration': 60, 'media_type': 'shorts'}, self.settings()['youtube']))
+        self.assertIn('直播', collector.gate({'duration': 60, 'was_live': True}, self.settings()['youtube']).reason)
+        self.assertIn('Shorts', collector.gate({'duration': 60, 'media_type': 'shorts'}, self.settings()['youtube']).reason)
         for duration in (float('nan'), -1, True, None):
             self.assertTrue(collector.gate({'duration': duration}, self.settings()['youtube']))
         entries = [self.entry(1), {**self.entry(2), 'title': 'Travel weekend', 'description': ''}]
@@ -119,7 +120,9 @@ class YouTubeCollector(YouTubeFixture):
         entry = {**self.entry(), 'published': '2026-01-02T22:00:00+08:00'}
         storage.discover(self.source, [entry])
         row = storage.rows()[0]
-        storage.update(row['video_id'], state='ready', note=json.dumps(self.note(row)))
+        entry = self.note(row)
+        storage.update(row['video_id'], state='ready', note=json.dumps(entry),
+                       validation=products.certify(row, {'duration': 600}, self.complete_transcript(), entry))
         summary = {'added': 0, 'message': ''}
         self.assertTrue(collector.commit_notes(self.source, storage.ready(self.source), summary))
         self.assertEqual(0, summary['added'])
