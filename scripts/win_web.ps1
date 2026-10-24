@@ -54,10 +54,12 @@ $($r.Text)
 }
 
 function Get-WebState {
-    $state = @{ Name = 'unknown'; Why = ''; Pids = @() }
+    $state = @{ Name = 'unknown'; Why = ''; Pids = @(); LegacyPid = 0; LegacyToken = '' }
     try { $service = Get-ServiceState $script:WebPid $script:Port }
     catch { $state.Why = $_.Exception.Message; return $state }
     $state.Pids = @($service.Pids)
+    $state.LegacyPid = $service.LegacyPid
+    $state.LegacyToken = $service.LegacyToken
     if (@($service.Owners).Count -gt 0 -and -not $service.Owned) {
         $state.Name = 'conflict'
         $state.Why = "端口 $($script:Port) 被未登记的进程占着"
@@ -105,13 +107,22 @@ function Wait-WebReady {
 function Start-Web {
     param([int]$TimeoutSeconds = 20)
     $state = Get-WebState
+    try {
+        for ($attempt = 0; $attempt -lt 3 -and $state.Name -eq 'stopped' -and $state.LegacyPid -gt 0; $attempt++) {
+            $null = Invoke-LegacyMigration $script:WebPid $script:Port $state.LegacyToken
+            $state = Get-WebState
+        }
+        if ($state.Name -eq 'stopped' -and $state.LegacyPid -gt 0) {
+            throw '旧实例记录持续变化，未启动新实例；请稍后重试'
+        }
+    } catch { Die $_.Exception.Message }
     if ($state.Name -eq 'ready') {
         Write-Note "[web] 已在 $($script:Api)"
         Show-CodeStale; Show-EgressLines; Show-GraphStale
         return
     }
     if ($state.Name -in @('unknown', 'conflict', 'residual')) {
-        Die "kb-web 未就绪:$($state.Why)。未启动新实例，已有记录和进程保留；请先检查日志或用 web stop 安全停止。"
+        Die "kb-web 未就绪:$($state.Why)。未启动新实例，已有记录和进程保留；请按具体原因处理后重试。"
     }
     if (-not (Test-Path -LiteralPath $script:Curl -PathType Leaf)) {
         Die "找不到 $($script:Curl) —— 这个入口靠系统自带的 curl 跟面板说话(Win10 1803+ 都有)"
@@ -158,7 +169,8 @@ function Stop-Web {
 "@
         }
     }
-    Stop-Service_ 'kb-web' $script:WebPid $script:Port $script:WebPat
+    try { Stop-Service_ 'kb-web' $script:WebPid $script:Port $script:WebPat }
+    catch { Die $_.Exception.Message }
 }
 
 function Get-WebStatus {

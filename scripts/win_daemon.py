@@ -127,7 +127,7 @@ def main() -> int:
     if os.name != 'nt':
         print('这个脚本只支持 Windows，POSIX 上走 kb.sh', file=sys.stderr)
         return 2
-    from win_job import state, stop
+    from win_job import migrate_legacy, state, stop
 
     try:
         action, *rest = sys.argv[1:]
@@ -139,7 +139,10 @@ def main() -> int:
             result = state(rest[0]) if action == 'state' else stop(rest[0])
             print(json.dumps(result))
             return 0
-        raise ValueError('用法: win_daemon.py spawn ... | state pidfile | stop pidfile')
+        if action == 'migrate' and len(rest) == 3:
+            print(json.dumps(migrate_legacy(rest[0], rest[1], int(rest[2]))))
+            return 0
+        raise ValueError('用法: win_daemon.py spawn ... | state pidfile | stop pidfile | migrate pidfile token port')
     except (OSError, ValueError) as error:
         print(f'Windows 实例操作失败: {error}', file=sys.stderr)
         return 1

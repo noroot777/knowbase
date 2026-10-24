@@ -384,7 +384,7 @@ function Get-PortOwners { param([int]$P)
 }
 function Invoke-Instance { param([string]$Action, [string]$PidFile)
     if ($Action -eq 'stop') { throw 'termination denied' }
-    return [pscustomobject]@{ managed = $true; pids = @(123) }
+    return [pscustomobject]@{ managed = $true; pids = @(123); root_alive = $true }
 }
 try { Stop-Service_ 'probe' $f 0 'probe'; 'SUCCESS' }
 catch { 'FAILED' }

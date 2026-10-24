@@ -3,9 +3,11 @@ from __future__ import annotations
 import ctypes
 from ctypes import wintypes
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import time
 import uuid
 
@@ -33,6 +35,7 @@ query_job = _api('QueryInformationJobObject', wintypes.BOOL, HANDLE, ctypes.c_in
 set_job = _api('SetInformationJobObject', wintypes.BOOL, HANDLE, ctypes.c_int,
                ctypes.c_void_p, DWORD)
 open_process = _api('OpenProcess', HANDLE, DWORD, wintypes.BOOL, DWORD)
+wait_process = _api('WaitForSingleObject', DWORD, HANDLE, DWORD)
 process_times = _api('GetProcessTimes', wintypes.BOOL, HANDLE,
                      ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
                      ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME))
@@ -89,9 +92,40 @@ def members(handle) -> list[int]:
     raise OSError('Job Object 的进程集合过大，无法确认停机')
 
 
+class LegacyRecordError(ValueError):
+    def __init__(self, path, process_id, token):
+        self.process_id = process_id
+        self.token = token
+        super().__init__(f'{path}: 旧版 PID 记录 (PID {process_id})，不能凭裸 PID 认领；'
+                         '请先关闭旧服务（原窗口按 Ctrl+C；无窗口时可重启 Windows），再运行 .\\kb.cmd restart；'
+                         '确认旧 PID 已退出且端口空闲后，入口会备份旧记录，无需手动删除')
+
+
+def process_alive(process_id) -> bool:
+    process = open_process(0x00100000, False, process_id)
+    if not process:
+        if ctypes.get_last_error() == 87:
+            return False
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        result = wait_process(process, 0)
+        if result == 0:
+            return False
+        if result == 258:
+            return True
+        if result == 0xffffffff:
+            raise ctypes.WinError(ctypes.get_last_error())
+        raise OSError(f'无法确认旧 PID {process_id} 是否已退出: {result}')
+    finally:
+        close(process)
+
+
 def load_record(path) -> dict | None:
     try:
-        record = json.loads(Path(path).read_text(encoding='utf-8'))
+        content = Path(path).read_bytes()
+        record = json.loads(content.decode('utf-8-sig'))
+        if type(record) is int and 0 < record <= 0xffffffff:
+            raise LegacyRecordError(path, record, hashlib.sha256(content).hexdigest())
         if (not isinstance(record, dict) or record.get('version') != 1
                 or type(record.get('pid')) is not int or record['pid'] <= 0
                 or not isinstance(record.get('created'), str) or not record['created'].isdigit()
@@ -102,9 +136,11 @@ def load_record(path) -> dict | None:
         return record
     except FileNotFoundError:
         return None
+    except LegacyRecordError:
+        raise
     except (ValueError, TypeError, KeyError) as error:
-        raise ValueError(f'{path}: 旧版或损坏的实例记录，不能凭裸 PID 认领；'
-                         '请先确认并关闭旧服务，再移走这份记录后重新启动') from error
+        raise ValueError(f'{path}: 损坏的实例记录，无法确认实例身份；'
+                         '请先确认并关闭旧服务，再备份移走这份记录后重新启动') from error
 
 
 def acquire_job(record):
@@ -117,7 +153,12 @@ def acquire_job(record):
 
 
 def state(path) -> dict:
-    record = load_record(path)
+    try:
+        record = load_record(path)
+    except LegacyRecordError as error:
+        return {'managed': False, 'pids': [], 'root_alive': False,
+                'legacy_pid': error.process_id, 'legacy_alive': process_alive(error.process_id),
+                'legacy_token': error.token}
     handle = acquire_job(record)
     try:
         process_ids = members(handle) if handle else []
@@ -164,6 +205,58 @@ def signal_root(handle, record):
                 free_console()
     finally:
         close(process)
+
+
+def require_free_port(port):
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError('迁移旧记录需要有效端口 (1-65535)')
+    script = str(Path(__file__).with_name('win_proc.ps1')).replace("'", "''")
+    command = ("[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; "
+               "$ErrorActionPreference = 'Stop'; "
+               f". '{script}'; Get-PortOwners {port} | ConvertTo-Json -Compress")
+    powershell = Path(os.environ['SystemRoot']) / 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    try:
+        result = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive',
+                                 '-ExecutionPolicy', 'Bypass', '-Command', command],
+                                capture_output=True, encoding='utf-8', errors='replace',
+                                timeout=20, creationflags=subprocess.CREATE_NO_WINDOW)
+    except subprocess.TimeoutExpired as error:
+        raise OSError(f'端口 {port} 查询超时，旧记录已保留') from error
+    if result.returncode:
+        raise OSError(f'端口 {port} 查询失败，旧记录已保留: {result.stderr.strip()}')
+    try:
+        query = json.loads(result.stdout)
+    except ValueError as error:
+        raise OSError(f'端口 {port} 查询结果无效，旧记录已保留') from error
+    if (not isinstance(query, dict) or query.get('Known') is not True
+            or not isinstance(query.get('Owners'), list)):
+        reason = query.get('Why', '') if isinstance(query, dict) else ''
+        raise OSError(f'无法确认端口 {port} 空闲，旧记录已保留: {reason}')
+    if query['Owners']:
+        raise OSError(f'端口 {port} 仍有监听 PID: {query["Owners"]}，旧记录已保留')
+
+
+def migrate_legacy(path, expected, port) -> dict:
+    if (not isinstance(expected, str) or len(expected) != 64
+            or any(character not in '0123456789abcdef' for character in expected)):
+        raise ValueError('迁移旧记录需要有效的预期内容标识')
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise ValueError('迁移旧记录需要有效端口 (1-65535)')
+    if not Path(path).parent.exists():
+        return {'changed': True}
+    with instance_lock(path):
+        try:
+            load_record(path)
+        except LegacyRecordError as error:
+            if error.token != expected:
+                return {'changed': True}
+            if process_alive(error.process_id):
+                raise
+            require_free_port(port)
+            backup = Path(str(path) + '.legacy-' + uuid.uuid4().hex + '.bak')
+            Path(path).rename(backup)
+            return {'changed': False, 'legacy_backup': str(backup)}
+        return {'changed': True}
 
 
 def _stop_locked(path, grace, timeout) -> dict:
