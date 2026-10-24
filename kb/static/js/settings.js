@@ -69,9 +69,8 @@ function copyMcpConfig() {
 // ── 问答模型下拉 ──────────────────────────────────────────────────────────
 // option 的 value 是带家的 "provider:model_id":裸 id 传回后端只能靠前缀猜家,
 // 同一个 id 两家中转站都可能有,猜错就是拿 A 家 key 打 B 家的站。
-async function loadModels(preserveSelection = false) {
+async function loadModels() {
   const read = beginModelRead('ask');
-  const selected = preserveSelection ? $('ask-model').value : '';
   try {
     const d = await fetch('/api/models', { cache: 'no-store' }).then(r => r.json());
     if (!ownsModelRead('ask', read, d)) return;
@@ -99,8 +98,13 @@ async function loadModels(preserveSelection = false) {
       const first = [...sel.options].find(o => !o.disabled);
       if (first) first.selected = true;
     }
-    if (selected && [...sel.options].some(option => option.value === selected && !option.disabled)) sel.value = selected;
+    if (modelAskSelection !== null) {
+      if ([...sel.options].some(option => option.value === modelAskSelection && !option.disabled)) sel.value = modelAskSelection;
+      else modelAskSelection = null;
+    }
+    appliedModelSettings('ask', d);
   } catch { /* 保底:留空下拉,发送时后端用默认模型 */ }
+  finally { finishModelRead('ask', read); }
 }
 
 // ── 模型分配:每个用到大模型的阶段各选一家一模型 ──────────────────────────
@@ -284,22 +288,22 @@ function renderStages(data, savedPreset) {
   setStageBusy();
 }
 
-async function refreshStages(retry = true) {
+async function refreshStages(retry = true, signal) {
   const generation = stageSaveGeneration;
   const readVersion = ++stageReadVersion;
   try {
     const operation = stageUnconfirmedOperation;
-    const response = await fetch('/api/stages' + (operation ? '?operation_id=' + encodeURIComponent(operation.id) : ''), { cache: 'no-store' });
+    const response = await fetch('/api/stages' + (operation ? '?operation_id=' + encodeURIComponent(operation.id) : ''), { cache: 'no-store', signal });
     if (!response.ok) throw new Error(response.status);
     const data = await response.json();
+    signal?.throwIfAborted();
     if (generation !== stageSaveGeneration || readVersion !== stageReadVersion) return;
     if (Number.isSafeInteger(data.revision) && data.revision < modelSettingsRevision) {
-      if (retry) return refreshStages(false);
+      if (retry) return refreshStages(false, signal);
       throw new Error('配置读取已过期');
     }
-    const newer = data.revision > modelSettingsRevision;
     renderStages(data);
-    if (newer) refreshModelConsumers(data);
+    refreshModelConsumers(data, true);
     if (operation && stageUnconfirmedOperation?.id === operation.id) {
       const committed = data.operation?.status === 'committed';
       const superseded = data.revision > operation.revision;
@@ -310,6 +314,7 @@ async function refreshStages(retry = true) {
     } else if ($('stages-msg').textContent.includes('正在重新读取')) $('stages-msg').textContent = '';
     return true;
   } catch (e) {
+    if (signal?.aborted) throw e;
     if (generation !== stageSaveGeneration || readVersion !== stageReadVersion) return;
     $('stages-presets').innerHTML = '';
     $('stages-list').innerHTML = '<div class="empty">状态获取失败</div>';
@@ -430,8 +435,7 @@ async function persistStages(url, body) {
       }
       toast('保存失败', { detail });
       if (r.status === 409) {
-        await refreshStages();
-        refreshModelConsumers();
+        await refreshStages(true, controller.signal);
       }
       return;
     }
@@ -440,7 +444,7 @@ async function persistStages(url, body) {
     if (generation !== stageSaveGeneration) return;
     rememberStageOperation(null);
     if (Number.isSafeInteger(d.revision) && d.revision < modelSettingsRevision) {
-      const refreshed = await refreshStages();
+      const refreshed = await refreshStages(true, controller.signal);
       if (refreshed) $('stages-msg').textContent = '配置已有后续更新,已读取当前配置。';
       return;
     }
@@ -451,8 +455,7 @@ async function persistStages(url, body) {
       return;
     }
     if (d.renamed_preset) {
-      loadModels(true);
-      initFavTools(true);
+      refreshModelConsumers(d, true);
       $('stages-msg').textContent = '✓ 组名已保存：' + d.renamed_preset;
       return;
     }

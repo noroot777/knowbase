@@ -90,12 +90,13 @@ async function initFavTools(force = false) {
       select.insertAdjacentHTML('afterbegin', `<option value="${esc(settings.model)}">${esc(modelLabel(settings.model))}</option>`);
     }
     select.value = settings.model;
+    appliedModelSettings('fav', settings);
     $('fav-model-state').textContent = '';
   } catch (error) {
     if (!ownsModelRead('fav', read)) return;
     favToolsInited = false;
     $('fav-model-state').textContent = '模型读取失败：' + error.message;
-  }
+  } finally { finishModelRead('fav', read); }
 }
 
 async function saveFavModel() {
