@@ -1,0 +1,14 @@
+#youtube-channel-fields { margin: 16px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+#youtube-channel-fields legend { color: var(--ink-2); font-size: 12px; padding: 0 6px; }
+#youtube-channel-fields select, #youtube-channel-fields input { width: 100%; }
+#youtube-settings-fields h3 { margin: 0 0 8px; font-size: 14px; }
+#youtube-settings-fields input:not([type="checkbox"]) { width: 100%; margin-bottom: 10px; }
+#youtube-settings-fields label { display: block; margin: 10px 0 5px; font-size: 12px; color: var(--ink-2); }
+.youtube-ranking { margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
+.youtube-ranking h3 { font-size: 15px; margin: 0 0 8px; }
+.youtube-ranking > label { font-size: 12px; margin-right: 8px; color: var(--ink-2); }
+.youtube-ranking select { max-width: 160px; margin-bottom: 8px; }
+.youtube-rank-item { padding: 10px 0; border-bottom: 1px solid var(--line-soft); overflow-wrap: anywhere; }
+.youtube-rank-item > a { color: var(--ink); font-size: 14px; font-weight: 600; text-decoration: none; }
+.youtube-rank-item > a:hover { color: var(--accent); text-decoration: underline; }
+.youtube-rank-item p { margin: 5px 0 0; }

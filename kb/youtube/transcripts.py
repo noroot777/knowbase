@@ -1,0 +1,113 @@
+import html
+import json
+import math
+import re
+
+
+def seconds(value):
+    parts = str(value).replace(',', '.').split(':')
+    return sum(float(part) * 60 ** position for position, part in enumerate(reversed(parts)))
+
+
+def clean(text):
+    return re.sub(r'\s+', ' ', html.unescape(re.sub(r'<[^>]*>', '', text))).strip()
+
+
+def parse(text, suffix):
+    segments = []
+    if suffix in ('.json', '.json3'):
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise ValueError('字幕 JSON 格式不正确')
+        if 'events' in payload:
+            for event in payload['events']:
+                content = ''.join(segment.get('utf8', '') for segment in event.get('segs', []))
+                if content.strip():
+                    start = float(event.get('tStartMs', 0)) / 1000
+                    segments.append({'start': start,
+                                     'end': start + float(event.get('dDurationMs', 1000)) / 1000,
+                                     'text': clean(content)})
+        else:
+            for segment in payload.get('segments', payload.get('transcription', [])):
+                offsets = segment.get('offsets', {})
+                segments.append({'start': float(segment.get('start', offsets.get('from', 0) / 1000)),
+                                 'end': float(segment.get('end', offsets.get('to', 0) / 1000)),
+                                 'text': clean(segment.get('text', ''))})
+    else:
+        for block in re.split(r'\n\s*\n', text.replace('\r\n', '\n')):
+            lines = block.splitlines()
+            for position, line in enumerate(lines):
+                if '-->' not in line:
+                    continue
+                start, end = line.split('-->', 1)
+                try:
+                    segments.append({'start': seconds(start.strip()),
+                                     'end': seconds(end.strip().split()[0]),
+                                     'text': clean(' '.join(lines[position + 1:]))})
+                except ValueError:
+                    pass
+                break
+    return deduplicate(segments)
+
+
+def deduplicate(segments):
+    result = []
+    for segment in sorted(segments, key=lambda item: (item['start'], item['end'])):
+        if not segment['text'] or segment['end'] <= segment['start'] or segment['start'] < 0:
+            continue
+        if result and result[-1]['start'] == segment['start']:
+            if len(segment['text']) >= len(result[-1]['text']):
+                result[-1] = segment
+            continue
+        if result and result[-1]['end'] >= segment['start']:
+            previous, current = result[-1]['text'].split(), segment['text'].split()
+            if segment['text'] == result[-1]['text']:
+                result[-1]['end'] = max(result[-1]['end'], segment['end'])
+                continue
+            for overlap in range(min(len(previous), len(current)), 2, -1):
+                if previous[-overlap:] == current[:overlap]:
+                    segment = {**segment, 'text': ' '.join(current[overlap:])}
+                    break
+        if segment['text']:
+            result.append(segment)
+    return result
+
+
+def validate(segments, duration):
+    if not isinstance(segments, list) or any(not isinstance(item, dict) or
+            not isinstance(item.get('text'), str) or any(isinstance(item.get(field), bool) or
+            not isinstance(item.get(field), (float, int)) or not math.isfinite(item[field])
+            for field in ('start', 'end')) or item['start'] < 0 or item['end'] <= item['start']
+            for item in segments):
+        raise ValueError('字幕内容或时间戳格式不正确')
+    if not segments or sum(char.isalpha() for item in segments for char in item['text']) < 10:
+        raise ValueError('字幕为空或没有足够的可读文字')
+    if any(item['end'] > duration + 30 for item in segments):
+        raise ValueError('字幕时间戳超出视频时长')
+    if duration > 180 and max(item['end'] for item in segments) < duration * .75:
+        raise ValueError('字幕疑似不完整，不能作为完整内容输入')
+    return segments
+
+
+def timestamp(seconds_value):
+    value = int(seconds_value)
+    hours, remainder = divmod(value, 3600)
+    minutes, seconds_part = divmod(remainder, 60)
+    return f'{hours:02}:{minutes:02}:{seconds_part:02}'
+
+
+def blocks(segments, limit=3000):
+    result, current = [], ''
+    for segment in segments:
+        text = segment['text']
+        while text:
+            prefix = f"[{timestamp(segment['start'])}] "
+            piece, text = text[:limit - len(prefix)], text[limit - len(prefix):]
+            line = prefix + piece
+            if current and len(current) + len(line) + 2 > limit:
+                result.append(current)
+                current = ''
+            current += ('\n\n' if current else '') + line
+    if current:
+        result.append(current)
+    return result

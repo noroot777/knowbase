@@ -132,7 +132,7 @@ PRIMARY_SOURCE_NAMES: list[str] = [s.name for s in SOURCES if not s.derived]
 # dr-youtube-dig(概览摘要)和 dr-video-projects(逐工具条目),单选其一都会漏。
 SOURCE_GROUPS: dict[str, list[str]] = {
     "gzh": ["dr-gzh", "dr-gzh-projects", "gzh"],
-    "video": ["dr-youtube-dig", "dr-video-projects"],
+    "video": ["youtube", "dr-youtube-dig", "dr-video-projects"],
     "dr": ["dr"],
     **{kind: [kind] for kind in feed_types()},
 }

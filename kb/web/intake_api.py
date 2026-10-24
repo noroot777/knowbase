@@ -100,9 +100,11 @@ class Subscription(BaseModel):
     # 「这条订阅的内容要不要买一次大模型提取(实体/主题/摘要)」。**默认关** ——
     # 不开也照样全文/语义检索得到,只是没有标签(见 kb.extract.pending_docs)。
     extract: bool = False
+    youtube: dict | None = None
 
 
 class SubscriptionPatch(BaseModel):
+    youtube: dict | None = None
     name: str | None = Field(default=None,min_length=1,max_length=120)
     url: str | None = Field(default=None,max_length=2048)
     feed_url: str | None = Field(default=None,max_length=2048)
@@ -132,6 +134,7 @@ def delete_source(kind: str,source_id: int):
 
 
 class Settings(BaseModel):
+    youtube: dict | None = None
     # `enabled` / `interval_minutes` 是**按来源类型自动同步**那一档留下的,那一档
     # 整条拆掉了(见 `kb.pipeline._scheduler_tick`),现在没有任何地方读它们。
     # **仍旧接受、仍旧原样存**:老页面和脚本还会发,拒掉等于让它们保存失败;照
@@ -147,12 +150,28 @@ class Settings(BaseModel):
 def set_settings(kind: str,body: Settings):
     kind_checked(kind)
     values = body.model_dump(exclude_none=True)
+    if kind != 'youtube':
+        values.pop('youtube', None)
     if not x_channels.supports_channels(kind):
         # X 的通道字段只对 social 有意义。不摘掉的话它们会被原样存进 rss 的设置里
         # (那一类压根不走 `x_channels.validate`),留下一份谁也不读、也没校验过的垃圾。
         for key in ('x_channel', 'x_feedgrab_bin', 'x_chrome_path'):
             values.pop(key, None)
     return call(reg.save_settings,kind,values)
+
+
+@router.get('/youtube/ranking')
+def youtube_ranking(source_id: int | None = None):
+    from kb.youtube.storage import listing
+    return listing(source_id)
+
+
+@router.get('/youtube/status')
+def youtube_status():
+    from kb.youtube import notes
+    from kb.youtube.settings import tools
+    ready, reason = notes.available()
+    return {'tools': tools(reg.get_settings('youtube')), 'models_ready': ready, 'model_hint': reason}
 
 
 # ── X 的采集通道(只有 social 这一类有)──────────────────────────────────────

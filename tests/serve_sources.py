@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--port',type=int,default=8879)
     parser.add_argument('--layout-fixture',action='store_true')
     parser.add_argument('--grab-fixture',action='store_true')
+    parser.add_argument('--youtube-fixture',action='store_true')
     args=parser.parse_args()
     sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
     from tests.fixture_root import fixture_root
@@ -52,6 +53,9 @@ def main():
                           author='测试作者',content_kind='content')],
                     dict(etag='fixture-v1',modified='',resolved_url=source['url']))
         sync.fetch_source=fixture
+        if args.youtube_fixture:
+            from tests.youtube_browser_fixture import install
+            install()
         if args.grab_fixture:
             # 手动收录那条路**自己发 HTTP**(不走 sync.fetch_source),所以要另外
             # 打一桩:探针不许连外网(口径同 CLAUDE.md「测试探针起无头浏览器」
