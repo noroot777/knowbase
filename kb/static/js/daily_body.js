@@ -14,10 +14,54 @@
 const dailyOriginalBodies = new WeakMap();
 const DAILY_LEGACY_SKIP = '.daily-legacy-context';
 
+function preserveDailyLineItems(el) {
+  for (const block of [...el.children]) {
+    if (block.tagName !== 'P') continue;
+    const parts = [];
+    const range = document.createRange();
+    range.setStart(block, 0);
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode: node => node.nodeType === 1 && node.matches('code, pre')
+        ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT
+    });
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (node.nodeType === 1 && node.tagName === 'BR') {
+        range.setEndBefore(node);
+        parts.push(range.cloneContents());
+        range.setStartAfter(node);
+      } else if (node.nodeType === 3) {
+        for (const newline of node.nodeValue.matchAll(/\r?\n/g)) {
+          range.setEnd(node, newline.index + newline[0].length);
+          parts.push(range.cloneContents());
+          range.collapse(false);
+        }
+      }
+    }
+    range.setEnd(block, block.childNodes.length);
+    parts.push(range.cloneContents());
+    if (parts.filter(part => part.textContent.trim()).length < 2) continue;
+    const list = document.createElement('ul');
+    for (const attribute of block.attributes) list.setAttribute(attribute.name, attribute.value);
+    list.classList.add('daily-line-items');
+    const leading = document.createDocumentFragment();
+    let row = null;
+    for (const part of parts) {
+      if (part.textContent.trim()) {
+        row = document.createElement('li');
+        row.append(leading);
+        list.append(row);
+      }
+      (row || leading).append(part);
+    }
+    block.replaceWith(list);
+  }
+}
+
 function setDailyBody(html, ref = '') {
   const el = $('daily-reader-body');
   dailyOriginalBodies.delete(el);
   el.innerHTML = html;
+  preserveDailyLineItems(el);
   if (ref) el.dataset.snipRef = ref;
   else delete el.dataset.snipRef;
   return el;
@@ -80,6 +124,7 @@ function consumeDailySnipJump(pending, ref, el) {
     const body = document.createElement('div');
     body.dataset.snipRef = ref;
     body.innerHTML = mdHtml(original);
+    preserveDailyLineItems(body);
     enhanceDailyBody(body);
     context.append(summary, body);
     el.append(context);
