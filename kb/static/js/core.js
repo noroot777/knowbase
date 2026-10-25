@@ -147,23 +147,38 @@ function openReader(a) {
 // 关闭按钮 —— 原本唯一的出口就在那条头里。机制见 kb/static/js/scrollaway.js。
 let readerAway = null;
 function bindReaderScrollAway() {
-  readerAway?.release();
+  const previous = readerAway;
   readerAway = null;
+  previous?.release();
   if ($('reader').style.display === 'none') return;      // about:blank,关掉那一下
+  const frame = $('reader-frame');
   try {
-    const win = $('reader-frame').contentWindow;
-    if (win?.document) readerAway = bindScrollAway(win, ['reader-head'],
-      { visible: $('reader-frame'), host: $('reader') });
+    const doc = frame.contentDocument;
+    if (!doc) {
+      if (document.activeElement === frame)
+        $('reader-head').querySelector('[aria-label="关闭阅读器"]').focus({ preventScroll: true });
+      return;
+    }
+    for (const link of doc.querySelectorAll('a[href]')) {
+      if (!/^https?:$/.test(link.protocol) || link.origin === location.origin) continue;
+      link.target = '_blank';
+      link.relList.add('noopener');
+    }
+    readerAway = bindScrollAway(frame.contentWindow, ['reader-head'],
+      { visible: frame, host: $('reader') });
   } catch { /* An external document cannot be measured from here. */ }
 }
 $('reader-frame').addEventListener('load', bindReaderScrollAway);
 
 function closeReader() {
-  readerAway?.release();
+  const previous = readerAway;
   readerAway = null;
-  $('reader').style.display = 'none';
-  $('reader-mask').style.display = 'none';
-  $('reader-frame').src = 'about:blank';
+  try { previous?.release(); }
+  finally {
+    $('reader').style.display = 'none';
+    $('reader-mask').style.display = 'none';
+    $('reader-frame').src = 'about:blank';
+  }
 }
 document.addEventListener('click', e => {
   const a = e.target.closest('a[data-doc]');

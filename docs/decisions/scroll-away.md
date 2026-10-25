@@ -234,3 +234,29 @@
 
 更早几档(撤手势门、撤两道「滚得回来」、不设 inert、收起态只压 height、不复位、
 整条机制不接)也各自注入过。
+
+## 跨域跳转不能堵住退出（2026-10-25）
+
+文章正文链接原先会在阅读器 iframe 内直接导航。截图中的 Once 文章跳到外站后，
+浏览器拒绝嵌入；旧绑定清理时访问 WindowProxy 的 `removeEventListener` 抛出
+`SecurityError`，同时中断 load 重绑和 `closeReader()`，所以关闭按钮与 Esc 都无效。
+仅保护滚动位置读数不够，事件解绑也必须逐项容忍窗口变成跨域，继续清理同源监听、
+ResizeObserver 和注册表。其它异常不吞掉，便于发现真正的逻辑错误。
+
+阅读器 load 时将正文中跨域 HTTP(S) 链接改为新标签打开并补 `noopener`，保留页内
+锚点、站内链接和 Obsidian 协议。遇到意外跨域或浏览器错误页时，如果焦点仍在
+iframe，交回阅读器关闭按钮，使父页面可以收到 Esc。关闭本身通过 `finally`
+撤掉抽屉、遮罩和正文，并在清理前释放当前句柄，不允许辅助行为锁死退出入口。
+
+新增 `tests/reader_close_test.mjs`，覆盖跨域 load、导航期间直接关闭、清理异常兜底、
+外链与本地链接区分；由 `tests/test_reader_close.py` 接入统一验收，按项目约定未在
+执行阶段运行，留待验收阶段执行。
+
+定向页面点检使用截图中同一篇文章：外链在新标签打开，阅读器正文保持；强制绕过
+新标签规则并构造 `X-Frame-Options: DENY` 错误页后，关闭按钮和 Esc 均能退出，
+遮罩与主区域 inert 状态同步解除，滚动绑定数恢复原值，没有未捕获页面异常。
+Chrome 扩展创建具名后台标签返回 `Capability is not available: visibility`，因此
+降级独立无头临时 profile；未接管用户标签，未使用登录态，也未访问真实外站。
+截图保存在 `output/playwright/reader-external-link-fixed.png`、
+`output/playwright/reader-error-recoverable.png` 和
+`output/playwright/reader-escape-closed.png`。
