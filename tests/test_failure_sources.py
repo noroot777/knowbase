@@ -15,6 +15,7 @@ from kb.feeds import exclusion, fulltext, grab, registry as reg, sync, translate
 from kb.feeds.fetching import FeedError
 from kb.source_types import feed_types
 from kb.web import grab_api, pipeline_api
+from kb.youtube import collector as youtube_collector, discovery as youtube_discovery
 from tests.headless import probe_env, requires_headless, run_probe
 from tests.test_extract_no_body import NoBodyBase, REAL, STUB
 from tests.test_feed_fulltext import FullTextCase
@@ -38,7 +39,8 @@ class FailureSourceTests(FullTextCase):
     def add(self, kind, *, fulltext=False, url='https://example.org/post'):
         self.serial += 1
         source = reg.save_subscription(kind, {
-            'name': f'{kind}-{self.serial}', 'url': f'https://{kind}-{self.serial}.example.org/feed',
+            'name': f'{kind}-{self.serial}', 'url': ('https://www.youtube.com/channel/UC' + f'{self.serial:022d}'
+                if kind == 'youtube' else f'https://{kind}-{self.serial}.example.org/feed'),
             'fulltext': fulltext, 'extract': True})
         entry = {'url': url, 'title': 'An article about coding agents',
                  'body': 'The runtime schedules tools and keeps the transcript. ' * 15,
@@ -97,9 +99,14 @@ class FailureSourceTests(FullTextCase):
             with self.subTest(kind=kind):
                 source, key, entry = self.add(kind)
                 expected = self.report_ref(kind, key, entry)
-                with patch.object(translate, 'translate_item', side_effect=RuntimeError('model down')):
+                with patch.object(translate, 'translate_item', side_effect=RuntimeError('model down')) as translate_item:
                     result = translate.translate_pending(kind)
-                self.assertEqual(expected, result['errors'][0]['drop'])
+                if kind == 'youtube':
+                    self.assertEqual([], result['errors'])
+                    translate_item.assert_not_called()
+                    self.assertEqual('youtube:pending-validation', self.row(key)['body_provenance'])
+                else:
+                    self.assertEqual(expected, result['errors'][0]['drop'])
                 with patch.object(sync.os, 'replace', side_effect=PermissionError('read only')):
                     sync.export(kind)
                 reports = sync._stage.call_args.kwargs['failures']
@@ -107,7 +114,7 @@ class FailureSourceTests(FullTextCase):
 
     def test_fulltext_failures_keep_identity_for_every_source_that_supports_refill(self):
         for kind, spec in feed_types().items():
-            if spec.adapter in {'digest', 'manual'}:
+            if spec.adapter in {'digest', 'manual', 'youtube'}:
                 continue
             with self.subTest(kind=kind):
                 source, key, entry = self.add(kind, fulltext=True)
@@ -122,8 +129,10 @@ class FailureSourceTests(FullTextCase):
             with self.subTest(kind=kind):
                 source, key, entry = self.add(kind)
                 with patch.object(sync, 'fetch_source', side_effect=FeedError('source down')), \
+                     patch.object(youtube_discovery, 'fetch', side_effect=FeedError('source down')), \
                      patch.object(sync, '_prefetch_digest'), patch.object(sync, '_prefetch_x'):
-                    result = sync.collect(kind, FetchScope(targets=(str(source['id']),)))
+                    scope = FetchScope(targets=(str(source['id']),))
+                    result = youtube_collector.collect(scope) if kind == 'youtube' else sync.collect(kind, scope)
                 report = result['errors'][0]
                 self.assertEqual(source['url'], report['url'])
                 self.assertNotIn('drop', report)

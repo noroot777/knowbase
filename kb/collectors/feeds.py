@@ -241,4 +241,7 @@ class FeedCollector:
 
 
 def create_collector(name):
+    if name == 'youtube':
+        from kb.youtube.collector import YouTubeCollector
+        return YouTubeCollector(name)
     return FeedCollector(name)

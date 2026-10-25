@@ -30,6 +30,8 @@ def populate():
         # 站点首页 —— 夹具照它的真实形态造,不要塞一个 feed 地址进去。
         url = ('https://example.org/' if not spec.pollable
                else f'https://example.org/{kind}.xml')
+        if kind == 'youtube':
+            url = 'https://www.youtube.com/@layout-fixture'
         source = reg.save_subscription(kind, {
             'name': '长内容布局验证' if spec.pollable else 'example.org', 'url': url})
         items = []

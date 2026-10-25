@@ -616,7 +616,9 @@ class DefaultsUpgradeTests(unittest.TestCase):
         """反过来钉一边:补种那条路不许把全新安装弄少。"""
         names = self._names()
         self.assertTrue(self.fresh <= names)
-        self.assertEqual(len(names), len({s['name'] for s in self._defaults()}))
+        from kb.youtube.channels import defaults
+        expected = {source['name'] for source in self._defaults()} | {source['name'] for source in defaults()['channels']}
+        self.assertEqual(expected, names)
 
 
 class SourceCopyTests(unittest.TestCase):
