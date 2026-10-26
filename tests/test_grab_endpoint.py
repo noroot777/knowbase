@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 from kb import config, pipeline
 from kb.feeds import grab, registry as reg
-from tests.grab_fixtures import (BODY, SOFT_WALL, WALL, GrabCase, PAGE, TWEET,
-                                 html_resp, page_html)
+from tests.grab_fixtures import (BODY, DIGEST_SUMMARY, SOFT_WALL, WALL, GrabCase,
+                                 PAGE, TWEET, html_resp, page_html)
 
 
 class EndpointTests(GrabCase):
@@ -375,6 +375,38 @@ class EndpointTests(GrabCase):
         self.assertNotIn('Sign in to continue', self.items()[0]['body'])
         self.assertEqual(self.pending_export(), 1)
         self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
+
+    def test_a_refetch_is_refused_when_the_row_owns_its_own_body(self):
+        """**简报那条简讯的 `url` 指向的是别人家那篇文章** —— 「重新抓一次」不许拿
+        那一页去换简报自己写的那两句话。
+
+        `known()` 按 **url** 查全表,所以这条路能走到任何一类来源的条目上;而
+        `content_ok` 对非手动收录的条目**恒真**,于是 `refetch=True` 一步落到替换
+        那一支。审查实测:28 字的简讯摘要被换成 1338 字的仓库 README、`content_rev`
+        跟着 +1、译文整组作废、后半条链被起起来 —— 而简报**不进补抓队列**,没有任何
+        一轮同步会把那两句话补回来。
+
+        **这一档连 HTTP 都不发**:只靠写语句那一道的话,人得先白等一次抓取,拿到的
+        还是「和它一样,或者这期间有人换过」那句答不出原因的话。写语句自己那一道在
+        `tests/test_grab_store.py` 里单独钉(入口可以被别的调用方绕过,那一道不行)。
+        **反过来钉一边**:手动收录那一类照旧重抓、照旧替换,见
+        `test_an_explicit_refetch_recovers_what_the_gate_cannot_see`。
+        """
+        key = self.digest_item()
+        before = dict(next(r for r in self.items() if r['key'] == key))
+        with patch.object(grab, 'grab', side_effect=AssertionError('不许发请求')), \
+             self.pipeline_patch():
+            data = self.post(refetch=True).json()
+        self.assertEqual((data['duplicate'], data['replaced']), (True, False))
+        self.assertIs(data['body_from_link'], False)
+        self.assertIn('不是外链那一页的全文', data['detail'])
+        self.assertEqual(self.runs, [])              # 拒绝不起后半条链
+        # **后果断言**:那一行一个字都没动 —— 正文、代次、指纹、译文各钉一处。
+        after = dict(next(r for r in self.items() if r['key'] == key))
+        self.assertEqual(after['body'], DIGEST_SUMMARY)
+        for column in ('body', 'content_kind', 'content_rev', 'content_hash',
+                       'body_zh', 'translated_at', 'extract_stale'):
+            self.assertEqual(after[column], before[column], column)
 
     def test_an_explicit_refetch_that_hits_a_wall_leaves_the_row_alone(self):
         """重抓撞上关卡:**库里原样留着,不占管道,也不说「已完成」。**

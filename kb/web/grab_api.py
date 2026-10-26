@@ -138,6 +138,19 @@ def _recover(out: dict, url: str, seen: dict, label: str, asked: bool = False) -
     到的就是同一份。**失败那两档不是终态**:界面据 `replaced` 为假说「没换成」,
     而不是说「已完成」—— 再来一次照旧会重抓。
     """
+    if not seen.get('body_from_link'):
+        # **这一类来源的正文不是它外链那一页的内容**(`permits_link_body`),所以这
+        # 一档**连 HTTP 都不发**:简报那条简讯的 `url` 指向的是别人家那篇文章,换一
+        # 次就把简报自己写的那两句话毁掉,而简报不进补抓队列、没有任何一轮同步会
+        # 来补。`replace` 自己的 WHERE 也挡着(`link_body_sql`),但只靠那一道的话
+        # 人得先白等一次抓取、拿到的还是「和它一样,或者这期间有人换过」那句答不出
+        # 原因的话。界面上那颗按钮据 `body_from_link` 本就不露面,这一道是给直接
+        # 打接口的那一侧。
+        out['replaced'] = False
+        out['detail'] = (f'这条之前被「{label}」收过了；「{label}」的正文是它自己'
+                         '那段内容，不是外链那一页的全文，这里不替换它 —— '
+                         '要读原文请点它的原文链接')
+        return out
     why = '你要求重新抓一次' if out.get('content_ok') else '库里那一份看不出是正文'
     try:
         fresh = grab.grab(url)
@@ -166,7 +179,10 @@ def _duplicate(url: str, seen: dict, refetch: bool = False,
     label = KINDS.get(seen['kind'], seen['kind'])
     out = {'ok': True, 'added': 0, 'duplicate': True, 'url': url,
            'title': seen['title'], 'kind': seen['kind'], 'done': bool(seen['done']),
-           'content_ok': bool(seen.get('content_ok'))}
+           'content_ok': bool(seen.get('content_ok')),
+           # 界面据它决定「重新抓一次」露不露面:亮一颗必定被拒的按钮,和后端静默
+           # 覆盖是同一处口径分家的两半(第 3 条审查形态)。
+           'body_from_link': bool(seen.get('body_from_link'))}
     if restore_only and not out['content_ok']:
         # 恢复不替任何人做「换掉它」这个决定(出路是 `refetch`,见 `_recover`)。
         out['owing'] = grab.owing(seen)
@@ -215,7 +231,10 @@ def grab_state(url: str = Query(..., min_length=1, max_length=2048)):
     seen = grab.known(norm)
     out = {'ok': True, 'url': norm, 'known': bool(seen),
            'done': bool(seen and seen['done']), 'owing': grab.owing(seen or {}),
-           'content_ok': bool(seen and seen['content_ok'])}
+           'content_ok': bool(seen and seen['content_ok']),
+           # 没收过的那一档给 True:存进来会是手动收录(许可),按钮本来也被
+           # `known` 那一道挡着。
+           'body_from_link': bool(seen['body_from_link']) if seen else True}
     if seen:
         out.update(kind=seen['kind'], title=seen['title'],
                    exported=seen['exported'], stored=seen['stored'],

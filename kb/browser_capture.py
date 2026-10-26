@@ -8,7 +8,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 from kb.feeds import fulltext, grab_page, registry as reg
-from kb.source_types import permits_link_body
+from kb.source_types import link_body_sql, permits_link_body
 
 TTL = 900
 MAX_BODY = 200_000
@@ -132,12 +132,12 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
                                    (intent['key'],)).fetchone()
             if not current:
                 raise LookupError('条目已被删除，未写入正文')
-            changed = conn.execute("""UPDATE feed_items SET body=?,content_kind='content',
+            changed = conn.execute(f"""UPDATE feed_items SET body=?,content_kind='content',
                 content_hash=?,content_rev=content_rev+1,lang=?,fulltext_at=?,
                 fulltext_error='',fulltext_hold='',extract_stale=1,body_provenance=?,
                 title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
                 WHERE key=? AND kind=? AND url=? AND content_hash=? AND content_rev=?
-                AND content_kind<>'post' AND x_post_meta=''
+                AND content_kind<>'post' AND x_post_meta='' AND {link_body_sql()}
                 AND NOT EXISTS (SELECT 1 FROM feed_item_exclusions WHERE key=feed_items.key)""",
                 (body, fulltext.body_hash(body), reg.text_language(current['title'], body),
                  reg.now(), json.dumps(provenance, ensure_ascii=False), intent['key'],

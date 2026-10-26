@@ -19,6 +19,7 @@ import json
 import sqlite3
 
 from kb.feeds import grab_page, registry as reg
+from kb.source_types import link_body_sql, permits_link_body
 
 #: 这一类来源的 id。`kb.source_types.SOURCE_TYPES` 里那一条。
 KIND = 'inbox'
@@ -207,6 +208,11 @@ def known(url: str) -> dict | None:
     # `content`(网页正文)的条目上。
     seen['content_ok'] = (seen['kind'] != KIND or seen['content_kind'] != 'content'
                           or grab_page.body_confirmed(seen['body']))
+    # **「这一条的正文能不能换成外链那一页」同样是这一行自己的事实**
+    # (`permits_link_body`):`known` 按 **url** 查全表,命中的可能是任何一类来源的
+    # 条目 —— 简报那条简讯的 `url` 指向的正是别人家那篇文章。交出来给两个消费方:
+    # `_recover` 据它直接拒(连 HTTP 都不发)、界面据它不亮那颗按钮。
+    seen['body_from_link'] = permits_link_body(seen['kind'])
     seen['exported'] = bool(seen['path'] and seen['exported_hash']
                             and seen['exported_hash'] == seen['content_hash'])
     seen['stored'] = _stored(seen['path'])
@@ -251,6 +257,13 @@ def replace(seen: dict, entry: dict) -> bool:
     `content_kind='post'` 的 X 残片)从此 `content_ok` 恒真,恢复要是也架在它上面
     就一辈子换不回来(第 3 轮审查实测)。
 
+    **这一行那一类来源许不许可,也待在同一条 WHERE 里**(`link_body_sql`)。
+    `known` 按 url 查全表,所以这条路能走到任何一类来源的条目上:简报那条简讯的
+    `url` 指向的就是别人家那篇文章,换一次就把简报自己写的那两句话毁掉,而简报不
+    进补抓队列、没有任何一轮同步会来补。入口那一侧也拒(`grab_api._recover`,那
+    一道还省掉一次白跑的抓取),这一道是写语句自己的那一份 —— 两道都在,因为这个
+    入口曾经是五个写入口里唯一漏接的那个,而漏接的形态是静默覆盖。
+
     **只在确认得了的内容上替换**(调用方保证:能走到这里的 `entry` 刚过完
     `grab_page.verdict` 那八道),而且**判据待在 UPDATE 自己的 WHERE 里** ——
     `content_hash` 要还是我们读到的那一版;`rowcount == 0` 说明这期间别人已经
@@ -290,10 +303,10 @@ def replace(seen: dict, entry: dict) -> bool:
     # 它那份更早的抓取照旧被接受(见 `work_version`)。`seen` 一律是 `known()` 交出
     # 来的那份快照,缺了代次就该当场抛,不许退回「只比指纹」。
     with reg.db() as c:
-        cur = c.execute("""UPDATE feed_items SET title=?,body=?,author=?,published=?,
+        cur = c.execute(f"""UPDATE feed_items SET title=?,body=?,author=?,published=?,
             content_hash=?,lang=?,x_post_meta=?,body_provenance=?,extract_stale=1,content_rev=content_rev+1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
-            WHERE key=? AND content_hash=? AND content_rev=?""",
+            WHERE key=? AND content_hash=? AND content_rev=? AND {link_body_sql()}""",
             (fresh['title'], fresh['body'], fresh['author'], fresh['published'],
              item_version(fresh), reg.text_language(fresh['title'], fresh['body']),
              entry.get('x_post_meta', seen['x_post_meta']),

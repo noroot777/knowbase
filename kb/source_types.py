@@ -89,11 +89,12 @@ SOURCE_TYPES = {
 def permits_link_body(kind: str) -> bool:
     """**「这一类来源的正文允不允许被 `url` 指向的那一页替换」—— 判据只有这一份。**
 
-    **每一个会写 `feed_items.body`、而内容来自条目自己那个链接的入口都要先过它**,
-    一共四处:自动补抓队列(`fulltext._eligible`)、采集时直取 Markdown
-    (`markdown_source.enrich`)、浏览器采集(`kb.browser_capture.target`)、存量
-    复查的写回(`feed_fulltext_recheck._downgrade` 的两支)。订阅保存
-    (`registry.save_subscription`)和编辑表单也读它,免得这个开关被打开。
+    **每一个会写 `feed_items.body`、而内容来自条目自己那个链接的入口都要先过它。**
+    布尔这一份给采集期的入口(`markdown_source.enrich` 改的是还没入库的 entry)、
+    准入检查(`browser_capture.target`)、存量复查分支(`feed_fulltext_recheck._plan`)
+    和订阅那一侧(`registry.save_subscription`、编辑表单、`fulltext._eligible`);
+    **真正写库的那几条 UPDATE 另有 SQL 形状的同一份判据,见 `link_body_sql`** ——
+    谁漏接由那一条集合级回归来答,不靠这段注释记名单。
 
     **一处没接上就崩一条内容,而且不可恢复。** 简报的 `url` 指向的是别人家的文章
     (`docs/decisions/digest.md`),它那条「不开 fulltext」原先只以三种间接形式存在
@@ -108,6 +109,33 @@ def permits_link_body(kind: str) -> bool:
 
 def feed_types():
     return {k: v for k, v in SOURCE_TYPES.items() if v.manager == 'feeds'}
+
+
+def link_body_sql(item: str = 'feed_items') -> str:
+    """同一份判据的 **SQL 形状**:这一行的正文允不允许被它 `url` 指向的那一页替换。
+
+    **凡是要改写 `feed_items.body`、而内容来自这一行 `url` 的 UPDATE,都把它拼进自己
+    的 WHERE**(元规则「判据待在写语句自己的 WHERE 里」)。接着这一份口径的有:
+    `fulltext._save`、`browser_capture` 的写回、`grab_store.replace`,以及选队列和
+    存量复查许可支经 `fulltext._eligible` 带上的那一道。
+
+    **为什么是写入层的共用片段,而不是「记得在每个入口调一次 `permits_link_body()`」。**
+    后者靠人记全一张入口名单,而名单只能写在注释和一条列举式用例里:前四处都接上了,
+    第五处(`grab_store.replace`,人点「重新抓一次」那条路)照旧把简报里一条简讯的正文
+    换成了外链那篇文章的全文 —— 走的是公开接口、不是内部直调,审查实测可达。片段化之
+    后,漏接是 `tests/test_link_body_entries.py` 的红:它把 `kb/`、`scripts/` 下每一条
+    写 `body` 的 `UPDATE feed_items` 都扫出来,要求逐条声明内容从哪来,**声明集合不等
+    就红** —— 新增一个入口而不声明也红,所以这张名单不再靠人记。
+
+    **判据取 `SOURCE_TYPES` 全集,不过 `feed_types()`。** 它问的是「`feed_items` 这张
+    表里哪些 kind 许可」,跟那一类由谁管理无关;今天两者算出来一样,哪天某类来源换了
+    manager 也不该悄悄改变写入闸的集合。
+
+    `item` 是表名或别名,只接内部写死的取值,不接外部输入。
+    """
+    kinds = ','.join(f"'{kind}'" for kind, spec in SOURCE_TYPES.items()
+                     if spec.body_from_link) or 'NULL'
+    return f'{item}.kind IN ({kinds})'
 
 
 def catalog():

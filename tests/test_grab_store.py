@@ -15,7 +15,8 @@ from kb import config
 from kb.collectors import FetchScope
 from kb.feeds import grab, registry as reg, sync
 from kb.source_types import feed_types
-from tests.grab_fixtures import BODY, SOFT_WALL, WALL, GrabCase, PAGE, TWEET
+from tests.grab_fixtures import (BODY, DIGEST_SUMMARY, SOFT_WALL, WALL,
+                                 GrabCase, PAGE, TWEET)
 
 
 class SaveTests(GrabCase):
@@ -356,6 +357,45 @@ class PipelineTests(GrabCase):
         self.assertIn('这是一段确认得了的正文', one.read_text())
         self.assertEqual(self.pending_export(), 0)
         self.assertTrue(grab.known(PAGE)['exported'])
+
+
+class LinkBodyGateTests(GrabCase):
+    """`replace()` 自己那条 WHERE 里的能力判据(`link_body_sql`)。
+
+    **和入口那一道各钉一次**(入口在 `tests/test_grab_endpoint.py`):入口答的是
+    「这次该不该抓」,这一道答的是「这一行该不该被外链那一页覆盖」。只有后者挡得住
+    绕过入口的调用方,而这个入口曾经是五个写 `body` 的 UPDATE 里唯一漏接的那个 ——
+    漏接的形态是**静默覆盖**,不是报错。
+    """
+
+    def fresh(self):
+        return {'url': PAGE, 'title': 'openai/openai-cli: a terminal client',
+                'body': BODY, 'author': 'github.com', 'published': '',
+                'content_kind': 'content'}
+
+    def test_a_row_that_owns_its_body_is_not_replaced(self):
+        """简报那条简讯:CAS 全对、内容也确认得了,照旧一个字都不许换。"""
+        key = self.digest_item()
+        seen = grab.known(PAGE)
+        self.assertEqual(seen['kind'], 'digest')     # 查重按 url,命中的不是手动收录
+        self.assertTrue(seen['content_ok'])          # 质量那道判据对它恒真
+        self.assertFalse(grab.replace(seen, self.fresh()))
+        row = next(r for r in self.items() if r['key'] == key)
+        self.assertEqual(row['body'], DIGEST_SUMMARY)
+        self.assertEqual((row['content_rev'], row['body_zh']), (0, '简报摘要译文'))
+
+    def test_a_row_whose_body_is_its_links_page_is_still_replaced(self):
+        """反过来钉一边:手动收录那一类的正文**就是**外链那一页,照旧换得成。
+
+        不钉这一边的话,「全都拦住」也能让上面那条绿 —— 而那等于把错存唯一的出路
+        (`put_items` 是 DO NOTHING)整条打死。
+        """
+        grab.save({'url': PAGE, 'title': 'Membership required', 'body': SOFT_WALL,
+                   'author': 'Example', 'published': '', 'content_kind': 'content'})
+        seen = grab.known(PAGE)
+        self.assertEqual(seen['kind'], grab.KIND)
+        self.assertTrue(grab.replace(seen, self.fresh()))
+        self.assertIn('这是一段确认得了的正文', self.items()[0]['body'])
 
 
 if __name__ == "__main__":

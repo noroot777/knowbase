@@ -49,17 +49,30 @@ class RecheckCapabilityTests(CapabilityCase):
             )
         return source, key
 
-    def backup(self, key, body=ORIGINAL, content_kind='summary'):
-        """一份只够 `_from_backup` 读的备份库。返回它的路径列表。"""
-        path = self.root / f'backup-{key[:8]}' / 'feeds.db'
+    def backup(self, key, body=ORIGINAL, content_kind='summary', tag=''):
+        """一份只够 `_from_backup` 读的备份库。返回它的路径列表。
+
+        `content_kind=None` 建一份**没有这一列**的老备份(schema 变过那种)。
+        """
+        path = self.root / f'backup-{key[:8]}{tag}' / 'feeds.db'
         path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(path)
         with conn:
-            conn.execute('CREATE TABLE feed_items(key TEXT PRIMARY KEY,body TEXT,'
-                         'content_kind TEXT)')
-            conn.execute('INSERT INTO feed_items VALUES(?,?,?)', (key, body, content_kind))
+            if content_kind is None:
+                conn.execute('CREATE TABLE feed_items(key TEXT PRIMARY KEY,body TEXT)')
+                conn.execute('INSERT INTO feed_items VALUES(?,?)', (key, body))
+            else:
+                conn.execute('CREATE TABLE feed_items(key TEXT PRIMARY KEY,body TEXT,'
+                             'content_kind TEXT)')
+                conn.execute('INSERT INTO feed_items VALUES(?,?,?)',
+                             (key, body, content_kind))
         conn.close()
         return [path]
+
+    def row(self, key):
+        with reg.db() as conn:
+            return dict(conn.execute('SELECT * FROM feed_items WHERE key=?',
+                                     (key,)).fetchone())
 
     def plan(self, backups=(), **scope):
         return recheck._plan(recheck._suspect(**scope), list(backups))
@@ -92,6 +105,59 @@ class RecheckCapabilityTests(CapabilityCase):
         planned = self.plan(kind='digest', source=source['id'])
         self.assertEqual([key], [row['key'] for row in planned])
         self.assertIn('不是这一条自己的', planned[0]['why'])
+
+    def test_a_backup_made_after_the_damage_is_not_restored_onto_itself(self):
+        """**备份判据和扫描判据必须同源。** 这一条栽过两次,形态一模一样。
+
+        `_backups()` 自动扫按 mtime **倒序**,所以「污染之后做的那一份」是默认命中
+        项:里面那份同样是外链那一页的全文、`content_kind` 同样是 `content`。只问
+        文字那一道(`boilerplate_reason` 对一篇逐字正常的文章返回空串)的后果实测
+        过 —— 它被当成有效原文装回**它自己头上**,`body=?` 的 CAS 比的是同一份内容、
+        **rowcount 照样是 1**,于是报「已收拾 1 条、从备份装回了原文」而正文一个字
+        都没变;代价全落在旁边几列:译文作废(下一轮按这份别人家的文章再买一次翻译,
+        翻译是这条链上最贵的一步)、`content_hash` 改写(vault 里那篇跟着重写),而且
+        每跑一次 `run` 重复一轮、永不收敛。
+        """
+        source, key = self.wrong_article('digest', FOREIGN_ARTICLE)
+        before = self.row(key)
+        rows = self.plan(backups=self.backup(key, FOREIGN_ARTICLE, 'content'),
+                         kind='digest', source=source['id'])
+        self.assertEqual([''], [row['shell'] for row in rows])   # 这份不算有效原文
+        cut, moved, stuck = recheck._downgrade(rows)
+        self.assertEqual((len(cut), len(moved), len(stuck)), (0, 0, 1))
+        # **后果断言**:报「收拾不了」就真的一列都没动 —— 尤其译文还在。
+        self.assertEqual(self.row(key), before)
+
+    def test_an_older_clean_backup_wins_over_a_polluted_newer_one(self):
+        """拒掉一份不等于放弃:继续往更早的备份找,找到了照旧装回去。"""
+        source, key = self.wrong_article('digest', FOREIGN_ARTICLE)
+        backups = (self.backup(key, FOREIGN_ARTICLE, 'content', tag='-new')
+                   + self.backup(key, ORIGINAL, 'summary', tag='-old'))
+        rows = self.plan(backups=backups, kind='digest', source=source['id'])
+        self.assertEqual([ORIGINAL], [row['shell'] for row in rows])
+        self.assertEqual(['summary'], [row['shell_kind'] for row in rows])
+        cut, moved, stuck = recheck._downgrade(rows)
+        self.assertEqual((len(cut), len(moved), len(stuck)), (1, 0, 0))
+        self.assertEqual(self.row(key)['body'], ORIGINAL)
+
+    def test_a_legacy_backup_without_content_kind_is_only_trusted_where_it_is_safe(self):
+        """老备份缺 `content_kind` 这一列:**不许可来源那一支不拿它赌**。
+
+        那一支要把备份里那份原文**原样**装回去、而且不放回补抓队列,所以判不出这份
+        备份是不是在某一轮错误覆盖之后做的时候,回落到「收拾不了」由人处理比赌一把
+        便宜(拿不准就别固化终态)。**反过来钉一边**:许可来源那一支照旧用得上它 ——
+        它按「从没补抓过」的形态写 `summary`、而且会把条目放回队列,下一轮自己重抓。
+        """
+        source, key = self.wrong_article('digest', FOREIGN_ARTICLE)
+        rows = self.plan(backups=self.backup(key, ORIGINAL, None),
+                         kind='digest', source=source['id'])
+        self.assertEqual([''], [row['shell'] for row in rows])
+        self.forget('digest', source, key)
+        source, key = self.wrong_article('rss')
+        rows = self.plan(backups=self.backup(key, ORIGINAL, None),
+                         kind='rss', source=source['id'])
+        self.assertEqual([ORIGINAL], [row['shell'] for row in rows])
+        self.assertEqual(['summary'], [row['shell_kind'] for row in rows])
 
     def test_a_normal_fulltext_article_on_a_capable_source_is_left_alone(self):
         """反过来钉一边:许可来源上一篇正常的补抓成品不在射程里,一个字都不许动。"""

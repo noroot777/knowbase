@@ -150,6 +150,22 @@ def _covered() -> str:
     答案由采集通道自己写死,不靠任何「这段文字像不像正文」的猜。所以它和
     `_not_article` 并列成立(见 `_why`)—— 那条 README 逐字是一篇正常文章,
     `boilerplate_reason` 对它返回空串(生产实测),光靠文字判据永远选不中它。
+
+    **② 认的是 `content_kind` 这个结构信号,它只覆盖「会改 content_kind 的那几条
+    路」。** 曾经漏过的是 `grab_store.replace`(人点「重新抓一次」):它刻意不动
+    `content_kind`(一条推文换了正文还是推文),于是简报那条被换掉正文的简讯在这儿
+    **一条都选不中**。根治在写入层 —— 那几条 UPDATE 现在自己的 WHERE 里就带着能力
+    判据(`kb.source_types.link_body_sql`),不许可来源的正文**不会再**被外链那一页
+    换掉,所以 ② 看得见的那一类就是今后唯一还会出现的一类。
+
+    **把 ② 换成「和备份比 `content_hash`」试过,不可取**:生产只读实测
+    (2026-10-26,`data/feeds.db` 对 20261021 那份全库备份)不许可来源里 hash 与备份
+    不同的 31 条**全是 social**,来路是 X 那一侧的合法长文回填(`x_article_backfill`,
+    空正文→推文自己的长文);把它们选中之后不许可那一支只认备份,会拿备份里那条短推
+    文盖掉回填好的长文 —— 这是制造破坏,不是「顶多重抓一次」。同一次实测里 `digest`
+    的 231 条 `content_rev` 全为 0(`replace` 必然 +1),说明那个入口在生产库上还没
+    造成过污染,存量不需要一道会误伤的射程。
+    **扫不中不等于「确定没有」,所以空结果那句话要把这层边界说出来**(见 `_nothing`)。
     """
     kinds = ','.join(f"'{kind}'" for kind in feed_types()
                      if not permits_link_body(kind)) or 'NULL'
@@ -226,7 +242,7 @@ def _backups(explicit: str | None) -> list[Path]:
     return found
 
 
-def _from_backup(paths: list[Path], key: str) -> tuple[str, str, str]:
+def _from_backup(paths: list[Path], key: str, kind: str) -> tuple[str, str, str]:
     """备份里那份原始 body。返回 `(壳, 它的 content_kind, 来自哪个备份)`,没有就三个空串。
 
     **`content_kind` 一起取回来是给不许可来源那一支用的**:简报原生 `summary`、
@@ -234,12 +250,25 @@ def _from_backup(paths: list[Path], key: str) -> tuple[str, str, str]:
     与其在这儿按 kind 写死两个字面量,不如恢复备份里那条**原本的样子** —— 新增
     一类不许可来源时这儿不用跟着改。
 
-    **恢复回来的要再过一遍判据,而且过的是和扫描同一道那份**(`_not_article`):
-    备份可能是在某一轮错误补抓之后做的,里面那份同样不是文章正文 —— 那就不算有效
-    壳,继续往更早的备份找。实测过只更新扫描那一侧的后果(审查第 1 轮):一份同样
-    印着「请完成验证」的较新备份被当成有效原摘要装回来,`_downgrade` 紧接着清掉
-    `fulltext_at`,这一条从此连扫描都选不中,而正确的较旧备份明明还在 —— 三轮同步
-    之后那段验证提示仍旧导出到了 vault。
+    **恢复回来的要再过一遍判据,而且过的是和扫描同一道那份** —— 所以这里调的是
+    `_why` 本身,不是它两道中的某一道。备份可能是在某一轮错误覆盖之后做的,里面那份
+    同样不合格:那就不算有效壳,继续往更早的备份找。`_backups()` 按 mtime **倒序**,
+    所以「污染之后做的那一份」是默认命中项,不是边角情形。
+
+    **同一处口径分家,这个函数上栽过两次,形态一模一样。** 第一次是扫描换成
+    `_not_article` 而这里还在用旧判据:一份同样印着「请完成验证」的较新备份被当成
+    有效原摘要装回来,`_downgrade` 紧接着清掉 `fulltext_at`,这一条从此连扫描都选不
+    中,而正确的较旧备份明明还在 —— 三轮同步之后那段验证提示仍旧导出到了 vault。
+    第二次是扫描加了结构那一道(`_why` 的第一道)而这里只留着文字那一道:一份
+    `content_kind='content'` 的污染备份过了 `boilerplate_reason`,被装回它自己头上
+    —— `body=?` 的 CAS 比的是同一份内容,**rowcount 照样是 1**,于是报「已收拾 1 条、
+    从备份装回了原文」而那条正文一个字都没变,译文却被作废、`content_hash` 被改写,
+    下一轮重新买一次翻译、vault 里那篇重写一遍,每跑一次 `run` 重复一轮(审查实测)。
+
+    **老备份缺 `content_kind` 这一列时,只有许可来源还用得上它**:它那一支按「从没
+    补抓过」的形态写 `summary`,不读备份的 content_kind;不许可来源那一支判不出这份
+    备份是不是在某一轮错误覆盖之后做的,**拿不准就别固化终态** —— 回落到「收拾不了」
+    由人处理,比赌一份判不出来的备份便宜。
 
     **宁可多拒一份备份。** 误拒的代价是回落到「标题与链接」那份重建壳、下一轮重抓
     一次(`_downgrade` 会把它放回队列、额度给满);漏放的代价是把已经认出来的坏正文
@@ -251,7 +280,9 @@ def _from_backup(paths: list[Path], key: str) -> tuple[str, str, str]:
             conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
             conn.row_factory = sqlite3.Row
             with conn:
-                row = conn.execute('SELECT body,content_kind FROM feed_items WHERE key=?',
+                # `SELECT *` 是为了老备份缺列时不整份跳过(那样连许可来源也救不
+                # 回来);读的仍只有下面这两项。
+                row = conn.execute('SELECT * FROM feed_items WHERE key=?',
                                    (key,)).fetchone()
         except sqlite3.Error:
             continue                      # 老备份的 schema 不同、或者文件坏了
@@ -261,8 +292,15 @@ def _from_backup(paths: list[Path], key: str) -> tuple[str, str, str]:
             except (sqlite3.Error, NameError, UnboundLocalError):
                 pass
         body = (row['body'] if row else '') or ''
-        if body.strip() and not _not_article(body):
-            return body, (row['content_kind'] or 'summary'), path.parent.name
+        if not body.strip():
+            continue
+        columns = row.keys()
+        content_kind = (row['content_kind'] if 'content_kind' in columns else '') or ''
+        if not content_kind and not permits_link_body(kind):
+            continue                      # 老备份判不出结构那一道,不拿它赌
+        if _why({'kind': kind, 'content_kind': content_kind, 'body': body}):
+            continue                      # 和扫描同一道判据,往更早的备份找
+        return body, content_kind or 'summary', path.parent.name
     return '', '', ''
 
 
@@ -281,7 +319,7 @@ def _plan(rows: list[dict], backups: list[Path]) -> list[dict]:
     就别固化终态)。
     """
     for row in rows:
-        shell, kind, origin = _from_backup(backups, row['key'])
+        shell, kind, origin = _from_backup(backups, row['key'], row['kind'])
         row['requeue'] = permits_link_body(row['kind'])
         if row['requeue']:
             row['shell'] = shell or _rebuild(row)
@@ -311,8 +349,15 @@ def _nothing(kind: str | None, source: int | None) -> str:
     if not closed:
         return base
     labels = '、'.join(SOURCE_TYPES[k].label for k in closed)
+    # **不许把「扫不中」说成「确定没有」**(元规则:判不准一律如实交出,不许返回
+    # 「确定没有」)。射程 ② 认的是 `content_kind`,而换正文的入口里曾有一个刻意
+    # 不动它(`_covered` 那一段);那句「当前一条都没有」实测过被当成结论用。
     return (base + f'\n（{labels}不走正文补抓:正文就是这一类来源自己给的那一份。'
-            '这里只收拾「正文被原文链接那一页覆盖过」的条目 —— 当前一条都没有。）')
+            '这里按两道判据选:正文形态不像文章、或者这一类来源手里拿着一份网页'
+            '正文 —— 两道都没选中。\n这不等于「它的正文一定没被换过」:若有过一次'
+            '连 content_kind 都没改的覆盖,这里看不出来,要拿备份逐条比 content_hash '
+            '才查得到。改正文那几条语句现在自己的 WHERE 里就拦着不许可的来源,'
+            '所以新的不会再有。）')
 
 
 def _groups(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
@@ -472,7 +517,9 @@ def cmd_run(args) -> int:
         for row in moved:
             print(f"  {row['title'][:48]}")
         print('  （正文或订阅设置已变化。再跑一次 scan 看它现在是什么。）')
-    return 0
+    # **还有收拾不了的就不报 0**:那几条的坏正文还在库里、还会导出,脚本化调用
+    # 据退出码当「全清了」的话,这件事就再没人来问它(统计按实际写入结果报)。
+    return 1 if stuck else 0
 
 
 def main() -> int:

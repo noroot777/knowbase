@@ -58,7 +58,7 @@ from kb.feeds.fetching import FeedError, Gated, SOURCE_SECONDS, request
 # 本模块和手动重抓那条链共用它。再导出一次,让 `fulltext.work_version` 照旧能用。
 from kb.feeds.grab_store import work_version  # noqa: F401
 from kb.pipeline_state import _state
-from kb.source_types import feed_types, permits_link_body
+from kb.source_types import link_body_sql
 
 # 一轮补抓多少条。存量几百条壳的话一次全抓会把一次同步拖很久,而且每抓一条就
 # 多一条待翻译 —— 分批消化,每轮啃一截。
@@ -114,12 +114,10 @@ def _eligible(ref: str = 'feed_items.key') -> str:
     `ref` 只有两个写死的取值(`feed_items.key` 给拼进别人 WHERE 的那几段和复查
     写回,`fi.key` 给 `held()` 和复查脚本带别名的 SELECT)—— **不接外部输入**。
     """
-    kinds = ','.join(f"'{kind}'" for kind in feed_types()
-                     if permits_link_body(kind)) or 'NULL'
     item = ref.rsplit('.', 1)[0]
-    return (f"({item}.kind IN ({kinds}) AND EXISTS(SELECT 1 FROM subscription_items si"
+    return (f"({link_body_sql(item)} AND EXISTS(SELECT 1 FROM subscription_items si"
             " JOIN subscriptions s ON s.id=si.subscription_id"
-            f" WHERE si.item_key={ref} AND s.fulltext=1 AND s.kind IN ({kinds})))")
+            f" WHERE si.item_key={ref} AND s.fulltext=1 AND {link_body_sql('s')}))")
 
 
 def queued_sql() -> tuple[str, list]:
@@ -313,11 +311,11 @@ def _save(key: str, body: str, seen: tuple[str, int]) -> bool:
         row = c.execute('SELECT title FROM feed_items WHERE key=?', (key,)).fetchone()
         if not row:                      # 这期间被存量清理删掉了,没什么可写的
             return False
-        cur = c.execute("""UPDATE feed_items SET body=?,content_kind='content',content_hash=?,lang=?,
+        cur = c.execute(f"""UPDATE feed_items SET body=?,content_kind='content',content_hash=?,lang=?,
             fulltext_at=?,fulltext_error='',fulltext_hold='',extract_stale=1,
             content_rev=content_rev+1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
-            WHERE key=? AND content_hash=? AND content_rev=?""",
+            WHERE key=? AND content_hash=? AND content_rev=? AND {link_body_sql()}""",
             (body, digest, reg.text_language(row['title'], body), reg.now(), key, *seen))
         return cur.rowcount > 0
 

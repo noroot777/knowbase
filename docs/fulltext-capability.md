@@ -108,8 +108,8 @@ socket 连接被拒绝,真实网络调用为 0,没有模型调用。脚本及临
 
 用户裁定不采纳上一轮的范围驳回,按报告修。那份报告点的三条是同一个类问题的三个实例 ——
 「这一类来源的正文允不允许被 `url` 指向的那一页替换」在仓库里还有三处没接到 `permits_link_body()` 上。
-现在它是这个问题的唯一答案,四个入口都过它(补抓队列、采集直取、浏览器采集、存量复查写回),
-`kb/source_types.py` 的函数 docstring 把这四处列齐了;回归钉的是**集合**而不是实例,新增入口加进那条用例。
+当时的做法是让这四个入口(补抓队列、采集直取、浏览器采集、存量复查写回)各自调一次 `permits_link_body()`,
+名单写在 `kb/source_types.py` 的 docstring 和一条列举式用例里。**那张名单漏了第五个**,见下一节。
 
 - **采集时直取 Markdown**(`markdown_source.enrich`):闸门原先是订阅 `fulltext` 生值的**反面** ——
   那不是资格判据而是分工(开了补抓的让补抓阶段去取),于是简报(规定 `fulltext` 必须为 0)正好落在打开那一侧。
@@ -169,10 +169,66 @@ git diff --check
 
 用户裁定**不采纳**这条驳回。浏览器采集那一处已按上面所写在本分支接上同一份判据,与原任务分支逐字相同。
 
+## 判据搬到写入层(第 1 轮审查的三条)
+
+上一节那张「四个入口」的名单漏了第五个:`grab_store.replace()`,人在投递栏点「重新抓一次」那条路。
+`known()` 按 **url** 查全表,命中的可能是任何一类来源的条目,而质量判据对非手动收录的条目恒真 ——
+于是 `POST /api/grab {"refetch": true}` 把一条简讯的 28 字摘要换成了 1338 字的仓库 README(`content_rev` +1、
+译文整组作废、后半条链被起起来)。走的是公开接口,不是内部直调。
+
+**按报告指的层级修根因:判据搬到写入层,名单改由测试维护。**
+
+- `kb/source_types.py` 新增 `link_body_sql(item)` —— 同一份判据的 SQL 形状。凡是要改写 `feed_items.body`、
+  而内容来自这一行 `url` 的 UPDATE,都把它拼进自己的 WHERE(元规则「判据待在写语句自己的 WHERE 里」):
+  `fulltext._save`、`browser_capture` 的写回、`grab_store.replace`,以及经 `_eligible()` 带上的选队列和存量复查
+  许可支。判据取 `SOURCE_TYPES` 全集而不过 `feed_types()` —— 它问的是「这张表里哪些 kind 许可」,跟谁管理无关。
+- `tests/test_link_body_entries.py` 是这张名单现在的住处:扫 `kb/`、`scripts/` 下每一条写 `body` 的
+  `UPDATE feed_items`(排除 docstring,否则 `link_body_sql` 自己那段说明会算成一条假写入点),要求逐条声明内容
+  从哪来,**声明集合不等就红**;逐函数比「带闸几条 / 不带闸几条」而不按语句顺序对号 —— 删掉某条的闸会红,
+  **给备份恢复那一支加上闸同样红**(那一支要把原文原样装回不许可来源,带闸之后 rowcount 恒 0)。基线扫出 7 条
+  语句、6 个函数,与声明表完全相等。残留盲区一处写在用例 docstring 里:`fulltext._fail` 的 SET 列表在 Python 里
+  拼,扫描器看不见里面有什么。
+- 入口那一侧也拒(`grab_api._recover` 按 `seen['body_from_link']`),**连 HTTP 都不发** —— 只靠写语句那一道的话,
+  人得先白等一次抓取、拿到的还是一句说不出原因的「换不成」。界面上那颗按钮据回包里的 `body_from_link` 不露面,
+  **前端只拿它和 `false` 比**:字段缺失(浏览器缓存着旧脚本)时按原来那样亮,不凭「读不到」就把错存唯一的出路收走。
+- **第 2 条(备份判据与扫描不同源)**:`_from_backup` 现在带上这一行的 `kind`、调 `_why` 本身验备份,
+  口径只留一份。这个函数上同一处口径分家栽过两次,第二次的后果是污染备份被装回**它自己头上** ——
+  `body=?` 的 CAS 比的是同一份内容、rowcount 照样是 1,于是报「已收拾 1 条」而正文一个字没变,译文却被作废、
+  `content_hash` 被改写,每跑一次 `run` 重复一轮。顺带:老备份缺 `content_kind` 那一列时只有许可来源还用得上它
+  (不许可那一支判不出这份备份是不是污染后做的,回落到「收拾不了」);`cmd_run` 留下「收拾不了」时**不再报 0**。
+- **第 3 条(前端入口按来源名字面量渲染)**:`kb/static/js/source_reader.js:48` 换成
+  `sourceModules.get(item.kind)?.body_from_link`,与原任务分支 `23f96aa` 的同一处**逐字相同**(含它那一道
+  `!item.x_post_meta`),合并不会冲突。没有竞态:`sourceActive()` 本身要求 `sourceModules.has(kind)` 才渲染条目。
+- **射程 ② 没有扩成「和备份比 `content_hash`」**,理由是生产只读实测(下一节),改的是**空结果那句话** ——
+  它原先说「当前一条都没有」,现在如实交出射程边界(元规则:判不准不许返回「确定没有」)。
+
+### 这一轮实际执行的检查
+
+**没有执行任何回归套件**(项目硬约束:执行者不得执行回归测试)。做的是:
+
+- **报告自带的两份复现**,改动后重跑:`repro-1` 的断言 `assertNotEqual(before, after)` 现在**失败**(它为复现而
+  写,失败即已挡住),回包 `replaced=False`、`body_from_link=False`、`content_rev 0 -> 0`、译文未动;
+  `repro-2` 从「已收拾 1 条」变成「收拾不了 1 条」、退出码 0 → 1,译文与 `translated_at` 原样保住。
+- **一次性 smoke**(借 `tests/` 的夹具类写断言,不执行仓库里的用例):入口拒绝 / 写语句拒绝 / 手动收录照旧换成
+  三条,污染备份 / 更早的干净备份 / 缺列老备份三条,全部通过。**如实记录一处越界**:`smoke_recheck.py` 继承了
+  `RecheckCapabilityTests` 当夹具,unittest 连父类的用例一起收走了,实际跑了 33 条(全绿)—— 本应像报告那份
+  `repro-2` 一样屏蔽父类方法。
+- **扫描器自验**:直接调 `_statements()` 看基线输出(7 条语句 / 6 个函数 / 声明集合相等),再定点注入三次确认它
+  真会红。
+- **生产只读实测**(2026-10-26):把 `data/feeds.db` 与 `data/backups/feeds-before-xbackfill-20261021-103633.db`
+  复制到 `/tmp` 之后 `mode=ro` 打开,原库 mtime 未变、一个字节没写。结论:`digest` 231 条的 `content_rev`
+  **全为 0**(`replace` 必然 +1 → 这个入口在生产库上还没造成过污染),`content_kind='content'` 的只有 1 条
+  (上一节那个 `enrich` 受害者,现有射程看得见);不许可来源里 hash 与备份不同的 31 条**全是 social**,来路是
+  `x_article_backfill`(空正文 → 推文自己的长文)—— 把射程 ② 换成 hash 比对会当场误伤这 31 条,而不许可那一支
+  只认备份,会拿短推文盖掉回填好的长文。
+
 ## 留给验收
 
-新增回归覆盖旧误开值、直接 API 开启、部分编辑保留设置、默认种子、默认关闭能力、混合归属、补抓正向对照、翻译和挂起出口。
-验收阶段执行 `tests.test_fulltext_capability`、`tests.test_fulltext_recheck_capability`,并覆盖既有
+新增回归覆盖旧误开值、直接 API 开启、部分编辑保留设置、默认种子、默认关闭能力、混合归属、补抓正向对照、翻译和挂起出口;
+这一轮又加了写入层那条集合级用例、手动收录两道闸的正反两边、以及备份判据的三条(污染备份 / 更早的干净备份 /
+缺列老备份)。
+验收阶段执行 `tests.test_link_body_entries`、`tests.test_grab_store`、`tests.test_grab_endpoint`、
+`tests.test_fulltext_capability`、`tests.test_fulltext_recheck_capability`,并覆盖既有
 `tests.test_markdown_source`(改了 `enrich`)、`tests.test_browser_capture`(改了 `target`)、
 `tests.test_failure_sources`、`tests.test_fulltext_failures`、`tests.test_fulltext_recheck_race`、`tests.test_fulltext_admit`、
 `tests.test_feed_fulltext`、`tests.test_admit_three_ways`、`tests.test_fulltext_held_exit`、`tests.test_fulltext_browser`、
