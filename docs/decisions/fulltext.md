@@ -12,17 +12,27 @@
   `defaults.json` 里**只标了 HN Buzzing** 一条;那段只对新库跑,存量库要在面板上点一下。**给 defaults.json 加字
   段必须同时改那条 INSERT。**
 - **独立一列,不放 `config`** —— 换链接时 `save_subscription` 的 `reset` 会把 config 整个清空。
-- **「这一类来源的正文允不允许被 `url` 指向的那一页替换」的判据只有一份**,两种形状同源:布尔
+- **「这一类条目的正文该不该由通用的 HTTP + 提取器去它外链那一页上取」的判据只有一份**,两种形状同源:布尔
   `permits_link_body()` 给采集期、准入检查、分支选择和订阅那一侧(`_eligible`、`markdown_source.enrich`、
   `browser_capture.target`、`feed_fulltext_recheck._plan`、订阅保存与编辑表单);**SQL 片段 `link_body_sql()`
   给真正写库的那几条 UPDATE** —— 元规则「判据待在写语句自己的 WHERE 里」。默认关闭,RSS/网页专栏/手动收录
   显式开放。
+- **`SourceType` 上关于「正文从哪来」的位有两个,问的是两个不同的问题,别混成一个许可位。** 上面那一位
+  (`body_from_link`)问的是通用那条路;另一位 `url_is_origin` 问的是**这一行的 `url` 指向的是不是它自己的原文**
+  (`permits_origin_body()` / `origin_body_sql()`),落点是人工重抓那条路(`grab_store.replace`、`grab_api._recover`、
+  `x_article_backfill.apply_one`)。两者在 RSS / 网页专栏 / 手动收录 / 简报上答案一致,**在大V观点上分叉**:推文
+  进不了补抓队列(通用提取器对 x.com 无效),但它的 `url` 就是它本人的永久链接。混成一个的后果两边都实测过 ——
+  一边静默覆盖正文(简报那条简讯),一边静默收走那几百条推文残片唯一的人工出路。整张取值表钉在
+  `tests/test_fulltext_capability.py::test_both_capability_bits_are_declared_per_source`,**两位都默认 False**:
+  新增来源在没人想清楚之前不许可(漏报只是少一条出路、人能来改声明;误报是静默覆盖、不可恢复)。
 - **判据不许靠「记得在每个入口调一次」落实,因为那是一张人手名单。** 这个问题冒出来过四次,每次都是某个入口
   自己列一张排除名单;前三次修完,名单写在 `source_types` 的 docstring 和一条列举式用例里,**两处都只列了四个,
   而第五个(`grab_store.replace`,人点「重新抓一次」)照旧把简报里一条简讯的 28 字摘要换成了外链那篇仓库 README
   的全文** —— 走的是公开接口 `POST /api/grab {"refetch": true}`,不是内部直调。所以名单改由
   `tests/test_link_body_entries.py` 维护:它扫 `kb/`、`scripts/` 下每一条写 `body` 的 `UPDATE feed_items`,要求
-  逐条声明内容从哪来,**声明集合不等就红**,而且逐函数比「带闸几条 / 不带闸几条」—— 删掉某条的闸会红,
+  逐条声明内容从哪来,**声明集合不等就红**,而且逐函数比「**哪一道**闸各几条」(不只是「带没带」——
+只比后者的那一版对「带错了那一道」恒绿,而第 2 轮审查逮到的倒退正是带错:人工重抓那条路挂上了通用路那道闸)。
+删掉某条的闸会红,
   **给备份恢复那一支加上闸也会红**(那一支要把原文原样装回不许可来源,带闸之后 rowcount 恒 0,存量复查那条出路
   整条失效)。残留盲区一处:`_fail` 的 SET 列表在 Python 里拼,扫描器看不见里面有什么。
   **一处没接上就崩一条内容、而且不可恢复** ——

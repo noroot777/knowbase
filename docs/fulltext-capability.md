@@ -188,7 +188,8 @@ git diff --check
   **给备份恢复那一支加上闸同样红**(那一支要把原文原样装回不许可来源,带闸之后 rowcount 恒 0)。基线扫出 7 条
   语句、6 个函数,与声明表完全相等。残留盲区一处写在用例 docstring 里:`fulltext._fail` 的 SET 列表在 Python 里
   拼,扫描器看不见里面有什么。
-- 入口那一侧也拒(`grab_api._recover` 按 `seen['body_from_link']`),**连 HTTP 都不发** —— 只靠写语句那一道的话,
+- 入口那一侧也拒(`grab_api._recover` 按 `seen['body_from_link']`;**第 2 轮把这道闸换成了 `url_is_origin`**,
+  理由见下一节),**连 HTTP 都不发** —— 只靠写语句那一道的话,
   人得先白等一次抓取、拿到的还是一句说不出原因的「换不成」。界面上那颗按钮据回包里的 `body_from_link` 不露面,
   **前端只拿它和 `false` 比**:字段缺失(浏览器缓存着旧脚本)时按原来那样亮,不凭「读不到」就把错存唯一的出路收走。
 - **第 2 条(备份判据与扫描不同源)**:`_from_backup` 现在带上这一行的 `kind`、调 `_why` 本身验备份,
@@ -245,11 +246,124 @@ git diff --check
   确实变过一次(15:23 → 18:31)、8787 那个进程的 pid 也换了(39425 → 70582),**不是这一轮做的**:库里最新几行是
   生产自己那一轮 rss 批次(`batch-6adc61d7…`),而这一轮一条写生产库的语句都没有。
 
+## 判据问错了问题:把「许可位」拆成两个说得清的字段(第 2 轮审查那一条)
+
+第 1 轮说「不变量该搬到写入层」,搬了、搬对了;第 2 轮暴露的是**判据本身问错了问题**,而落点是对的。
+
+### 形态
+
+`body_from_link` 一个位被当成两件事用:既是「这一类该不该由通用的 HTTP + 提取器去它外链那一页上取正文」,
+又是「这一行的正文许不许被换掉」。这两个问题在 RSS / 网页专栏 / 手动收录 / 简报上答案碰巧一致,**在大V观点上
+分叉**:推文进不了补抓队列(通用提取器对 x.com 无效,所以前者是 False),但它的 `url` 就是它本人的永久链接
+(`x_timeline_js` 拼的 `x.com/<handle>/status/<id>`)、`grab.grab()` 拿它走 FxTwitter 取回的是**这条推文自己**的
+正文(所以后者是 True)。
+
+上一轮拿前者当了人工重抓那条路的判据,于是 social 三处一起拒:`grab_api._recover` 入口早返回(连 HTTP 都不发)、
+`grab_store.replace` 的 WHERE 也拒、界面上那颗按钮不露面,给出的理由还是一句**事实相反**的话(「正文是它自己
+那段内容,不是外链那一页的全文」—— 那一页恰恰就是它自己)。代价:生产库里 social 3356 条全部是
+`content_kind='post'`,其中 12 条正文为空、651 条不足 40 字;它们进不了补抓队列、没有浏览器采集入口、
+`x_article_backfill` 只管得了带 Article 卡片信号的长文 —— 剩下的出路只有人点那颗按钮,被整条收走。
+
+### 这一轮怎么修的
+
+- **`SourceType` 上拆成两位,各自问一个说得清的问题**(`kb/source_types.py`):
+  `body_from_link`(通用那条路)和新的 `url_is_origin`(「这一行的 `url` 指向的是不是它自己的原文」)。
+  两位都默认 `False` —— 漏报的代价是少一条出路(人能来改这一行声明),误报是静默覆盖正文、不可恢复。
+  取值:wechat `(F,T)`、social `(F,T)`、rss `(T,T)`、digest `(F,F)`、web `(T,T)`、inbox `(T,T)`。
+- **两种形状各一份,渲染那段机械逻辑只有一份**:`permits_origin_body()` / `origin_body_sql()` 与原先那一对并列,
+  共用 `_kinds_sql(item, flag)`。
+- **按内容来路挂闸**:人工重抓那条路(`grab_store.replace`)和 X 长文回填(`x_article_backfill.apply_one`)是**同一个
+  来路**(拿这一行的 `url` 问公开接口、取回它本人的内容),所以带同一道 `origin_body_sql`;通用那条路
+  (`fulltext._save`、`browser_capture.save`、`_eligible`)照旧带 `link_body_sql`。`apply_one` 那一处在真实路径上
+  行为等价(`empty_items` 已经写死 `kind='social'`),加它的理由是**同来路不该判成两边** —— 上一轮那两处判了相反的
+  两边,下一个读代码的人没法知道哪边是口径。
+- **回包与界面跟着换**:`grab_store.known` 交出 `url_is_origin`、`_duplicate` / `grab_state` 同;`grab.js` 的
+  `grabUrlIsOrigin` 读新字段,保留「只和 `false` 比」。入口那句理由改成对「链接指向别处」的来源成立的话。
+- **撞车那条回退路上把字段填齐**(报告第 1 条,不拦但同类):`grab_link` 在 `added == 0` 分支手搭的那个字典少这个
+  键,`bool(seen.get(...))` 就填成 `False`,**正好把前端那道兜底抵消**。现在写的是 `permits_origin_body(grab.KIND)`
+  而不是字面量 —— 兜底值跟着「存进来会是哪一类」走。
+
+### 集合级那条用例:从「带没带闸」改成「带的是哪一道闸」
+
+上一轮那一版只问「这条语句带闸了吗」,所以**对「带错了那一道」恒绿** —— 第 2 轮的倒退一条红都没有。现在声明表的
+取值是 `LINK` / `ORIGIN` / `OWN` / `DYNAMIC`,逐函数比「哪一道闸各几条」。另外补了报告第 5 条点出的盲区:
+`test_no_update_statement_is_assembled_from_pieces` 把「出现 `UPDATE feed_items`、却不在同一个字面量里带着
+`SET`」的字面量全扫出来,名单必须为空 —— 拼出来的写语句原先整条看不见。
+
+**如实记一笔两层的分工**(注入实测):闸靠**字样**认,所以 `import link_body_sql as origin_body_sql` 这种改名包装
+这一层认不出(照旧全绿);那个形态由行为那一层逮住 —— 同一次注入让 `test_grab_store.py` 里推文那条当场红。
+
+### 存量复查脚本的三条(报告第 2、4、6 条)
+
+- `_backups()` 的自动模式原先只扫 `backups/*/feeds.db`,而生产上那份全库备份是**平铺的一个 `.db` 文件** ——
+  整份看不见它,自动能扫到的只有一份更早的局部备份(里面压根没有要恢复的那一类条目)。现在两种摆法都认,
+  报告里那个名字由 `_backup_tag()` 给(平铺式取文件名,否则几份备份在报告里会一起叫「backups」)。
+- `_from_backup` 里 `SELECT *` 之后直接 `row['body']`:老备份缺这一列时 `sqlite3.Row` 抛的是 `IndexError`,
+  **不在 `sqlite3.Error` 的射程里**,会穿出去把整趟 run 打断 —— 而这个函数的全部设计就是「老备份缺列时别整份
+  跳过」。现在和 `content_kind` 同一个写法(`'body' in columns`)。
+- `_nothing()` 对 `--kind wechat` 原先给的是那段「不走正文补抓、这里按两道判据选」的解释,而公众号条目压根不
+  住在 feeds.db 里 —— 那是把「这个脚本管不着」说成了「这个脚本查过了」。现在先答「它住不住在这张表里」。
+  顺带把那句「新的不会再有」说准到**哪一条路**:通用那条路拦着,人点「重新抓一次」对大V观点是放行的
+  (换回来的是推文本人的正文,不属于这里要找的损坏)。
+
+### 这一轮实际执行的检查
+
+**没有执行任何仓库回归套件**(项目硬约束:回归统一在验收阶段跑)。跑的是一次性 smoke(只继承纯夹具
+`GrabCase`,`unittest.main(argv=...)` 显式点名自己那几条,`Ran N tests` 每次核对)、定点反向注入(撤回用**备份
+原文**,不用 `git checkout` —— 那会把本轮未提交的改动一起抹掉),以及两个浏览器探针。
+
+| # | 注入 | 期望 | 实测 |
+|---|---|---|---|
+| ① | `replace` 的闸改名包装成通用路那一道 | 行为层红 | 推文那条红(`False is not true`) |
+| ② | `replace` 的 WHERE 去掉那道闸 | 简报那条红 | 红(`True is not false`) |
+| ③ | 简报改成 `url_is_origin=True`(反向钉一边) | 简报那条红 | 两层都红 |
+| ④ | `_recover` 读回 `body_from_link` | 推文那条红 | 红(`got.call_count 0 != 1`:连 HTTP 都不发) |
+| ⑤ | 撞车兜底字典少那个键 | 兜底那条红 | 红(`False is not True`) |
+| ⑥ | `replace` 的闸**字样**写成 `link_body_sql` | 两层都红 | 集合级红(`origin != link`)+ 行为层红 |
+| ⑦ | 声明表把 `replace` 写成 `LINK` | 集合级红 | 红 |
+| ⑧ | `x_article_backfill` 去掉那道闸 | 集合级红 | 红 |
+| ⑨ | 新增一个没声明的写入口 | 集合级红 | 红(集合不等) |
+| ⑩ | 拼出来的 `UPDATE feed_items` | 新那条红 | 红(扫出位置) |
+| ⑪ | 备份恢复那一支加上闸(反向钉一边) | 集合级红 | 红 |
+| ⑫ | 按钮不再看这个判据 | 界面那档红 | 红(「链接指向别处的来源:不露面」) |
+| ⑬ | 前端读回 `body_from_link` | 界面那档红 | 红(同上一条) |
+| ⑭ | 改成真值判断,不再只和 `false` 比 | 「字段缺失」那档红 | 红 |
+| ⑮ | `_nothing` 去掉「住不住在这张表里」那一支 | 公众号那条红 | 红(又拿到那段两道判据的解释) |
+| ⑯ | 去掉「重新抓一次是放行的」那一句 | 大V那条红 | 红 |
+| ⑰ | `_backups` 只认目录式 | 平铺那条红 | 红(平铺那份整份看不见) |
+| ⑱ | `_backup_tag` 一律取 `parent.name` | 平铺那条红 | 红(两份都叫「backups」) |
+| ⑲ | 直接取 `row['body']` | 缺列那条红 | **ERROR `IndexError: No item with that key`**(报告那一条是按代码推断的,这里实测到了) |
+
+**浏览器探针**(`tests/grab_probe.mjs` 40/40、`tests/source_post_probe.mjs` 26/26,都在改完之后跑):前者含新加的
+「大V观点:进不了补抓队列,这颗按钮照旧露面」;后者证明 catalog 多出一位字段没影响来源页,而卡片上那个
+「从浏览器补抓」入口照旧只按 `body_from_link`(简报无、RSS 有)。**降级说明**:按全局浏览器规范,第一档(用户已
+登录的 Chrome 里开命名组后台标签)这个会话没有可用的扩展通道,所以走第二档 —— 独立无头
+`chrome-headless-shell` + 临时 profile + CDP 直连、不连网、始终无头。验证对象是本机页面 + 自带 mock 后端,
+**不需要登录态**,所以这次降级不会产生假失败。
+
+**没有碰生产库**:这一轮一条写 `data/` 的语句都没有,全部造局在 `tempfile` 临时目录里(`GrabCase` 把
+`reg.DB_PATH`、`config.DB_PATH`、两个 `VAULT_ROOT` 和维护锁的 `DATA_DIR` 都指到 tmp)。
+
+### 报告里那条我不改的
+
+第 3 条(那条真实污染行的原文两份备份里都没有,所以 `run` 对它必然落 stuck、返回 1,「换一份更早的备份」在这条上
+不成立)——报告自己写的是「不拦验收」,而它说的是**事实**,不是缺陷:脚本把两条出路都写上,其中一条在这一条数据
+上走不通,这正是「拿不准就别固化终态」要的结果(不许它拿两行标题链接顶替)。
+
+
 ## 留给验收
 
 新增回归覆盖旧误开值、直接 API 开启、部分编辑保留设置、默认种子、默认关闭能力、混合归属、补抓正向对照、翻译和挂起出口;
-这一轮又加了写入层那条集合级用例、手动收录两道闸的正反两边、以及备份判据的三条(污染备份 / 更早的干净备份 /
+第 1 轮又加了写入层那条集合级用例、手动收录两道闸的正反两边、以及备份判据的三条(污染备份 / 更早的干净备份 /
 缺列老备份)。
+
+**第 2 轮新增/改写的**:两位字段那张取值表(`test_fulltext_capability` 的
+`test_both_capability_bits_are_declared_per_source`);人工重抓那道闸的**三类**正反边(`test_grab_store` 的
+`OriginBodyGateTests`:简报拒 / 推文换 / 收件桶换)与端点那三条(`test_grab_endpoint`:拒 / 推文照旧换 / 撞车兜底
+把字段填齐);集合级那条从「带没带闸」改成「带的是哪一道闸」、并多一条「拼出来的 UPDATE 一个都不许有」
+(`test_link_body_entries`);存量复查四条(`test_fulltext_recheck_capability`:公众号不住在这张表里 / 重抓那条路的
+措辞 / 平铺备份也认得出 / 缺 `body` 列的老备份跳过而不抛);界面那一档「大V观点:这颗按钮照旧露面」
+(`grab_probe.mjs` 12c)。
 验收阶段执行 `tests.test_link_body_entries`、`tests.test_grab_store`、`tests.test_grab_endpoint`、
 `tests.test_fulltext_capability`、`tests.test_fulltext_recheck_capability`,并覆盖既有
 `tests.test_markdown_source`(改了 `enrich`)、`tests.test_browser_capture`(改了 `target`)、
