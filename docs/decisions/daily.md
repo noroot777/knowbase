@@ -2951,7 +2951,7 @@ return key in fetch_pending.mine(_pending_folder())
 回执是**导出**那一刻给的,而「哪一次抓到的」是**入库**那一刻的事实,中间隔着几天 —— 所以这个事实
 只能存下来:
 
-- **订阅侧**:`feed_items` 加一列 `fetch_round`(`registry._ADDED_COLUMNS`,只增不减)。`put_items`
+- **订阅侧**:`feed_items` 加一列 `fetch_round`(`kb/feeds/schema.py` 的 `_ADDED_COLUMNS`,只增不减)。`put_items`
   的 `INSERT … ON CONFLICT DO NOTHING` 天然把它钉在**首次发现**那一轮,后面补正文、补译文都不改写。
   存量行是空串 = **说不清**,不是「不是本次」。
 - **公众号侧**:单开一张 `article_fetch_rounds`(`migrations` v19),**不给 `articles` 加列**。

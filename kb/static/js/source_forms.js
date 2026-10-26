@@ -13,6 +13,7 @@ function openSourceEditor(id = null) {
   $('source-edit-fulltext').disabled = !bodyFromLink;
   $('source-edit-fulltext').checked = bodyFromLink && !!s?.fulltext;
   $('source-edit-extract').checked = !!s?.extract;
+  if (typeof youtubeEditor === 'function') youtubeEditor(s, sourceKind);
   $('source-edit-hint').textContent = sourceModules.get(sourceKind).url_hint;
   $('source-edit-error').textContent = '';
   $('source-edit-save').disabled = false;
@@ -32,6 +33,7 @@ async function saveSourceEditor(e) {
     enabled:$('source-edit-enabled').checked,
     fulltext:!!sourceModules.get(kind).body_from_link && $('source-edit-fulltext').checked,
     extract:$('source-edit-extract').checked };
+  if (kind === 'youtube') body.youtube = youtubeChannelPayload();
   try {
     const saved = await pipeJson(`/api/intake/${kind}/sources${sourceEditId ? '/'+sourceEditId : ''}`, {
       method:sourceEditId?'PATCH':'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body),
@@ -85,7 +87,8 @@ function fillSourceSettings(s, sent) {
   // `kb.pipeline._scheduler_tick`),这张表单上只剩 X 的取法那一块 —— 别的来源
   // 打开会看到一个空表单配一颗「保存设置」,点下去提交一个空对象。整张表单
   // 跟着 X 那一块一起藏掉,面板剩下的说明文字照旧显示。
-  $('source-settings-form').hidden = sourceModules.get(sourceKind)?.adapter !== 'social';
+  $('source-settings-form').hidden = !['social', 'youtube'].includes(sourceModules.get(sourceKind)?.adapter);
+  if (typeof fillYouTubeSettings === 'function') fillYouTubeSettings(s, sent);
   // X 那一块(取法、可执行文件路径、登录/导入/检查)整个归 x_channel.js 管。
   fillXChannelFields(s, sent);
   const reread = loadXChannel(sourceKind);
@@ -168,10 +171,11 @@ async function saveSourceSettingsNow() {
   const body = {};
   const social = sourceModules.get(kind).adapter === 'social';
   if (social) Object.assign(body, xChannelPayload(kind));
+  if (kind === 'youtube') body.youtube = youtubeSettingsPayload();
   // **记下发出去的是哪一份草稿。** 回包落地时拿它和此刻的草稿比一下:不一样就
   // 说明用户在这段时间里又改了,那份新草稿不许被这条旧回包重写(审查实测:保存
   // 在途时改回另一档,回包一落地选择就被换回去、动作还接着跑了下去)。
-  const sent = social ? xChanDraft() : undefined;
+  const sent = social ? xChanDraft() : kind === 'youtube' ? JSON.stringify(body.youtube) : undefined;
   try {
     const settings = await pipeJson(`/api/intake/${kind}/settings`, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     if (kind === sourceKind) {

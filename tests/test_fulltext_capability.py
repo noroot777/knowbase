@@ -32,12 +32,24 @@ from tests.test_feed_fulltext import FullTextCase, PAGE, SHELL, page
 REPOSITORY = 'https://github.com/openai/openai-cli'
 
 
+def subscription_url(kind: str, serial: int) -> str:
+    """这一类来源收得下的订阅地址 —— **按来源造局的那几处都过这一个口径**。
+
+    YouTube 的地址要过 `youtube.channels.normalize`,随便一个 example.org 会在
+    「这一类支不支持补抓」之前就被地址校验拦掉 —— 那样枚举式用例问的就不是它
+    想问的那件事了(实测:拒的理由变成「请填写公开的频道主页」)。
+    """
+    if kind == 'youtube':
+        return 'https://www.youtube.com/channel/UC' + f'{serial:022d}'
+    return f'https://{kind}.example.org/feed/{serial}'
+
+
 class CapabilityCase(FullTextCase):
     def legacy_item(self, kind, hold=''):
         self.legacy_serial = getattr(self, 'legacy_serial', 0) + 1
         source = reg.save_subscription(kind, {
             'name': f'{kind} legacy',
-            'url': f'https://{kind}.example.org/feed/{self.legacy_serial}',
+            'url': subscription_url(kind, self.legacy_serial),
             'extract': True,
         })
         url = f'https://example.org/{kind}-article/{self.legacy_serial}'
@@ -188,10 +200,14 @@ class FulltextCapabilityTests(CapabilityCase):
 
         **分叉那一格是这张表的要点**:大V观点进不了补抓队列(通用提取器对 x.com
         无效)、而它的 `url` 就是它本人的永久链接 —— 这一格曾经被当成「两边都不许可」。
+        反过来 YouTube 两位都是 False,而**两个 False 的理由不同**:播放页上提得出
+        文字(所以不是「提不出来」),但那些文字是简介和推荐列表、不是这条条目的转录稿
+        —— 补抓会把转录稿整篇换掉,重抓一次也换不回它自己。
         """
         self.assertEqual(
             {'wechat': (False, True), 'social': (False, True), 'rss': (True, True),
-             'digest': (False, False), 'web': (True, True), 'inbox': (True, True)},
+             'digest': (False, False), 'web': (True, True), 'inbox': (True, True),
+             'youtube': (False, False)},
             {kind: (spec.body_from_link, spec.url_is_origin)
              for kind, spec in SOURCE_TYPES.items()})
         future = SourceType('future', '新来源', '', ('future',))
@@ -231,8 +247,10 @@ class SubscriptionCapabilityTests(CapabilityCase):
                 continue
             with self.subTest(kind=kind):
                 before = len(reg.subscriptions(kind))
+                # 地址得是这一类收得下的那种:不然拒的理由会变成「地址不合法」,
+                # 而这条用例问的是「显式开补抓会不会被拒」。
                 response = self.client.post(f'/api/intake/{kind}/sources', json={
-                    'name': '不允许补抓', 'url': f'https://{kind}.example.org/invalid',
+                    'name': '不允许补抓', 'url': subscription_url(kind, 9000 + before),
                     'fulltext': True,
                 })
                 self.assertEqual(400, response.status_code)

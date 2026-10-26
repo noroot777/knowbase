@@ -104,7 +104,9 @@ class RecheckCapabilityTests(CapabilityCase):
         return recheck._plan(recheck._suspect(**scope), list(backups))
 
     def native(self, kind):
-        return 'post' if kind == 'social' else 'summary'
+        # 这一类来源自己那份正文的 `content_kind`:推文是 post、视频是转录稿
+        # (`youtube.notes` 写 markdown),其余是来源给的摘要。
+        return {'social': 'post', 'youtube': 'markdown'}.get(kind, 'summary')
 
     def forget(self, kind, source, key):
         """连条目一起清掉 —— **删订阅是刻意保留已收录条目的**(`registry`),而射程 ②
@@ -217,6 +219,18 @@ class RecheckCapabilityTests(CapabilityCase):
     def test_a_backup_restores_the_original_body_without_requeueing(self):
         for kind, spec in feed_types().items():
             if spec.body_from_link:
+                continue
+            if kind == 'youtube':
+                # **这一类的正文另有一个管理者**:`youtube.products` 那条链给每份
+                # 成品留了完整性证明,对不上的在下一次首访连接时被换成占位 ——
+                # 所以「把备份原样装回去」在它身上留不住。而真实路径上这一格
+                # **压根不可达**:它原生 `content_kind='markdown'`,进不了射程 ②,
+                # 浏览器补抓对它也是拒的(两位能力都是 False)。所以这里钉住的是
+                # 那个不可达本身,而不是去造一个它永远不会落进的局。
+                with self.subTest(kind=kind, unreachable=True):
+                    source, key = self.legacy_item(kind)
+                    self.assertEqual([], self.plan(kind=kind, source=source['id']))
+                    self.forget(kind, source, key)
                 continue
             with self.subTest(kind=kind):
                 source, key = self.wrong_article(kind)

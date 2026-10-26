@@ -90,6 +90,11 @@ DECLARED: dict[tuple[str, str], tuple[str, ...]] = {
     # 存量复查写回,两支:许可来源换壳回队列(内容下一轮由通用路从 `url` 那一页来)、
     # 不许可来源把备份里**它自己原本那一份**原样装回去。
     ('scripts/feed_fulltext_recheck.py', '_downgrade'): (LINK, OWN),
+    # YouTube 成品写回:内容是它自己那条链的产物(字幕或音频转录),不从 `url` 那一页
+    # 来 —— 播放页上只有简介和推荐列表。**它比 OWN 还更钉一层**:语句里写死了
+    # `kind='youtube'`,而且那一类的正文另有一道完整性证明(`youtube.products`
+    # 的隔离会把任何对不上证明的正文换成占位),所以别人写进去也留不住。
+    ('kb/youtube/products.py', 'replace'): (OWN,),
 }
 
 

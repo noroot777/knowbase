@@ -126,7 +126,7 @@ class ReadWriteTests(EgressApiBase):
         self.assertEqual(DOH, egress.endpoint(), '写盘了但下一次取值没看见')
 
     def test_a_bad_value_is_refused_with_the_box_it_belongs_to(self):
-        """**`detail` 必须还是一句话**:ui.js 的 `apiFail` 只认字符串,给它一个对象的话
+        """**`detail` 必须还是一句话**:前端那个 `apiFail` 只认字符串,给它一个对象的话
         那句话会被静默换成「保存失败」—— 而人这时唯一想知道的就是哪儿填错了。"""
         for payload, field in ((('ftp://x/y', '', ''), 'endpoint'),
                                (('', 'abc', ''), 'seconds'),

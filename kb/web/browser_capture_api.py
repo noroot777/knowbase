@@ -60,7 +60,7 @@ def capture_page():
 def extension_download():
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
-        for name in ('manifest.json', 'popup.html', 'popup.css', 'popup.js', 'extract.js', 'README.md'):
+        for name in ('manifest.json', 'popup.html', 'popup.css', 'popup.js', 'api.js', 'extract.js', 'README.md'):
             bundle.write(ROOT / 'kb/static/browser-extension/knowbase-capture' / name,
                          'knowbase-capture/' + name)
     return Response(archive.getvalue(), media_type='application/zip',
@@ -77,7 +77,7 @@ def pairing(request: Request):
 
 @router.get('/api/browser-capture/target/{key}', dependencies=[Depends(app_access)])
 def capture_target(key: str):
-    return capture.public(invoke(capture.target, key))
+    return invoke(capture.item_state, key)
 
 
 class IntentRequest(BaseModel):
@@ -101,17 +101,33 @@ def cancel_intent(identity: str):
     return invoke(capture.cancel, identity)
 
 
+#: 这颗按钮**只跑这两段**,而且页面、确认框、下面那句回执必须跟这份清单一致。
+#:
+#: `extract`(条目化提取)**不在里面**:它的队列是 `kb.extract.pending_docs`,压根
+#: 没有来源参数,按全库取数 —— 一颗开在某一篇文章页上的按钮不该顺手买下全库那一轮
+#: 模型调用。`export` 这一段认 `crawl_filter`(只有这一类来源,见
+#: `pipeline_stages._run_export`),`index` 是整个 vault 的增量比对、不调模型,这两件
+#: 事页面上都明写着。要提取就到同步中心的起跑弹窗里勾,那边的射程写在脸上
+#: (见 `docs/decisions/sync-entry.md`);这一篇的 `extract_stale=1` 还在,下一轮同步
+#: 自己会把它重新提一遍。
+CONTINUE_STAGES = ('export', 'index')
+
+
 @router.post('/api/browser-capture/intents/{identity}/continue', dependencies=[Depends(app_access)])
 def continue_processing(identity: str):
-    intent = invoke(capture.get, identity)
-    if intent['status'] != 'saved':
-        raise HTTPException(409, '正文尚未补入，不能启动后续处理')
+    intent = invoke(capture.saved, identity)
+    if not intent:
+        raise HTTPException(409, '正文尚未补入，不能启动导出与索引')
     reasons: list[str] = []
-    run = pipeline.start_pipeline(['export', 'index', 'extract'],
+    run = pipeline.start_pipeline(list(CONTINUE_STAGES),
                                   crawl_filter={'channel': intent['kind']}, refused=reasons)
     if not run:
         raise HTTPException(409, reasons[0] if reasons else '管道正忙，正文已保留，请稍后再执行')
-    return {'run': run, 'detail': '已启动该来源后续处理：本篇使用已补正文，其他待办可能补抓、翻译或调用模型；结果以同步中心为准'}
+    # 这一句会原样显示在页面的 `#run-note` 上,所以只说「起了哪两段、钱花在哪」;
+    # 完整的射程说明在页面那块警告里,别在这里再抄一遍。
+    return {'run': run, 'detail': '已启动导出与索引：本篇使用已补正文；同类来源其他待办会一起导出，'
+                                  '可能联网补抓并调用翻译模型；索引会检查全库。'
+                                  '条目化提取不在这一步，等下一轮同步。结果以同步中心为准'}
 
 
 @router.get('/api/browser-capture/pending', dependencies=[Depends(extension_access)])
@@ -119,13 +135,38 @@ def extension_pending():
     return {'intents': capture.pending()}
 
 
+#: 传输上限,**不是判据** —— 「正文够不够」只有 `capture._admit_body` 一份(按行去重的
+#: 400 字门槛 + 20 万字上限)。这里特意留宽一截:卡在同一个数上的话,越界那一下回的
+#: 是 pydantic 的英文校验话,而不是那句能照着做的中文。
+_TRANSPORT_BODY = capture.MAX_BODY * 2
+_METHOD_PATTERN = '^(' + '|'.join(capture.METHODS) + ')$'
+
+
+class PrecheckRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    intent_id: str = Field(min_length=1, max_length=100)
+    page_url: str = Field(min_length=1, max_length=4096)
+    body: str = Field(default='', max_length=_TRANSPORT_BODY)
+    method: str = Field(pattern=_METHOD_PATTERN)
+
+
+@router.post('/api/browser-capture/precheck', dependencies=[Depends(extension_access)])
+def precheck(body: PrecheckRequest):
+    """扩展在**读页之前**和**渲染预览之前**各问一次:这一页、这一份正文写得了吗。
+
+    判据与 `upload` 同一组(`capture._admit_*`),这里只是不落库 —— 扩展自己不许
+    再判网址、长度或条目版本,否则放行口径一分叉,代价就是人白读一整篇。
+    """
+    return invoke(capture.precheck, body.intent_id, body.page_url, body.body, body.method)
+
+
 class UploadRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     intent_id: str = Field(min_length=1, max_length=100)
     page_url: str = Field(min_length=1, max_length=4096)
     title: str = Field(max_length=1000)
-    body: str = Field(min_length=400, max_length=capture.MAX_BODY)
-    method: str = Field(pattern='^(article|selection)$')
+    body: str = Field(min_length=1, max_length=_TRANSPORT_BODY)
+    method: str = Field(pattern=_METHOD_PATTERN)
     confirmed_complete: bool
 
 

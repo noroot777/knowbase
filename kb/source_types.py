@@ -59,6 +59,18 @@ SOURCE_TYPES = {
                          adapter='social'),
     'rss': SourceType('rss', 'RSS', '让值得读的文章，自己来到这里。', ('rss',),
                       body_from_link=True, url_is_origin=True),
+    # YouTube:**两位都不开,但理由不同,正好是这两个问题分开问的意义**。
+    # ①`body_from_link=False`:这一类的正文是视频的转录稿,而 `url` 后面那一页是播放页 ——
+    #   通用提取器从那儿拿到的是简介和推荐列表,补抓一次就把转录稿整篇换掉,**不可逆**
+    #   (见 `docs/decisions/browser-capture.md`)。
+    # ②`url_is_origin=False`:播放页确实是这条内容的出处,但那一页上**没有**它的正文 ——
+    #   「拿这个 `url` 重抓一次」换回来的不是这篇转录稿。所以那颗「重新抓一次」也不该露面。
+    'youtube': SourceType('youtube', 'YouTube', '频道更新先排名，只处理值得读的视频。',
+                         ('youtube',), icon='paper', interval_minutes=1440,
+                         url_hint='输入 YouTube 的 /channel/UC… 或 /@频道名 主页',
+                         note='先按热度和价值排名，再按数量与时长预算处理；优先复用字幕，'
+                              '需要时仅下载音频转录，英文内容翻译为中文。不分析画面。',
+                         adapter='youtube'),
     # 没有 feed 的站点走这条路:解析列表页。独立成一类而不是塞进 rss,是因为
     # 它的失败形态不同 —— 读 feed 坏在对方服务,解析页面还会坏在**对方改版**,
     # 而那需要人去适配。混在一起的话 rss 那条线的状态和定时会被它带着抖。

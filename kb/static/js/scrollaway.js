@@ -147,7 +147,10 @@ function bindScrollAway(scroller, targets, opts = {}) {
   };
   const listen = (target, type, fn) => {
     target.addEventListener(type, fn, { passive: true });
-    state.off.push(() => target.removeEventListener(type, fn));
+    state.off.push(() => {
+      try { target.removeEventListener(type, fn); }
+      catch (error) { if (error.name !== 'SecurityError') throw error; }
+    });
   };
   // 口径②那道门。四类手势都要:滚轮、触摸、键盘(空格 / PageDown / 方向键)、
   // 拖滚动条。认手势而不是认「delta 大不大」—— 程序一次跳 180px,用户快速甩一下

@@ -248,7 +248,7 @@ PROBE_HOST = "mistral.ai"
 
 
 def _bad(e: egress.BadValue) -> JSONResponse:
-    """坏值回 400,**`detail` 保持是一句话**(ui.js 的 `apiFail` 只认字符串,给它一个
+    """坏值回 400,**`detail` 保持是一句话**(前端那个 `apiFail` 只认字符串,给它一个
     对象的话那句话会被静默换成「保存失败」),哪一项错了单独一个 `field` —— 面板按它
     把红字写在对应输入框下面。"""
     return JSONResponse({"detail": str(e), "field": e.field}, status_code=400)

@@ -11,20 +11,14 @@ function renderSourceBody(content, { plain = false } = {}) {
     return;
   }
   body.innerHTML = DOMPurify.sanitize(renderer.parse(content));
-  body.querySelectorAll('a:not([href^="#"])').forEach(link => {
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-  });
+  prepareMarkdownLinks(body);
   body.querySelectorAll('img').forEach(image => {
     image.loading = 'lazy';
     image.referrerPolicy = 'no-referrer';
   });
-  const headings = [...body.querySelectorAll('h1,h2,h3,h4,h5,h6')], anchors = new Map();
+  const headings = [...body.querySelectorAll('h1,h2,h3,h4,h5,h6')];
   headings.forEach((heading, index) => {
-    const slug = heading.textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}_\s-]/gu, '').replace(/\s/g, '-');
-    const count = anchors.get(slug) || 0;
-    anchors.set(slug, count + 1);
-    heading.dataset.readerAnchor = slug + (count ? '-' + count : '');
+    heading.dataset.readerAnchor = heading.dataset.markdownAnchor;
     heading.id = 'source-section-' + index;
   });
   if (headings.length < 3) return;

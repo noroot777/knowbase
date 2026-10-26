@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.source_types import feed_types
 
@@ -20,6 +21,10 @@ THEMES = (
 
 
 def populate():
+    reader_dir = VAULT_ROOT / 'reader-layout'
+    reader_dir.mkdir(parents=True, exist_ok=True)
+    for name in ('first', 'second'):
+        (reader_dir / f'{name}.md').write_text(f'# {name}\n\n阅读器布局夹具。\n', encoding='utf-8')
     published = datetime.now().strftime('%Y-%m-%d %H:%M')
     # **按 `feed_types()` 整批造,不写死一张清单** —— 新增一类来源时这张夹具
     # 自动把它也撑开,否则胶囊栏上会多出一个空视图,而「切到最后一类」那条用例
@@ -30,6 +35,8 @@ def populate():
         # 站点首页 —— 夹具照它的真实形态造,不要塞一个 feed 地址进去。
         url = ('https://example.org/' if not spec.pollable
                else f'https://example.org/{kind}.xml')
+        if kind == 'youtube':
+            url = 'https://www.youtube.com/@layout-fixture'
         source = reg.save_subscription(kind, {
             'name': '长内容布局验证' if spec.pollable else 'example.org', 'url': url})
         items = []
