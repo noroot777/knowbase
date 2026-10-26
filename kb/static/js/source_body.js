@@ -16,12 +16,9 @@ function renderSourceBody(content, { plain = false } = {}) {
     image.loading = 'lazy';
     image.referrerPolicy = 'no-referrer';
   });
-  const headings = [...body.querySelectorAll('h1,h2,h3,h4,h5,h6')], anchors = new Map();
+  const headings = [...body.querySelectorAll('h1,h2,h3,h4,h5,h6')];
   headings.forEach((heading, index) => {
-    const slug = heading.textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}_\s-]/gu, '').replace(/\s/g, '-');
-    const count = anchors.get(slug) || 0;
-    anchors.set(slug, count + 1);
-    heading.dataset.readerAnchor = slug + (count ? '-' + count : '');
+    heading.dataset.readerAnchor = heading.dataset.markdownAnchor;
     heading.id = 'source-section-' + index;
   });
   if (headings.length < 3) return;

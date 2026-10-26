@@ -14,5 +14,5 @@ class MarkdownLinkPolicyTests(unittest.TestCase):
                                timeout=90, env=probe_env())
         self.assertEqual(0, result.returncode, result.stderr[-4000:] + result.stdout[-4000:])
         evidence = json.loads(result.stdout.strip().splitlines()[-1])
-        self.assertGreaterEqual(len(evidence['passed']), 10)
+        self.assertGreaterEqual(len(evidence['passed']), 21)
         self.assertEqual([], evidence['errors'])

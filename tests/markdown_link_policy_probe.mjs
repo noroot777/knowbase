@@ -11,14 +11,15 @@ const check = async (name, expression) => {
   passed.push(name);
 };
 const targets = async () => (await send('Target.getTargets')).result.targetInfos;
-const clickNewTab = async (selector, name) => {
+const clickNewTab = async (selector, name, { invalid = false } = {}) => {
   const before = new Set((await targets()).map(target => target.targetId));
   const expected = await evalJs(`document.querySelector(${JSON.stringify(selector)}).href`);
   assert.ok(await clickAt(selector), name + ': 真实鼠标命中');
   let opened;
   const deadline = Date.now() + 6000;
   while (!opened && Date.now() < deadline) {
-    opened = (await targets()).find(target => !before.has(target.targetId) && target.url === expected);
+    opened = (await targets()).find(target => target.type === 'page' && !before.has(target.targetId)
+      && (invalid || target.url === expected));
     if (!opened) await sleep(100);
   }
   assert.ok(opened, name + ': 新标签到达目标');
@@ -30,17 +31,32 @@ const clickNewTab = async (selector, name) => {
     await send('Target.closeTarget', { targetId: opened.targetId });
   }
 };
+const clickFragment = async (selector, name, targetSelector = null) => {
+  const before = await evalJs(`({ url:location.href, filters:JSON.stringify(gState) })`);
+  const pages = (await targets()).filter(target => target.type === 'page').length;
+  assert.ok(await clickAt(selector), name + ': 真实鼠标命中');
+  await sleep(100);
+  const after = await evalJs(`({ url:location.href, filters:JSON.stringify(gState) })`);
+  assert.deepEqual(after, before, name + ': 页签和筛选不变');
+  assert.equal((await targets()).filter(target => target.type === 'page').length, pages);
+  if (targetSelector) await check(name, `document.activeElement.matches(${JSON.stringify(targetSelector)})`);
+  else passed.push(name);
+};
 
 try {
   await send('Page.enable');
   await send('Runtime.enable');
   await send('Page.navigate', { url: base + '/#ask' });
   assert.ok(await until(`typeof renderMsg === 'function' && typeof renderToolEntries === 'function'
-    && typeof renderSourceBody === 'function' && typeof DOMPurify !== 'undefined'`));
+    && typeof renderSourceBody === 'function' && typeof DOMPurify !== 'undefined'
+    && typeof workspaceLocated !== 'undefined' && workspaceLocated`));
   await evalJs(`(() => {
     window.policyOriginalUrl = location.href;
     window.policyMemory = '问题、回答和筛选仍在';
-    window.policyMarkdown = '[打开目标](/static/favicon.svg?markdown-link-policy)';
+    gState.q = 'agent'; gState.kind = 'project';
+    window.policyMarkdown = '[打开目标](/static/favicon.svg?markdown-link-policy)\\n\\n'
+      + '## 方法细节\\n\\n[页内](#方法细节) [同地址](' + location.origin + '/#方法细节) '
+      + '[无落点](#missing) [编码错误](#%E0%A4%A)';
     const host = document.createElement('section');
     host.id = 'policy-cases';
     host.style.cssText = 'position:fixed;inset:0;z-index:99999;background:var(--bg);padding:30px;overflow:auto';
@@ -69,6 +85,22 @@ try {
     ['policy-stream', '问答增量重绘保留知识库'],
     ['policy-entry', '工具条目正文保留知识库'],
   ]) await clickNewTab('#' + id + ' a', name);
+  for (const id of ['policy-answer', 'policy-restored', 'policy-stream', 'policy-entry']) {
+    await clickFragment('#' + id + ' a[href^="#"]', id + ': 片段只定位当前正文', '#' + id + ' h2');
+  }
+  await clickFragment('#policy-answer a[href^="http"]', '同地址片段不改工作台 hash', '#policy-answer h2');
+  await clickFragment('#policy-answer a[href="#missing"]', '没有落点时安全停留');
+  await clickFragment('#policy-answer a[href="#%E0%A4%A"]', '片段解码失败时安全停留');
+  await evalJs(`(() => {
+    const host = document.createElement('div');
+    host.id = 'policy-invalid';
+    host.innerHTML = renderMsg({ role:'assistant', content:'<a href="http://[">坏地址</a>' });
+    $('policy-cases').append(host);
+  })()`);
+  await clickNewTab('#policy-invalid a', '坏地址也不能导航走知识库', { invalid:true });
+  await evalJs(`renderDailyReportBody({ date:'fixture', body:policyMarkdown });
+    $('policy-cases').append($('daily-reader-body'));`);
+  await clickFragment('#daily-reader-body a[href^="#"]', '日报片段不改工作台 hash', '#daily-reader-body h2');
 
   await check('HTTP(S)、相对路径和协议相对路径共享打开策略', `(() => {
     const host = document.createElement('div');
@@ -142,6 +174,7 @@ try {
   })()`);
   await evalJs(`$('policy-cases').append($('td-chat-msgs'))`);
   await clickNewTab('#td-pending-body a', '工具增量重绘保留知识库');
+  await clickFragment('#td-pending-body a[href^="#"]', '图鉴流式片段在完成前安全定位', '#td-pending-body h2');
   await evalJs(`policyFinishStream(); policyToolRun.finally(() => { window.fetch = policyFetch; })`);
   assert.deepEqual(pageErrors, [], '没有页面 JavaScript 异常');
   console.log(JSON.stringify({ passed, errors:pageErrors }));

@@ -80,14 +80,28 @@ const safeUrl = u => /^(https?:|obsidian:|\/|#)/i.test(String(u || '')) ? String
 // 否则"回答变纯文本"这种静默降级根本查不出是脚本没加载。
 let _mdWarned = false;
 function prepareMarkdownLinks(root) {
+  const anchors = new Map();
+  for (const heading of root.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
+    const slug = heading.textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}_\s-]/gu, '').replace(/\s/g, '-');
+    const count = anchors.get(slug) || 0;
+    anchors.set(slug, count + 1);
+    heading.dataset.markdownAnchor = slug + (count ? '-' + count : '');
+  }
   for (const link of root.querySelectorAll('a[href]')) {
     const href = link.getAttribute('href').trim();
-    if (href.startsWith('#')) continue;
-    let destination;
-    try { destination = new URL(href, document.baseURI); } catch { continue; }
-    if (!/^https?:$/.test(destination.protocol)) continue;
-    if (destination.hash && destination.origin === location.origin
-        && destination.pathname === location.pathname && destination.search === location.search) continue;
+    delete link.dataset.markdownFragment;
+    let destination = null;
+    try { destination = new URL(href, document.baseURI); } catch {}
+    const sameDocument = destination && destination.origin === location.origin
+      && destination.pathname === location.pathname && destination.search === location.search;
+    const fragment = href.startsWith('#') ? href.slice(1)
+      : sameDocument && href.includes('#') ? destination.hash.slice(1) : null;
+    if (fragment !== null) {
+      link.dataset.markdownFragment = fragment;
+      link.removeAttribute('target');
+      continue;
+    }
+    if (destination && !/^https?:$/.test(destination.protocol)) continue;
     link.setAttribute('target', '_blank');
     const rel = new Set((link.getAttribute('rel') || '').split(/\s+/).filter(Boolean));
     rel.add('noopener');
@@ -95,6 +109,24 @@ function prepareMarkdownLinks(root) {
     link.setAttribute('rel', [...rel].join(' '));
   }
 }
+
+document.addEventListener('click', event => {
+  const link = event.target.closest('a[data-markdown-fragment]');
+  if (!link || event.defaultPrevented) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const root = link.closest('.md, .reader-prose, [data-snip-ref], #daily-reader-body');
+  if (!root) return;
+  let fragment;
+  try { fragment = decodeURIComponent(link.dataset.markdownFragment); } catch { return; }
+  if (!fragment) return;
+  const target = [...root.querySelectorAll('[data-markdown-anchor], [id], a[name]')].find(node =>
+    node.id === fragment || node.getAttribute('name') === fragment || node.dataset.markdownAnchor === fragment);
+  if (!target) return;
+  target.scrollIntoView({ block:'start', behavior:'instant' });
+  target.tabIndex = -1;
+  target.focus({ preventScroll:true });
+});
 
 function mdHtml(src, linkContext = null) {
   const md = String(src || '');

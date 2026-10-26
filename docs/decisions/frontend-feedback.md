@@ -7,10 +7,12 @@
 ## 硬约束(原 CLAUDE.md「前端反馈(问答面板布局与探针那几条)」)
 
 - **主文档 Markdown 链接的打开位置只由 `core.js` 的 `prepareMarkdownLinks` 判定。**
-  `mdHtml` 在 DOMPurify 净化后、返回 HTML 前统一处理，问答完整回答、进行中回答与恢复气泡、
+  `mdHtml` 在 DOMPurify 净化后、返回 HTML 前统一准备，消费侧由一次性的共享点击委托接住片段，问答完整回答、进行中回答与恢复气泡、
   图鉴条目正文和图鉴流式回答不再各补一次。日报补出的出处链接、订阅的字面 HTML 渲染也复用它。
-  HTTP(S) 目标（包括同源、相对路径、协议相对路径）新标签打开，保留已有 `rel` 并补
-  `noopener noreferrer`，不能让整个知识库页面导航走。纯片段和同地址带片段的链接保留页内跳转；
+  HTTP(S) 目标（包括同源、相对路径、协议相对路径）以及无法解析的地址都新标签打开，保留已有 `rel` 并补
+  `noopener noreferrer`，不能让整个知识库页面导航走。纯片段和同地址带片段的链接必须由共享点击委托
+  `preventDefault` 后在最近的正文容器中定位，不能交给浏览器改写工作台 hash；无落点、空片段或非法编码只取消跳转。
+  标题以容器内的 `data-markdown-anchor` 定位，不生成跨消息冲突的全局 id；订阅目录复用同一标题 slug。
   邮件、电话、Obsidian 等非 HTTP(S) 链接不改写，仍由原净化器决定哪些协议可用，不放宽协议白名单。
   问答自己的 `docA` 引用与 Obsidian 入口在净化之后生成，不受正文策略影响。不得修改 href 或原 Markdown，
   日报链接定义上下文、实体解码、复制和片段坐标保持原契约；解析器或净化器缺失时仍只显示纯文本。
@@ -299,6 +301,25 @@
 只进行了定向实点、JS 语法、Python AST 和 diff 检查，未执行任何回归测试。
 `tests/test_markdown_link_policy.py` 与 `tests/markdown_link_policy_probe.mjs` 留给统一验收运行，
 覆盖正文入口、实际新页面、链接定义上下文、净化和安全降级；不把静态检查或定向实点记为回归通过。
+
+#### 片段和坏地址的失败关闭
+
+仅在渲染期给 HTTP(S) 链接加新标签还不够：片段会被浏览器交给工作台的 `hashchange`，
+解析失败的 HTTP 地址则可能把主页面替换成 `about:blank#blocked`。
+现在正文链接先分类：片段带私有标记，由共享点击委托取消默认动作、仅在最近正文容器里定位；
+标题使用容器内的 slug 元数据，不依赖全局 id。无法解析的目标仍保留原 href，但也强制新标签，
+不把「判不准」当成放行顶层导航。订阅的目录 slug 直接读取同一份标题元数据。
+
+使用生产模板的本地隔离服务定向实点了问答完整与流式正文、图鉴条目与挂起流式回答、日报正文，
+纯片段和同地址片段均把焦点送到正文标题，页签、地址、图鉴关键词 `agent`、类型 `project` 与未发送草稿不变。
+无落点、非法百分号编码的片段只取消导航。点击 `http://[` 后，新 target 为 `about:blank#blocked`，
+知识库仍停在原问答页。订阅的重复标题保留原来的 `source-section-*` id 与带序号 slug，页面没有 JS 异常。
+观测记录在 `output/playwright/markdown-links-boundary-observation.json`，截图为同目录
+`markdown-links-fragment-retained.png`、`markdown-links-invalid-retained.png`。
+
+本次同样先尝试具名分组后台扩展标签，得到 `Capability is not available: visibility` 后才使用
+独立无头浏览器与临时 profile；未连接用户 Chrome 或使用登录态。服务、浏览器与 profile 已清理。
+JS 语法、Python AST、diff 检查通过；只补充验收探针，未运行回归测试，不宣称新增回归已通过。
 
 - **问答的模型下拉收在输入框里,不许再单起一行。** `.chat-inputbar` 整体就是那个框
   (边和圆角画在它身上),文本域占满上面一行、自己不再描边,下拉贴框内左下角、发送在
