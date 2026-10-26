@@ -1,0 +1,26 @@
+:root { color-scheme:light; color:#14202b; background:#f3f5f4; font:13px/1.7 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif; }
+* { box-sizing:border-box; }
+body { width:450px; margin:0; }
+header { display:flex; justify-content:space-between; align-items:baseline; padding:16px 20px; border-bottom:1px solid #dce3e0; }
+header strong { color:#17604f; font-size:19px; }
+header span,.hint { color:#67766f; font-size:11px; }
+main { padding:18px 20px; }
+h1 { font:600 25px/1.4 "Songti SC",serif; margin:0 0 12px; }
+h2 { font-size:13px; } h3 { font-size:15px; margin-bottom:6px; }
+section { border-top:1px solid #dce3e0; margin-top:18px; padding-top:14px; }
+label { display:block; margin:10px 0 5px; font-size:12px; }
+input,select,textarea { width:100%; background:white; color:#14202b; border:1px solid #dce3e0; border-radius:5px; padding:8px; font:inherit; font-size:12px; line-height:1.6; }
+textarea { height:200px; resize:vertical; }
+.actions { display:flex; flex-wrap:wrap; gap:8px; }
+button { background:#17604f; border:1px solid #17604f; color:white; padding:8px 12px; border-radius:5px; cursor:pointer; font:inherit; font-size:12px; line-height:1.5; }
+.secondary { color:#17604f; background:white; border-color:#dce3e0; }
+button:disabled { opacity:.45; cursor:not-allowed; }
+button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible { outline:2px solid #17604f; outline-offset:2px; }
+summary { color:#17604f; cursor:pointer; }
+.url { overflow-wrap:anywhere; font-size:11px; color:#67766f; }
+.check { display:flex; gap:8px; align-items:flex-start; }
+.check input { width:auto; margin:5px 0 0; }
+#status { color:#17604f; min-height:22px; }
+#status.error { color:#b3402f; }
+#connect { margin-top:10px; }
+[hidden] { display:none !important; }

@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Knowbase · 采集此页</title><link rel="stylesheet" href="popup.css"><script defer src="popup.js"></script></head>
+<body>
+  <header><strong>k· Knowbase</strong><span>由你选择，只读此页</span></header>
+  <main>
+    <h1>把这篇正文补回去。</h1><p id="status" role="status" aria-live="polite">正在连接本机知识库…</p>
+    <details id="connection"><summary>连接本机知识库</summary>
+      <label for="server">服务地址</label><input id="server" type="url" value="http://127.0.0.1:8787" autocomplete="off">
+      <label for="key">配对密钥</label><input id="key" type="password" autocomplete="off" placeholder="从知识库补抓页复制，只需配置一次">
+      <button id="connect" class="secondary">保存并连接</button>
+      <p class="hint">只允许本机 127.0.0.1 / localhost。密钥不放进网址，不发送给文章网站。</p>
+    </details>
+    <section>
+      <label for="intent">补回哪个待办</label><select id="intent" disabled><option value="">请先在知识库发起采集请求</option></select>
+      <p id="expected" class="url"></p>
+      <div class="actions"><button id="read" disabled>读取此页</button><button id="selection" class="secondary" disabled>读取所选文字</button><button id="refresh" class="secondary">刷新待办</button></div>
+    </section>
+    <section id="preview" hidden>
+      <h2>核对后才会写入</h2><h3 id="page-title"></h3><p id="page-url" class="url"></p><p id="count" class="hint"></p>
+      <textarea id="body" readonly aria-label="采集正文预览"></textarea>
+      <label class="check"><input id="complete" type="checkbox">我已核对：这是目标文章的完整正文，不是登录提示、摘要或选段。</label>
+      <button id="save" disabled>使用此正文</button>
+    </section>
+    <p class="hint">不会刷新、滚动、跳转或关闭原标签。自动识别不准时，请先在文章里选好全文，再读取所选文字。不会上传 Cookie、密码、表单或整页 HTML。</p>
+  </main>
+</body>
+</html>
