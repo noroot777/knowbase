@@ -79,6 +79,23 @@ const safeUrl = u => /^(https?:|obsidian:|\/|#)/i.test(String(u || '')) ? String
 // 两个库都随包在 /static/vendor/,正常不会走到兜底;真走到了在 console 留一句,
 // 否则"回答变纯文本"这种静默降级根本查不出是脚本没加载。
 let _mdWarned = false;
+function prepareMarkdownLinks(root) {
+  for (const link of root.querySelectorAll('a[href]')) {
+    const href = link.getAttribute('href').trim();
+    if (href.startsWith('#')) continue;
+    let destination;
+    try { destination = new URL(href, document.baseURI); } catch { continue; }
+    if (!/^https?:$/.test(destination.protocol)) continue;
+    if (destination.hash && destination.origin === location.origin
+        && destination.pathname === location.pathname && destination.search === location.search) continue;
+    link.setAttribute('target', '_blank');
+    const rel = new Set((link.getAttribute('rel') || '').split(/\s+/).filter(Boolean));
+    rel.add('noopener');
+    rel.add('noreferrer');
+    link.setAttribute('rel', [...rel].join(' '));
+  }
+}
+
 function mdHtml(src, linkContext = null) {
   const md = String(src || '');
   if (!window.DOMPurify || !window.marked) {
@@ -89,13 +106,17 @@ function mdHtml(src, linkContext = null) {
     }
     return `<div style="white-space:pre-wrap">${esc(md)}</div>`;
   }
+  let html;
   if (linkContext !== null) {
     const links = marked.lexer(String(linkContext)).links;
     const lexer = new marked.Lexer();
     lexer.tokens.links = links;
-    return DOMPurify.sanitize(marked.parser(lexer.lex(md)));
-  }
-  return DOMPurify.sanitize(marked.parse(md));
+    html = marked.parser(lexer.lex(md));
+  } else html = marked.parse(md);
+  const body = document.createElement('div');
+  body.append(DOMPurify.sanitize(html, { RETURN_DOM_FRAGMENT: true }));
+  prepareMarkdownLinks(body);
+  return body.innerHTML;
 }
 // 页内阅读链接:点击滑出面板,href 保留 /doc 路径,中键/Cmd 点仍可新标签打开
 // hash 传 #kbq=…(片段定位锚点),doc 页加载后据此高亮滚动

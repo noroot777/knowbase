@@ -11,10 +11,7 @@ function renderSourceBody(content, { plain = false } = {}) {
     return;
   }
   body.innerHTML = DOMPurify.sanitize(renderer.parse(content));
-  body.querySelectorAll('a:not([href^="#"])').forEach(link => {
-    link.target = '_blank';
-    link.rel = 'noopener noreferrer';
-  });
+  prepareMarkdownLinks(body);
   body.querySelectorAll('img').forEach(image => {
     image.loading = 'lazy';
     image.referrerPolicy = 'no-referrer';
