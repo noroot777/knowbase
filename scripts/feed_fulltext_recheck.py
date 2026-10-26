@@ -227,7 +227,10 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
         join = ' JOIN subscription_items si ON si.item_key=fi.key'
         where.append('si.subscription_id=?')
         args.append(source)
+    # `fulltext_hold` 取回来是给**汇报**用的:许可支会把它清掉(见 `_downgrade`),
+    # 而「这一条原本挂在等人看一眼上」是人该知道的一件事 —— 那个待办被这一轮覆盖了。
     sql = (f'SELECT DISTINCT fi.key,fi.kind,fi.title,fi.url,fi.body,fi.path,fi.content_kind,'
+           f'fi.fulltext_hold,'
            f"fi.exported_hash<>'' AS shipped FROM feed_items fi{join}"
            f' WHERE {" AND ".join(where)}')
     with reg.db() as c:
@@ -436,6 +439,10 @@ def cmd_scan(args) -> int:
         print('\n补抓写进来的,不是文章正文（换成壳、放回补抓队列、译文一并作废）:')
         _lines(refill)
         print(f'  {restored} 条从备份里恢复原始内容，{len(refill) - restored} 条按标题与链接重建。')
+        if held := sum(1 for r in refill if r.get('fulltext_hold')):
+            print(f'  其中 {held} 条现在挂在「等你看一眼」上。那半句话问的是上一次抓回来的'
+                  '那一页，而那份内容正是这一轮要换掉的 —— 所以挂起会一并清掉、重新排队，'
+                  '不是留在那儿等你看一份已经没有了的内容。')
         print(f'  下一轮同步重抓一次:拿到真正文就补上;仍然拿不到 → 试满'
               f' {fulltext.MAX_TRIES} 次之后按壳入库（和没开过补抓的条目一样）。')
     if restore:
@@ -458,12 +465,34 @@ def _downgrade(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
     """把计划里的每一条写回去。返回 `(真改了的, 这期间变过的, 收拾不了的)`。
 
     **动作按来源能力分两支,这才是 `permits_link_body` 在这个脚本里的落点**:
-    - **许可来源**(rss / web / inbox):换成壳、清掉补抓那三个标记**放回队列**、
+    - **许可来源**(rss / web / inbox):换成壳、清掉补抓那**四**个标记**放回队列**、
       译文作废。写入时再核一次 `fulltext._eligible()` —— 计划生成后关掉最后一条
       补抓归属或删掉订阅,不得把已无机会补回的正文换成壳。
+
+      **`fulltext_hold` 是那四个里最容易漏的一个,漏了「放回队列」这句话就是假的。**
+      真队列的判据是 `fulltext.queued_sql()`:资格 + `fulltext_at=''` +
+      **`fulltext_hold=''`** + 额度没满。只清前三个的后果实测过:一条原本挂在
+      「等你看一眼」上的 rss 条目,跑完 `run --yes` 拿到的是「放回补抓队列、译文一并
+      作废」加退出码 0,而 `fetch_pending` **一次都不叫取文供应器**(`done=0 left=0`)。
+      正文已经换成壳、译文已经作废,而它**一轮同步都不会被碰到**,人还以为不用管了。
+      **翻译那头跟着一起堵死,但别把它当成另一条缺陷**:跑完这一下它不在翻译队列里本来
+      就是对的(`unsettled_sql` 的右半边此刻恒真 —— `fulltext_tries` 刚被归零),正文
+      马上要整条换掉,现在译就是同一条内容买两次模型调用;要害是**补抓那头进不去**,
+      于是它永远走不到「正文定下来」那一步,两头都没有出口。
+      **为什么是清掉而不是「保留人工判断、不计入已排队」**:hold 那半句话问的是
+      **上一次抓回来的那一页**看不出是不是正文,而那份内容正是这一轮要换掉的东西 ——
+      待办指向的对象已经不在库里了。留着它等于把一条已经清成壳、译文也作废的行固化
+      在「等人看一份已经没了的内容」上,那正是 `unsettled_sql` 那段说明里讲的「答不出
+      任何出口的夹缝」。清掉之后口径和另外三个写入方一致(`fulltext._save`、
+      `browser_capture.save`、`fulltext.release`,它们都清这一列)—— **这个脚本曾是
+      唯一一处清了额度和错误却留着挂起的写入点**。人工那个决定被覆盖了是事实,所以
+      两条命令的汇报里都把「其中几条原本在等你看一眼」说出来(元规则:如实交出)。
     - **不许可来源**(简报 / 大V):**只把备份里那份原文装回去**,`fulltext_at` /
-      `fulltext_error` / `fulltext_tries` 一个都不碰 —— 它压根不该进补抓队列,清
-      掉标记只会让它看起来「在等全文」而永远没人来抓。这一支不带 `_eligible()`:
+      `fulltext_error` / `fulltext_tries` / `fulltext_hold` 一个都不碰 —— 它压根不该
+      进补抓队列,清掉标记只会让它看起来「在等全文」而永远没人来抓。**上面那条清
+      `fulltext_hold` 的理由到这一支就不成立**:它的 `_eligible()` 恒假,整条
+      `unsettled_sql` 为假,hold 在这边既不挡补抓也不挡翻译(原摘要照旧翻译),
+      清掉只是把一条真待办白抹掉。这一支不带 `_eligible()`:
       那个判据对它恒假,带上就是 0 行。它的 CAS 是 `body=?` 加 `content_kind=?`
       (扫到那一刻的形态),同样待在 UPDATE 自己的 WHERE 里。
 
@@ -522,7 +551,8 @@ def _downgrade(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
             if row['requeue']:
                 cur = c.execute(
                     f"""UPDATE feed_items SET body=?,content_kind='summary',content_hash=?,lang=?,
-                       fulltext_at='',fulltext_error='',fulltext_tries=0,extract_stale=1,
+                       fulltext_at='',fulltext_error='',fulltext_hold='',fulltext_tries=0,
+                       extract_stale=1,
                        title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
                        WHERE key=? AND body=? AND {fulltext._eligible()}""",
                     (shell, digest, lang, key, body))
@@ -552,6 +582,9 @@ def cmd_run(args) -> int:
     if queued:
         print(f'  {len(queued)} 条正文换成壳（{restored} 条取自备份，'
               f'{len(queued) - restored} 条按标题与链接重建）、放回补抓队列、译文一并作废。')
+        if held := sum(1 for r in queued if r.get('fulltext_hold')):
+            print(f'  其中 {held} 条原本挂在「等你看一眼」上，挂起一并清掉了 —— '
+                  '那半句话问的是被这一轮换掉的那份正文，留着它这一条就既不重抓也不重译。')
     if restored_rows:
         print(f'  {len(restored_rows)} 条从备份装回了原文、译文一并作废;'
               '这一类来源不走补抓,补抓标记一个都没动、也没放回队列。')

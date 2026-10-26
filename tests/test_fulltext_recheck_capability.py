@@ -12,14 +12,18 @@
 **两条红各钉一边**:许可来源那边照旧换壳、放回队列(`..._return_to_a_real_refill_
 queue`);许可来源上一篇正常的补抓成品不许被这一轮新射程选中(`..._is_left_alone`)。
 """
+import io
 import os
 import sqlite3
+from contextlib import redirect_stdout
 from dataclasses import replace
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from kb.feeds import fulltext, readable, registry as reg
+from kb.feeds import fulltext, readable, registry as reg, translate_scope
 from kb.source_types import SOURCE_TYPES, feed_types
 from scripts import feed_fulltext_recheck as recheck
+from tests.test_feed_fulltext import PAGE, page
 from tests.test_fulltext_capability import CapabilityCase
 from tests.test_fulltext_failures import LEGAL_TEXT
 
@@ -49,6 +53,27 @@ class RecheckCapabilityTests(CapabilityCase):
                 (body, fulltext.body_hash(body), key),
             )
         return source, key
+
+    def held_article(self, kind, body=LEGAL_TEXT, hold='取回页面证据不足'):
+        """一条**挂在「等你看一眼」上**、正文又是补抓写进来的条目。
+
+        形态照审查那次复现:`content_kind='summary'`、`fulltext_at=''`、正文是版权
+        样板(文字那道判据选得中)、`fulltext_hold` 非空。这是真实可达的状态 ——
+        `fulltext._fail(..., hold=...)` 判出「我没能判断这一页是不是正文」时就落这儿,
+        而它**不扣重试额度**,所以 `fulltext_tries` 照旧是 0。
+        """
+        source, key = self.legacy_item(kind, hold=hold)
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET body=? WHERE key=?', (body, key))
+        return source, key
+
+    def run_cmd(self, kind=None, source=None, backup=None):
+        """跑一次真的 `run --yes`,返回 `(退出码, 它打出来的那几行)`。"""
+        args = SimpleNamespace(kind=kind, source=source, backup=backup, yes=True)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            code = recheck.cmd_run(args)
+        return code, out.getvalue()
 
     def backup(self, key, body=ORIGINAL, content_kind='summary', tag=''):
         """一份只够 `_from_backup` 读的备份库。返回它的路径列表。
@@ -300,6 +325,96 @@ class RecheckCapabilityTests(CapabilityCase):
         self.assertEqual(planned, cut)
         self.assertEqual(([], []), (moved, stuck))
         self.assertTrue(self.matches(key, fulltext.queued_sql))
+
+    def test_a_requeued_row_really_lands_in_the_refill_queue(self):
+        """**「放回补抓队列」这句话必须当场为真** —— 判据是真队列那条 SQL,不是标志位。
+
+        许可来源那一支清掉的是补抓那**四**个标记。只清前三个(成功时间、错误、额度)、
+        留着 `fulltext_hold` 的后果审查实测过:`run --yes` 打出「放回补抓队列、译文一并
+        作废」加退出码 0,而那一条**既不在补抓队列里**(`queued_sql` 第三道就是
+        `fulltext_hold=''`,取文供应器一次都不会被叫到)、**也不在翻译队列里**
+        (`unsettled_sql` 的右半边只看 hold,对它恒真)—— 正文已经换成壳、译文已经作废,
+        人却以为不用再管。
+
+        所以这里断的是**后果,而且一直断到底**:挂起那一列空了、它在真队列里数得到、
+        **下一轮同步真的会去抓它**(审查那次复现里取文一次都没发生)、抓到正文之后才
+        进翻译队列。
+
+        **「跑完这一下它还不在翻译队列里」是对的,不是缺陷**:它此刻手里是壳,正文马上
+        要被整条换掉,现在译就是同一条内容买两次模型调用(`unsettled_sql` 那段说明)。
+        夹缝在于**漏清 hold 时它连补抓队列都进不去**,于是永远走不到「正文定下来」那一步
+        —— 两头都不通,而且没有任何一轮同步会改变它。
+        """
+        source, key = self.held_article('rss')
+        self.assertTrue(self.matches(key, fulltext.unsettled_sql))   # 挂起态:还没定下来
+        self.assertFalse(self.matches(key, fulltext.queued_sql))     # 所以这会儿不排队
+        code, out = self.run_cmd(kind='rss', source=source['id'])
+        self.assertEqual(0, code, out)
+        self.assertIn('放回补抓队列', out)
+        self.assertEqual('', self.row(key)['fulltext_hold'])
+        self.assertTrue(self.matches(key, fulltext.queued_sql), out)
+        self.assertEqual(1, fulltext.pending('rss'))
+        with patch.object(fulltext, 'request', Mock(return_value=page(PAGE))) as got:
+            self.assertEqual(1, fulltext.fetch_pending('rss')['done'])
+        got.assert_called()
+        self.assertIn('runtime schedules tools', self.row(key)['body'])
+        self.assertTrue(self.matches(key, translate_scope.queued_sql))
+
+    def test_the_run_says_which_rows_had_been_waiting_for_a_person(self):
+        """**那个人工待办被这一轮覆盖了,就得说出来。**
+
+        hold 那半句话问的是上一次抓回来的那一页 —— 而那份内容正是这一轮换掉的东西。
+        清它是把状态转换做完整,不是替人做决定;但人需要知道自己挂起的那几条被动过。
+        反过来钉一边:没有挂起的那一轮不许多出这句话。
+        """
+        source, _ = self.held_article('rss')
+        _, out = self.run_cmd(kind='rss', source=source['id'])
+        self.assertIn('原本挂在「等你看一眼」上', out)
+        # 同样是「正文被补抓写坏了」的一条,只是没挂起过。
+        other, key2 = self.held_article('rss', hold='')
+        _, clean = self.run_cmd(kind='rss', source=other['id'])
+        self.assertIn('放回补抓队列', clean)
+        self.assertNotIn('原本挂在', clean)
+        self.assertTrue(self.matches(key2, fulltext.queued_sql), clean)
+
+    def test_a_requeue_from_a_backup_clears_the_hold_too(self):
+        """有干净备份的那一档走的是同一条 UPDATE,所以挂起同样要清掉。
+
+        报告点名要覆盖「已有 hold + 有备份 / 无备份」两档:壳从哪来(备份 / 标题与
+        链接重建)决定的是写什么内容,不决定状态转换 —— 两档共用许可支那一条语句,
+        漏清挂起会一起漏。
+        """
+        source, key = self.held_article('rss')
+        backups = self.backup(key, body=ORIGINAL)
+        code, out = self.run_cmd(kind='rss', source=source['id'], backup=str(backups[0]))
+        self.assertEqual(0, code, out)
+        self.assertIn('取自备份', out)
+        self.assertEqual(ORIGINAL, self.row(key)['body'])
+        self.assertEqual('', self.row(key)['fulltext_hold'])
+        self.assertTrue(self.matches(key, fulltext.queued_sql), out)
+
+    def test_a_disallowed_source_keeps_its_hold_and_still_gets_translated(self):
+        """**反过来钉一边:不许可来源那一支一个补抓标记都不许动,包括挂起。**
+
+        它不承诺排队(压根不该进补抓队列),所以清掉标记只会让它看起来「在等全文」而
+        永远没人来抓。而它的译文照旧补得回来 —— `_eligible()` 对这一类恒假,于是
+        `unsettled_sql` 整条为假、hold 挡不住翻译(那道资格排在并集外面,口径见
+        `fulltext.unsettled_sql`)。所以这一支的 hold 留着不构成上面那条的夹缝。
+        """
+        source, key = self.held_article('digest', hold='取回页面证据不足')
+        with reg.db() as conn:
+            conn.execute("UPDATE feed_items SET content_kind='content' WHERE key=?", (key,))
+        backups = self.backup(key, body=ORIGINAL)
+        code, out = self.run_cmd(kind='digest', source=source['id'],
+                                 backup=str(backups[0]))
+        self.assertEqual(0, code, out)
+        self.assertIn('从备份装回了原文', out)
+        self.assertNotIn('放回补抓队列', out)
+        self.assertNotIn('原本挂在', out)
+        after = self.row(key)
+        self.assertEqual((ORIGINAL, '取回页面证据不足'), (after['body'], after['fulltext_hold']))
+        self.assertFalse(self.matches(key, fulltext.unsettled_sql))
+        self.assertTrue(self.matches(key, translate_scope.queued_sql), out)
 
     def test_naming_a_disallowed_source_explains_an_empty_result(self):
         """点名了不走补抓的来源却一条都没选中时,把「为什么」说出来。"""
