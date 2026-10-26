@@ -47,7 +47,7 @@ function rig() {
   document.body = element('body');
   document.documentElement = { dataset: {} };
   const links = [];
-  const frameDoc = { ...target(), URL: 'https://kb.local/doc/article.md', title: 'Article',
+  let frameDoc = { ...target(), URL: 'https://kb.local/doc/article.md', title: 'Article',
     documentElement: { contains: () => false, dataset: { readerPath: 'article.md' } },
     querySelector: () => null, querySelectorAll: () => links };
   let foreign = false;
@@ -55,7 +55,10 @@ function rig() {
   const frameWindow = { ...target() };
   const remove = frameWindow.removeEventListener;
   for (const [name, value] of Object.entries({ scrollY: 0, document: frameDoc, removeEventListener: remove }))
-    Object.defineProperty(frameWindow, name, { get() { if (foreign) throw securityError; return value; } });
+    Object.defineProperty(frameWindow, name, { get() {
+      if (foreign) throw securityError;
+      return name === 'document' ? frameDoc : value;
+    } });
   const frame = element('reader-frame');
   let frameHidden = false;
   Object.defineProperty(frame, 'hidden', { get: () => frameHidden, set(value) {
@@ -81,12 +84,18 @@ function rig() {
     const handler = [...window.listeners].find(([, type]) => type === 'message')?.[0];
     handler?.({ source: frameWindow, origin: 'https://kb.local', data, ...overrides });
   };
-  return { element, document, window, frameDoc, links, popups, message,
+  return { element, document, window, get frameDoc() { return frameDoc; }, links, popups, message,
     advance: milliseconds => { now += milliseconds; },
     renderDocument(url) {
       foreign = false;
       frameDoc.URL = url;
       frameDoc.documentElement.dataset.readerPath = new URL(url).pathname.slice(5);
+    },
+    commitDocument(url) {
+      foreign = false;
+      frameDoc = { ...frameDoc, ...target(), URL: url,
+        documentElement: { contains: () => false, dataset: {} } };
+      vm.runInContext('readerGuardStop?.(); watchReaderDocument(readerLoadGeneration)', state);
     },
     run: code => vm.runInContext(code, state),
     open(path) {
@@ -193,7 +202,7 @@ test('a non-reader destination restores the verified article and retains the act
   assert.equal(app.element('reader-destination').style.display, '');
   assert.equal(app.popups.length, 0);
   assert.equal(app.document.activeElement, app.element('reader-close'));
-  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-error').hidden, false);
   app.message({ type: 'reader-navigation', navigationId, documentUrl: app.frameDoc.URL,
     destination: 'https://stale.test/' });
   assert.equal(app.run('readerPendingDestination'), null);
@@ -317,20 +326,20 @@ test('opening another article clears the error state before its load event', () 
   app.run('setReaderUnavailable(true)');
   app.open('/doc/slow.md');
   assert.equal(app.element('reader-frame').src, '/doc/slow.md');
-  assert.equal(app.element('reader-frame').hidden, false);
-  assert.equal(app.element('reader-frame').inert, false);
-  assert.equal(app.element('reader-frame').hasAttribute('tabindex'), false);
+  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.element('reader-frame').inert, true);
+  assert.equal(app.element('reader-frame').hasAttribute('tabindex'), true);
   assert.equal(app.element('reader-error').hidden, true);
   assert.equal(app.run('readerAway'), null);
 });
 
-test('closing a restored page and reopening does not wait for load to restore the frame', () => {
+test('closing a restored page clears errors and reopening guards the new document before showing it', () => {
   const app = rig();
   app.open('/doc/first.md');
   app.navigateAway();
   app.load()();
-  assert.equal(app.element('reader-frame').hidden, false);
-  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.element('reader-error').hidden, false);
   app.run('closeReader()');
   assert.equal(app.element('reader-error').hidden, true);
   assert.equal(app.element('reader-frame').hidden, false);
@@ -339,9 +348,11 @@ test('closing a restored page and reopening does not wait for load to restore th
   assert.equal(app.load(), undefined);
   app.open('/doc/slow.md');
   assert.equal(app.element('reader').style.display, '');
-  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-frame').hidden, true);
   assert.equal(app.element('reader-error').hidden, true);
   assert.equal(app.run('readerAway'), null);
+  app.commitDocument('https://kb.local/doc/slow.md');
+  assert.equal(app.element('reader-frame').hidden, false);
 });
 
 test('obsolete load callbacks cannot change a switched, closed or reopened reader', () => {
@@ -355,10 +366,10 @@ test('obsolete load callbacks cannot change a switched, closed or reopened reade
   app.navigateAway();
   firstLoad();
   assert.equal(app.run('readerAway'), previousBinding);
-  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-error').hidden, false);
   secondLoad();
-  assert.equal(app.element('reader-frame').hidden, false);
-  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.element('reader-error').hidden, false);
   assert.equal(app.run('readerAway'), null);
   app.run('closeReader()');
   secondLoad();
@@ -366,7 +377,7 @@ test('obsolete load callbacks cannot change a switched, closed or reopened reade
   assert.equal(app.element('reader-error').hidden, true);
   app.open('/doc/third.md');
   secondLoad();
-  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-frame').hidden, true);
   assert.equal(app.element('reader-error').hidden, true);
   assert.equal(app.run('readerAway'), null);
   assert.equal([...app.element('reader-frame').listeners.values()].filter(type => type === 'load').length, 1);
@@ -381,8 +392,8 @@ test('departure before the first load restores the rendered article and keeps it
   assert.equal(app.run('readerLastDocument'), app.frameDoc.URL);
   app.load()();
   assert.equal(app.element('reader-frame').src, app.frameDoc.URL);
-  assert.equal(app.element('reader-frame').hidden, false);
-  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.element('reader-error').hidden, false);
   assert.equal(app.element('reader-destination').href, 'https://external.test/blocked');
   assert.equal(app.popups.length, 0);
 });
@@ -413,9 +424,9 @@ test('repeated recovery stops reloading and opening popups until the reader is e
   app.open('/doc/article.md');
   app.navigateAway();
   app.load()();
-  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-frame').hidden, true);
   assert.equal(app.popups.length, 0);
-  assert.equal(app.element('reader-return').hidden, true);
+  assert.equal(app.element('reader-return').hidden, false);
 });
 
 test('a delayed departure cannot reset the automatic recovery budget', () => {
@@ -451,50 +462,60 @@ test('loading another article or hash cannot reset the recovery budget without a
   assert.equal(app.popups.length, 0);
 });
 
-test('a raw reader file is recognized by a successful matching server response header', async () => {
-  const app = rig();
-  app.open('/doc/asset.txt');
-  app.frameDoc.URL = 'https://kb.local/doc/asset.txt';
-  delete app.frameDoc.documentElement.dataset.readerPath;
-  app.run(`fetch = async () => ({ ok: true, url: 'https://kb.local/doc/asset.txt',
-    headers: { get: name => name === 'X-KB-Reader-Path' ? 'asset.txt' : null } })`);
-  await app.load()();
-  assert.equal(app.element('reader-frame').hidden, false);
-  assert.equal(app.element('reader-error').hidden, true);
-  assert.equal(app.element('reader-fav').dataset.path, 'asset.txt');
-  assert.notEqual(app.run('readerAway'), null);
-});
-
-test('a missing raw file or mismatched header cannot impersonate a reader document', async () => {
-  for (const [ok, path] of [[false, null], [true, 'other.txt'], [true, null]]) {
+test('readable local articles and files never depend on a declaration or a second request', () => {
+  for (const path of ['legacy.md', 'asset.txt', 'asset.pdf', 'raw.html', '中文%20file.txt']) {
     const app = rig();
-    app.open('/doc/asset.txt');
-    app.frameDoc.URL = 'https://kb.local/doc/asset.txt';
+    app.open('/doc/' + path);
+    app.frameDoc.URL = 'https://kb.local/doc/' + path;
     delete app.frameDoc.documentElement.dataset.readerPath;
-    app.run(`fetch = async () => ({ ok: ${ok}, url: 'https://kb.local/doc/asset.txt',
-      headers: { get: () => ${JSON.stringify(path)} } })`);
-    await app.load()();
-    assert.equal(app.element('reader-frame').hidden, true);
-    assert.equal(app.element('reader-error').hidden, false);
+    app.run('fetch = () => { throw new Error("HEAD must not gate a readable body"); }');
+    app.load()();
+    assert.equal(app.element('reader-frame').hidden, false);
+    assert.equal(app.element('reader-error').hidden, true);
+    assert.equal(app.element('reader-fav').dataset.path, encodeURIComponent(decodeURIComponent(path)));
+    assert.notEqual(app.run('readerAway'), null);
     assert.equal(app.element('reader-return').hidden, true);
   }
 });
 
-test('a late raw-file identity response cannot alter a switched reader', async () => {
+test('the host guards an undeclared slow document before its load event', () => {
   const app = rig();
-  app.open('/doc/asset.txt');
-  app.frameDoc.URL = 'https://kb.local/doc/asset.txt';
-  delete app.frameDoc.documentElement.dataset.readerPath;
-  app.run('let finishFileCheck; fetch = () => new Promise(resolve => { finishFileCheck = resolve; })');
-  const checking = app.load()();
-  app.open('/doc/next.md');
-  app.renderDocument('https://kb.local/doc/next.md');
-  app.load()();
-  const currentBinding = app.run('readerAway');
-  app.run(`finishFileCheck({ ok: true, url: 'https://kb.local/doc/asset.txt',
-    headers: { get: () => 'asset.txt' } })`);
-  await checking;
-  assert.equal(app.run('readerAway'), currentBinding);
+  app.open('/doc/raw.html');
+  assert.equal(app.element('reader-frame').hidden, true);
+  app.commitDocument('https://kb.local/doc/raw.html');
   assert.equal(app.element('reader-frame').hidden, false);
-  assert.equal(app.element('reader-fav').dataset.path, 'next.md');
+  assert.equal(app.run('readerAway'), null);
+  const click = [...app.element('reader-frame').contentWindow.listeners].find(([, type]) => type === 'click')[0];
+  for (const href of ['https://external.test/slow', 'https://kb.local/go-external']) {
+    const attributes = new Map([['target', '_top'], ['rel', 'nofollow']]);
+    const link = { href, hasAttribute: () => false,
+      getAttribute: name => attributes.get(name), setAttribute: (name, value) => attributes.set(name, value) };
+    click({ button: 0, target: { closest: () => link } });
+    assert.equal(attributes.get('target'), '_blank');
+    assert.ok(attributes.get('rel').includes('noopener'));
+    assert.ok(attributes.get('rel').includes('nofollow'));
+  }
+  const beforeUnload = [...app.element('reader-frame').contentWindow.listeners]
+    .find(([, type]) => type === 'beforeunload')[0];
+  beforeUnload();
+  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.element('reader-frame').inert, true);
+  assert.equal(app.document.activeElement, app.element('reader-close'));
+  app.run('closeReader()');
+  assert.equal(app.frameDoc.listeners.size, 0);
+});
+
+test('cross-origin intent hides the frame immediately and overlay Escape needs no iframe load', () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  app.load()();
+  app.message({ type: 'reader-navigation', navigationId: app.element('reader-frame').dataset.readerNavigation,
+    documentUrl: app.frameDoc.URL, destination: 'https://external.test/slow' });
+  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.element('reader-frame').inert, true);
+  assert.equal(app.document.activeElement, app.element('reader-close'));
+  const escape = [...app.element('reader').listeners].find(([, type]) => type === 'keydown')[0];
+  escape({ key: 'Escape', preventDefault() {}, stopPropagation() {} });
+  assert.equal(app.element('reader').style.display, 'none');
+  assert.equal(app.element('reader-mask').style.display, 'none');
 });

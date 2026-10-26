@@ -4,6 +4,7 @@ import html
 import json
 import sys
 import threading
+import time
 from argparse import ArgumentParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -38,6 +39,20 @@ def main():
             path = urlsplit(self.path).path
             if path == "/blocked":
                 self.respond(b"Embedding denied", "text/html", headers={"X-Frame-Options": "DENY"})
+            elif path == "/slow-foreign":
+                body = b"<html><body><h1>Slow foreign page</h1>" + b"<p>Loading</p>" * 80 + b"</body></html>"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    try:
+                        self.wfile.write(body[:70])
+                        self.wfile.flush()
+                        time.sleep(6)
+                        self.wfile.write(body[70:])
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
             elif path in {"/go-external", "/doc/redirect.md"}:
                 self.respond(b"", "text/html", 302, {"Location": f"http://localhost:{args.port}/blocked"})
             elif path in {"/missing", "/failed", "/elsewhere"}:
@@ -55,13 +70,21 @@ def main():
             elif path == "/doc/asset.txt":
                 self.respond(b"Raw reader file", "text/plain",
                              headers={"X-KB-Reader-Path": quote(path[5:], safe="")})
+            elif path == "/doc/headfail.txt":
+                self.respond(b"Raw file without HEAD support", "text/plain",
+                             500 if self.command == "HEAD" else 200)
+            elif path == "/doc/raw.html":
+                body = (f'<html><body><a href="http://localhost:{args.port}/slow-foreign" target="_top">Raw external</a>'
+                        '<p><a href="#section">Anchor</a></p><h2 id="section">Raw article</h2>'
+                        '<img src="/slow-image.svg"></body></html>')
+                self.respond(body.encode(), "text/html")
             elif path == "/doc/missing.txt":
                 self.respond(b"Missing reader file", "text/plain", 404)
             elif path.startswith("/doc/"):
                 markdown = f"[外链](http://localhost:{args.port}/blocked)\n\n[页内锚点](#section)"
                 markdown += "\n\n[站内跳转](/go-external)\n\n[另一篇](/doc/ready.md)"
                 markdown += "\n\n[不存在](/missing)\n\n[服务错误](/failed)\n\n[其它页面](/elsewhere)"
-                if path == "/doc/slow.md":
+                if path in {"/doc/slow.md", "/doc/legacy.md"}:
                     markdown += "\n\n![等待中的图片](/slow-image.svg)"
                 rendered = pages._DOC_TMPL.format(
                     title=f"阅读器关闭点检 {path}",
@@ -72,9 +95,11 @@ def main():
                     literal_js=pages._DOC_LITERAL_JS + (
                         '\nmarked.parse = () => { throw new Error("reader fixture render failure"); };'
                         if path == "/doc/render-error.md" else ""
-                    ), links_js=pages._DOC_LINKS_JS,
+                    ), links_js="" if path == "/doc/legacy.md" else pages._DOC_LINKS_JS,
                     snip_js=pages._DOC_SNIP_JS,
                 )
+                if path == "/doc/legacy.md":
+                    rendered = rendered.replace(f' data-reader-path="{html.escape(path[5:])}"', "")
                 if path in {"/doc/loop.md", "/doc/slowloop.md"}:
                     delay = 6000 if path == "/doc/slowloop.md" else 0
                     departure = f'http://localhost:{args.port}/blocked'

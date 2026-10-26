@@ -52,7 +52,7 @@ const openReader = async path => {
     link.dataset.title = '阅读器关闭验收'; openReader(link);
   })()`);
   await waitFor(`$('reader-frame').contentDocument?.URL.endsWith(${JSON.stringify(path)})
-    && $('reader-frame').contentDocument.querySelector('#content a')`);
+    && $('reader-frame').contentDocument.querySelector('#content a') && !$('reader-frame').hidden`);
 };
 const foreignPage = async () => {
   await evaluate(`(() => {
@@ -136,11 +136,17 @@ try {
     return { x: frame.x + link.x + link.width / 2, y: frame.y + link.y + link.height / 2 };
   })()`);
   await waitFor(`$('reader-frame').contentDocument?.URL.endsWith('/doc/legacy.md') && readerAway !== null
-    && $('reader-destination').style.display !== 'none'`);
-  check('缺少 Navigation API 时真实点击仍保留离页目标', await evaluate(`!$('reader-frame').contentWindow.navigation
-    && $('reader-destination').href.endsWith('/blocked') && !$('reader-frame').hidden`));
-  const fallbackPopup = (await send('Target.getTargets')).targetInfos.find(target =>
-    target.type === 'page' && target.url.endsWith('/blocked'));
+    && $('reader-frame').contentDocument.querySelector('#content a').target === '_blank'`);
+  let fallbackPopup;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    fallbackPopup = (await send('Target.getTargets')).targetInfos.find(target =>
+      target.type === 'page' && target.url.endsWith('/blocked'));
+    if (fallbackPopup) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  check('旧模板缺少声明和 Navigation API 时宿主仍让链接走新标签', !!fallbackPopup
+    && await evaluate(`!$('reader-frame').contentWindow.navigation
+      && $('reader-destination').style.display === 'none' && !$('reader-frame').hidden`));
   if (fallbackPopup) await send('Target.closeTarget', { targetId: fallbackPopup.targetId });
   await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: fallbackScript.identifier });
   await foreignPage();
@@ -180,12 +186,7 @@ try {
   check('Tab 循环后 Escape 仍能退出', await evaluate(closed));
   await fetch(base + '/hold-image');
   await openReader('/doc/slow.md');
-  await evaluate(`$('reader-frame').contentDocument.querySelector('#content a[href$="/blocked"]').target = '_self'`);
-  await click(`(() => {
-    const frame = $('reader-frame').getBoundingClientRect();
-    const link = $('reader-frame').contentDocument.querySelector('#content a[href$="/blocked"]').getBoundingClientRect();
-    return { x: frame.x + link.x + link.width / 2, y: frame.y + link.y + link.height / 2 };
-  })()`);
+  await evaluate(`$('reader-frame').contentWindow.location.href = ${JSON.stringify(base.replace('127.0.0.1', 'localhost') + '/blocked')}`);
   await waitFor(`(() => {
     const doc = $('reader-frame').contentDocument;
     return doc?.URL.endsWith('/doc/slow.md') && doc.readyState === 'interactive'
@@ -255,17 +256,51 @@ try {
   await evaluate(`(() => {
     const link = document.createElement('a'); link.href = '/doc/asset.txt'; openReader(link);
   })()`);
-  await waitFor(`readerAway !== null && readerLastDocument.endsWith('/doc/asset.txt')`);
-  check('原样文件凭响应头确认身份后保持可读', await evaluate(`!$('reader-frame').hidden
+  await waitFor(`readerAway !== null && readerLastDocument?.endsWith('/doc/asset.txt')`);
+  check('原样文件不依赖二次确认请求也保持可读', await evaluate(`!$('reader-frame').hidden
     && $('reader-error').hidden && $('reader-fav').dataset.path === 'asset.txt'`));
   await evaluate(`(() => {
     const link = document.createElement('a'); link.href = '/doc/missing.txt'; openReader(link);
   })()`);
-  await waitFor(`!$('reader-error').hidden`);
-  check('不存在的原样文件不会仅凭地址被当成阅读页', await evaluate(`$('reader-frame').hidden
-    && $('reader-return').hidden && readerLastDocument === null`));
+  await waitFor(`readerLastDocument?.endsWith('/doc/missing.txt') && !$('reader-frame').hidden`);
+  check('可读的同源错误正文直接显示而不被隐藏', await evaluate(`$('reader-error').hidden
+    && $('reader-frame').contentDocument.body.innerText.includes('Missing reader file')`));
+  await evaluate(`(() => {
+    const link = document.createElement('a'); link.href = '/doc/headfail.txt'; openReader(link);
+  })()`);
+  await waitFor(`readerLastDocument?.endsWith('/doc/headfail.txt') && !$('reader-frame').hidden`);
+  check('HEAD 不可用不影响已经加载的原样文件', await evaluate(`$('reader-error').hidden
+    && $('reader-frame').contentDocument.body.innerText.includes('without HEAD support')`));
+  await fetch(base + '/hold-image');
+  await evaluate(`(() => {
+    const link = document.createElement('a'); link.href = '/doc/raw.html'; openReader(link);
+  })()`);
+  await waitFor(`readerGuardDocument?.URL.endsWith('/doc/raw.html') && !$('reader-frame').hidden
+    && $('reader-frame').contentDocument.querySelector('a')`);
+  await click(`(() => {
+    const frame = $('reader-frame').getBoundingClientRect();
+    const link = $('reader-frame').contentDocument.querySelector('a').getBoundingClientRect();
+    return { x: frame.x + link.x + link.width / 2, y: frame.y + link.y + link.height / 2 };
+  })()`);
+  let rawPopup;
+  for (let attempt = 0; attempt < 100; attempt++) {
+    rawPopup = (await send('Target.getTargets')).targetInfos.find(target =>
+      target.type === 'page' && target.url.endsWith('/slow-foreign'));
+    if (rawPopup) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  check('原样 HTML 慢图完成前的 _top 链接在新标签打开', !!rawPopup && await evaluate(`(() => {
+    const frame = $('reader-frame'), doc = frame.contentDocument;
+    return doc.URL.endsWith('/doc/raw.html') && !doc.images[0].complete && !frame.hidden;
+  })()`));
+  if (rawPopup) await send('Target.closeTarget', { targetId: rawPopup.targetId });
+  await evaluate(`$('reader-frame').contentWindow.location.href = ${JSON.stringify(base.replace('127.0.0.1', 'localhost') + '/slow-foreign')}`);
+  await waitFor(`$('reader-frame').contentDocument === null`);
+  check('跨源 commit 至 load 间正文已不可聚焦且关闭按钮获焦', await evaluate(`$('reader-frame').hidden
+    && $('reader-frame').inert && document.activeElement === $('reader-close')`));
   await press('Escape');
   await waitFor(closed);
+  check('跨源慢文档未 load 时 Escape 已可退出', await evaluate(closed));
   check('无未捕获页面异常', errors.length === 0);
 } finally {
   await fetch(base + '/release-image').catch(() => {});
