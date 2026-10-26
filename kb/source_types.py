@@ -25,19 +25,40 @@ class SourceType:
     # 导出 → 索引 → 提取。**不是"这一类来源不进管道"**:积压的条目正是靠那
     # 半条链进知识库的,所以它照旧出现在同步中心的通道里。
     pollable: bool = True
+    # 下面这两位问的是**两个不同的问题**,别当成一个许可位的两种说法 ——
+    # 它们在 rss / web / inbox / digest 上答案碰巧一致,在 social 上分叉,
+    # 混成一个的后果是一边静默覆盖、一边静默收走出路(见两个判据各自的说明)。
+    #
+    # ①这一类条目的正文,该不该由**通用的 HTTP + 正文提取器**那条路、
+    #   去它 `url` 指向的那一页上取。判据函数 `permits_link_body` /
+    #   `link_body_sql`。
     body_from_link: bool = False
+    # ②这一行的 `url` 指向的**是不是它自己的原文**。判据函数
+    #   `permits_origin_body` / `origin_body_sql`。默认 False:新增来源
+    #   没想清楚之前不许可(漏报只是那颗「重新抓一次」不露面,误报是静默
+    #   覆盖正文、不可恢复)。
+    url_is_origin: bool = False
 
 
 SOURCE_TYPES = {
     'wechat': SourceType('wechat', '公众号', '关注的公众号文章',
-                         ('wechat_oa', 'wechat_local'), manager='wechat', icon='chat'),
+                         ('wechat_oa', 'wechat_local'), manager='wechat', icon='chat',
+                         url_is_origin=True),
+    # 大V观点:**这两位在这一类上分叉,social 是唯一一处**。一条推文的 `url` 就是
+    # 这条推文自己的永久链接(`x_timeline_js` 拼的 `x.com/<handle>/status/<id>`),所以
+    # `url_is_origin=True` —— 人点「重新抓一次」走公开接口取回的是**它本人**的正文。
+    # 但那条路是 X 专用的(`grab.grab()` 走 FxTwitter),通用的 HTTP + 提取器拿 x.com
+    # 什么也提不出来,所以 `body_from_link=False`:它进不了补抓队列、也没有浏览器采集
+    # 入口。曾经把这两个问题当成一个,于是 3356 条推文里那些空正文/短残片**唯一**的
+    # 人工出路被静默收走,给出的理由还是一句反过来的话(「正文不是外链那一页」)。
     'social': SourceType('social', '大V观点', '关注的人，此刻的想法。', ('social',),
-                         icon='chat', interval_minutes=1440,
+                         icon='chat', interval_minutes=1440, url_is_origin=True,
                          url_hint='输入 X / Twitter 账号主页，或其他社交媒体的 RSS 地址',
                          note='X 的取法在下面的「取法」那一块里选，每一档要准备的东西不同。'
                               '也可以为单个账号填写专用订阅链接，它优先于任何通道。',
                          adapter='social'),
-    'rss': SourceType('rss', 'RSS', '让值得读的文章，自己来到这里。', ('rss',), body_from_link=True),
+    'rss': SourceType('rss', 'RSS', '让值得读的文章，自己来到这里。', ('rss',),
+                      body_from_link=True, url_is_origin=True),
     # 没有 feed 的站点走这条路:解析列表页。独立成一类而不是塞进 rss,是因为
     # 它的失败形态不同 —— 读 feed 坏在对方服务,解析页面还会坏在**对方改版**,
     # 而那需要人去适配。混在一起的话 rss 那条线的状态和定时会被它带着抖。
@@ -67,7 +88,7 @@ SOURCE_TYPES = {
                       note='给没有 RSS / Atom 的站点用：按「每条带发布时间的链接」认出'
                            '列表，正文建议打开「补抓原文」去文章页取。站点改版时这条'
                            '订阅会报错，而不是静静地变成「今天没有新文章」。',
-                      adapter='page', body_from_link=True),
+                      adapter='page', body_from_link=True, url_is_origin=True),
     # 手动收录:看到一篇就存下来。**它没有可轮询的源** —— 内容在用户给出链接的
     # 那一刻就抓好入库了(`kb/feeds/grab.py`),所以 `pollable=False`、
     # `adapter='manual'`(**刻意不在 `fetching.ADAPTERS` 里**:哪条路漏了跳过
@@ -82,60 +103,107 @@ SOURCE_TYPES = {
                              'X 的单条推文走公开接口（长文连正文一起取），其他站点'
                              '按文章正文提取。按站点自动归到一个收件桶里，'
                              '抓不到正文的不会入库——重试一次的代价只是再抓一遍。',
-                        adapter='manual', pollable=False, body_from_link=True),
+                        adapter='manual', pollable=False, body_from_link=True,
+                        url_is_origin=True),
 }
 
 
 def permits_link_body(kind: str) -> bool:
-    """**「这一类来源的正文允不允许被 `url` 指向的那一页替换」—— 判据只有这一份。**
+    """**问题①:这一类条目的正文,该不该由通用的 HTTP + 正文提取器去它外链那一页上取。**
 
-    **每一个会写 `feed_items.body`、而内容来自条目自己那个链接的入口都要先过它。**
-    布尔这一份给采集期的入口(`markdown_source.enrich` 改的是还没入库的 entry)、
-    准入检查(`browser_capture.target`)、存量复查分支(`feed_fulltext_recheck._plan`)
-    和订阅那一侧(`registry.save_subscription`、编辑表单、`fulltext._eligible`);
-    **真正写库的那几条 UPDATE 另有 SQL 形状的同一份判据,见 `link_body_sql`** ——
-    谁漏接由那一条集合级回归来答,不靠这段注释记名单。
+    这一份管的是**那条通用路**:补抓队列(`fulltext`)、采集期直取
+    (`markdown_source.enrich`)、浏览器采集的准入(`browser_capture.target`)、存量复查
+    的分支选择(`feed_fulltext_recheck._plan`)、订阅上那颗「补抓原文」开关
+    (`registry.save_subscription`、编辑表单、`fulltext._eligible`)、以及条目卡片上那个
+    「从浏览器补抓」入口(`source_reader.js` 读 catalog 里这一列)。
+    **真正写库的那几条 UPDATE 另有 SQL 形状的同一份判据,见 `link_body_sql`。**
+
+    **它不是「这一行的正文许不许改」的总闸** —— 那是问题②(`permits_origin_body`)。
+    两个问题在 rss / web / inbox / digest 上答案一致,在 social 上分叉:推文的正文取法是
+    X 专用的公开接口,通用提取器对 x.com 无效(所以这一份是 False),但它的 `url` 指向的
+    确实是它本人(所以那一份是 True)。把两者当成一个许可位,social 两边都会判错。
 
     **一处没接上就崩一条内容,而且不可恢复。** 简报的 `url` 指向的是别人家的文章
     (`docs/decisions/digest.md`),它那条「不开 fulltext」原先只以三种间接形式存在
     (defaults.json 不标、一句人话提示、`s.fulltext=1` 顺带挡住)。于是 `enrich` 的
     闸门方向恰好是反的、浏览器采集按 kind 字面量只挡了大V —— 生产库里一条 TLDR AI
     的简讯因此被整篇 README 顶掉。新增来源默认 `body_from_link=False`,要开就想清楚
-    那个链接指向的是不是这条内容自己的原文。
+    那一页上的内容是不是这条条目本身。
     """
     source = SOURCE_TYPES.get(kind)
     return bool(source and source.body_from_link)
+
+
+def permits_origin_body(kind: str) -> bool:
+    """**问题②:这一行的 `url` 指向的是不是它自己的原文。**
+
+    是 —— 那么「拿这个 `url` 重抓一次、把正文换成抓回来的东西」换的还是这条内容本身,
+    许可(rss / 网页专栏 / 手动收录 / 公众号 / 大V观点)。不是 —— 换过去就是另一篇了,
+    拒(简报:它的 `url` 指向被简讯引用的第三方文章)。
+
+    落点是**人工重抓那条路**:`grab_api._recover` 的入口拒(连 HTTP 都不发)、
+    `grab_store.known` 把它交给前端(那颗「重新抓一次」据此露不露面)。写库的那几条
+    UPDATE 用 SQL 形状的同一份判据,见 `origin_body_sql`。
+
+    与问题①(`permits_link_body`)的区别见那一份的说明。默认 False:新增来源在没人想清楚
+    它的 `url` 指向什么之前,不许可 —— **漏报的代价是那颗按钮不露面(人能来改这一行声明),
+    误报的代价是静默把正文覆盖成另一篇、不可恢复**(元规则「拿不准就别固化终态」)。
+    """
+    source = SOURCE_TYPES.get(kind)
+    return bool(source and source.url_is_origin)
 
 
 def feed_types():
     return {k: v for k, v in SOURCE_TYPES.items() if v.manager == 'feeds'}
 
 
-def link_body_sql(item: str = 'feed_items') -> str:
-    """同一份判据的 **SQL 形状**:这一行的正文允不允许被它 `url` 指向的那一页替换。
+def _kinds_sql(item: str, flag: str) -> str:
+    """把 `SourceType` 上某一位渲染成 `<表>.kind IN (...)`。
 
-    **凡是要改写 `feed_items.body`、而内容来自这一行 `url` 的 UPDATE,都把它拼进自己
-    的 WHERE**(元规则「判据待在写语句自己的 WHERE 里」)。接着这一份口径的有:
-    `fulltext._save`、`browser_capture` 的写回、`grab_store.replace`,以及选队列和
-    存量复查许可支经 `fulltext._eligible` 带上的那一道。
+    **「怎么渲染」只该有一份**,所以两个判据共用它;**「渲染哪一位」是两个不同的问题**,
+    所以对外是两个函数。全 False 时给 `kind IN (NULL)` —— WHERE 下恒不成立,即「谁都不
+    许可」,这正是安全的那一边。
+
+    判据取 `SOURCE_TYPES` 全集,不过 `feed_types()`:问的是「`feed_items` 这张表里哪些
+    kind 许可」,跟那一类由谁管理无关;今天两者算出来一样,哪天某类来源换了 manager 也
+    不该悄悄改变写入闸的集合。
+    """
+    kinds = ','.join(f"'{kind}'" for kind, spec in SOURCE_TYPES.items()
+                     if getattr(spec, flag)) or 'NULL'
+    return f'{item}.kind IN ({kinds})'
+
+
+def link_body_sql(item: str = 'feed_items') -> str:
+    """问题①的 **SQL 形状**:这一行的正文允不允许被通用提取器从它外链那一页取回来的东西替换。
+
+    **凡是要改写 `feed_items.body`、而内容来自对这一行 `url` 发的那次通用抓取的 UPDATE,
+    都把它拼进自己的 WHERE**(元规则「判据待在写语句自己的 WHERE 里」):`fulltext._save`、
+    `browser_capture.save`,以及选队列和存量复查许可支经 `fulltext._eligible` 带上的那一道。
+    内容来自「这一行 `url` 指向的它自己」的那几条用 `origin_body_sql`。
 
     **为什么是写入层的共用片段,而不是「记得在每个入口调一次 `permits_link_body()`」。**
     后者靠人记全一张入口名单,而名单只能写在注释和一条列举式用例里:前四处都接上了,
     第五处(`grab_store.replace`,人点「重新抓一次」那条路)照旧把简报里一条简讯的正文
     换成了外链那篇文章的全文 —— 走的是公开接口、不是内部直调,审查实测可达。片段化之
     后,漏接是 `tests/test_link_body_entries.py` 的红:它把 `kb/`、`scripts/` 下每一条
-    写 `body` 的 `UPDATE feed_items` 都扫出来,要求逐条声明内容从哪来,**声明集合不等
-    就红** —— 新增一个入口而不声明也红,所以这张名单不再靠人记。
+    写 `body` 的 `UPDATE feed_items` 都扫出来,要求逐条声明内容从哪来、并据此带对应的
+    那一道闸,**声明集合不等就红**(带错了哪一道也红) —— 新增一个入口而不声明也红,所以
+    这张名单不再靠人记。
 
-    **判据取 `SOURCE_TYPES` 全集,不过 `feed_types()`。** 它问的是「`feed_items` 这张
-    表里哪些 kind 许可」,跟那一类由谁管理无关;今天两者算出来一样,哪天某类来源换了
-    manager 也不该悄悄改变写入闸的集合。
-
-    `item` 是表名或别名,只接内部写死的取值,不接外部输入。
+    `item` 是表名或别名,只接内部写死的取值,不接外部输入(`origin_body_sql` 同)。
     """
-    kinds = ','.join(f"'{kind}'" for kind, spec in SOURCE_TYPES.items()
-                     if spec.body_from_link) or 'NULL'
-    return f'{item}.kind IN ({kinds})'
+    return _kinds_sql(item, 'body_from_link')
+
+
+def origin_body_sql(item: str = 'feed_items') -> str:
+    """问题②的 **SQL 形状**:这一行的 `url` 指向的是不是它自己的原文。
+
+    **凡是要改写 `feed_items.body`、而内容是拿这一行 `url` 重抓它本人取回来的 UPDATE,
+    都把它拼进自己的 WHERE**:`grab_store.replace`(人点「重新抓一次」)、
+    `x_article_backfill.apply_one`(拿推文链接补回长文正文)—— 这两处是同一个来路,所以
+    带同一道闸。为什么闸在写语句里、以及漏接为什么是红,见 `link_body_sql`。
+    """
+    return _kinds_sql(item, 'url_is_origin')
 
 
 def catalog():
