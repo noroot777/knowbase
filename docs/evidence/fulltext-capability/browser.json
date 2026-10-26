@@ -1,0 +1,65 @@
+[
+  {
+    "kind": "digest",
+    "displayed": false,
+    "disabled": true,
+    "checked": false,
+    "extract": true,
+    "row": "能\n能力点检 digest\n已停用\nhttps://digest.example.org/capability\n未分组 · 0 条 · 尚未成功同步 · 提取知识标签\n编辑\n启用\n同步\n删除"
+  },
+  {
+    "kind": "social",
+    "displayed": false,
+    "disabled": true,
+    "checked": false,
+    "extract": true,
+    "row": "能\n能力点检 social\n已停用\nhttps://social.example.org/capability\n未分组 · 0 条 · 尚未成功同步 · 提取知识标签\n编辑\n启用\n同步\n删除"
+  },
+  {
+    "kind": "rss",
+    "displayed": true,
+    "disabled": false,
+    "checked": true,
+    "extract": true,
+    "row": "能\n能力点检 rss\n已停用\nhttps://rss.example.org/capability\n未分组 · 0 条 · 尚未成功同步 · 补抓原文正文 · 提取知识标签\n编辑\n启用\n同步\n删除"
+  },
+  {
+    "kind": "web",
+    "displayed": true,
+    "disabled": false,
+    "checked": true,
+    "extract": true,
+    "row": "能\n能力点检 web\n已停用\nhttps://web.example.org/capability\n未分组 · 0 条 · 尚未成功同步 · 补抓原文正文 · 提取知识标签\n编辑\n启用\n同步\n删除"
+  },
+  {
+    "kind": "inbox",
+    "displayed": true,
+    "disabled": false,
+    "checked": true,
+    "extract": true,
+    "row": "能\n能力点检 inbox\n已停用\nhttps://inbox.example.org/capability\n未分组 · 0 条 · 尚未成功同步 · 补抓原文正文 · 提取知识标签\n编辑\n启用\n同步\n删除"
+  },
+  {
+    "kind": "digest",
+    "displayed": false,
+    "disabled": true,
+    "checked": false,
+    "extract": true,
+    "row": "能\n能力点检 digest\n已停用\nhttps://digest.example.org/capability\n未分组 · 0 条 · 尚未成功同步 · 提取知识标签\n编辑\n启用\n同步\n删除"
+  },
+  {
+    "kind": "rss",
+    "displayed": true,
+    "disabled": false,
+    "checked": true,
+    "extract": true,
+    "row": "能\n能力点检 rss\n已停用\nhttps://rss.example.org/capability\n未分组 · 0 条 · 尚未成功同步 · 补抓原文正文 · 提取知识标签\n编辑\n启用\n同步\n删除"
+  },
+  {
+    "mobileWidth": 390,
+    "scrollWidth": 390
+  },
+  {
+    "runtimeErrors": []
+  }
+]

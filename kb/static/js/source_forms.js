@@ -8,7 +8,10 @@ function openSourceEditor(id = null) {
   $('source-edit-group').value = s?.group_name || '';
   $('source-edit-feed').value = s?.feed_url || '';
   $('source-edit-enabled').checked = s ? !!s.enabled : true;
-  $('source-edit-fulltext').checked = !!s?.fulltext;
+  const bodyFromLink = !!sourceModules.get(sourceKind).body_from_link;
+  $('source-edit-fulltext-option').style.display = bodyFromLink ? '' : 'none';
+  $('source-edit-fulltext').disabled = !bodyFromLink;
+  $('source-edit-fulltext').checked = bodyFromLink && !!s?.fulltext;
   $('source-edit-extract').checked = !!s?.extract;
   $('source-edit-hint').textContent = sourceModules.get(sourceKind).url_hint;
   $('source-edit-error').textContent = '';
@@ -26,7 +29,8 @@ async function saveSourceEditor(e) {
   const inManager = () => sourceKind === kind && sourceView === 'manage' && sourceActive();
   const body = { name:$('source-edit-name').value.trim(), url:$('source-edit-url').value.trim(),
     group_name:$('source-edit-group').value.trim(), feed_url:$('source-edit-feed').value.trim(),
-    enabled:$('source-edit-enabled').checked, fulltext:$('source-edit-fulltext').checked,
+    enabled:$('source-edit-enabled').checked,
+    fulltext:!!sourceModules.get(kind).body_from_link && $('source-edit-fulltext').checked,
     extract:$('source-edit-extract').checked };
   try {
     const saved = await pipeJson(`/api/intake/${kind}/sources${sourceEditId ? '/'+sourceEditId : ''}`, {

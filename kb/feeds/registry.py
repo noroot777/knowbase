@@ -28,7 +28,7 @@ from kb.feeds.exclusion import SCHEMA as EXCLUSION_SCHEMA, item_key
 from kb.feeds.targets import (ID_PREFIX, NAME_PREFIX,   # noqa: F401 - 再导出
                               bare_target, id_target, in_scope, name_target,
                               target_source_id, target_source_name)
-from kb.source_types import feed_types
+from kb.source_types import feed_types, permits_link_body
 
 DB_PATH = DATA_DIR / 'feeds.db'
 KINDS = {k: s.label for k, s in feed_types().items()}
@@ -291,7 +291,8 @@ def _seed_defaults(conn) -> None:
             (kind,name,url,mode,group_name,config,created_at,updated_at,history_floor,fulltext,extract)
             VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
             (s['kind'], s['name'], source_url(s['kind'],s['url']), s['mode'], s['group_name'],
-             '{}', now(), now(), floor, int(bool(s.get('fulltext'))),
+             '{}', now(), now(), floor,
+             int(bool(s.get('fulltext')) and permits_link_body(s['kind'])),
              int(bool(s.get('extract')))))
     if not seeded:
         conn.execute("INSERT INTO feed_meta VALUES('defaults-v1',?)", (now(),))
@@ -463,6 +464,10 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
     group = str(data.get('group_name', old.get('group_name', ''))).strip()[:80]
     enabled = bool(data.get('enabled', old.get('enabled', True)))
     fulltext = bool(data.get('fulltext', old.get('fulltext', False)))
+    if not permits_link_body(kind):
+        if data.get('fulltext'):
+            raise ValueError(f'{KINDS[kind]}不支持去原文链接补抓正文')
+        fulltext = False
     # 「这条订阅要不要买提取」。默认关,理由见 `_ADDED_COLUMNS` 里那一段。
     extract = bool(data.get('extract', old.get('extract', False)))
     reset = any(old.get(k) != v for k, v in [('url', url), ('feed_url', feed_url), ('mode', mode)])

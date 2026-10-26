@@ -58,6 +58,7 @@ from kb.feeds.fetching import FeedError, Gated, SOURCE_SECONDS, request
 # 本模块和手动重抓那条链共用它。再导出一次,让 `fulltext.work_version` 照旧能用。
 from kb.feeds.grab_store import work_version  # noqa: F401
 from kb.pipeline_state import _state
+from kb.source_types import feed_types, permits_link_body
 
 # 一轮补抓多少条。存量几百条壳的话一次全抓会把一次同步拖很久,而且每抓一条就
 # 多一条待翻译 —— 分批消化,每轮啃一截。
@@ -97,6 +98,8 @@ class Unconfirmed(FeedError):
 def _eligible(ref: str = 'feed_items.key') -> str:
     """**「这一条现在还属于某条开着补抓的订阅」—— 补抓这一族判据只有这一份。**
 
+    条目和归属订阅都须开放 `SourceType.body_from_link`,旧库误开的开关不授予资格。
+
     一条内容可能同时属于聚合源和单号源,**任意一条开着就算有资格**(补到的正文对
     另一条同样有用);反过来,关掉最后一条开着补抓的归属、或者把订阅整条删掉
     (`registry` 删订阅时刻意保留已收录的条目),这一条就再也不该等全文了。
@@ -111,8 +114,12 @@ def _eligible(ref: str = 'feed_items.key') -> str:
     `ref` 只有两个取值、全写死在本模块里(`feed_items.key` 给拼进别人 WHERE 的那
     几段,`fi.key` 给 `held()` 自己那条带别名的 SELECT)—— **不接外部输入**。
     """
-    return ("EXISTS(SELECT 1 FROM subscription_items si JOIN subscriptions s"
-            f" ON s.id=si.subscription_id WHERE si.item_key={ref} AND s.fulltext=1)")
+    kinds = ','.join(f"'{kind}'" for kind in feed_types()
+                     if permits_link_body(kind)) or 'NULL'
+    item = ref.rsplit('.', 1)[0]
+    return (f"({item}.kind IN ({kinds}) AND EXISTS(SELECT 1 FROM subscription_items si"
+            " JOIN subscriptions s ON s.id=si.subscription_id"
+            f" WHERE si.item_key={ref} AND s.fulltext=1 AND s.kind IN ({kinds})))")
 
 
 def queued_sql() -> tuple[str, list]:
