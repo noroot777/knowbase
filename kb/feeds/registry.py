@@ -160,15 +160,10 @@ _ADDED_COLUMNS = {
         ('x_post_meta', "TEXT NOT NULL DEFAULT ''"),
         ('body_provenance', "TEXT NOT NULL DEFAULT ''"),
     ),
-    'browser_capture_audit': (
-        # 「这张回执记的是**哪一世**的那篇文章」。`item_key` 按网址算,同一个 key
-        # 清理掉之后再收录回来还是它,所以光凭 key 认不出前一世 —— 判据和事故形态
-        # 在 `kb/browser_capture._same_life`。取 `fetched_at`:它只在 INSERT 时写
-        # (`put_items` 撞 key 是 DO NOTHING),换内容的那几个写入方一个都不碰它。
-        # **老库里的回执行补成空串 = 说不清是哪一世**,按「没有回执」办:少显示
-        # 一行历史回执,总好过在重新收录的文章上常驻一句假的「正文已被修改」。
-        ('item_fetched_at', "TEXT NOT NULL DEFAULT ''"),
-    ),
+    # 回执记的是**哪一世**的那篇文章 —— `item_key` 按网址算,清理掉再收录回来还是
+    # 同一个 key。判据、事故形态和「老库补成空串 = 说不清,按没有回执办」这一条,
+    # 都在 `kb/browser_capture._same_life`。
+    'browser_capture_audit': (('item_fetched_at', "TEXT NOT NULL DEFAULT ''"),),
 }
 
 
