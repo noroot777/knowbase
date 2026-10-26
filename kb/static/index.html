@@ -579,11 +579,17 @@
     <b id="reader-title"></b>
     <button class="favbtn" id="reader-fav" onclick="toggleFav(this)" style="display:none;font-size:12.5px"></button>
     <a id="reader-open" target="_blank" rel="noopener">新标签<i data-arrow="ext"></i></a>
+    <a id="reader-destination" target="_blank" rel="noopener" style="display:none">打开刚才的链接<i data-arrow="ext"></i></a>
     <a id="reader-obs">Obsidian</a>
     <a id="reader-src" target="_blank" rel="noopener" style="display:none">原文<i data-arrow="ext"></i></a>
-    <button class="ghost" onclick="closeReader()" aria-label="关闭阅读器" style="padding:4px 10px">✕</button>
+    <button class="ghost" id="reader-close" onclick="closeReader()" aria-label="关闭阅读器" style="padding:4px 10px">✕</button>
   </div>
   <button class="ghost away-exit" id="reader-exit" onclick="closeReader()" aria-label="关闭阅读器">✕</button>
+  <div id="reader-error" role="status" tabindex="0" hidden>
+    <p id="reader-status">此页面无法在阅读器内显示。</p>
+    <p><a id="reader-return" data-doc="1" hidden>回到刚才那篇</a></p>
+    <p>可用上方链接在新标签打开目标，或关闭阅读器返回。</p>
+  </div>
   <iframe id="reader-frame" title="文章内容"></iframe>
 </div>
 
