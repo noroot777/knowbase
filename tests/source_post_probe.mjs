@@ -214,6 +214,9 @@ let over = JSON.parse(await overflowPx());
 check("大V观点:没有任何东西画到卡片外面", over.px <= 1, JSON.stringify(over));
 // 顺手钉住「从浏览器补抓」在这一档不露面:两道都该挡 —— `content_kind === 'post'`,
 // 而且这一类来源本身不许 `body_from_link`。另两档(简报不亮 / RSS 亮)在收尾那一节。
+// **这一类在另一位上是许可的**(`url_is_origin`:它的链接就是它本人的永久链接),
+// 那一位管的是投递栏里那颗「重新抓一次」,不是这个入口 —— 两个问题只在这一类上
+// 分叉,别据这一条以为 social 两边都关(回归 tests/grab_probe.mjs 12c)。
 check("大V观点:卡片上没有「从浏览器补抓」", await evalJs(
   `document.querySelectorAll('#source-list .source-entry a[href^="/browser-capture"]').length`) === 0);
 

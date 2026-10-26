@@ -359,13 +359,19 @@ class PipelineTests(GrabCase):
         self.assertTrue(grab.known(PAGE)['exported'])
 
 
-class LinkBodyGateTests(GrabCase):
-    """`replace()` 自己那条 WHERE 里的能力判据(`link_body_sql`)。
+class OriginBodyGateTests(GrabCase):
+    """`replace()` 自己那条 WHERE 里的判据(`origin_body_sql`)。
 
     **和入口那一道各钉一次**(入口在 `tests/test_grab_endpoint.py`):入口答的是
-    「这次该不该抓」,这一道答的是「这一行该不该被外链那一页覆盖」。只有后者挡得住
-    绕过入口的调用方,而这个入口曾经是五个写 `body` 的 UPDATE 里唯一漏接的那个 ——
-    漏接的形态是**静默覆盖**,不是报错。
+    「这次该不该抓」,这一道答的是「这一行的正文该不该被这次重抓换掉」。只有后者
+    挡得住绕过入口的调用方,而这个入口曾经是五个写 `body` 的 UPDATE 里唯一漏接的
+    那个 —— 漏接的形态是**静默覆盖**,不是报错。
+
+    **判据问的是「这一行的 `url` 指向的是不是它自己」,不是「这一类进不进补抓队列」。**
+    三类来源把两边都钉住:简报(链接指向别人家那篇 → 拒)、手动收录(链接就是人要的
+    那一篇 → 换)、大V观点(**两个问题在这一类上分叉**:不进补抓队列,但链接是它本人
+    的永久链接 → 换)。只摆前两类的后果实测过:把通用路那道闸拿来当这里的判据,两条
+    用例照旧全绿,而推文那条唯一的人工出路被整条打死。
     """
 
     def fresh(self):
@@ -383,6 +389,25 @@ class LinkBodyGateTests(GrabCase):
         row = next(r for r in self.items() if r['key'] == key)
         self.assertEqual(row['body'], DIGEST_SUMMARY)
         self.assertEqual((row['content_rev'], row['body_zh']), (0, '简报摘要译文'))
+
+    def test_a_tweet_is_replaced_because_its_url_points_at_itself(self):
+        """推文那条短残片:不进补抓队列,但照旧换得成 —— 它的链接就是它自己。
+
+        **这一条是上面那条的分叉边**:只按「进不进补抓队列」判的话它会被连带拒掉,
+        而这是那几百条残片唯一的人工出路。`content_kind` 不许动(换了正文还是推文),
+        译文整组作废(旧译文译的是那段残片)。
+        """
+        key = self.social_item()
+        seen = grab.known(TWEET)
+        self.assertEqual(seen['kind'], 'social')     # 查重按 url,命中的不是手动收录
+        self.assertTrue(seen['content_ok'])          # 质量那道判据对它恒真
+        self.assertTrue(grab.replace(seen, {**self.fresh(), 'url': TWEET,
+                                            'title': '某某：这次取回了全文',
+                                            'content_kind': 'post'}))
+        row = next(r for r in self.items() if r['key'] == key)
+        self.assertIn('这是一段确认得了的正文', row['body'])
+        self.assertEqual(row['content_kind'], 'post')
+        self.assertEqual((row['content_rev'], row['body_zh']), (1, ''))
 
     def test_a_row_whose_body_is_its_links_page_is_still_replaced(self):
         """反过来钉一边:手动收录那一类的正文**就是**外链那一页,照旧换得成。

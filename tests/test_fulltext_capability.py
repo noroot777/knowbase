@@ -1,5 +1,12 @@
 """原文链接能力约束旧补抓、订阅保存和翻译/挂起出口。仅在验收阶段执行。
 
+**`SourceType` 上关于「正文从哪来」的位有两个,问的是两个不同的问题**
+(定义见 `kb/source_types.py`):`body_from_link` 问「该不该由通用的 HTTP + 提取器去
+它外链那一页上取」(这个文件管的就是它),`url_is_origin` 问「这一行的 `url` 指向的是不是
+它自己」(人工重抓那条路,回归在 `tests/test_grab_store.py`、`test_grab_endpoint.py`)。
+两者在大V观点上分叉,`test_both_capability_bits_are_declared_per_source` 把整张取值表
+钉住 —— 混成一个许可位的后果两边都实测过:一边静默覆盖正文,一边静默收走唯一的出路。
+
 **`test_every_link_body_entry_refuses_a_disallowed_source` 钉的是集合,不是实例。**
 「这一类来源的正文允不允许被 `url` 指向的那一页替换」这个问题在仓库里冒出来过三次,
 每次都是某个入口自己列一张排除名单(先是补抓队列只看订阅开关,再是采集直取把闸门
@@ -167,6 +174,34 @@ class FulltextCapabilityTests(CapabilityCase):
         self.assertFalse(SourceType('future', '新来源', '', ('future',)).body_from_link)
         self.assertEqual({'rss', 'web', 'inbox'},
                          {source['id'] for source in catalog() if source['body_from_link']})
+
+    def test_both_capability_bits_are_declared_per_source(self):
+        """**两位字段的整张取值表** —— 新增一类来源必须显式回答这两个问题。
+
+        不钉这张表的话,下一类新来源照样会判错,而且照样是静默的:`body_from_link`
+        标错 → 外链那一页顶替正文(简报那条简讯被整篇 README 顶掉);`url_is_origin`
+        标错 → 人工重抓那条唯一的出路消失(推文那几百条残片),或者反过来把别人家那
+        篇抓回来当成它自己。
+
+        **两位都默认 False**:漏报的代价是少一条出路(人能来改这一行声明),误报的
+        代价是静默覆盖、不可恢复(元规则「拿不准就别固化终态」)。
+
+        **分叉那一格是这张表的要点**:大V观点进不了补抓队列(通用提取器对 x.com
+        无效)、而它的 `url` 就是它本人的永久链接 —— 这一格曾经被当成「两边都不许可」。
+        """
+        self.assertEqual(
+            {'wechat': (False, True), 'social': (False, True), 'rss': (True, True),
+             'digest': (False, False), 'web': (True, True), 'inbox': (True, True)},
+            {kind: (spec.body_from_link, spec.url_is_origin)
+             for kind, spec in SOURCE_TYPES.items()})
+        future = SourceType('future', '新来源', '', ('future',))
+        self.assertEqual((False, False), (future.body_from_link, future.url_is_origin))
+        # catalog 两列都交给前端:条目卡片那个采集入口读前者,投递栏那颗「重新抓
+        # 一次」读的是 `/api/grab` 回包里的后者(同一份判据的两个形状)。
+        self.assertEqual({'rss', 'web', 'inbox'},
+                         {s['id'] for s in catalog() if s['body_from_link']})
+        self.assertEqual({'wechat', 'social', 'rss', 'web', 'inbox'},
+                         {s['id'] for s in catalog() if s['url_is_origin']})
 
     def test_default_seed_cannot_enable_a_source_without_the_capability(self):
         disabled_rss = replace(SOURCE_TYPES['rss'], body_from_link=False)
