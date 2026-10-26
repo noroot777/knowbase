@@ -39,6 +39,9 @@ def main():
             elif path == "/release-image":
                 image_ready.set()
                 self.respond(b"ok", "text/plain")
+            elif path == "/hold-image":
+                image_ready.clear()
+                self.respond(b"ok", "text/plain")
             elif path == "/slow-image.svg":
                 image_ready.wait(20)
                 self.respond(b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>', "image/svg+xml")

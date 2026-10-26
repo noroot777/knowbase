@@ -119,7 +119,11 @@ function promoBadge(h) {
 }
 
 function openReader(a) {
-  $('reader-frame').src = a.getAttribute('href');
+  const frame = $('reader-frame');
+  const generation = resetReaderNavigation();
+  readerLoadListener = () => bindReaderScrollAway(generation);
+  frame.addEventListener('load', readerLoadListener);
+  frame.src = a.getAttribute('href');
   $('reader-title').textContent = a.dataset.title || '';
   $('reader-open').href = a.getAttribute('href');
   $('reader-obs').href = a.dataset.obs || '#';
@@ -146,6 +150,15 @@ function openReader(a) {
 // 页面上」得看 iframe 元素自己(跨文档量不着)。头收起之后右上角留一颗常驻的
 // 关闭按钮 —— 原本唯一的出口就在那条头里。机制见 kb/static/js/scrollaway.js。
 let readerAway = null;
+let readerLoadGeneration = 0;
+let readerLoadListener = null;
+function resetReaderNavigation() {
+  readerLoadGeneration++;
+  if (readerLoadListener) $('reader-frame').removeEventListener('load', readerLoadListener);
+  readerLoadListener = null;
+  setReaderUnavailable(false);
+  return readerLoadGeneration;
+}
 function setReaderUnavailable(unavailable) {
   const frame = $('reader-frame');
   frame.hidden = unavailable;
@@ -156,7 +169,8 @@ function setReaderUnavailable(unavailable) {
   if (unavailable && document.activeElement === frame)
     $('reader-head').querySelector('[aria-label="关闭阅读器"]').focus({ preventScroll: true });
 }
-function bindReaderScrollAway() {
+function bindReaderScrollAway(generation = readerLoadGeneration) {
+  if (generation !== readerLoadGeneration) return;
   const previous = readerAway;
   readerAway = null;
   previous?.release();
@@ -170,7 +184,6 @@ function bindReaderScrollAway() {
       { visible: frame, host: $('reader') });
   } catch { /* An external document cannot be measured from here. */ }
 }
-$('reader-frame').addEventListener('load', bindReaderScrollAway);
 
 function closeReader() {
   const previous = readerAway;
@@ -179,6 +192,7 @@ function closeReader() {
   finally {
     $('reader').style.display = 'none';
     $('reader-mask').style.display = 'none';
+    resetReaderNavigation();
     $('reader-frame').src = 'about:blank';
   }
 }

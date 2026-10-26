@@ -51,7 +51,8 @@ const openReader = async path => {
     const link = document.createElement('a'); link.href = ${JSON.stringify(path)};
     link.dataset.title = '阅读器关闭验收'; openReader(link);
   })()`);
-  await waitFor(`$('reader-frame').contentDocument?.querySelector('#content a')`);
+  await waitFor(`$('reader-frame').contentDocument?.URL.endsWith(${JSON.stringify(path)})
+    && $('reader-frame').contentDocument.querySelector('#content a')`);
 };
 const foreignPage = async () => {
   await evaluate(`$('reader-frame').focus(); $('reader-frame').src = ${JSON.stringify(base.replace('127.0.0.1', 'localhost') + '/blocked')}`);
@@ -99,9 +100,18 @@ try {
   await press('Escape');
   await waitFor(closed);
   check('点击错误区域后 Escape 仍能完整退出', await evaluate(closed));
-  await openReader('/doc/ready.md');
-  await waitFor(`!$('reader-frame').hidden && !$('reader-frame').inert`);
-  check('重新打开同源文章恢复交互', await evaluate(`$('reader-error').hidden && !$('reader-frame').hasAttribute('tabindex')`));
+  check('关闭错误页立即清除错误状态', await evaluate(`$('reader-error').hidden
+    && !$('reader-frame').hidden && !$('reader-frame').inert && !$('reader-frame').hasAttribute('tabindex')`));
+  await fetch(base + '/hold-image');
+  await openReader('/doc/slow.md');
+  check('重开慢图文章在 load 前就恢复正文与交互', await evaluate(`(() => {
+    const frame = $('reader-frame'), doc = frame.contentDocument;
+    return doc.readyState === 'interactive' && !doc.images[0].complete && readerAway === null
+      && !frame.hidden && !frame.inert && !frame.hasAttribute('tabindex') && $('reader-error').hidden;
+  })()`));
+  await fetch(base + '/release-image');
+  await waitFor(`$('reader-frame').contentDocument?.readyState === 'complete' && readerAway !== null`);
+  check('新文章 load 后仍保持正常正文', await evaluate(`!$('reader-frame').hidden && $('reader-error').hidden`));
   await foreignPage();
   for (let step = 0; step < 6; step++) {
     await press('Tab');

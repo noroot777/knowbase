@@ -66,6 +66,10 @@ function rig() {
     vm.runInContext(readFileSync(new URL(name, root), 'utf8'), state, { filename: name });
   return { element, document, window, frameDoc, links,
     run: code => vm.runInContext(code, state),
+    open(path) {
+      vm.runInContext(`openReader({ getAttribute: () => ${JSON.stringify(path)}, dataset: {} })`, state);
+    },
+    load: () => [...frame.listeners].find(([, type]) => type === 'load')?.[0],
     navigateAway() { foreign = true; document.activeElement = frame; },
     get disconnected() { return disconnected; },
   };
@@ -107,12 +111,17 @@ test('closing during cross-origin navigation always removes the drawer and mask'
 
 test('unexpected cleanup errors remain observable but cannot trap the reader open', () => {
   const app = rig();
-  app.run('readerAway = { release() { throw new Error("cleanup failed"); } }');
+  app.open('/doc/first.md');
+  const obsoleteLoad = app.load();
+  app.run('setReaderUnavailable(true); readerAway = { release() { throw new Error("cleanup failed"); } }');
   assert.throws(() => app.run('closeReader()'), /cleanup failed/);
   assert.equal(app.element('reader').style.display, 'none');
   assert.equal(app.element('reader-mask').style.display, 'none');
   assert.equal(app.element('reader-frame').src, 'about:blank');
   assert.equal(app.run('readerAway'), null);
+  obsoleteLoad();
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-error').hidden, true);
   assert.doesNotThrow(() => app.run('closeReader()'));
 });
 
@@ -147,4 +156,62 @@ test('a same-origin article restores the frame after an unavailable page', () =>
   assert.equal(app.element('reader-frame').hasAttribute('tabindex'), false);
   assert.equal(app.element('reader-error').hidden, true);
   assert.equal(app.run('SCROLL_AWAY.length'), 1);
+});
+
+test('opening another article clears the error state before its load event', () => {
+  const app = rig();
+  app.run('setReaderUnavailable(true)');
+  app.open('/doc/slow.md');
+  assert.equal(app.element('reader-frame').src, '/doc/slow.md');
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-frame').inert, false);
+  assert.equal(app.element('reader-frame').hasAttribute('tabindex'), false);
+  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.run('readerAway'), null);
+});
+
+test('closing an error page and reopening does not wait for load to restore the frame', () => {
+  const app = rig();
+  app.open('/doc/first.md');
+  app.navigateAway();
+  app.load()();
+  assert.equal(app.element('reader-frame').hidden, true);
+  app.run('closeReader()');
+  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-frame').inert, false);
+  assert.equal(app.element('reader-frame').hasAttribute('tabindex'), false);
+  assert.equal(app.load(), undefined);
+  app.open('/doc/slow.md');
+  assert.equal(app.element('reader').style.display, '');
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.run('readerAway'), null);
+});
+
+test('obsolete load callbacks cannot change a switched, closed or reopened reader', () => {
+  const app = rig();
+  app.open('/doc/first.md');
+  const firstLoad = app.load();
+  firstLoad();
+  const previousBinding = app.run('readerAway');
+  app.open('/doc/second.md');
+  const secondLoad = app.load();
+  app.navigateAway();
+  firstLoad();
+  assert.equal(app.run('readerAway'), previousBinding);
+  assert.equal(app.element('reader-error').hidden, true);
+  secondLoad();
+  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.run('readerAway'), null);
+  app.run('closeReader()');
+  secondLoad();
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-error').hidden, true);
+  app.open('/doc/third.md');
+  secondLoad();
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.run('readerAway'), null);
+  assert.equal([...app.element('reader-frame').listeners.values()].filter(type => type === 'load').length, 1);
 });

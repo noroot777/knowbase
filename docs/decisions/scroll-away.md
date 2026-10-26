@@ -287,3 +287,32 @@ profile，未接管用户标签或使用登录态。截图保存在
 `output/playwright/reader-review-slow-before-load.png`、
 `output/playwright/reader-review-error-click.png`、
 `output/playwright/reader-review-error-closed.png`。
+
+### 第 2 轮审查修复（2026-10-26）
+
+错误页的隐藏状态原先只在下一次 iframe `load` 中恢复；关闭时的 `about:blank`
+load 又因抽屉已隐藏而跳过，导致重开慢资源文章时，旧错误提示继续遮住已可读正文。
+
+- 打开新文章前和关闭的 `finally` 中立即恢复 iframe 的 `hidden`、`inert`、
+  `tabindex` 与错误面板状态，不等待图片或附件完成。
+- 每次打开/关闭递增导航代次并移除旧 load 监听；新监听捕获本次代次，过期回调在
+  释放绑定或修改错误状态前直接返回，避免关闭或切换后迟到的回调影响当前文章。
+- 单测补充直接切换、错误页关闭后重开但不触发 load、清理异常时复位，以及过期
+  回调隔离。浏览器探针重新挂起图片，并在 `readyState=interactive`、图片未完成时
+  检查正文恢复，不再等待 iframe 可见或完整 load 来掩盖状态残留。
+
+按项目约定，执行阶段未运行任何回归测试或新增用例；只做逐文件 `node --check`、
+Python AST 语法检查、`git diff --check` 和独立浏览器定向点检。点检使用生产模板的
+本地隔离夹具：错误页点击后 Esc 关闭，iframe 已恢复且错误面板隐藏；重开慢图文章
+时 `readyState=interactive`、`imageComplete=false`、`frameHidden=false`、
+`frameInert=false`、`frameTab=null`、`errorHidden=true`，正文可见。加载前点击关闭
+按钮也完整退出；快速切换后仍立即可读；人工调用保留的旧 load 回调不会改变新绑定，
+绑定数在恢复后保持 2、关闭后回到基线 1。未捕获页面异常数组为空。
+
+Chrome 扩展创建具名后台标签仍返回 `Capability is not available: visibility`，
+因此降级独立无头临时 profile，未接管用户标签、激活窗口或使用登录态。夹具的
+业务 API 503 和拒绝嵌入提示为预期，不代表业务接口验证通过。截图与观察记录：
+`output/playwright/reader-round2-error.png`、
+`output/playwright/reader-round2-reopen-before-load.png`、
+`output/playwright/reader-round2-closed.png`、
+`output/playwright/reader-round2-observation.log`。
