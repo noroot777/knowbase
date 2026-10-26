@@ -16,7 +16,7 @@ function target() {
   };
 }
 
-function rig() {
+function rig(initialUrl = 'https://kb.local/doc/article.md') {
   let now = 10000;
   const elements = new Map();
   const document = { ...target(), activeElement: null, getElementById: element,
@@ -47,7 +47,7 @@ function rig() {
   document.body = element('body');
   document.documentElement = { dataset: {} };
   const links = [];
-  let frameDoc = { ...target(), URL: 'https://kb.local/doc/article.md', title: 'Article',
+  let frameDoc = { ...target(), URL: initialUrl, title: 'Article',
     documentElement: { contains: () => false, dataset: { readerPath: 'article.md' } },
     querySelector: () => null, querySelectorAll: () => links };
   let foreign = false;
@@ -60,6 +60,15 @@ function rig() {
       return name === 'document' ? frameDoc : value;
     } });
   const frame = element('reader-frame');
+  const srcAssignments = [];
+  let frameSource = initialUrl === 'about:blank' ? initialUrl : new URL(initialUrl).pathname;
+  Object.defineProperty(frame, 'src', { get: () => frameSource, set(value) {
+    frameSource = value;
+    srcAssignments.push(value);
+    const destination = new URL(value, 'https://kb.local');
+    if (destination.protocol === 'https:' && destination.href.split('#')[0] === frameDoc.URL.split('#')[0])
+      frameDoc.URL = destination.href;
+  } });
   let frameHidden = false;
   Object.defineProperty(frame, 'hidden', { get: () => frameHidden, set(value) {
     frameHidden = value;
@@ -84,7 +93,7 @@ function rig() {
     const handler = [...window.listeners].find(([, type]) => type === 'message')?.[0];
     handler?.({ source: frameWindow, origin: 'https://kb.local', data, ...overrides });
   };
-  return { element, document, window, get frameDoc() { return frameDoc; }, links, popups, message,
+  return { element, document, window, get frameDoc() { return frameDoc; }, links, popups, message, srcAssignments,
     advance: milliseconds => { now += milliseconds; },
     renderDocument(url) {
       foreign = false;
@@ -113,11 +122,11 @@ function rig() {
 
 test('cross-origin load releases every accessible listener and returns Escape focus to the reader', () => {
   const app = rig();
-  app.open('https://external.test/blocked');
+  app.open('/doc/article.md');
   app.run('bindReaderScrollAway()');
   app.element('reader-head').setAttribute('inert', '');
+  app.navigateAway('https://external.test/blocked');
   app.run('readerLastDocument = null');
-  app.navigateAway('https://external.test/blocked', false);
   assert.doesNotThrow(() => app.run('bindReaderScrollAway()'));
   assert.equal(app.run('readerAway'), null);
   assert.equal(app.run('SCROLL_AWAY.length'), 0);
@@ -296,7 +305,7 @@ test('a readable non-reader error page cannot become a reader document', () => {
 
 test('reader headers follow the loaded article metadata instead of the entry link', () => {
   const app = rig();
-  app.open('/doc/first.md');
+  app.open('/doc/article.md');
   app.frameDoc.URL = 'https://kb.local/doc/next.md';
   app.frameDoc.title = 'Next article';
   app.frameDoc.documentElement.dataset.readerPath = 'next.md';
@@ -321,7 +330,7 @@ test('a same-origin article restores the frame after an unavailable page', () =>
   assert.equal(app.run('SCROLL_AWAY.length'), 1);
 });
 
-test('opening another article clears the error state before its load event', () => {
+test('opening another article replaces the old error with a loading state before its load event', () => {
   const app = rig();
   app.run('setReaderUnavailable(true)');
   app.open('/doc/slow.md');
@@ -329,7 +338,8 @@ test('opening another article clears the error state before its load event', () 
   assert.equal(app.element('reader-frame').hidden, true);
   assert.equal(app.element('reader-frame').inert, true);
   assert.equal(app.element('reader-frame').hasAttribute('tabindex'), true);
-  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-error').hidden, false);
+  assert.equal(app.element('reader-status').textContent, '正在加载正文…');
   assert.equal(app.run('readerAway'), null);
 });
 
@@ -349,7 +359,8 @@ test('closing a restored page clears errors and reopening guards the new documen
   app.open('/doc/slow.md');
   assert.equal(app.element('reader').style.display, '');
   assert.equal(app.element('reader-frame').hidden, true);
-  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-error').hidden, false);
+  assert.equal(app.element('reader-status').textContent, '正在加载正文…');
   assert.equal(app.run('readerAway'), null);
   app.commitDocument('https://kb.local/doc/slow.md');
   assert.equal(app.element('reader-frame').hidden, false);
@@ -359,6 +370,7 @@ test('obsolete load callbacks cannot change a switched, closed or reopened reade
   const app = rig();
   app.open('/doc/first.md');
   const firstLoad = app.load();
+  app.renderDocument('https://kb.local/doc/first.md');
   firstLoad();
   const previousBinding = app.run('readerAway');
   app.open('/doc/second.md');
@@ -378,16 +390,18 @@ test('obsolete load callbacks cannot change a switched, closed or reopened reade
   app.open('/doc/third.md');
   secondLoad();
   assert.equal(app.element('reader-frame').hidden, true);
-  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-error').hidden, false);
+  assert.equal(app.element('reader-status').textContent, '正在加载正文…');
   assert.equal(app.run('readerAway'), null);
   assert.equal([...app.element('reader-frame').listeners.values()].filter(type => type === 'load').length, 1);
 });
 
 test('departure before the first load restores the rendered article and keeps its destination', () => {
-  const app = rig();
+  const app = rig('about:blank');
   app.open('/doc/article.md');
   assert.equal(app.run('readerLastDocument'), null);
   assert.equal(app.run('readerAway'), null);
+  app.renderDocument('https://kb.local/doc/article.md');
   app.navigateAway();
   assert.equal(app.run('readerLastDocument'), app.frameDoc.URL);
   app.load()();
@@ -426,7 +440,8 @@ test('repeated recovery stops reloading and opening popups until the reader is e
   app.load()();
   assert.equal(app.element('reader-frame').hidden, true);
   assert.equal(app.popups.length, 0);
-  assert.equal(app.element('reader-return').hidden, false);
+  assert.equal(app.element('reader-return').hidden, true);
+  assert.equal(app.element('reader-status').textContent, '正在加载正文…');
 });
 
 test('a delayed departure cannot reset the automatic recovery budget', () => {
@@ -449,6 +464,8 @@ test('loading another article or hash cannot reset the recovery budget without a
   app.open('/doc/article.md');
   app.navigateAway();
   app.load()();
+  app.renderDocument('https://kb.local/doc/article.md');
+  app.load()();
   app.renderDocument('https://kb.local/doc/other.md#section');
   app.load()();
   app.navigateAway('https://external.test/other');
@@ -460,6 +477,61 @@ test('loading another article or hash cannot reset the recovery budget without a
   assert.equal(app.run('readerRecoveryCount'), 0);
   assert.equal(app.element('reader-return').hidden, true);
   assert.equal(app.popups.length, 0);
+});
+
+test('identical and fragment-only opens rebind the committed article without a load event', () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  for (const path of ['/doc/article.md', '/doc/article.md#section', '/doc/article.md#section']) {
+    const previousBinding = app.run('readerAway');
+    app.open(path);
+    assert.equal(app.element('reader-frame').hidden, false);
+    assert.equal(app.element('reader-frame').inert, false);
+    assert.equal(app.element('reader-error').hidden, true);
+    assert.notEqual(app.run('readerAway'), previousBinding);
+    assert.equal(app.run('SCROLL_AWAY.length'), 1);
+    assert.equal(app.run('readerLastDocument'), 'https://kb.local' + path);
+    assert.equal(app.element('reader-open').href, 'https://kb.local' + path);
+  }
+});
+
+test('a stale article load cannot take ownership of a pending request', () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  const previousBinding = app.run('readerAway');
+  app.open('/doc/next.md');
+  app.load()();
+  assert.equal(app.run('readerAway'), previousBinding);
+  assert.equal(app.run('readerLastDocument'), null);
+  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.element('reader-status').textContent, '正在加载正文…');
+  app.renderDocument('https://kb.local/doc/next.md');
+  app.load()();
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-fav').dataset.path, 'next.md');
+  assert.equal(app.run('readerRecoveryCount'), 0);
+});
+
+test('a close blank arriving after immediate reopen reissues only the current request once', () => {
+  const app = rig();
+  app.open('/doc/article.md#section');
+  app.run('closeReader()');
+  app.open('/doc/article.md#section');
+  app.renderDocument('about:blank');
+  const currentLoad = app.load();
+  currentLoad();
+  const assignmentCount = app.srcAssignments.length;
+  assert.equal(app.element('reader-frame').src, 'https://kb.local/doc/article.md#section');
+  assert.equal(app.element('reader-status').textContent, '正在加载正文…');
+  assert.equal(app.element('reader-open').href, 'https://kb.local/doc/article.md#section');
+  assert.equal(app.run('readerRecoveryCount'), 0);
+  currentLoad();
+  assert.equal(app.srcAssignments.length, assignmentCount);
+  app.renderDocument('https://kb.local/doc/article.md#section');
+  currentLoad();
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.run('SCROLL_AWAY.length'), 1);
 });
 
 test('readable local articles and files never depend on a declaration or a second request', () => {

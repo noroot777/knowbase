@@ -13,6 +13,32 @@
 
 ## 硬约束
 
+- **阅读器就绪先核对本次请求 URL，不认 Document 对象是否换过。** 显式打开或
+  自动恢复后，待提交的同源 `/doc/` 文档必须与 `readerRequestedDocument` 同址
+  （忽略 fragment），才可接管正文；旧文章迟到的 load 不得释放当前绑定或改写抬头。
+  同址重开、只换 fragment 直接保护并重绑，不等待不会到来的 load。关闭留下的
+  `about:blank` 不是文章加载失败；仍在打开的会话最多重新投递一次当前请求，
+  不消耗离页恢复预算，也不把空白页写进标题或目标入口。
+- **可读性不依赖服务端身份声明。** 请求归属确认后，同源 `/doc/` 的可读正文
+  不因缺少 `data-reader-path`、响应头、HEAD 支持或内联脚本而隐藏；属性仅补充
+  路径元信息，不另发 HEAD。旧模板和原样附件走同一套宿主保护；不用 sandbox
+  代替导航守卫，它不阻止子框自导航且会阻断浏览器内置 PDF 阅读器。
+- **宿主先保护、再放开 iframe，不等子资源 load。** 宿主装好点击、Esc、
+  Navigation API 和 beforeunload 监听后才显示正文；HTTP(S) 离页链接统一新标签
+  并补 `noopener`，只有同文档锚点留在正文，保留下载、修饰键和特殊协议。
+- **正文可见性、交互和提示必须同出口更新。** 加载中或不可访问时统一设置
+  `hidden`、`inert`、`tabindex=-1`，宿主提示区区分正在加载与无法显示，不能只
+  隐藏正文而留下永久空白；保护就绪后一起还原。离页意图出现就接管，不等外站
+  完成 load，隐藏前记住焦点归属，把 iframe/BODY 上的焦点交给稳定关闭按钮。
+- **自动恢复每个显式阅读会话最多一次，不按时间、文章或 hash 重置。**
+  恢复已确认的正文也不解锁预算；自动动作不开新标签。失败时保留真实目标，
+  初次失败的「新标签」指向本次请求；有已确认正文时提供「回到刚才那篇」，
+  由用户显式重开后才重置预算。
+- **退出不能依赖子页或滚动绑定清理成功。** 抽屉自身、关闭按钮与遮罩始终
+  可退出；子窗口变跨域时逐项容忍解绑的 `SecurityError`，继续释放同源监听、
+  ResizeObserver 和注册表，其它异常保留可观测性，关闭用 `finally` 撤掉抽屉。
+  打开/关闭代次隔离迟到 load，导航通知须核对窗口、origin、源文章 URL 和
+  导航编号；有效文章加载后按实际路径、标题与元信息同步全部抬头入口。
 - **收起只认用户自己滚的那一下**(滚轮 / 触摸 / 键盘 / 拖滚动条),程序改
   `scrollTop` 不算。违反之后的形态是**按钮点不中**:这一页到处在改 `scrollTop`
   (换一篇写回 0、从「订阅管理」切回阅读时恢复上次停在哪儿),后一种会被当成
@@ -146,15 +172,6 @@
 - **文章阅读器那一条轴在 iframe 里**(同源的 `/doc/`)。所以绑的是
   `contentWindow`、手势听它那份 `document`,而「这块还在不在页面上」得看 iframe
   元素自己 —— 跨文档量不着。iframe 每换一次 `src` 都要重绑,`closeReader()` 解绑。
-- **可读性不依赖服务端身份声明。** 同源 `/doc/` 且 `contentDocument` 可读就显示，
-  `data-reader-path` 仅补充路径元信息；旧进程未输出属性、附件缺少响应头、HEAD
-  不可用都不能藏掉已经加载的正文，也不再为显示正文另发 HEAD 请求。
-- **宿主先保护再放开 iframe。** 新导航先隐藏并 inert，宿主在文档可访问时安装
-  点击、Esc、Navigation API 和 beforeunload 监听后才显示，不等图片等资源的 load。
-  旧模板和原样 HTML 的 HTTP(S) 离页链接同样走新标签，保留本页锚点、下载和特殊协议。
-  跨源或非 `/doc/` 离页意图立即隐藏正文并把焦点交给关闭按钮；遮罩和抽屉自身的
-  Esc 不依赖子页监听。不使用 iframe sandbox 代替导航保护：它并不禁止子框自导航，
-  且会阻断浏览器内置 PDF 阅读器；附件和旧模板也必须经过同一套宿主保护。
 - **收藏详情每次重绘都是新 DOM**(`renderFavInspector()` 整块重写 innerHTML),
   绑定跟着渲染走,渲染前先 `release()` 上一份,否则监听和 `ResizeObserver` 会越
   积越多。
@@ -243,280 +260,3 @@
 
 更早几档(撤手势门、撤两道「滚得回来」、不设 inert、收起态只压 height、不复位、
 整条机制不接)也各自注入过。
-
-## 跨域跳转不能堵住退出（2026-10-25）
-
-文章正文链接原先会在阅读器 iframe 内直接导航。截图中的 Once 文章跳到外站后，
-浏览器拒绝嵌入；旧绑定清理时访问 WindowProxy 的 `removeEventListener` 抛出
-`SecurityError`，同时中断 load 重绑和 `closeReader()`，所以关闭按钮与 Esc 都无效。
-仅保护滚动位置读数不够，事件解绑也必须逐项容忍窗口变成跨域，继续清理同源监听、
-ResizeObserver 和注册表。其它异常不吞掉，便于发现真正的逻辑错误。
-
-文章正文渲染时立即将跨域 HTTP(S) 链接改为新标签打开并补 `noopener`，保留页内
-锚点、站内链接和 Obsidian 协议，不等图片等子资源完成。遇到意外跨域或浏览器错误页时，
-隐藏并 inert 掉 iframe，由父页面的提示面板接管原正文区域，避免焦点再次进入子文档。
-关闭本身通过 `finally`
-撤掉抽屉、遮罩和正文，并在清理前释放当前句柄，不允许辅助行为锁死退出入口。
-
-新增 `tests/reader_close_test.mjs`，覆盖跨域 load、导航期间直接关闭、清理异常兜底、
-外链与本地链接区分；由 `tests/test_reader_close.py` 接入统一验收，按项目约定未在
-执行阶段运行，留待验收阶段执行。
-
-首轮定向页面点检使用截图中同一篇文章：外链在新标签打开，阅读器正文保持；强制绕过
-新标签规则并构造 `X-Frame-Options: DENY` 错误页后，当时仅确认刚加载时关闭按钮和 Esc 均能退出，
-遮罩与主区域 inert 状态同步解除，滚动绑定数恢复原值，没有未捕获页面异常。
-Chrome 扩展创建具名后台标签返回 `Capability is not available: visibility`，因此
-降级独立无头临时 profile；未接管用户标签，未使用登录态，也未访问真实外站。
-截图保存在 `output/playwright/reader-external-link-fixed.png`、
-`output/playwright/reader-error-recoverable.png` 和
-`output/playwright/reader-escape-closed.png`。
-
-### 第 1 轮审查修复（2026-10-26）
-
-审查复现了首轮漏掉的两个窗口：错误页加载后再次点击或 Tab 进入 iframe，Esc 不再
-到达父页面；慢图尚未完成时，文章已经可点击，但 load 中的外链改写还未执行。
-
-- 错误页现在由父页面提示面板替代，iframe 同时设置 `hidden`、`inert` 和
-  `tabindex=-1`；鼠标与键盘均不能重新进入它。同源文章加载后恢复正文与交互。
-- 外链规则移到生产 `/doc/` 模板，净化后的正文写入与链接处理在同一个同步脚本中
-  完成；不再与 scroll-away 的 load 绑定耦合。直接解析 href，保留其它 rel 值。
-- `tests/reader_close_probe.mjs` 使用生产模板、可控慢图和本地拒绝嵌入页，覆盖 load 前
-  真实点击开新标签、错误区域点击再 Esc、Tab 循环再 Esc、同源文章恢复；由
-  `tests/test_reader_close_browser.py` 接入统一验收。单测同步补齐状态恢复与早期外链。
-
-本轮仅执行语法检查、diff 检查与独立浏览器定向点检，未运行任何回归测试或新增用例。
-点检记录：慢图未完成时 `readyState=interactive`、外链已有 `_blank/noopener`，真实
-点击打开独立标签且原 iframe 仍在 slow.md；点击原错误区域后焦点为 reader-error，
-Esc 关闭抽屉/遮罩并解除主区域 inert；连续 6 次 Tab 及程序 focus 均未进入 iframe，
-Esc 仍能关闭。同源文章重开恢复正常，无未捕获页面异常。隔离夹具对业务 API 返回
-预期 503，不代表业务接口验证通过；不使用真实库或外站。
-
-扩展再次返回 `Capability is not available: visibility`，因此按规范降级独立无头临时
-profile，未接管用户标签或使用登录态。截图保存在
-`output/playwright/reader-review-slow-before-load.png`、
-`output/playwright/reader-review-error-click.png`、
-`output/playwright/reader-review-error-closed.png`。
-
-### 第 2 轮审查修复（2026-10-26）
-
-错误页的隐藏状态原先只在下一次 iframe `load` 中恢复；关闭时的 `about:blank`
-load 又因抽屉已隐藏而跳过，导致重开慢资源文章时，旧错误提示继续遮住已可读正文。
-
-- 打开新文章前和关闭的 `finally` 中立即恢复 iframe 的 `hidden`、`inert`、
-  `tabindex` 与错误面板状态，不等待图片或附件完成。
-- 每次打开/关闭递增导航代次并移除旧 load 监听；新监听捕获本次代次，过期回调在
-  释放绑定或修改错误状态前直接返回，避免关闭或切换后迟到的回调影响当前文章。
-- 单测补充直接切换、错误页关闭后重开但不触发 load、清理异常时复位，以及过期
-  回调隔离。浏览器探针重新挂起图片，并在 `readyState=interactive`、图片未完成时
-  检查正文恢复，不再等待 iframe 可见或完整 load 来掩盖状态残留。
-
-按项目约定，执行阶段未运行任何回归测试或新增用例；只做逐文件 `node --check`、
-Python AST 语法检查、`git diff --check` 和独立浏览器定向点检。点检使用生产模板的
-本地隔离夹具：错误页点击后 Esc 关闭，iframe 已恢复且错误面板隐藏；重开慢图文章
-时 `readyState=interactive`、`imageComplete=false`、`frameHidden=false`、
-`frameInert=false`、`frameTab=null`、`errorHidden=true`，正文可见。加载前点击关闭
-按钮也完整退出；快速切换后仍立即可读；人工调用保留的旧 load 回调不会改变新绑定，
-绑定数在恢复后保持 2、关闭后回到基线 1。未捕获页面异常数组为空。
-
-Chrome 扩展创建具名后台标签仍返回 `Capability is not available: visibility`，
-因此降级独立无头临时 profile，未接管用户标签、激活窗口或使用登录态。夹具的
-业务 API 503 和拒绝嵌入提示为预期，不代表业务接口验证通过。截图与观察记录：
-`output/playwright/reader-round2-error.png`、
-`output/playwright/reader-round2-reopen-before-load.png`、
-`output/playwright/reader-round2-closed.png`、
-`output/playwright/reader-round2-observation.log`。
-
-### 新一轮阅读器审查修复（2026-10-26）
-
-本轮报告第 2–5 条落在阅读器的链接、落点、错误焦点和抬头链路，合并处理：
-
-- 正文的 HTTP(S) 链接统一在新标签打开，只有同一文档的锚点留在正文；不再用
-  同源字符串推断最终落点。站内重定向、404、500、其它页面和另一篇文章都不会
-  替换当前正文，Obsidian 协议保持不变。
-- 生产阅读页同步声明 `readerPath`，load 时检查实际文档标记，不只检查是否同源。
-  意外离开阅读页时恢复上一次已确认的正文，并尝试在新标签打开实际请求；抬头保留
-  「打开刚才的链接」入口，弹窗被拦时仍能继续。没有可恢复正文时，错误面板的
-  「新标签」指向失败目标，不再指向上一篇文章。
-- 隐藏 iframe 前保存焦点归属，错误出现后把 iframe 或 BODY 上的焦点送到稳定
-  `reader-close` 按钮，不再依赖中文 aria-label 或隐藏后的 activeElement。
-- 有效文章 load 后从其实际标题、路径和元信息同步抬头、收藏、Obsidian 与原文；
-  即便发生同源文章内部导航，也不沿用上一篇的字段。
-
-补充了落点恢复、同源非阅读错误页、真实隐藏导致焦点丢失、目标入口与抬头同步的
-单测和浏览器探针覆盖。按项目约定，未运行任何回归套件或新增用例；逐文件 JS
-语法检查、Python AST 检查与 diff 检查通过。
-
-独立浏览器定向点检使用生产模板的本地隔离夹具：慢图仍未完成时，真实点击站内
-重定向、另一篇文章、404、500、普通同源页面，均打开独立标签，主页面和 iframe
-仍留在原处。绕过链接规则强制导航到这类非阅读页，均恢复 slow.md 并保留真实
-目标入口；直接加载 ready.md 后标题、收藏路径、Obsidian、原文均对应 ready.md。
-初始加载拒绝嵌入页时，焦点为 reader-close，连续 6 次 Tab 均在抽屉内；实际点击
-「新标签」打开 blocked 目标。Esc 关闭后，重开慢图仍在 interactive 阶段即可读，
-父页异常记录为空。业务 API 的 503 和拒绝嵌入日志为夹具预期，不代表业务接口通过。
-
-Chrome 扩展具名后台标签返回 `Capability is not available: visibility`，按规范
-降级独立无头临时 profile；未接管用户标签、激活窗口或使用登录态。截图和记录：
-`output/playwright/reader-destinations-kept.png`、
-`output/playwright/reader-restored-destination.png`、
-`output/playwright/reader-current-header.png`、
-`output/playwright/reader-error-focus-fixed.png`、
-`output/playwright/reader-destination-observation.log`。
-
-报告第 1 条是问答回答/图鉴条目在主文档里的既有导航问题，涉及 chat/gallery 与
-通用 mdHtml，而非阅读抽屉。基线 f97482a 已有相同调用；本任务对这两个模块无
-任何改动，也未改动 mdHtml 的链接行为。本轮没有扩修它们，按边界协议申请独立
-处理主文档 Markdown 链接的统一策略，等待用户裁定；不宣称报告全部通过。
-
-### 离页源头与文章夹具契约修复（2026-10-26）
-
-本轮 f5Yl0USdpAKo 第 1 轮的两条意见都落在阅读器链路内，分别修复：
-
-- 订阅布局探针不再拿 CSS/JS 静态文件冒充文章。布局夹具在自己的临时 vault
-  写入 `reader-layout/first.md` 和 `second.md`，探针通过正式 `/doc/` 路由加载，
-  等待正确文章与让位绑定均就绪后再滚动；没有放宽生产的 `readerPath` 判据。
-- 离页目标由文章源头记录，不再从 iframe 的 `src` 属性推断。捕获阶段记录
-  同框 HTTP(S) 链接点击，Navigation API 在可用时记录包括 `location.href`
-  在内的脚本导航，`beforeunload` 补发已知目标。点击被取消时撤销意图，页内
-  锚点、修饰键、新标签与下载不当作同框离页目标。
-- 同源文章先同步调用父页接收器，再发送 `postMessage`。定向点检中仅异步通知
-  在真实跨源点击时未被父页收到，因此不依赖消息任务赶在文档退出前执行。
-  两条通道复用同一处校验：当前 iframe、来源 origin、源文章 URL 和本次
-  iframe 导航编号必须匹配；恢复、换篇或关闭后旧通知失效。
-- 恢复正文时保留真实请求入口；初次失败仅使用已登记的打开请求作兜底，不把
-  本地 `src` 冒充远端地址。独立阅读页脚本拆入 `kb/web/doc_links.py`，继续由
-  生产模板同步内联，避免主路由文件超过 700 行。
-
-同步更新了单测和浏览器探针的验收覆盖：内部导航不再给 `frame.src` 赋目标值，
-增加无 Navigation API 的真实点击、取消意图、非法来源和过期通知的覆盖。
-**按项目约定，本轮没有运行回归套件，也没有执行新增测试用例**；不宣称原先
-5 条失败已由测试跑绿，回归统一留在验收阶段。逐文件 JS 语法、嵌入脚本语法、
-Python AST 和 `git diff --check` 是本轮静态校验依据。
-
-本轮独立无头浏览器定向点检记录：
-
-- 正文内部通过 `contentWindow.location.href` 跨源跳到拒绝嵌入页，赋值后
-  iframe 的 `src` 仍是原文章；恢复后目标入口指向 `localhost` 的实际请求，
-  正文可读，焦点回到 `reader-close`，目标入口可实际打开该请求。
-- 禁用 Navigation API 后，将正文链接设成同框目标并真实点击，仍恢复原文章、
-  保留拒绝嵌入页的目标入口；实际点击关闭按钮可退出。
-- 初次直接打开拒绝嵌入页时，错误面板的链接指向实际请求，焦点在关闭按钮、
-  iframe inert；分别用 Esc 与关闭按钮均能退出，父页异常记录为空。
-- 使用真实订阅布局夹具的两篇文章：第一篇带正式 `readerPath`，iframe 未隐藏；
-  下滚后标题栏高度 61→0、正文高度 659→720，标题栏 inert、常驻关闭按钮出现，
-  点它能退出。连续打开第一、第二篇后最终停在第二篇，仍能下滚收头并用 Esc 退出。
-
-Chrome 扩展具名后台标签返回 `Capability is not available: visibility`，因此
-降级为独立临时 profile 的无头 Chrome。未连接用户 Chrome、接管普通标签、
-激活窗口或使用登录态；只访问本地隔离夹具。证据：
-`output/playwright/reader-navigation-observation.log`、
-`output/playwright/reader-inner-navigation-restored.png`、
-`output/playwright/reader-captured-click-restored.png`、
-`output/playwright/reader-real-article-scroll-away.png`。
-
-上一节申请转出的主文档问答/图鉴链接问题，用户已裁定交由独立任务
-`3VpdKYp6Ao4c` 处理；本轮未改动 chat/gallery 或通用 Markdown 链接策略。
-
-### 恢复熔断与提前离页断言（2026-10-26）
-
-本轮按 f5Yl0USdpAKo 第 2 轮报告修复两条阻塞意见：
-
-- 两条旧断言改为期望恢复已解析正文，而不是隐藏 iframe。另加明确的首次
-  `load` 前离页用例，保留源文章与实际目标的契约，不回退生产的提前记账行为。
-- 在 `recoverReaderDocument` 动作层记录恢复目标和时间，同一文章（忽略 hash）
-  5 秒内只自动恢复一次。第二次离页进入不可显示面板，并锁住后续自动恢复和
-  弹窗；即使等待超过时间窗或再次收到 load，也不自动解锁。用户显式重开、
-  切篇或关闭时清零。未触发锁定、间隔至少 5 秒的独立离页仍允许恢复。
-- 熔断前先更新实际目标入口，保留「新标签」与「打开刚才的链接」，隐藏并
-  inert 失败的 iframe，焦点留在关闭按钮。自动恢复或有效文章 load 都不重置
-  熔断记忆，避免恢复后的文档再次离页时绕过保护。
-
-补齐验收覆盖：可控时钟下的重复失败、超过时间窗仍锁定、显式重开后重置、
-间隔达到时间窗后允许独立恢复；浏览器夹具增加最多离页 4 次的安全上限，
-探针期望实际只离页 2 次（首次打开加一次恢复）。慢图恢复观察会等待正文
-解析完成和图片元素存在，避免把新文档刚创建、内容尚未解析的瞬间当作正文。
-
-本轮仅做独立无头浏览器的本地定向点检：
-
-- 打开立即离页的夹具后，离页次数 2、导航增量 2、弹窗 1；继续观察 5.5 秒
-  数值不变，iframe hidden/inert、错误面板可见、焦点为 `reader-close`，两个
-  目标入口均指向实际拒绝嵌入页。
-- 慢图文章首次 load 前真实点击同框链接：点击前 `interactive`、图片未完成、
-  无让位绑定；恢复后仍是 `interactive`、图片未完成，正文可见、错误面板隐藏、
-  目标入口保留。释放图片后 load 完成并正常绑定，实际点击关闭按钮可退出。
-- 重开立即离页夹具后可以重新恢复一次并熔断，Esc 能关闭且清空保护状态；
-  随后打开普通文章正常可读，实际点击遮罩可退出。慢图点检期间未捕获页面异常。
-  主页面 API 的 503 与拒绝嵌入提示均来自隔离夹具，不作为真实服务失败。
-
-**未执行任何回归套件或新增用例**，原报告两条失败没有由执行者复跑绿；所有
-回归留到验收。JS 语法、Python AST、代码文件行数及 `git diff --check` 为静态
-检查依据。主文档链接策略仍由 `3VpdKYp6Ao4c` 承接，本轮未扩修非阻塞项。
-
-Chrome 扩展具名后台标签返回 `Capability is not available: visibility`，故降级为
-独立临时 profile 的无头 Chrome；仅访问本地夹具，未连接用户 Chrome、激活
-窗口、接管普通标签或使用登录态。自己的弹窗、浏览器与夹具服务用后关闭。
-证据：`output/playwright/reader-recovery-observation.log`、
-`output/playwright/reader-recovery-stopped.png`、
-`output/playwright/reader-early-departure-observation.log`、
-`output/playwright/reader-early-departure-restored.png`、
-`output/playwright/reader-recovery-exits-observation.log`。
-
-### 阅读会话次数上限与服务端身份（2026-10-26）
-
-按 muRCluk2-fv5 第 1 轮报告修复三条阻塞项。本节替代上一节按 5 秒时间窗
-判断独立离页的取舍：时间间隔不能证明离页来自用户还是页面自跳。
-
-- 自动恢复在动作层按本次 `openReader` 累计封顶 1 次，与时间、目标文章和 hash
-  无关。成功 load、自动恢复或后台消息均不补充预算；只有显式打开（包括返回
-  入口）或关闭会清零。删除 load 回调里的 `window.open`，外部目标仅登记在
-  现有链接上，用户点了才打开，不再自动弹窗。
-- 错误面板增加「回到刚才那篇」链接，指向最后确认的文章，复用 `data-doc`
-  入口开启新的有界阅读会话。被拒绝的实际目标仍由抬头链接提供，用户不必
-  关掉抽屉再寻找原文章；初次失败、没有确认过文章时不显示返回入口。
-- Markdown 页在 `_DOC_TMPL` 根元素保留经过 HTML 转义的 `data-reader-path`，
-  仅用于路径元信息，不依赖链接脚本打标记。解析器抛异常、脚本未执行或旧模板
-  缺少属性，都不把可读的同源阅读页误判为外站。解析异常时正文仍可能为空，
-  但标题、出处和阅读器出口不再被整个隐藏。
-- `/doc/` 的非 Markdown 文件继续原样返回，并保留 `X-KB-Reader-Path`（URL 编码）
-  响应头与 HEAD 接口作为可选声明。父页的可读性判据以同源 `/doc/` 文档本身为准，
-  缺少声明不影响显示；服务端返回的可读错误正文也直接显示，不再二次确认后隐藏。
-
-验收用例同步改为自动弹窗数为 0、延迟超过旧时间窗仍受次数上限约束，新增
-换文章/hash 不重置预算、返回入口实际点击、6 秒慢循环、渲染抛异常、原样文件
-响应头与过期响应覆盖；新增 Python 契约覆盖 HTML 属性转义和 GET/HEAD 声明。
-**本轮未执行任何回归套件或新增测试用例**，回归仍统一留到验收，不宣称这些
-用例已经跑绿。JS 语法、嵌入链接脚本语法、Python AST、代码行数和 diff 检查
-是静态校验依据，修改后的代码文件都不超过 700 行。
-
-本地独立无头浏览器定向点检与隔离接口冒烟：
-
-- 每 6 秒自跳的文章观察 26 秒：离页次数 2、导航增量 2、累计恢复 1 次，
-  浏览器始终只有原来的 1 个标签，错误面板有返回入口，Esc 能退出。
-- 真实点击两次同框外链后，面板保留原文章与实际目标；没有自动开标签。
-  实际点目标链接能打开目标，点「回到刚才那篇」后正文可见、错误面板隐藏、
-  恢复预算为 0，随后点关闭按钮可退出。
-- 强制 `marked.parse` 抛出夹具指定异常：页面已 complete，服务端身份仍为
-  `render-error.md`，iframe 可见、错误面板隐藏、让位绑定存在、恢复次数为 0。
-  记录了这 1 个预期渲染异常，不将它冒充无异常或正文已经成功渲染。
-- 原样文本文件通过响应头确认后可读；不存在的文本文件显示错误且无虚假返回
-  入口，Esc 能退出。另对生产 `doc_page` 的隔离 ASGI 接口冒烟：特殊字符文件
-  GET/HEAD 均 200，HEAD 无响应正文且路径声明编码正确；缺失文件 HEAD 404、
-  无身份头。只使用临时目录，没有读取或写入真实 vault/数据库。
-
-方向消息切换期间临时夹具服务被中断，一次点检因此连接拒绝；重启自己的服务
-后重新点检，未把环境中断算作产品失败。Chrome 扩展具名后台标签仍返回
-`Capability is not available: visibility`，因此降级到独立临时 profile 的无头
-Chrome；未接管用户标签、激活窗口、连接用户 Chrome 或使用登录态。自己的
-弹窗、浏览器和夹具服务用后关闭。证据：
-`output/playwright/reader-budget-slow-loop.log`、
-`output/playwright/reader-budget-slow-loop.png`、
-`output/playwright/reader-manual-return.log`、
-`output/playwright/reader-return-available.png`、
-`output/playwright/reader-manually-returned.png`、
-`output/playwright/reader-server-identity.log`、
-`output/playwright/reader-server-identity-render-failure.png`、
-`output/playwright/reader-raw-file-identity.log`、
-`output/playwright/reader-raw-file-visible.png`、
-`output/playwright/reader-file-head-http.log`。
-
-已裁定转出的主文档 Markdown 链接策略仍由独立任务 `3VpdKYp6Ao4c` 承接，
-本轮没有改动 chat/gallery、`mdHtml` 或扩修报告中的非阻塞项。

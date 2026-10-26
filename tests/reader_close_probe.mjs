@@ -176,6 +176,27 @@ try {
   check('抬头与加载后的当前文章一致', await evaluate(`$('reader-title').textContent.endsWith('/doc/ready.md')
     && $('reader-open').href.endsWith('/doc/ready.md') && $('reader-obs').href.endsWith('file=ready.md')
     && $('reader-src').href.endsWith('doc=ready.md')`));
+  for (const path of ['/doc/ready.md', '/doc/ready.md#kbq=section', '/doc/ready.md#kbq=section']) {
+    await evaluate(`(() => {
+      const link = document.createElement('a'); link.href = ${JSON.stringify(path)};
+      const previous = $('reader-frame').contentDocument;
+      openReader(link);
+      window.readerSameDocument = previous === $('reader-frame').contentDocument;
+    })()`);
+    check(`${path} 同文档重开立即就绪而不等 load`, await evaluate(`readerSameDocument
+      && !$('reader-frame').hidden && !$('reader-frame').inert && $('reader-error').hidden
+      && readerAway !== null && $('reader-open').href.endsWith(${JSON.stringify(path)})`));
+  }
+  for (const path of ['/doc/ready.md#kbq=section', '/doc/other.md#section']) {
+    await evaluate(`(() => {
+      const link = document.createElement('a'); link.href = ${JSON.stringify(path)};
+      closeReader(); openReader(link);
+    })()`);
+    await waitFor(`$('reader-frame').contentDocument?.URL.endsWith(${JSON.stringify(path)})
+      && !$('reader-frame').hidden && readerAway !== null`);
+    check(`${path} 关闭后同任务重开忽略旧空白页`, await evaluate(`$('reader-error').hidden
+      && readerRecoveryCount === 0 && $('reader-open').href.endsWith(${JSON.stringify(path)})`));
+  }
   await foreignPage();
   for (let step = 0; step < 6; step++) {
     await press('Tab');
