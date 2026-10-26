@@ -107,7 +107,7 @@ class FailureSourceTests(FullTextCase):
 
     def test_fulltext_failures_keep_identity_for_every_source_that_supports_refill(self):
         for kind, spec in feed_types().items():
-            if spec.adapter in {'digest', 'manual'}:
+            if not spec.body_from_link:
                 continue
             with self.subTest(kind=kind):
                 source, key, entry = self.add(kind, fulltext=True)

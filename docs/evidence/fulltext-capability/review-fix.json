@@ -1,0 +1,132 @@
+{
+  "checked_at": "2026-10-26T14:23:29.763413+08:00",
+  "method": "isolated one-off defect reproduction; no test modules imported",
+  "network_calls": 0,
+  "regression_tests_executed": false,
+  "recheck": [
+    {
+      "kind": "digest",
+      "legacy_selected": true,
+      "selected": 0,
+      "changed": 0,
+      "skipped": 0,
+      "body_chars_before": 455,
+      "body_chars_after": 455,
+      "entire_row_unchanged": true,
+      "translation_preserved": true,
+      "content_kind_after": "content",
+      "queued_after": false,
+      "legacy_cached_plan_rejected": true
+    },
+    {
+      "kind": "social",
+      "legacy_selected": true,
+      "selected": 0,
+      "changed": 0,
+      "skipped": 0,
+      "body_chars_before": 455,
+      "body_chars_after": 455,
+      "entire_row_unchanged": true,
+      "translation_preserved": true,
+      "content_kind_after": "content",
+      "queued_after": false,
+      "legacy_cached_plan_rejected": true
+    },
+    {
+      "kind": "rss",
+      "legacy_selected": true,
+      "selected": 1,
+      "changed": 1,
+      "skipped": 0,
+      "body_chars_before": 455,
+      "body_chars_after": 50,
+      "entire_row_unchanged": false,
+      "translation_preserved": false,
+      "content_kind_after": "summary",
+      "queued_after": true
+    },
+    {
+      "kind": "web",
+      "legacy_selected": true,
+      "selected": 1,
+      "changed": 1,
+      "skipped": 0,
+      "body_chars_before": 455,
+      "body_chars_after": 50,
+      "entire_row_unchanged": false,
+      "translation_preserved": false,
+      "content_kind_after": "summary",
+      "queued_after": true
+    },
+    {
+      "kind": "inbox",
+      "legacy_selected": true,
+      "selected": 1,
+      "changed": 1,
+      "skipped": 0,
+      "body_chars_before": 455,
+      "body_chars_after": 52,
+      "entire_row_unchanged": false,
+      "translation_preserved": false,
+      "content_kind_after": "summary",
+      "queued_after": true
+    }
+  ],
+  "revoked_after_scan": [
+    {
+      "action": "disable",
+      "changed": 0,
+      "skipped": 1,
+      "entire_row_unchanged": true,
+      "queued_after": false
+    },
+    {
+      "action": "delete",
+      "changed": 0,
+      "skipped": 1,
+      "entire_row_unchanged": true,
+      "queued_after": false
+    }
+  ],
+  "remaining_enabled_membership": {
+    "changed": 1,
+    "queued_after": true
+  },
+  "failure_fixture_filter": "not spec.body_from_link",
+  "failure_identity": [
+    {
+      "kind": "rss",
+      "failed": 1,
+      "drop": {
+        "channel": "rss",
+        "id": "cf691586c897caf05c9256360bc3dcc0",
+        "link": "https://example.org/article"
+      }
+    },
+    {
+      "kind": "web",
+      "failed": 1,
+      "drop": {
+        "channel": "web",
+        "id": "58f19c712b59fee24446eb17ce991af3",
+        "link": "https://example.org/article"
+      }
+    },
+    {
+      "kind": "inbox",
+      "failed": 1,
+      "drop": {
+        "channel": "inbox",
+        "id": "f2ef9841ca135149a83088a4e065dfd8",
+        "link": "https://example.org/article"
+      }
+    }
+  ],
+  "isolated_data_removed": true,
+  "input_sha256": {
+    "scripts/feed_fulltext_recheck.py": "0f89249d807a45712a7af3883478b98132a8b486a5208a57ba3770bbfee02e70",
+    "kb/feeds/fulltext.py": "2ad1305b64958090367074f242b7f716ddc0beca90e0789037d1f87ecbf6b8b6",
+    "tests/test_failure_sources.py": "5cfa1dff2d47b4fde2525e098633ad97aea68505fadf7c2d1add06a962fadf43",
+    "tests/test_fulltext_recheck_capability.py": "e12bf2a72c5a252aaca6d5cf2d3846826308688fea36a9e60c89f3975ba55c98"
+  }
+}

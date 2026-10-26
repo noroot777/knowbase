@@ -111,8 +111,8 @@ def _eligible(ref: str = 'feed_items.key') -> str:
     人工恢复也以 `released=0` 拒绝。三处各判一遍就会这样,所以元规则那条「口径
     只有一份」在这里不是风格问题。
 
-    `ref` 只有两个取值、全写死在本模块里(`feed_items.key` 给拼进别人 WHERE 的那
-    几段,`fi.key` 给 `held()` 自己那条带别名的 SELECT)—— **不接外部输入**。
+    `ref` 只有两个写死的取值(`feed_items.key` 给拼进别人 WHERE 的那几段和复查
+    写回,`fi.key` 给 `held()` 和复查脚本带别名的 SELECT)—— **不接外部输入**。
     """
     kinds = ','.join(f"'{kind}'" for kind in feed_types()
                      if permits_link_body(kind)) or 'NULL'

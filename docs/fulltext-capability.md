@@ -7,7 +7,7 @@
 默认关闭,RSS、网页专栏、手动收录显式开放。旧补抓和订阅保存共用这个能力判据。
 原任务工作区未修改,也未重新开启原任务。
 
-- 自动补抓的 `_eligible()` 同时检查条目和归属订阅的来源能力。补抓队列、挂起列表、恢复写入和翻译闸门仍共用它。
+- 自动补抓的 `_eligible()` 同时检查条目和归属订阅的来源能力。补抓队列、挂起列表、恢复写入、翻译闸门及存量复查共用它。
 - 不适用来源即使在旧库中留着 `fulltext=1`,也不再被自动抓取,不会因历史挂起状态永久扣留英文摘要翻译。
 - 订阅新建/编辑显式提交不适用的 `fulltext=true` 返回 400,不保存任何部分改动。
   不带该字段的正常编辑会把旧误开值收敛为关闭,其余选项保留;默认订阅种子同样受能力约束。
@@ -69,9 +69,63 @@ git diff --check
 
 ![RSS 编辑框保留补抓开关](evidence/fulltext-capability/form-rss.png)
 
+## 复查入口与失败场景补齐
+
+完整读取本任务审查报告后,处理其中第 1、2 条。保持既定来源口径不变:大V观点不开放正文链接替换,
+RSS / 网页专栏 / 手动收录开放;失败明细用例按 `spec.body_from_link` 挑选来源,不再用 adapter 猜测能力。
+
+- 复查扫描改用 `fulltext._eligible('fi.key')`,不再保留第二份订阅 EXISTS。旧误开简报/大V条目不进入清理计划。
+- 复查写回的 UPDATE 同时检查共享资格和原有 `body=?` CAS。计划生成后最后一条补抓归属关闭或被删时,
+  正文、译文及其余条目字段全部保留;还有另一条合法归属开着时照旧放回补抓队列。跳过数量和原因如实显示。
+- 增补 `tests/test_fulltext_recheck_capability.py`,覆盖能力正反两侧、撤销订阅/能力和多归属。
+  只做语法检查,**未执行这些用例或任何其他回归测试**。
+
+本轮实际检查命令:
+
+```text
+/Users/fjh/code/knowledge-base/.venv/bin/python -m py_compile \
+    scripts/feed_fulltext_recheck.py kb/feeds/fulltext.py \
+    tests/test_failure_sources.py tests/test_fulltext_recheck_capability.py
+/Users/fjh/code/knowledge-base/.venv/bin/python /tmp/kb-fulltext-review-oYebSouTUqu6.py
+git diff --check
+```
+
+命令均成功。一次性脚本未导入任何 `tests` 模块,未启动服务或管道;数据、vault 和视频路径均指向独立临时目录,
+socket 连接被拒绝,真实网络调用为 0,没有模型调用。脚本及临时数据已删除。输入文件指纹和真实输出存于
+`evidence/fulltext-capability/review-fix.json`,仅作为本轮缺陷复现证据,不作为可自动复用的回归记录。
+
+- 简报和大V旧 SQL 原本都能选中,现在均选中 0 条;455 字正文、译文及整个条目记录不变。
+  直接把旧计划交给写回也拒绝,各跳过 1 条,整个记录仍不变。
+- RSS / 网页专栏 / 手动收录各真实降级 1 条,类型变 summary,旧译文清空,随后实际补抓队列判据均为真。
+- 扫描后关闭或删除最后一条补抓订阅,各实际修改 0、跳过 1,整个条目不变;还有合法归属开启时仍实际修改 1。
+- 失败明细夹具静态筛选表达式为 `not spec.body_from_link`;三个许可来源均可创建补抓订阅。
+  仅对取文函数注入 HTTP 403,实际队列/失败写回给出正确的来源、条目身份和原文链接,包括新增覆盖的手动收录。
+
+本轮改动没有可见 UI 变化,没有进行任何浏览器操作,因此没有新增浏览器通道降级或截图。
+已修改代码文件均低于 700 行。
+
+### 浏览器覆盖意见的边界待裁定
+
+审查第 3 条技术事实成立,但落点是原任务明确保留的「从已打开文章标签主动读取、预览并回填」链路,
+不属于独立转出的旧自动补抓/订阅设置范围。当前分支仍保留该基线行为,**不声称此分支已修复浏览器覆盖问题**。
+本轮未改浏览器入口、保存或前端按钮,也未重新打开原任务。
+
+具体证据:
+
+- `git diff 2fb0122..HEAD -- kb/browser_capture.py kb/web/browser_capture_api.py kb/static/js/source_reader.js` 无输出。
+  前后对应 blob 一致:分别为 `9fb4d9d`、`067c39f`、`99255bb`。
+- 基线 `2fb0122:kb/browser_capture.py:46` 已存在仅排除 social 的逻辑,不是本任务新引入的写入路径。
+- 原任务已有独立修复 `23f96aa`: `kb/browser_capture.py:47` 的目标检查和 `:143` 的保存检查使用
+  `permits_link_body()`,`kb/static/js/source_reader.js:48` 的入口使用相同能力字段。
+  本任务没有重复合入该提交;应由原任务交付该链路,整合前本分支上的该缺陷仍存在。
+
+就第 3 条提交范围裁定请求;第 1、2 条已修复,不将有效事实写成驳回理由。
+
 ## 留给验收
 
 新增回归覆盖旧误开值、直接 API 开启、部分编辑保留设置、默认种子、默认关闭能力、混合归属、补抓正向对照、翻译和挂起出口。
-验收阶段执行 `tests.test_fulltext_capability`,并覆盖既有 `tests.test_feed_fulltext`、`tests.test_admit_three_ways`、
-`tests.test_fulltext_held_exit`、`tests.test_fulltext_browser`、`tests.test_feed_sources`,再按项目统一闸门执行全量回归。
+验收阶段执行 `tests.test_fulltext_capability`、`tests.test_fulltext_recheck_capability`,并覆盖既有
+`tests.test_failure_sources`、`tests.test_fulltext_failures`、`tests.test_fulltext_recheck_race`、`tests.test_fulltext_admit`、
+`tests.test_feed_fulltext`、`tests.test_admit_three_ways`、`tests.test_fulltext_held_exit`、`tests.test_fulltext_browser`、
+`tests.test_feed_sources`,再按项目统一闸门执行全量回归。
 本任务不把这些尚未执行的用例报告为通过。

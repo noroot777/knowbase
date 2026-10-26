@@ -145,8 +145,7 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
     同一轮里。**认不出来的代价是库里留着两条瘦正文,认错的代价是把正常正文写死** ——
     后者不可逆地更贵。
     """
-    where = ["EXISTS(SELECT 1 FROM subscription_items x JOIN subscriptions s"
-             ' ON s.id=x.subscription_id WHERE x.item_key=fi.key AND s.fulltext=1)']
+    where = [fulltext._eligible('fi.key')]
     args: list = []
     if kind:
         where.append('fi.kind=?')
@@ -248,7 +247,10 @@ def cmd_scan(args) -> int:
 
 
 def _downgrade(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    """把计划里的每一条换成壳。返回 `(真改了的, 这期间内容已经换过的)`。
+    """把计划里的每一条换成壳。返回 `(真改了的, 这期间内容或补抓资格已变化的)`。
+
+    补抓资格和扫描、队列共用 `_eligible`,写入时再核对一次:计划生成后关掉最后
+    一条补抓归属或删除订阅,不得把已无机会补回的正文换成壳。
 
     **判据是「这一条还是我扫到的那份 body 吗」,而且待在 UPDATE 自己的 WHERE
     里(`AND body=?`),不许在 Python 这边先 SELECT 一次比对。** 先查后写在两
@@ -275,10 +277,10 @@ def _downgrade(rows: list[dict]) -> tuple[list[dict], list[dict]]:
     with reg.db() as c:
         for row in rows:
             cur = c.execute(
-                """UPDATE feed_items SET body=?,content_kind='summary',content_hash=?,lang=?,
+                f"""UPDATE feed_items SET body=?,content_kind='summary',content_hash=?,lang=?,
                    fulltext_at='',fulltext_error='',fulltext_tries=0,extract_stale=1,
                    title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
-                   WHERE key=? AND body=?""",
+                   WHERE key=? AND body=? AND {fulltext._eligible()}""",
                 (row['shell'], fulltext.body_hash(row['shell']),
                  reg.text_language(row['title'], row['shell']), row['key'], row['body']))
             (cut if cur.rowcount else moved).append(row)
@@ -298,10 +300,10 @@ def cmd_run(args) -> int:
     print(f'已收拾 {len(cut)} 条:正文换成壳（{restored} 条取自备份，'
           f'{len(cut) - restored} 条按标题与链接重建）、放回补抓队列、译文一并作废。')
     if moved:
-        print(f'\n另有 {len(moved)} 条在这一趟里内容已经换过，原样留着没动:')
+        print(f'\n另有 {len(moved)} 条在这一趟里内容已经换过或补抓资格已变化，原样留着没动:')
         for row in moved:
             print(f"  {row['title'][:48]}")
-        print('  （同步可能刚把正文补上了。再跑一次 scan 看它现在是什么。）')
+        print('  （正文或订阅设置已变化。再跑一次 scan 看它现在是什么。）')
     return 0
 
 
