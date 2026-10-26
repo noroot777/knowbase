@@ -1,12 +1,13 @@
 """只读阅读器点检夹具：生产文章模板、可控慢图、有界离页和本地拒绝嵌入页。"""
 
+import html
 import json
 import sys
 import threading
 from argparse import ArgumentParser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tests import fixture_life  # noqa: E402
@@ -30,7 +31,8 @@ def main():
             for name, value in (headers or {}).items():
                 self.send_header(name, value)
             self.end_headers()
-            self.wfile.write(data)
+            if self.command != "HEAD":
+                self.wfile.write(data)
 
         def do_GET(self):
             path = urlsplit(self.path).path
@@ -50,6 +52,11 @@ def main():
             elif path == "/slow-image.svg":
                 image_ready.wait(20)
                 self.respond(b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>', "image/svg+xml")
+            elif path == "/doc/asset.txt":
+                self.respond(b"Raw reader file", "text/plain",
+                             headers={"X-KB-Reader-Path": quote(path[5:], safe="")})
+            elif path == "/doc/missing.txt":
+                self.respond(b"Missing reader file", "text/plain", 404)
             elif path.startswith("/doc/"):
                 markdown = f"[外链](http://localhost:{args.port}/blocked)\n\n[页内锚点](#section)"
                 markdown += "\n\n[站内跳转](/go-external)\n\n[另一篇](/doc/ready.md)"
@@ -61,18 +68,22 @@ def main():
                     meta=f'本地隔离夹具 <a href="http://localhost:{args.port}/elsewhere?doc={path[5:]}" target="_blank">原文</a>'
                          f' <a href="obsidian://open?file={path[5:]}">Obsidian</a>',
                     md_json=pages._script_json(markdown),
-                    path_json=json.dumps(path[5:]), version_json='"fixture"',
-                    literal_js=pages._DOC_LITERAL_JS, links_js=pages._DOC_LINKS_JS,
+                    path_json=json.dumps(path[5:]), path_attr=html.escape(path[5:]), version_json='"fixture"',
+                    literal_js=pages._DOC_LITERAL_JS + (
+                        '\nmarked.parse = () => { throw new Error("reader fixture render failure"); };'
+                        if path == "/doc/render-error.md" else ""
+                    ), links_js=pages._DOC_LINKS_JS,
                     snip_js=pages._DOC_SNIP_JS,
                 )
-                if path == "/doc/loop.md":
+                if path in {"/doc/loop.md", "/doc/slowloop.md"}:
+                    delay = 6000 if path == "/doc/slowloop.md" else 0
                     departure = f'http://localhost:{args.port}/blocked'
                     departure_script = (
                         '<script>setTimeout(() => {'
                         'const host = window.parent;'
                         'host.readerLoopDepartures = (host.readerLoopDepartures || 0) + 1;'
                         f'if (host.readerLoopDepartures <= 4) location.href = {json.dumps(departure)};'
-                        '}, 0);</script>'
+                        f'}}, {delay});</script>'
                     )
                     rendered = rendered.replace('</body>', departure_script + '</body>')
                 self.respond(rendered.encode(), "text/html; charset=utf-8")
@@ -91,6 +102,7 @@ def main():
             self.send_error(405, "Reader fixture is read-only")
 
         do_PUT = do_PATCH = do_DELETE = do_POST
+        do_HEAD = do_GET
 
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     fixture_life.announce(f"Read-only reader fixture: http://127.0.0.1:{args.port}")

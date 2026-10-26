@@ -207,19 +207,65 @@ try {
     window.readerLoopDepartures = 0;
     const link = document.createElement('a'); link.href = '/doc/loop.md'; openReader(link);
   })()`);
-  await waitFor(`readerRecovery?.blocked && !$('reader-error').hidden`);
+  await waitFor(`readerRecoveryCount === 1 && !$('reader-error').hidden`);
   await new Promise(resolve => setTimeout(resolve, 350));
   check('重复离页只自动恢复一次且停止继续加载', await evaluate(`readerNavigationId === ${loopStart + 2}
     && window.readerLoopDepartures === 2 && $('reader-frame').hidden && $('reader-frame').inert`));
   const loopPopups = (await send('Target.getTargets')).targetInfos.filter(target =>
     target.type === 'page' && target.url.endsWith('/blocked'));
-  check('重复恢复不会持续弹出新标签', loopPopups.length <= 1);
+  check('自动恢复不会弹出任何新标签', loopPopups.length === 0);
   check('停止恢复后仍保留实际目标入口', await evaluate(`$('reader-destination').style.display !== 'none'
     && $('reader-destination').href.endsWith('/blocked') && $('reader-open').href.endsWith('/blocked')`));
+  check('停止恢复后可以显式返回原文章', await evaluate(`!$('reader-return').hidden
+    && $('reader-return').href.endsWith('/doc/loop.md')`));
   for (const target of loopPopups) await send('Target.closeTarget', { targetId: target.targetId });
+  await evaluate(`window.readerLoopDepartures = 0`);
+  await click(`(() => {
+    const rect = $('reader-return').getBoundingClientRect();
+    return { x: rect.x + rect.width / 2, y: rect.y + rect.height / 2 };
+  })()`);
+  await waitFor(`readerNavigationId === ${loopStart + 4} && !$('reader-error').hidden`);
+  check('实际点击返回入口会开始新的有界阅读会话', await evaluate(`readerRecoveryCount === 1
+    && window.readerLoopDepartures === 2 && !$('reader-return').hidden`));
   await press('Escape');
   await waitFor(closed);
   check('停止恢复后 Escape 仍能退出', await evaluate(closed));
+  const slowLoopStart = await evaluate(`readerNavigationId`);
+  await evaluate(`(() => {
+    window.readerLoopDepartures = 0;
+    const link = document.createElement('a'); link.href = '/doc/slowloop.md'; openReader(link);
+  })()`);
+  await waitFor(`readerNavigationId === ${slowLoopStart + 2} && !$('reader-error').hidden`);
+  await new Promise(resolve => setTimeout(resolve, 6500));
+  check('间隔超过五秒的自跳仍只能自动恢复一次', await evaluate(`readerNavigationId === ${slowLoopStart + 2}
+    && window.readerLoopDepartures === 2 && readerRecoveryCount === 1`));
+  check('慢循环不会自动开新标签', (await send('Target.getTargets')).targetInfos.filter(target =>
+    target.type === 'page' && target.url.endsWith('/blocked')).length === 0);
+  await evaluate(`closeReader()`);
+  const renderErrorStart = errors.length;
+  await evaluate(`(() => {
+    const link = document.createElement('a'); link.href = '/doc/render-error.md'; openReader(link);
+  })()`);
+  await waitFor(`readerAway !== null && $('reader-frame').contentDocument?.URL.endsWith('/doc/render-error.md')`);
+  const expectedRenderErrors = errors.splice(renderErrorStart);
+  check('点检确实触发了正文渲染异常', expectedRenderErrors.length === 1
+    && expectedRenderErrors[0].includes('reader fixture render failure'));
+  check('正文渲染异常不影响服务端声明的阅读页身份', await evaluate(`!$('reader-frame').hidden
+    && $('reader-error').hidden && $('reader-frame').contentDocument.documentElement.dataset.readerPath === 'render-error.md'`));
+  await evaluate(`(() => {
+    const link = document.createElement('a'); link.href = '/doc/asset.txt'; openReader(link);
+  })()`);
+  await waitFor(`readerAway !== null && readerLastDocument.endsWith('/doc/asset.txt')`);
+  check('原样文件凭响应头确认身份后保持可读', await evaluate(`!$('reader-frame').hidden
+    && $('reader-error').hidden && $('reader-fav').dataset.path === 'asset.txt'`));
+  await evaluate(`(() => {
+    const link = document.createElement('a'); link.href = '/doc/missing.txt'; openReader(link);
+  })()`);
+  await waitFor(`!$('reader-error').hidden`);
+  check('不存在的原样文件不会仅凭地址被当成阅读页', await evaluate(`$('reader-frame').hidden
+    && $('reader-return').hidden && readerLastDocument === null`));
+  await press('Escape');
+  await waitFor(closed);
   check('无未捕获页面异常', errors.length === 0);
 } finally {
   await fetch(base + '/release-image').catch(() => {});

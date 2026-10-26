@@ -90,7 +90,7 @@ _EXT_ARROW = (
 )
 
 _DOC_TMPL = """<!DOCTYPE html>
-<html lang="zh"><head>
+<html lang="zh" data-reader-path="{path_attr}"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
 <script src="/static/vendor/marked.min.js"></script>
@@ -608,6 +608,7 @@ def _script_json(value: str) -> str:
     return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c")
 
 
+@router.head("/doc/{doc_path:path}", include_in_schema=False)
 @router.get("/doc/{doc_path:path}")
 def doc_page(doc_path: str):
     root = VAULT_ROOT.resolve()
@@ -617,7 +618,7 @@ def doc_page(doc_path: str):
     if not full.is_file():
         raise HTTPException(404, "文件不存在")
     if full.suffix.lower() != ".md":
-        return FileResponse(full)
+        return FileResponse(full, headers={"X-KB-Reader-Path": quote(doc_path, safe="")})
 
     # 解码走 `read_md_text`:版本号是按读到的文本算的,报版本的这几处和落库前
     # 再算一次的那一处必须同一种解码(见 `scanner.read_md_text`)。
@@ -665,7 +666,8 @@ def doc_page(doc_path: str):
     return HTMLResponse(
         _DOC_TMPL.format(
             title=html_mod.escape(title), meta=" · ".join(meta_parts),
-            md_json=md_json, path_json=path_json, version_json=version_json,
+            md_json=md_json, path_json=path_json, path_attr=html_mod.escape(doc_path),
+            version_json=version_json,
             literal_js=_DOC_LITERAL_JS, links_js=_DOC_LINKS_JS, snip_js=_DOC_SNIP_JS,
         ),
         # 动态渲染页,改版后旧缓存会让新脚本(片段收藏)不生效

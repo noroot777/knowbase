@@ -1,7 +1,6 @@
 """独立阅读页的链接策略与离页目标通知。"""
 
 _DOC_LINKS_JS = r"""
-document.documentElement.dataset.readerPath = DOC_PATH;
 for (const link of document.querySelectorAll('#content a[href]')) {
   let url;
   try { url = new URL(link.getAttribute('href'), location.href); } catch { continue; }

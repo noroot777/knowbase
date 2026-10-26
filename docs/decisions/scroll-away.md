@@ -450,3 +450,65 @@ Chrome 扩展具名后台标签返回 `Capability is not available: visibility`�
 `output/playwright/reader-early-departure-observation.log`、
 `output/playwright/reader-early-departure-restored.png`、
 `output/playwright/reader-recovery-exits-observation.log`。
+
+### 阅读会话次数上限与服务端身份（2026-10-26）
+
+按 muRCluk2-fv5 第 1 轮报告修复三条阻塞项。本节替代上一节按 5 秒时间窗
+判断独立离页的取舍：时间间隔不能证明离页来自用户还是页面自跳。
+
+- 自动恢复在动作层按本次 `openReader` 累计封顶 1 次，与时间、目标文章和 hash
+  无关。成功 load、自动恢复或后台消息均不补充预算；只有显式打开（包括返回
+  入口）或关闭会清零。删除 load 回调里的 `window.open`，外部目标仅登记在
+  现有链接上，用户点了才打开，不再自动弹窗。
+- 错误面板增加「回到刚才那篇」链接，指向最后确认的文章，复用 `data-doc`
+  入口开启新的有界阅读会话。被拒绝的实际目标仍由抬头链接提供，用户不必
+  关掉抽屉再寻找原文章；初次失败、没有确认过文章时不显示返回入口。
+- Markdown 身份改由服务端在 `_DOC_TMPL` 根元素输出经过 HTML 转义的
+  `data-reader-path`；移除链接脚本末尾打标记的副作用。解析器抛异常或脚本未
+  执行都不再把已经加载的阅读页误判为外站错误页。本轮不是修复解析器本身，
+  强制解析异常时正文仍可能为空，但标题、出处和阅读器出口不再被整个隐藏。
+- `/doc/` 的非 Markdown 文件继续原样返回，增加 `X-KB-Reader-Path`（URL 编码）
+  响应头，并支持 HEAD。父页仅对同源 `/doc/` 非 Markdown 文档做 HEAD 确认，
+  同时检查成功状态、响应 URL 和声明路径，不能只靠文件后缀把 404 当作阅读页。
+  异步返回还要匹配阅读代次、导航编号和当前文档，换篇或关闭后的旧响应失效。
+
+验收用例同步改为自动弹窗数为 0、延迟超过旧时间窗仍受次数上限约束，新增
+换文章/hash 不重置预算、返回入口实际点击、6 秒慢循环、渲染抛异常、原样文件
+响应头与过期响应覆盖；新增 Python 契约覆盖 HTML 属性转义和 GET/HEAD 声明。
+**本轮未执行任何回归套件或新增测试用例**，回归仍统一留到验收，不宣称这些
+用例已经跑绿。JS 语法、嵌入链接脚本语法、Python AST、代码行数和 diff 检查
+是静态校验依据，修改后的代码文件都不超过 700 行。
+
+本地独立无头浏览器定向点检与隔离接口冒烟：
+
+- 每 6 秒自跳的文章观察 26 秒：离页次数 2、导航增量 2、累计恢复 1 次，
+  浏览器始终只有原来的 1 个标签，错误面板有返回入口，Esc 能退出。
+- 真实点击两次同框外链后，面板保留原文章与实际目标；没有自动开标签。
+  实际点目标链接能打开目标，点「回到刚才那篇」后正文可见、错误面板隐藏、
+  恢复预算为 0，随后点关闭按钮可退出。
+- 强制 `marked.parse` 抛出夹具指定异常：页面已 complete，服务端身份仍为
+  `render-error.md`，iframe 可见、错误面板隐藏、让位绑定存在、恢复次数为 0。
+  记录了这 1 个预期渲染异常，不将它冒充无异常或正文已经成功渲染。
+- 原样文本文件通过响应头确认后可读；不存在的文本文件显示错误且无虚假返回
+  入口，Esc 能退出。另对生产 `doc_page` 的隔离 ASGI 接口冒烟：特殊字符文件
+  GET/HEAD 均 200，HEAD 无响应正文且路径声明编码正确；缺失文件 HEAD 404、
+  无身份头。只使用临时目录，没有读取或写入真实 vault/数据库。
+
+方向消息切换期间临时夹具服务被中断，一次点检因此连接拒绝；重启自己的服务
+后重新点检，未把环境中断算作产品失败。Chrome 扩展具名后台标签仍返回
+`Capability is not available: visibility`，因此降级到独立临时 profile 的无头
+Chrome；未接管用户标签、激活窗口、连接用户 Chrome 或使用登录态。自己的
+弹窗、浏览器和夹具服务用后关闭。证据：
+`output/playwright/reader-budget-slow-loop.log`、
+`output/playwright/reader-budget-slow-loop.png`、
+`output/playwright/reader-manual-return.log`、
+`output/playwright/reader-return-available.png`、
+`output/playwright/reader-manually-returned.png`、
+`output/playwright/reader-server-identity.log`、
+`output/playwright/reader-server-identity-render-failure.png`、
+`output/playwright/reader-raw-file-identity.log`、
+`output/playwright/reader-raw-file-visible.png`、
+`output/playwright/reader-file-head-http.log`。
+
+已裁定转出的主文档 Markdown 链接策略仍由独立任务 `3VpdKYp6Ao4c` 承接，
+本轮没有改动 chat/gallery、`mdHtml` 或扩修报告中的非阻塞项。

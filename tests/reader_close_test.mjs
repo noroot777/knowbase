@@ -83,6 +83,11 @@ function rig() {
   };
   return { element, document, window, frameDoc, links, popups, message,
     advance: milliseconds => { now += milliseconds; },
+    renderDocument(url) {
+      foreign = false;
+      frameDoc.URL = url;
+      frameDoc.documentElement.dataset.readerPath = new URL(url).pathname.slice(5);
+    },
     run: code => vm.runInContext(code, state),
     open(path) {
       vm.runInContext(`openReader({ getAttribute: () => ${JSON.stringify(path)}, dataset: {} })`, state);
@@ -186,7 +191,7 @@ test('a non-reader destination restores the verified article and retains the act
   assert.equal(app.element('reader-frame').src, 'https://kb.local/doc/article.md');
   assert.equal(app.element('reader-destination').href, 'https://external.test/blocked');
   assert.equal(app.element('reader-destination').style.display, '');
-  assert.deepEqual(app.popups[0], ['https://external.test/blocked', '_blank', 'noopener']);
+  assert.equal(app.popups.length, 0);
   assert.equal(app.document.activeElement, app.element('reader-close'));
   assert.equal(app.element('reader-error').hidden, true);
   app.message({ type: 'reader-navigation', navigationId, documentUrl: app.frameDoc.URL,
@@ -379,7 +384,7 @@ test('departure before the first load restores the rendered article and keeps it
   assert.equal(app.element('reader-frame').hidden, false);
   assert.equal(app.element('reader-error').hidden, true);
   assert.equal(app.element('reader-destination').href, 'https://external.test/blocked');
-  assert.equal(app.popups.length, 1);
+  assert.equal(app.popups.length, 0);
 });
 
 test('repeated recovery stops reloading and opening popups until the reader is explicitly reopened', () => {
@@ -391,7 +396,7 @@ test('repeated recovery stops reloading and opening popups until the reader is e
   app.navigateAway('https://external.test/second');
   app.load()();
   assert.equal(app.element('reader-frame').dataset.readerNavigation, recoveryId);
-  assert.equal(app.popups.length, 1);
+  assert.equal(app.popups.length, 0);
   assert.equal(app.element('reader-frame').hidden, true);
   assert.equal(app.element('reader-frame').inert, true);
   assert.equal(app.element('reader-error').hidden, false);
@@ -401,16 +406,19 @@ test('repeated recovery stops reloading and opening popups until the reader is e
   app.advance(6000);
   app.load()();
   assert.equal(app.element('reader-frame').dataset.readerNavigation, recoveryId);
-  assert.equal(app.popups.length, 1);
+  assert.equal(app.popups.length, 0);
+  assert.equal(app.element('reader-return').hidden, false);
+  assert.equal(app.element('reader-return').href, app.frameDoc.URL);
   app.run('closeReader()');
   app.open('/doc/article.md');
   app.navigateAway();
   app.load()();
   assert.equal(app.element('reader-frame').hidden, false);
-  assert.equal(app.popups.length, 2);
+  assert.equal(app.popups.length, 0);
+  assert.equal(app.element('reader-return').hidden, true);
 });
 
-test('a later isolated departure can recover outside the short recovery window', () => {
+test('a delayed departure cannot reset the automatic recovery budget', () => {
   const app = rig();
   app.open('/doc/article.md');
   app.navigateAway();
@@ -418,7 +426,75 @@ test('a later isolated departure can recover outside the short recovery window',
   app.advance(5000);
   app.navigateAway('https://external.test/later');
   app.load()();
-  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-frame').hidden, true);
   assert.equal(app.element('reader-destination').href, 'https://external.test/later');
-  assert.equal(app.popups.length, 2);
+  assert.equal(app.popups.length, 0);
+  assert.equal(app.run('readerRecoveryCount'), 1);
+  assert.equal(app.element('reader-return').href, app.frameDoc.URL);
+});
+
+test('loading another article or hash cannot reset the recovery budget without an explicit open', () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  app.navigateAway();
+  app.load()();
+  app.renderDocument('https://kb.local/doc/other.md#section');
+  app.load()();
+  app.navigateAway('https://external.test/other');
+  app.load()();
+  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.run('readerRecoveryCount'), 1);
+  assert.equal(app.element('reader-return').href, 'https://kb.local/doc/other.md#section');
+  app.open(app.element('reader-return').href);
+  assert.equal(app.run('readerRecoveryCount'), 0);
+  assert.equal(app.element('reader-return').hidden, true);
+  assert.equal(app.popups.length, 0);
+});
+
+test('a raw reader file is recognized by a successful matching server response header', async () => {
+  const app = rig();
+  app.open('/doc/asset.txt');
+  app.frameDoc.URL = 'https://kb.local/doc/asset.txt';
+  delete app.frameDoc.documentElement.dataset.readerPath;
+  app.run(`fetch = async () => ({ ok: true, url: 'https://kb.local/doc/asset.txt',
+    headers: { get: name => name === 'X-KB-Reader-Path' ? 'asset.txt' : null } })`);
+  await app.load()();
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-fav').dataset.path, 'asset.txt');
+  assert.notEqual(app.run('readerAway'), null);
+});
+
+test('a missing raw file or mismatched header cannot impersonate a reader document', async () => {
+  for (const [ok, path] of [[false, null], [true, 'other.txt'], [true, null]]) {
+    const app = rig();
+    app.open('/doc/asset.txt');
+    app.frameDoc.URL = 'https://kb.local/doc/asset.txt';
+    delete app.frameDoc.documentElement.dataset.readerPath;
+    app.run(`fetch = async () => ({ ok: ${ok}, url: 'https://kb.local/doc/asset.txt',
+      headers: { get: () => ${JSON.stringify(path)} } })`);
+    await app.load()();
+    assert.equal(app.element('reader-frame').hidden, true);
+    assert.equal(app.element('reader-error').hidden, false);
+    assert.equal(app.element('reader-return').hidden, true);
+  }
+});
+
+test('a late raw-file identity response cannot alter a switched reader', async () => {
+  const app = rig();
+  app.open('/doc/asset.txt');
+  app.frameDoc.URL = 'https://kb.local/doc/asset.txt';
+  delete app.frameDoc.documentElement.dataset.readerPath;
+  app.run('let finishFileCheck; fetch = () => new Promise(resolve => { finishFileCheck = resolve; })');
+  const checking = app.load()();
+  app.open('/doc/next.md');
+  app.renderDocument('https://kb.local/doc/next.md');
+  app.load()();
+  const currentBinding = app.run('readerAway');
+  app.run(`finishFileCheck({ ok: true, url: 'https://kb.local/doc/asset.txt',
+    headers: { get: () => 'asset.txt' } })`);
+  await checking;
+  assert.equal(app.run('readerAway'), currentBinding);
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-fav').dataset.path, 'next.md');
 });

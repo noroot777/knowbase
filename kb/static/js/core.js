@@ -159,8 +159,8 @@ let readerLastDocument = null;
 let readerRequestedDocument = null;
 let readerPendingDestination = null;
 let readerNavigationId = 0;
-let readerRecovery = null;
-const READER_RECOVERY_WINDOW_MS = 5000;
+let readerRecoveryCount = 0;
+const MAX_READER_RECOVERIES = 1;
 function navigateReader(url) {
   const frame = $('reader-frame');
   readerRequestedDocument = new URL(url, location.href).href;
@@ -193,7 +193,7 @@ function resetReaderNavigation() {
   readerLastDocument = null;
   readerRequestedDocument = null;
   readerPendingDestination = null;
-  readerRecovery = null;
+  readerRecoveryCount = 0;
   delete $('reader-frame').dataset.readerNavigation;
   $('reader-destination').style.display = 'none';
   setReaderUnavailable(false);
@@ -207,6 +207,12 @@ function setReaderUnavailable(unavailable) {
   if (unavailable) frame.setAttribute('tabindex', '-1');
   else frame.removeAttribute('tabindex');
   $('reader-error').hidden = !unavailable;
+  const back = $('reader-return');
+  back.hidden = !unavailable || !readerLastDocument;
+  if (!back.hidden) {
+    back.href = readerLastDocument;
+    back.dataset.title = $('reader-title').textContent;
+  }
   if (unavailable && restoreFocus) $('reader-close').focus({ preventScroll: true });
 }
 function recoverReaderDocument(doc) {
@@ -220,30 +226,42 @@ function recoverReaderDocument(doc) {
   const link = $('reader-destination');
   link.href = destination;
   link.style.display = '';
-  const recoveryUrl = readerLastDocument.split('#')[0];
-  const now = Date.now();
-  if (readerRecovery?.blocked || (readerRecovery?.url === recoveryUrl
-      && now - readerRecovery.time < READER_RECOVERY_WINDOW_MS)) {
-    readerRecovery.blocked = true;
+  if (readerRecoveryCount >= MAX_READER_RECOVERIES) {
     setReaderUnavailable(true);
     return;
   }
-  readerRecovery = { url: recoveryUrl, time: now, blocked: false };
+  readerRecoveryCount++;
   $('reader-close').focus({ preventScroll: true });
   navigateReader(readerLastDocument);
   setReaderUnavailable(false);
-  window.open(destination, '_blank', 'noopener');
 }
-function syncReaderHeader(doc) {
+function syncReaderHeader(doc, path) {
   const links = [...doc.querySelectorAll('.meta a[href]')];
   setReaderHeader({ getAttribute: () => doc.URL, dataset: {
     title: doc.querySelector('.doc-title')?.textContent || doc.title,
-    path: encodeURIComponent(doc.documentElement.dataset.readerPath),
+    path: encodeURIComponent(path),
     obs: links.find(link => link.href.startsWith('obsidian:'))?.href || '#',
     url: links.find(link => /^https?:/i.test(link.href))?.href || '',
   } });
 }
-function bindReaderScrollAway(generation = readerLoadGeneration) {
+async function verifyReaderFile(doc, generation, source) {
+  const navigation = readerNavigationId;
+  let path = false;
+  try {
+    source.hash = '';
+    const response = await fetch(source.href, { method: 'HEAD', cache: 'no-store' });
+    const declared = response.headers.get('X-KB-Reader-Path');
+    if (response.ok && response.url === source.href && declared !== null
+        && decodeURIComponent(declared) === decodeURIComponent(source.pathname.slice(5)))
+      path = decodeURIComponent(declared);
+  } catch {}
+  if (generation !== readerLoadGeneration || navigation !== readerNavigationId) return;
+  let current;
+  try { current = $('reader-frame').contentDocument; } catch {}
+  if (current !== doc) return;
+  return bindReaderScrollAway(generation, path);
+}
+function bindReaderScrollAway(generation = readerLoadGeneration, filePath = null) {
   if (generation !== readerLoadGeneration) return;
   const previous = readerAway;
   readerAway = null;
@@ -252,7 +270,13 @@ function bindReaderScrollAway(generation = readerLoadGeneration) {
   const frame = $('reader-frame');
   let doc;
   try { doc = frame.contentDocument; } catch {}
-  if (typeof doc?.documentElement?.dataset?.readerPath !== 'string') {
+  const path = doc?.documentElement?.dataset?.readerPath ?? filePath;
+  if (typeof path !== 'string') {
+    let source;
+    try { source = new URL(doc?.URL); } catch {}
+    if (filePath === null && source?.origin === location.origin
+        && source.pathname.startsWith('/doc/') && !source.pathname.toLowerCase().endsWith('.md'))
+      return verifyReaderFile(doc, generation, source);
     recoverReaderDocument(doc);
     return;
   }
@@ -260,7 +284,7 @@ function bindReaderScrollAway(generation = readerLoadGeneration) {
     readerLastDocument = doc.URL;
     readerPendingDestination = null;
     setReaderUnavailable(false);
-    syncReaderHeader(doc);
+    syncReaderHeader(doc, path);
     readerAway = bindScrollAway(frame.contentWindow, ['reader-head'],
       { visible: frame, host: $('reader') });
   } catch { /* An external document cannot be measured from here. */ }
