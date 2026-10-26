@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from kb import browser_capture as capture
 from kb.feeds import registry as reg
 from kb.web import browser_capture_api
+from kb.source_types import catalog, permits_link_body
 from tests.test_feed_fulltext import FullTextCase
 
 BODY = '\n\n'.join([
@@ -130,3 +131,70 @@ class BrowserCaptureTests(FullTextCase):
         with patch.object(browser_capture_api.pipeline, 'start_pipeline', return_value=False):
             self.assertEqual(409, self.client.post('/api/browser-capture/intents/' + intent['id'] + '/continue').status_code)
         self.assertEqual(BODY, self.row(self.key)['body'])
+
+    def test_source_capability_blocks_digest_even_when_subscription_fulltext_is_enabled(self):
+        self.assertTrue(permits_link_body('rss'))
+        self.assertTrue(permits_link_body('web'))
+        self.assertTrue(permits_link_body('inbox'))
+        self.assertFalse(permits_link_body('digest'))
+        self.assertFalse(permits_link_body('social'))
+        self.assertFalse(permits_link_body('unknown'))
+        modules = {item['id']: item for item in catalog()}
+        self.assertFalse(modules['digest']['body_from_link'])
+        self.assertTrue(modules['rss']['body_from_link'])
+        with reg.db() as conn:
+            conn.execute("UPDATE feed_items SET kind='digest',content_kind='summary' WHERE key=?",
+                         (self.key,))
+            conn.execute('UPDATE subscriptions SET fulltext=1')
+        before = self.row(self.key)
+        self.assertEqual(409, self.client.get('/api/browser-capture/target/' + self.key).status_code)
+        result = self.client.post('/api/browser-capture/intents',
+                                  json={'key': self.key, 'page_url': before['url']})
+        self.assertEqual(409, result.status_code)
+        self.assertEqual(before, self.row(self.key))
+
+    def test_saved_receipt_survives_expiry_restart_and_idempotent_upload(self):
+        intent = self.intent()
+        receipt = self.upload(intent).json()
+        revision = self.row(self.key)['content_rev']
+        with patch.object(capture.time, 'time', return_value=intent['expires_at'] + 1):
+            restored = self.client.get('/api/browser-capture/intents/' + intent['id'])
+            self.assertEqual(200, restored.status_code)
+            self.assertEqual('saved', restored.json()['status'])
+            self.assertEqual(receipt, restored.json()['receipt'])
+            self.assertEqual(receipt, self.upload(intent).json())
+        capture._intents.clear()
+        self.assertEqual('saved', capture.get(intent['id'])['status'])
+        with patch.object(browser_capture_api.pipeline, 'start_pipeline', return_value='continued') as start:
+            result = self.client.post('/api/browser-capture/intents/' + intent['id'] + '/continue')
+        self.assertEqual(200, result.status_code)
+        self.assertEqual('continued', result.json()['run'])
+        self.assertEqual({'channel': 'rss'}, start.call_args.kwargs['crawl_filter'])
+        self.assertEqual(revision, self.row(self.key)['content_rev'])
+
+    def test_persisted_continuation_refuses_a_newer_revision(self):
+        intent = self.intent()
+        self.assertEqual(200, self.upload(intent).status_code)
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET content_rev=content_rev+1 WHERE key=?', (self.key,))
+        with patch.object(browser_capture_api.pipeline, 'start_pipeline') as start:
+            result = self.client.post('/api/browser-capture/intents/' + intent['id'] + '/continue')
+        self.assertEqual(409, result.status_code)
+        start.assert_not_called()
+
+    def test_terminal_requests_do_not_consume_pending_capacity(self):
+        for iteration in range(100):
+            intent = self.intent()
+            if iteration % 2:
+                self.assertEqual(200, self.upload(intent).status_code)
+            else:
+                self.client.delete('/api/browser-capture/intents/' + intent['id'])
+        self.assertEqual([], capture.pending())
+        for iteration in range(100):
+            self.intent()
+        self.assertEqual(100, len(capture.pending()))
+        result = self.client.post('/api/browser-capture/intents',
+                                  json={'key': self.key, 'page_url': 'https://e.org/post'})
+        self.assertEqual(409, result.status_code)
+        self.client.delete('/api/browser-capture/intents/' + capture.pending()[0]['id'])
+        self.assertEqual('pending', self.intent()['status'])

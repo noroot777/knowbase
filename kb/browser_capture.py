@@ -8,6 +8,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 from kb.feeds import fulltext, grab_page, registry as reg
+from kb.source_types import permits_link_body
 
 TTL = 900
 MAX_BODY = 200_000
@@ -43,7 +44,9 @@ def target(key: str) -> dict:
     if not row:
         raise LookupError('条目不存在或已不再收录')
     item = dict(row)
-    if item['content_kind'] == 'post' or item['kind'] == 'social' or item['x_post_meta']:
+    if not permits_link_body(item['kind']):
+        raise ValueError('此来源的正文不允许被原文链接中的页面替换，不能从浏览器补抓')
+    if item['content_kind'] == 'post' or item['x_post_meta']:
         raise ValueError('此入口用于单篇文章正文，不处理 X 观点或时间线覆盖问题')
     page_url(item['url'])
     return item
@@ -51,6 +54,28 @@ def target(key: str) -> dict:
 
 def public(item: dict) -> dict:
     return {name: item[name] for name in ('key', 'kind', 'title', 'url')}
+
+
+def _receipt(item: dict, digest: str, provenance: dict, characters: int) -> dict:
+    return dict(saved=True, key=item['key'], kind=item['kind'], digest=digest,
+                captured_at=provenance['captured_at'], characters=characters,
+                detail='正文已补入原条目；翻译、导出与索引仍待执行，不代表已经完成入库')
+
+
+def saved(identity: str) -> dict | None:
+    with reg.db() as conn:
+        row = conn.execute('SELECT * FROM browser_capture_audit WHERE id=?',
+                           (identity,)).fetchone()
+    if not row:
+        return None
+    item = target(row['item_key'])
+    digest = hashlib.sha256(item['body'].encode()).hexdigest()
+    if item['content_rev'] != row['content_rev'] or digest != row['body_digest']:
+        raise ValueError('本次保存后正文已被修改，请到同步中心处理最新内容，或重新发起采集')
+    provenance = json.loads(row['provenance'])
+    return dict(public(item), id=identity, page_url=provenance['page_url'],
+                expires_at=0, status='saved',
+                receipt=_receipt(item, digest, provenance, len(item['body'])))
 
 
 def _prune() -> None:
@@ -64,7 +89,7 @@ def create(key: str, expected_url: str) -> dict:
     item = target(key)
     with _lock:
         _prune()
-        if len(_intents) >= 100:
+        if sum(intent['status'] == 'pending' for intent in _intents.values()) >= 100:
             raise ValueError('等待中的采集请求过多，请完成或取消已有请求')
         identity = secrets.token_urlsafe(24)
         intent = dict(public(item), id=identity, page_url=page_url(expected_url),
@@ -82,9 +107,12 @@ def view(intent: dict) -> dict:
 def get(identity: str) -> dict:
     with _lock:
         _prune()
-        if identity not in _intents:
-            raise LookupError('采集请求已过期、服务已重启或请求不存在，请重新发起')
-        return view(_intents[identity])
+        if identity in _intents:
+            return view(_intents[identity])
+        restored = saved(identity)
+        if restored:
+            return restored
+        raise LookupError('采集请求已过期、服务已重启或请求不存在，请重新发起')
 
 
 def pending() -> list[dict]:
@@ -95,11 +123,11 @@ def pending() -> list[dict]:
 
 def cancel(identity: str) -> dict:
     with _lock:
-        get(identity)
-        intent = _intents[identity]
-        if intent['status'] == 'pending':
-            intent['status'] = 'cancelled'
-        return view(intent)
+        state = get(identity)
+        if state['status'] != 'pending':
+            return state
+        _intents[identity]['status'] = 'cancelled'
+        return view(_intents[identity])
 
 
 def save(identity: str, captured_url: str, title: str, body: str, method: str) -> dict:
@@ -111,16 +139,18 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
         raise ValueError('未知的采集方式')
     digest = hashlib.sha256(body.encode()).hexdigest()
     with _lock:
-        get(identity)
-        intent = _intents[identity]
-        if actual_url != intent['page_url']:
+        state = get(identity)
+        if not permits_link_body(state['kind']):
+            raise ValueError('此来源不允许从原文链接替换正文，未保存')
+        if actual_url != state['page_url']:
             raise ValueError('当前页面与指定文章网址不同。请回知识库核对最终网址并重新发起，未保存正文')
-        if intent['status'] == 'saved':
-            if intent['receipt']['digest'] == digest:
-                return dict(intent['receipt'])
+        if state['status'] == 'saved':
+            if state['receipt']['digest'] == digest:
+                return dict(state['receipt'])
             raise ValueError('此请求已提交，请勿用另一份正文重复覆盖')
-        if intent['status'] != 'pending':
+        if state['status'] != 'pending':
             raise ValueError('请求已取消或条目已变化，请重新发起')
+        intent = _intents[identity]
         provenance = dict(method='browser_' + method, page_url=actual_url,
                           page_title=title, captured_at=reg.now(), confirmed=True)
         with reg.db() as conn:
@@ -142,14 +172,10 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
             if changed.rowcount != 1:
                 intent['status'] = 'stale'
                 raise ValueError('条目已被其他操作修改或排除。本次没有覆盖，请重新核对并发起采集')
-            conn.execute('CREATE TABLE IF NOT EXISTS browser_capture_audit '
-                         '(id TEXT PRIMARY KEY,item_key TEXT NOT NULL,provenance TEXT NOT NULL,'
-                         'body_digest TEXT NOT NULL,content_rev INTEGER NOT NULL)')
-            conn.execute('INSERT INTO browser_capture_audit VALUES (?,?,?,?,?)',
+            conn.execute('INSERT INTO browser_capture_audit '
+                         '(id,item_key,provenance,body_digest,content_rev) VALUES (?,?,?,?,?)',
                          (identity, intent['key'], json.dumps(provenance, ensure_ascii=False),
                           digest, intent['content_rev'] + 1))
-        receipt = dict(saved=True, key=intent['key'], kind=intent['kind'], digest=digest,
-                       captured_at=provenance['captured_at'], characters=len(body),
-                       detail='正文已补入原条目；翻译、导出与索引仍待执行，不代表已经完成入库')
+        receipt = _receipt(intent, digest, provenance, len(body))
         intent.update(status='saved', receipt=receipt)
         return dict(receipt)

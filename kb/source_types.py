@@ -25,6 +25,7 @@ class SourceType:
     # 导出 → 索引 → 提取。**不是"这一类来源不进管道"**:积压的条目正是靠那
     # 半条链进知识库的,所以它照旧出现在同步中心的通道里。
     pollable: bool = True
+    body_from_link: bool = False
 
 
 SOURCE_TYPES = {
@@ -36,7 +37,7 @@ SOURCE_TYPES = {
                          note='X 的取法在下面的「取法」那一块里选，每一档要准备的东西不同。'
                               '也可以为单个账号填写专用订阅链接，它优先于任何通道。',
                          adapter='social'),
-    'rss': SourceType('rss', 'RSS', '让值得读的文章，自己来到这里。', ('rss',)),
+    'rss': SourceType('rss', 'RSS', '让值得读的文章，自己来到这里。', ('rss',), body_from_link=True),
     # 没有 feed 的站点走这条路:解析列表页。独立成一类而不是塞进 rss,是因为
     # 它的失败形态不同 —— 读 feed 坏在对方服务,解析页面还会坏在**对方改版**,
     # 而那需要人去适配。混在一起的话 rss 那条线的状态和定时会被它带着抖。
@@ -66,7 +67,7 @@ SOURCE_TYPES = {
                       note='给没有 RSS / Atom 的站点用：按「每条带发布时间的链接」认出'
                            '列表，正文建议打开「补抓原文」去文章页取。站点改版时这条'
                            '订阅会报错，而不是静静地变成「今天没有新文章」。',
-                      adapter='page'),
+                      adapter='page', body_from_link=True),
     # 手动收录:看到一篇就存下来。**它没有可轮询的源** —— 内容在用户给出链接的
     # 那一刻就抓好入库了(`kb/feeds/grab.py`),所以 `pollable=False`、
     # `adapter='manual'`(**刻意不在 `fetching.ADAPTERS` 里**:哪条路漏了跳过
@@ -81,8 +82,13 @@ SOURCE_TYPES = {
                              'X 的单条推文走公开接口（长文连正文一起取），其他站点'
                              '按文章正文提取。按站点自动归到一个收件桶里，'
                              '抓不到正文的不会入库——重试一次的代价只是再抓一遍。',
-                        adapter='manual', pollable=False),
+                        adapter='manual', pollable=False, body_from_link=True),
 }
+
+
+def permits_link_body(kind: str) -> bool:
+    source = SOURCE_TYPES.get(kind)
+    return bool(source and source.body_from_link)
 
 
 def feed_types():

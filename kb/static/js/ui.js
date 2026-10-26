@@ -61,12 +61,16 @@ function confirmBox({ title, body = '', ok = '确定', cancel = '取消', danger
     mask.className = 'modal-mask confirm-mask';
     mask.innerHTML =
       `<div class="modal confirm" role="dialog" aria-modal="true">` +
-      `<h2>${esc(title)}</h2>` +
-      `${body ? `<div class="hint confirm-body">${esc(body)}</div>` : ''}` +
+      `<h2></h2>` +
+      `${body ? '<div class="hint confirm-body"></div>' : ''}` +
       `<div class="confirm-acts">` +
-      `<button class="ghost" data-act="cancel">${esc(cancel)}</button>` +
-      `<button class="${danger ? 'danger' : ''}" data-act="ok">${esc(ok)}</button>` +
+      `<button class="ghost" data-act="cancel"></button>` +
+      `<button class="${danger ? 'danger' : ''}" data-act="ok"></button>` +
       `</div></div>`;
+    mask.querySelector('h2').textContent = title;
+    if (body) mask.querySelector('.confirm-body').textContent = body;
+    mask.querySelector('[data-act=cancel]').textContent = cancel;
+    mask.querySelector('[data-act=ok]').textContent = ok;
 
     const done = v => {
       // 捕获阶段监听:Esc 先给确认框,不会穿透到 core.js 那条「阅读器→抽屉→弹窗」的关闭链
@@ -87,26 +91,6 @@ function confirmBox({ title, body = '', ok = '确定', cancel = '取消', danger
     document.body.appendChild(mask);
     mask.querySelector('[data-act=ok]').focus();
   });
-}
-
-/** 从失败的 Response 里榨出最可读的一句错误。
-    FastAPI 的 {detail} > 校验错误数组 > 纯文本正文(未捕获异常时 Starlette 返回纯文本
-    "Internal Server Error",直接 r.json() 会炸,旧代码就是这样把原因吞成"启动失败"的) */
-async function apiFail(r, fallback = '请求失败') {
-  let txt = '';
-  try { txt = (await r.text()).trim(); } catch {}
-  if (txt) {
-    let j = null;
-    try { j = JSON.parse(txt); } catch {}
-    if (j) {
-      const d = j.detail ?? j.message ?? j.error;
-      if (typeof d === 'string' && d) return d;
-      if (Array.isArray(d) && d.length) return d.map(x => x.msg || JSON.stringify(x)).join('; ');
-    } else if (txt.length <= 200 && txt[0] !== '<') {
-      return `${txt}(HTTP ${r.status})`;
-    }
-  }
-  return `${fallback}(HTTP ${r.status})`;
 }
 
 /** 惯用简写:响应不 ok 时弹 toast 并返回 true(调用方据此 return) */

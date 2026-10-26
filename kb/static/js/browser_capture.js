@@ -11,13 +11,7 @@
     const response = await fetch(`/api/browser-capture${path}`, {
       cache: 'no-store', headers: {'Content-Type': 'application/json'}, ...options
     });
-    const result = await response.json();
-    if (!response.ok) {
-      const error = new Error(typeof result.detail === 'string' ? result.detail : '请求格式有误，请刷新后重试');
-      error.status = response.status;
-      throw error;
-    }
-    return result;
+    return apiResponse(response, '补抓请求失败');
   }
 
   function message(text, error = false) {
@@ -44,10 +38,11 @@
     element('saved').hidden = !saved;
     element('step-capture').classList.toggle('on', pending || saved);
     element('step-process').classList.toggle('on', saved);
-    element('intent-note').textContent = `请求 ${state.id.slice(-8)} · ${new Date(state.expires_at * 1000).toLocaleTimeString('zh-CN')} 到期`;
+    element('intent-note').textContent = saved ? `回执 ${state.id.slice(-8)} · 已持久保存`
+      : `请求 ${state.id.slice(-8)} · ${new Date(state.expires_at * 1000).toLocaleTimeString('zh-CN', {timeZone: 'Asia/Shanghai'})} 到期`;
     if (saved) {
       message('正文已补回原条目。翻译与入库尚待执行。');
-      element('receipt').textContent = `本次补入 ${state.receipt.characters} 字符 · ${new Date(state.receipt.captured_at).toLocaleString('zh-CN')}`;
+      element('receipt').textContent = `本次补入 ${state.receipt.characters} 字符 · ${new Date(state.receipt.captured_at).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`;
       clearTimeout(timer);
     } else if (pending) message('等待你在文章标签中主动采集；本页没有读取任何浏览器标签。');
     else {
@@ -98,8 +93,12 @@
     finally { processing = false; }
   });
 
-  element('restart').addEventListener('click', () => {
-    if (processing || !intent || !confirm('重新采集不会撤销已保存的正文；只有再次预览确认后才会替换。要重新发起吗？')) return;
+  element('restart').addEventListener('click', async () => {
+    if (processing || !intent) return;
+    processing = true;
+    const confirmed = await confirmBox({title: '重新采集正文？', body: '重新采集不会撤销已保存的正文；只有再次预览确认后才会替换。', ok: '重新采集'});
+    processing = false;
+    if (!confirmed) return;
     clearTimeout(timer);
     display({...intent, status: 'cancelled'});
     element('run-note').textContent = '';
@@ -121,8 +120,10 @@
   });
 
   element('continue').addEventListener('click', async () => {
-    if (processing || !intent || !confirm('继续会处理该来源其他待办，可能补抓其他文章、调用翻译及提取模型，索引会检查全库。确定开始吗？')) return;
+    if (processing || !intent) return;
     processing = true;
+    const confirmed = await confirmBox({title: '继续该来源后续处理？', body: '继续会处理该来源其他待办，可能补抓其他文章、调用翻译及提取模型，索引会检查全库。', ok: '开始处理'});
+    if (!confirmed) { processing = false; return; }
     element('continue').disabled = true;
     try {
       const result = await api(`/intents/${encodeURIComponent(intent.id)}/continue`, {method: 'POST', body: '{}'});

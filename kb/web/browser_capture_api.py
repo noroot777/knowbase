@@ -60,7 +60,7 @@ def capture_page():
 def extension_download():
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
-        for name in ('manifest.json', 'popup.html', 'popup.css', 'popup.js', 'extract.js', 'README.md'):
+        for name in ('manifest.json', 'popup.html', 'popup.css', 'popup.js', 'api.js', 'extract.js', 'README.md'):
             bundle.write(ROOT / 'kb/static/browser-extension/knowbase-capture' / name,
                          'knowbase-capture/' + name)
     return Response(archive.getvalue(), media_type='application/zip',
@@ -103,8 +103,8 @@ def cancel_intent(identity: str):
 
 @router.post('/api/browser-capture/intents/{identity}/continue', dependencies=[Depends(app_access)])
 def continue_processing(identity: str):
-    intent = invoke(capture.get, identity)
-    if intent['status'] != 'saved':
+    intent = invoke(capture.saved, identity)
+    if not intent:
         raise HTTPException(409, '正文尚未补入，不能启动后续处理')
     reasons: list[str] = []
     run = pipeline.start_pipeline(['export', 'index', 'extract'],

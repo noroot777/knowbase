@@ -43,9 +43,7 @@
       credentials: 'omit', redirect: 'error', cache: 'no-store',
       headers: {'Content-Type': 'application/json', Authorization: `Bearer ${key}`}, ...options
     });
-    const result = await response.json();
-    if (!response.ok) throw new Error(typeof result.detail === 'string' ? result.detail : '采集数据格式有误，未写入正文');
-    return result;
+    return apiResponse(response, '浏览器采集请求失败');
   }
 
   async function loadIntents() {
