@@ -77,7 +77,7 @@ def pairing(request: Request):
 
 @router.get('/api/browser-capture/target/{key}', dependencies=[Depends(app_access)])
 def capture_target(key: str):
-    return capture.public(invoke(capture.target, key))
+    return invoke(capture.item_state, key)
 
 
 class IntentRequest(BaseModel):

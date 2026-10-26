@@ -54,7 +54,8 @@
     for (const intent of intents) {
       const option = document.createElement('option');
       option.value = intent.id;
-      option.textContent = `${intent.title} · ${intent.id.slice(-8)}`;
+      const created = new Date(intent.created_at * 1000).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'});
+      option.textContent = `${intent.title} · ${created} 发起 · ${intent.id.slice(-8)}`;
       element('intent').append(option);
     }
     updateExpected();
@@ -132,7 +133,11 @@
       clearPreview();
       try { await loadIntents(); } catch { status('正文已保存；待办刷新失败，可稍后重新打开扩展。'); return; }
       status(result.detail);
-    } catch (error) { status(`${error.message}。若连接中断，可再次提交同一预览；服务端不会重复替换。`, true); }
+    } catch (error) {
+      const retry = !error.status || error.status >= 500
+        ? '。若连接中断，可再次提交同一预览；服务端不会重复替换。' : '';
+      status(error.message + retry, true);
+    }
     finally { setBusy(false); }
   });
 

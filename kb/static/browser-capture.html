@@ -24,8 +24,9 @@
       <h3 id="title">等待条目</h3><p id="original-url" class="url"></p>
       <label for="page-url">已打开文章的最终网址</label><input id="page-url" type="url" placeholder="https://…" disabled>
       <p class="hint">默认匹配原网址。若浏览器跳到了另一个文章地址，请明确填入那个最终网址。扩展不会用另一篇文章静默覆盖。</p>
-      <div class="actions"><button id="create" disabled>发起浏览器采集</button><button id="cancel" class="secondary" hidden>取消本次请求</button></div>
+      <div class="actions"><button id="create" disabled>发起浏览器采集</button><button id="draft-cancel" class="secondary" hidden>退出重新采集</button></div>
       <p id="intent-note" class="hint"></p>
+      <div id="pending" hidden><h2>这篇文章正在等待的采集</h2><p class="hint">同一篇只保留一个待办，其他标签发起的请求也会显示在这里，可以直接取消。</p><ul id="pending-list" class="pending-list"></ul></div>
     </section>
     <section class="card" aria-labelledby="capture-heading">
       <h2 id="capture-heading">接下来，在文章标签里操作</h2>
@@ -45,7 +46,7 @@
       <p class="warning">继续执行会处理该来源其他待办，可能联网补抓其他文章并调用翻译、提取模型；索引会检查全库。这不是只执行当前一篇。</p>
       <div class="actions"><button id="continue">继续该来源后续处理</button><button id="restart" class="secondary">重新采集正文</button></div><p id="run-note" role="status"></p><a href="/#pipe">到同步中心查看真实结果 <i data-arrow="ext"></i></a>
     </section>
-    <footer>浏览器采集只解决这篇文章的正文缺口，不用于补齐 X 账号时间线。待采集请求 15 分钟有效，未完成时服务重启需重新发起；已保存回执可在到期或重启后恢复并继续处理。</footer>
+    <footer>浏览器采集只解决这篇文章的正文缺口，不用于补齐 X 账号时间线。待采集请求 15 分钟有效，未完成时服务重启需重新发起；已保存回执按文章恢复，关掉本页、另开标签或重启服务后仍可查看和继续处理。</footer>
   </main>
 </body>
 </html>

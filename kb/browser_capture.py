@@ -78,6 +78,30 @@ def saved(identity: str) -> dict | None:
                 receipt=_receipt(item, digest, provenance, len(item['body'])))
 
 
+def item_state(key: str) -> dict:
+    with _lock:
+        item = target(key)
+        _prune()
+        waiting = []
+        for intent in _intents.values():
+            if intent['key'] == key and intent['status'] == 'pending':
+                if any(intent[field] != item[field] for field in
+                       ('content_hash', 'content_rev', 'kind', 'url')):
+                    intent['status'] = 'stale'
+                else:
+                    waiting.append(view(intent))
+        with reg.db() as conn:
+            row = conn.execute('SELECT id FROM browser_capture_audit WHERE item_key=? '
+                               'ORDER BY rowid DESC LIMIT 1', (key,)).fetchone()
+        receipt, error = None, ''
+        if row:
+            try:
+                receipt = saved(row['id'])
+            except ValueError as problem:
+                error = str(problem)
+        return dict(public(item), pending=waiting, saved=receipt, saved_error=error)
+
+
 def _prune() -> None:
     expired = [identity for identity, intent in _intents.items()
                if time.time() > intent['expires_at']]
@@ -86,28 +110,37 @@ def _prune() -> None:
 
 
 def create(key: str, expected_url: str) -> dict:
-    item = target(key)
+    expected = page_url(expected_url)
     with _lock:
+        item = target(key)
         _prune()
+        for intent in _intents.values():
+            if intent['key'] != key or intent['status'] != 'pending':
+                continue
+            if (intent['page_url'] == expected and all(intent[field] == item[field]
+                    for field in ('content_hash', 'content_rev', 'kind', 'url'))):
+                return view(intent)
+            intent['status'] = 'superseded'
         if sum(intent['status'] == 'pending' for intent in _intents.values()) >= 100:
             raise ValueError('等待中的采集请求过多，请完成或取消已有请求')
         identity = secrets.token_urlsafe(24)
-        intent = dict(public(item), id=identity, page_url=page_url(expected_url),
+        created = time.time()
+        intent = dict(public(item), id=identity, page_url=expected,
                       content_hash=item['content_hash'], content_rev=item['content_rev'],
-                      expires_at=time.time() + TTL, status='pending', receipt=None)
+                      created_at=created, expires_at=created + TTL, status='pending', receipt=None)
         _intents[identity] = intent
         return view(intent)
 
 
 def view(intent: dict) -> dict:
     return {name: intent[name] for name in
-            ('id', 'key', 'kind', 'title', 'url', 'page_url', 'expires_at', 'status', 'receipt')}
+            ('id', 'key', 'kind', 'title', 'url', 'page_url', 'created_at', 'expires_at', 'status', 'receipt')}
 
 
 def get(identity: str) -> dict:
     with _lock:
         _prune()
-        if identity in _intents:
+        if identity in _intents and _intents[identity]['status'] != 'saved':
             return view(_intents[identity])
         restored = saved(identity)
         if restored:
@@ -149,7 +182,7 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
                 return dict(state['receipt'])
             raise ValueError('此请求已提交，请勿用另一份正文重复覆盖')
         if state['status'] != 'pending':
-            raise ValueError('请求已取消或条目已变化，请重新发起')
+            raise ValueError('请求已取消、被新的采集请求替代或条目已变化，请回补抓页查看当前请求')
         intent = _intents[identity]
         provenance = dict(method='browser_' + method, page_url=actual_url,
                           page_title=title, captured_at=reg.now(), confirmed=True)

@@ -32,5 +32,9 @@ summary { cursor:pointer; color:var(--brand); }
 #message { min-height:25px; color:var(--brand); overflow-wrap:anywhere; }
 #message.error, #run-note.error { color:var(--danger); }
 footer { padding-top:20px; }
+.pending-list { list-style:none; padding:0; margin:0; }
+.pending-list li { border-top:1px solid var(--line); padding-top:12px; margin-top:12px; }
+.pending-list p { margin:6px 0; }
+#pending { margin-top:22px; }
 [hidden] { display:none !important; }
 @media(max-width:520px) { main { padding:18px 15px 40px; } h1 { font-size:27px; } header span { text-align:right; } .card { padding:18px; } .steps { font-size:11px; gap:8px; } }

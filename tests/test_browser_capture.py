@@ -1,5 +1,6 @@
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -191,10 +192,58 @@ class BrowserCaptureTests(FullTextCase):
                 self.client.delete('/api/browser-capture/intents/' + intent['id'])
         self.assertEqual([], capture.pending())
         for iteration in range(100):
-            self.intent()
+            key = self.put(url=f'https://e.org/pending-{iteration}')
+            capture.create(key, f'https://e.org/pending-{iteration}')
         self.assertEqual(100, len(capture.pending()))
         result = self.client.post('/api/browser-capture/intents',
                                   json={'key': self.key, 'page_url': 'https://e.org/post'})
         self.assertEqual(409, result.status_code)
         self.client.delete('/api/browser-capture/intents/' + capture.pending()[0]['id'])
         self.assertEqual('pending', self.intent()['status'])
+
+    def test_item_state_restores_latest_saved_receipt_without_an_intent_id(self):
+        original = self.intent()
+        self.assertEqual(200, self.upload(original).status_code)
+        newer = self.intent()
+        self.assertEqual(200, self.upload(newer, body=BODY + '\nNewer article version.').status_code)
+        capture._intents.clear()
+        result = self.client.get('/api/browser-capture/target/' + self.key)
+        self.assertEqual(200, result.status_code)
+        self.assertEqual(newer['id'], result.json()['saved']['id'])
+        self.assertEqual([], result.json()['pending'])
+
+    def test_same_item_concurrent_create_reuses_one_visible_cancellable_request(self):
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            requests = list(pool.map(lambda attempt: capture.create(self.key, 'https://e.org/post'), range(8)))
+        self.assertEqual(1, len({request['id'] for request in requests}))
+        state = self.client.get('/api/browser-capture/target/' + self.key).json()
+        self.assertEqual(1, len(state['pending']))
+        self.assertIn('created_at', state['pending'][0])
+        self.assertEqual(200, self.client.delete('/api/browser-capture/intents/' + requests[0]['id']).status_code)
+        self.assertEqual([], self.client.get('/api/browser-capture/target/' + self.key).json()['pending'])
+
+    def test_changed_address_or_item_version_supersedes_pending(self):
+        original = self.intent()
+        replacement = capture.create(self.key, 'https://e.org/final')
+        self.assertNotEqual(original['id'], replacement['id'])
+        self.assertEqual('superseded', capture.get(original['id'])['status'])
+        self.assertEqual([replacement['id']], [request['id'] for request in capture.pending()])
+        self.assertEqual(409, self.upload(original).status_code)
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET content_rev=content_rev+1 WHERE key=?', (self.key,))
+        self.assertEqual([], capture.item_state(self.key)['pending'])
+        self.assertEqual('stale', capture.get(replacement['id'])['status'])
+
+    def test_saved_validation_is_identical_with_or_without_memory(self):
+        request = self.intent()
+        self.assertEqual(200, self.upload(request).status_code)
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET body=? WHERE key=?', ('Another body without a revision bump.', self.key))
+        warm = self.client.get('/api/browser-capture/intents/' + request['id'])
+        self.assertEqual(409, warm.status_code)
+        capture._intents.clear()
+        cold = self.client.get('/api/browser-capture/intents/' + request['id'])
+        self.assertEqual(warm.json(), cold.json())
+        state = self.client.get('/api/browser-capture/target/' + self.key).json()
+        self.assertIsNone(state['saved'])
+        self.assertEqual(warm.json()['detail'], state['saved_error'])

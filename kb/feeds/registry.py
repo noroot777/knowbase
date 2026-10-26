@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS browser_capture_audit (
  id TEXT PRIMARY KEY,item_key TEXT NOT NULL,provenance TEXT NOT NULL,
  body_digest TEXT NOT NULL,content_rev INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS browser_capture_item ON browser_capture_audit(item_key);
 CREATE TABLE IF NOT EXISTS subscription_items (
  subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
  item_key TEXT NOT NULL REFERENCES feed_items(key), PRIMARY KEY(subscription_id, item_key)
