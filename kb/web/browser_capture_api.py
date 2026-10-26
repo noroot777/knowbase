@@ -101,17 +101,33 @@ def cancel_intent(identity: str):
     return invoke(capture.cancel, identity)
 
 
+#: 这颗按钮**只跑这两段**,而且页面、确认框、下面那句回执必须跟这份清单一致。
+#:
+#: `extract`(条目化提取)**不在里面**:它的队列是 `kb.extract.pending_docs`,压根
+#: 没有来源参数,按全库取数 —— 一颗开在某一篇文章页上的按钮不该顺手买下全库那一轮
+#: 模型调用。`export` 这一段认 `crawl_filter`(只有这一类来源,见
+#: `pipeline_stages._run_export`),`index` 是整个 vault 的增量比对、不调模型,这两件
+#: 事页面上都明写着。要提取就到同步中心的起跑弹窗里勾,那边的射程写在脸上
+#: (见 `docs/decisions/sync-entry.md`);这一篇的 `extract_stale=1` 还在,下一轮同步
+#: 自己会把它重新提一遍。
+CONTINUE_STAGES = ('export', 'index')
+
+
 @router.post('/api/browser-capture/intents/{identity}/continue', dependencies=[Depends(app_access)])
 def continue_processing(identity: str):
     intent = invoke(capture.saved, identity)
     if not intent:
-        raise HTTPException(409, '正文尚未补入，不能启动后续处理')
+        raise HTTPException(409, '正文尚未补入，不能启动导出与索引')
     reasons: list[str] = []
-    run = pipeline.start_pipeline(['export', 'index', 'extract'],
+    run = pipeline.start_pipeline(list(CONTINUE_STAGES),
                                   crawl_filter={'channel': intent['kind']}, refused=reasons)
     if not run:
         raise HTTPException(409, reasons[0] if reasons else '管道正忙，正文已保留，请稍后再执行')
-    return {'run': run, 'detail': '已启动该来源后续处理：本篇使用已补正文，其他待办可能补抓、翻译或调用模型；结果以同步中心为准'}
+    # 这一句会原样显示在页面的 `#run-note` 上,所以只说「起了哪两段、钱花在哪」;
+    # 完整的射程说明在页面那块警告里,别在这里再抄一遍。
+    return {'run': run, 'detail': '已启动导出与索引：本篇使用已补正文；同类来源其他待办会一起导出，'
+                                  '可能联网补抓并调用翻译模型；索引会检查全库。'
+                                  '条目化提取不在这一步，等下一轮同步。结果以同步中心为准'}
 
 
 @router.get('/api/browser-capture/pending', dependencies=[Depends(extension_access)])

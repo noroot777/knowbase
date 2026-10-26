@@ -148,9 +148,10 @@
 
 ## 前端反馈(硬性)
 
-- **禁止用原生 `alert` / `confirm` / `prompt`**(系统弹窗跟本项目的调子完全不搭,还阻塞主线程)。统一走 `kb/static/js/ui.js` 三个出
-  口:`toast(text, {type, detail})`、`confirmBox({...})`(返回 `Promise<boolean>`,Esc / 点遮罩 = 取消)、`apiFail(r, fallback)` /
-  `toastIfFail(r, text)`。**别再写 `(await r.json()).detail || '失败'`** —— 未捕获异常时 Starlette 返回的是纯文本 500,`r.json()`
+- **禁止用原生 `alert` / `confirm` / `prompt`**(系统弹窗跟本项目的调子完全不搭,还阻塞主线程)。统一走那三个出口:`kb/static/js/ui.js`
+  的 `toast(text, {type, detail})`、`confirmBox({...})`(返回 `Promise<boolean>`,Esc / 点遮罩 = 取消)、`toastIfFail(r, text)`,以及
+  榨错误文案的 `apiFail(r, fallback)` —— 它住在 `kb/static/browser-extension/knowbase-capture/api.js`,页面在 `ui.js` 之前引它、和
+  扩展共用这一份。**别再写 `(await r.json()).detail || '失败'`** —— 未捕获异常时 Starlette 返回的是纯文本 500,`r.json()`
   会炸,原因就被吞成一句无信息的「失败」。**表单字段级校验不用 toast,用 `.field-err` 就地红字。**
 - 问答面板的高度/留白/文本域增长、以及探针那几条,全部在 `docs/decisions/frontend-feedback.md`
   的硬约束一节(**动 `chat.js`/`chat.css` 或页面探针之前先读**);来源页布局在 `subs-layout.md`。

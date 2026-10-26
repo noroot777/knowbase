@@ -1,5 +1,7 @@
+import io
 import json
 import time
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
@@ -257,7 +259,14 @@ class BrowserCaptureTests(FullTextCase):
         self.assertEqual(409, result.status_code)
         start.assert_not_called()
 
-    def test_terminal_requests_do_not_consume_pending_capacity(self):
+    def test_terminal_requests_do_not_consume_capacity_and_a_full_pool_refuses_nobody(self):
+        """终态请求不占额度;池满时顶掉**最老的那个**,不拒人。
+
+        额度是全局的,而取消的出口只开在各自那篇文章的补抓页上 —— 撞上额度就拒的话,
+        人得挨个翻完那 100 篇才发得出第 101 次。等待中的请求手上没有任何产物,顶掉
+        最老的那个(它也最接近过期)只值一次重新点击,而它那篇文章一个字都没被写。
+        反过来钉一边:后面那 99 个照旧等着,已经保存的回执压根不在池子里。
+        """
         for iteration in range(100):
             intent = self.intent()
             if iteration % 2:
@@ -265,15 +274,123 @@ class BrowserCaptureTests(FullTextCase):
             else:
                 self.client.delete('/api/browser-capture/intents/' + intent['id'])
         self.assertEqual([], capture.pending())
-        for iteration in range(100):
+        receipt = self.client.get('/api/browser-capture/target/' + self.key).json()['saved']
+        oldest = oldest_key = None
+        for iteration in range(capture.MAX_PENDING):
             key = self.put(url=f'https://e.org/pending-{iteration}')
-            capture.create(key, f'https://e.org/pending-{iteration}')
-        self.assertEqual(100, len(capture.pending()))
-        result = self.client.post('/api/browser-capture/intents',
-                                  json={'key': self.key, 'page_url': 'https://e.org/post'})
-        self.assertEqual(409, result.status_code)
-        self.client.delete('/api/browser-capture/intents/' + capture.pending()[0]['id'])
-        self.assertEqual('pending', self.intent()['status'])
+            request = capture.create(key, f'https://e.org/pending-{iteration}')
+            if oldest is None:
+                oldest, oldest_key = request, key
+        self.assertEqual(capture.MAX_PENDING, len(capture.pending()))
+        mine = self.intent()
+        self.assertEqual('pending', mine['status'])
+        waiting = [request['id'] for request in capture.pending()]
+        self.assertEqual(capture.MAX_PENDING, len(waiting))
+        self.assertIn(mine['id'], waiting)
+        self.assertNotIn(oldest['id'], waiting)
+        displaced = self.upload(oldest, page_url='https://e.org/pending-0')
+        self.assertEqual(capture._NOT_PENDING, displaced.json()['detail'])
+        self.assertNotEqual(BODY, self.row(oldest_key)['body'])
+        self.assertEqual(receipt, self.client.get('/api/browser-capture/target/' + self.key).json()['saved'])
+
+    def test_reingested_item_does_not_inherit_the_previous_life_receipt(self):
+        """清理掉又重新收录的那篇文章,页面上不许留着上一世那张回执。
+
+        事故形态:`item_key` 按网址算,删掉再从同一个链接收回来还是同一个 key,而
+        回执按 key 取最新一行 —— 新条目的 `content_rev` 从 0 起,跟回执记的那一版
+        怎么比都不等,于是那一页常驻一句假的「本次保存后正文已被修改」:回执区被
+        藏掉、继续处理按钮是灰的,重抓一次也去不掉(那一行记的是上一世)。
+        两种收回来的形状各走一条判据:隔了一秒看 `fetched_at`,同一秒里看倒退的
+        `content_rev`(`fetched_at` 只记到秒)。反过来钉两边:新的一世照旧补得进去,
+        而同一世里正文真被别人换掉,那句红字照旧要出来。
+        """
+        intent = self.intent()
+        self.assertEqual(200, self.upload(intent).status_code)
+        original = self.row(self.key)
+        self.assertEqual(intent['id'],
+                         self.client.get('/api/browser-capture/target/' + self.key).json()['saved']['id'])
+
+        def reingest(fetched_at):
+            capture._intents.clear()
+            # 存量清理只删条目,它不认识审计表(`scripts/feed_trim_history.py`)。
+            with reg.db() as conn:
+                conn.execute('DELETE FROM subscription_items WHERE item_key=?', (self.key,))
+                conn.execute('DELETE FROM feed_items WHERE key=?', (self.key,))
+            self.assertEqual(self.key, self.put())
+            with reg.db() as conn:
+                conn.execute('UPDATE feed_items SET fetched_at=? WHERE key=?', (fetched_at, self.key))
+            return self.client.get('/api/browser-capture/target/' + self.key).json()
+
+        for label, fetched_at in (('同一秒收回来', original['fetched_at']),
+                                  ('隔一段时间收回来', '2026-10-20T09:00:00+00:00')):
+            with self.subTest(label):
+                state = reingest(fetched_at)
+                self.assertIsNone(state['saved'])
+                self.assertEqual('', state['saved_error'])
+                self.assertEqual([], state['pending'])
+        fresh = self.intent()
+        self.assertEqual(200, self.upload(fresh).status_code)
+        state = self.client.get('/api/browser-capture/target/' + self.key).json()
+        self.assertEqual(fresh['id'], state['saved']['id'])
+        # 老库里那些没记身份的回执行同样按「没有回执」办,不是「被改过」。
+        with reg.db() as conn:
+            conn.execute("UPDATE browser_capture_audit SET item_fetched_at='' WHERE id=?", (fresh['id'],))
+        legacy = self.client.get('/api/browser-capture/target/' + self.key).json()
+        self.assertIsNone(legacy['saved'])
+        self.assertEqual('', legacy['saved_error'])
+        with reg.db() as conn:
+            conn.execute('UPDATE browser_capture_audit SET item_fetched_at=? WHERE id=?',
+                         (self.row(self.key)['fetched_at'], fresh['id']))
+        with reg.db() as conn:
+            self.assertEqual([fresh['id']], [row['id'] for row in conn.execute(
+                'SELECT id FROM browser_capture_audit WHERE item_key=?', (self.key,))])
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET body=?,content_rev=content_rev+1 WHERE key=?',
+                         ('另一个写入方换掉的正文', self.key))
+        state = self.client.get('/api/browser-capture/target/' + self.key).json()
+        self.assertIsNone(state['saved'])
+        self.assertIn('已被修改', state['saved_error'])
+
+    def test_continue_runs_export_and_index_but_never_a_whole_library_extract(self):
+        """这颗按钮的射程必须等于它承诺的那些,`extract` 不在里面。
+
+        事故形态:按钮写着「该来源」,而 `extract` 这一段的队列
+        (`kb.extract.pending_docs`)压根没有来源参数 —— 点一下买下的是**全库**那一轮
+        条目化提取,钱按全库待办数花。反过来钉一边:导出仍然只限这一类来源,而三处
+        文案(页面、确认框、回执)不许再承诺提取。
+        """
+        self.assertNotIn('extract', browser_capture_api.CONTINUE_STAGES)
+        intent = self.intent()
+        self.assertEqual(200, self.upload(intent).status_code)
+        with patch.object(browser_capture_api.pipeline, 'start_pipeline', return_value='run-7') as start:
+            result = self.client.post('/api/browser-capture/intents/' + intent['id'] + '/continue')
+        self.assertEqual(200, result.status_code)
+        self.assertEqual(['export', 'index'], start.call_args.args[0])
+        self.assertEqual({'channel': 'rss'}, start.call_args.kwargs['crawl_filter'])
+        page = (browser_capture_api.ROOT / 'kb/static/browser-capture.html').read_text(encoding='utf-8')
+        script = (browser_capture_api.ROOT / 'kb/static/js/browser_capture.js').read_text(encoding='utf-8')
+        for place in (page, script, result.json()['detail']):
+            self.assertIn('条目化提取不在这一步', place)
+            self.assertNotIn('提取模型', place)
+
+    def test_extension_bundle_and_both_pages_carry_the_shared_error_reader(self):
+        """下发的 ZIP 要带上扩展目录里的每个文件;两个页面都要在 `ui.js` 之前引 `api.js`。
+
+        `apiFail` / `apiResponse` 只有一份实现,住在扩展目录(扩展装在浏览器里,取不到
+        `kb/static/js/` 下的文件)。页面漏引它的后果是**所有失败请求当场
+        ReferenceError**:一句话都不弹,而成功路径一切正常;ZIP 漏一个文件的后果是
+        装进浏览器的扩展当场打不开,而这边一切正常。
+        """
+        folder = browser_capture_api.ROOT / 'kb/static/browser-extension/knowbase-capture'
+        shipped = sorted(path.name for path in folder.iterdir()
+                         if path.is_file() and not path.name.startswith('.'))
+        archive = self.client.get('/api/browser-capture/extension.zip')
+        self.assertEqual(200, archive.status_code)
+        with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
+            self.assertEqual(shipped, sorted(name.split('/')[-1] for name in bundle.namelist()))
+        for page in ('kb/static/index.html', 'kb/static/browser-capture.html'):
+            text = (browser_capture_api.ROOT / page).read_text(encoding='utf-8')
+            self.assertLess(text.index('knowbase-capture/api.js'), text.index('/static/js/ui.js'), page)
 
     def test_item_state_restores_latest_saved_receipt_without_an_intent_id(self):
         original = self.intent()

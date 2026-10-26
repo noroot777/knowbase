@@ -204,7 +204,9 @@
     if (processing || !snapshot?.saved) return;
     const identity = snapshot.saved.id;
     processing = true;
-    const confirmed = await confirmBox({title: '继续该来源后续处理？', body: '继续会处理该来源其他待办，可能补抓其他文章、调用翻译及提取模型，索引会检查全库。', ok: '开始处理'});
+    // 话必须跟 `browser_capture_api.CONTINUE_STAGES` 对得上:`extract` 不在那份清单里,
+    // 所以这里不许再承诺会买一轮条目化提取 —— 页面上那两行警告同理。
+    const confirmed = await confirmBox({title: '继续导出与索引？', body: '跑的是导出与索引两段：同类来源其他待办会一起导出，可能补抓别的文章并调用翻译模型，索引会检查全库。条目化提取不在这一步。', ok: '开始处理'});
     if (!confirmed) { processing = false; render(); return; }
     if (snapshot.saved?.id !== identity) {
       processing = false;

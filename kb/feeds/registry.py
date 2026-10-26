@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS feed_items (
 CREATE INDEX IF NOT EXISTS feed_items_recent ON feed_items(kind, published DESC, fetched_at DESC);
 CREATE TABLE IF NOT EXISTS browser_capture_audit (
  id TEXT PRIMARY KEY,item_key TEXT NOT NULL,provenance TEXT NOT NULL,
- body_digest TEXT NOT NULL,content_rev INTEGER NOT NULL
+ body_digest TEXT NOT NULL,content_rev INTEGER NOT NULL,
+ -- 排在最后,和老库 ALTER 补出来的列序一致(见 _ADDED_COLUMNS)。
+ item_fetched_at TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS browser_capture_item ON browser_capture_audit(item_key);
 CREATE TABLE IF NOT EXISTS subscription_items (
@@ -157,6 +159,15 @@ _ADDED_COLUMNS = {
         ('content_rev', 'INTEGER NOT NULL DEFAULT 0'),
         ('x_post_meta', "TEXT NOT NULL DEFAULT ''"),
         ('body_provenance', "TEXT NOT NULL DEFAULT ''"),
+    ),
+    'browser_capture_audit': (
+        # 「这张回执记的是**哪一世**的那篇文章」。`item_key` 按网址算,同一个 key
+        # 清理掉之后再收录回来还是它,所以光凭 key 认不出前一世 —— 判据和事故形态
+        # 在 `kb/browser_capture._same_life`。取 `fetched_at`:它只在 INSERT 时写
+        # (`put_items` 撞 key 是 DO NOTHING),换内容的那几个写入方一个都不碰它。
+        # **老库里的回执行补成空串 = 说不清是哪一世**,按「没有回执」办:少显示
+        # 一行历史回执,总好过在重新收录的文章上常驻一句假的「正文已被修改」。
+        ('item_fetched_at', "TEXT NOT NULL DEFAULT ''"),
     ),
 }
 

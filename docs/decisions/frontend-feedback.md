@@ -432,7 +432,9 @@
   里**真的 `loadModels()`**,只把 `/api/models` 那一条 fetch 打桩 —— 直接往 select
   里插 option 就绕开了被测代码。
 - **禁止用原生 `alert` / `confirm` / `prompt`**,系统弹窗跟本项目的瓷白×墨蓝黑调子完全不搭,还阻塞主线程。
-- 统一走 `kb/static/js/ui.js` 三个出口:
+- 统一走那三个出口(前两个在 `kb/static/js/ui.js`;`apiFail` 住在
+  `kb/static/browser-extension/knowbase-capture/api.js`,页面在 `ui.js` 之前引它、和扩展
+  共用这一份,见 `browser-capture.md`):
   - `toast(text, {type: err|ok|info, detail})` — 一次性操作反馈(失败/成功),右下浮起,自动消失。
   - `confirmBox({title, body, ok, cancel, danger})` — 破坏性动作确认,返回 `Promise<boolean>`,Esc / 点遮罩 = 取消。
   - `apiFail(r, fallback)` / `toastIfFail(r, text)` — 从失败的 `Response` 榨错误文案。**别再写 `(await r.json()).detail || '失败'`**:未捕获异常时 Starlette 返回的是纯文本 500,`r.json()` 会炸,原因就被吞成一句无信息的"失败"。

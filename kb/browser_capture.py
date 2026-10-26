@@ -21,6 +21,13 @@ from kb.source_types import permits_link_body
 TTL = 900
 MAX_BODY = 200_000
 METHODS = ('article', 'selection')
+#: 内存里最多同时留几个等待中的请求。**撞上它的那一下不拒人**:同一篇文章只会有
+#: 一个等待中的请求(`create` 自己把旧的顶掉),所以撞到这个数意味着另外 99 篇各占
+#: 一个,而取消的出口只开在**各自那篇文章的补抓页**上 —— 拒了就得让人逐页去翻。
+#: 这里改成顶掉**最老的那个**(它也最接近过期):等待中的请求手上没有任何产物,
+#: 代价只是那一篇要重新点一次「发起浏览器采集」,而扩展那边收到的话正是
+#: 「被新的采集请求替代」。
+MAX_PENDING = 100
 _lock = threading.RLock()
 _intents: dict[str, dict] = {}
 _NOT_PENDING = '请求已取消、被新的采集请求替代或条目已变化，请回补抓页查看当前请求'
@@ -147,6 +154,24 @@ def _receipt(item: dict, digest: str, provenance: dict, characters: int) -> dict
                 detail='正文已补入原条目；翻译、导出与索引仍待执行，不代表已经完成入库')
 
 
+def _same_life(item: dict, row) -> bool:
+    """这张回执记的是不是**这一世**的这篇文章。
+
+    `item_key` 按网址算:存量清理删掉一条、下一轮又从同一个链接收回来,key 一个字
+    都没变,而库里那是另一行、另一份正文。两条判据各补对方的洞:`fetched_at` 只在
+    INSERT 时写(`put_items` 撞 key 是 DO NOTHING,换内容的几个写入方一个都不碰它),
+    是一世的身份;`content_rev` 在一行的生命里**只增**(见 registry 的
+    `_ADDED_COLUMNS`),新插进来的那一行从 0 起 —— 同一秒里删掉又收回来时
+    `fetched_at` 会撞上(它只记到秒),这一下由倒退的 `content_rev` 认出来。
+
+    认不出来就当**「没有回执」,不是「正文被改过」**:后者会在那篇文章的补抓页上
+    常驻一句假红字,还连带藏掉回执区、禁掉继续处理那颗按钮,而重抓一次也去不掉
+    (那一行审计记的是上一世,怎么比都不等)。
+    """
+    return (bool(row['item_fetched_at']) and item['fetched_at'] == row['item_fetched_at']
+            and item['content_rev'] >= row['content_rev'])
+
+
 def saved(identity: str) -> dict | None:
     with reg.db() as conn:
         row = conn.execute('SELECT * FROM browser_capture_audit WHERE id=?',
@@ -154,6 +179,8 @@ def saved(identity: str) -> dict | None:
     if not row:
         return None
     item = target(row['item_key'])
+    if not _same_life(item, row):
+        return None
     digest = hashlib.sha256(item['body'].encode()).hexdigest()
     if item['content_rev'] != row['content_rev'] or digest != row['body_digest']:
         raise ValueError('本次保存后正文已被修改，请到同步中心处理最新内容，或重新发起采集')
@@ -172,6 +199,9 @@ def item_state(key: str) -> dict:
             if intent['key'] == key and _refresh_status(intent, item):
                 waiting.append(view(intent))
         with reg.db() as conn:
+            # 取这个 key 最后那一张回执就行,**不在这里再判一次是哪一世**:
+            # 判据只有 `_same_life` 一份,`saved` 认不出来时回 None,那正是
+            # 「这篇文章没有回执」。
             row = conn.execute('SELECT id FROM browser_capture_audit WHERE item_key=? '
                                'ORDER BY rowid DESC LIMIT 1', (key,)).fetchone()
         receipt, error = None, ''
@@ -201,8 +231,10 @@ def create(key: str, expected_url: str) -> dict:
             if intent['page_url'] == expected and writable(intent, item):
                 return view(intent)
             intent['status'] = 'superseded'
-        if sum(intent['status'] == 'pending' for intent in _intents.values()) >= 100:
-            raise ValueError('等待中的采集请求过多，请完成或取消已有请求')
+        waiting = sorted((other for other in _intents.values() if other['status'] == 'pending'),
+                         key=lambda other: other['created_at'])
+        for extra in waiting[:max(0, len(waiting) + 1 - MAX_PENDING)]:
+            extra['status'] = 'superseded'
         identity = secrets.token_urlsafe(24)
         created = time.time()
         intent = dict(public(item), id=identity, page_url=expected,
@@ -340,10 +372,17 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
             if changed.rowcount != 1:
                 intent['status'] = 'stale'
                 raise ValueError(_STALE)
+            # 前一世的回执行在这里一并收掉:它永远不会再被认领(`_same_life`),
+            # 留着只会让审计表按「同一个 key 的历次收录」一直长。判据**特意比
+            # `_same_life` 窄**(只认身份这一半):这样它删掉的一定是认领不了的行,
+            # 两边口径万一走岔,也不会把一张还认得出来的回执抹掉。
+            conn.execute('DELETE FROM browser_capture_audit WHERE item_key=? '
+                         'AND item_fetched_at<>?', (intent['key'], current['fetched_at']))
             conn.execute('INSERT INTO browser_capture_audit '
-                         '(id,item_key,provenance,body_digest,content_rev) VALUES (?,?,?,?,?)',
+                         '(id,item_key,provenance,body_digest,content_rev,item_fetched_at) '
+                         'VALUES (?,?,?,?,?,?)',
                          (identity, intent['key'], json.dumps(provenance, ensure_ascii=False),
-                          digest, intent['content_rev'] + 1))
+                          digest, intent['content_rev'] + 1, current['fetched_at']))
         receipt = _receipt(intent, digest, provenance, len(body))
         intent.update(status='saved', receipt=receipt)
         return dict(receipt)
