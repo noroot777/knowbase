@@ -30,9 +30,14 @@ function toast(text, { type = 'err', detail = '', ms, key = '' } = {}) {
   if (key) el.dataset.toastKey = key;
   el.innerHTML =
     `<span class="toast-ic">${TOAST_ICON[type] || ''}</span>` +
-    `<div class="toast-body"><b>${esc(text)}</b>` +
-    `${detail ? `<span>${esc(detail)}</span>` : ''}</div>` +
+    '<div class="toast-body"><b></b></div>' +
     `<button class="toast-x" aria-label="关闭">✕</button>`;
+  el.querySelector('b').textContent = text;
+  if (detail) {
+    const description = document.createElement('span');
+    description.textContent = detail;
+    el.querySelector('.toast-body').appendChild(description);
+  }
   host.appendChild(el);
 
   let timer = null;

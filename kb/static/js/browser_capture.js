@@ -162,12 +162,18 @@
       const pairing = await api('/pairing');
       element('pairing-key').value = pairing.key;
       element('pairing').hidden = false;
-    } catch (error) { message(error.message, true); }
+    } catch (error) { toast(error.message, {key: 'capture-pairing'}); }
   });
 
   element('copy-key').addEventListener('click', async () => {
-    try { await navigator.clipboard.writeText(element('pairing-key').value); message('密钥已复制，只粘贴到你安装的 Knowbase 扩展中。'); }
-    catch { element('pairing-key').type = 'text'; element('pairing-key').select(); message('无法自动复制，请复制选中的配对密钥。'); }
+    try {
+      await navigator.clipboard.writeText(element('pairing-key').value);
+      toast('密钥已复制，只粘贴到你安装的 Knowbase 扩展中。', {type: 'ok', key: 'capture-copy'});
+    } catch {
+      element('pairing-key').type = 'text';
+      element('pairing-key').select();
+      toast('无法自动复制，请复制选中的配对密钥。', {type: 'info', detail: '按 Cmd-C（Windows 为 Ctrl-C）复制已选中的文字。', key: 'capture-copy'});
+    }
   });
 
   element('continue').addEventListener('click', async () => {
@@ -179,7 +185,7 @@
     if (snapshot.saved?.id !== identity) {
       processing = false;
       render();
-      message('保存回执已经变化，请核对当前内容后再操作。', true);
+      toast('保存回执已经变化，请核对当前内容后再操作。', {key: 'capture-continue'});
       return;
     }
     render();

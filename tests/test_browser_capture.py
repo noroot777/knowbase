@@ -247,3 +247,55 @@ class BrowserCaptureTests(FullTextCase):
         state = self.client.get('/api/browser-capture/target/' + self.key).json()
         self.assertIsNone(state['saved'])
         self.assertEqual(warm.json()['detail'], state['saved_error'])
+
+    def test_extension_pending_rejects_stale_items_without_opening_the_capture_page(self):
+        changes = (
+            "UPDATE feed_items SET content_rev=content_rev+1 WHERE key=?",
+            "UPDATE feed_items SET content_hash='new-hash' WHERE key=?",
+            "UPDATE feed_items SET kind='web' WHERE key=?",
+            "UPDATE feed_items SET kind='digest' WHERE key=?",
+            "UPDATE feed_items SET url='https://e.org/changed' WHERE key=?",
+            "UPDATE feed_items SET content_kind='post' WHERE key=?",
+            "UPDATE feed_items SET x_post_meta='{}' WHERE key=?",
+            "INSERT INTO feed_item_exclusions(key,kind,url,created_at) "
+            "SELECT key,kind,url,'2026-10-26 12:00' FROM feed_items WHERE key=?",
+            "DELETE FROM feed_items WHERE key=?",
+        )
+        healthy = self.intent()
+        for index, statement in enumerate(changes):
+            with self.subTest(statement=statement):
+                key = self.put(url=f'https://e.org/stale-{index}')
+                request = capture.create(key, 'https://e.org/post')
+                with reg.db() as conn:
+                    conn.execute('DELETE FROM subscription_items WHERE item_key=?', (key,))
+                    conn.execute(statement, (key,))
+                response = self.client.get('/api/browser-capture/pending', headers=self.auth)
+                self.assertEqual(200, response.status_code)
+                self.assertEqual([healthy['id']], [item['id'] for item in response.json()['intents']])
+                self.assertEqual('stale', capture.get(request['id'])['status'])
+                self.assertEqual(409, self.upload(request).status_code)
+                with reg.db() as conn:
+                    self.assertEqual(0, conn.execute('SELECT count(*) FROM browser_capture_audit '
+                                                     'WHERE id=?', (request['id'],)).fetchone()[0])
+        self.assertEqual(200, self.upload(healthy).status_code)
+        self.assertEqual(BODY, self.row(self.key)['body'])
+
+    def test_extension_pending_reads_all_current_items_in_one_connection(self):
+        first = self.intent()
+        key = self.put(url='https://e.org/second')
+        second = capture.create(key, 'https://e.org/second')
+        with patch.object(reg, 'db', wraps=reg.db) as database:
+            waiting = capture.pending()
+        self.assertEqual(1, database.call_count)
+        self.assertEqual({first['id'], second['id']}, {request['id'] for request in waiting})
+
+    def test_save_keeps_transactional_revision_guard_even_if_preflight_allows_it(self):
+        request = self.intent()
+        before = self.row(self.key)['body']
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET content_rev=content_rev+1 WHERE key=?', (self.key,))
+        with patch.object(capture, 'writable', return_value=True):
+            result = self.upload(request)
+        self.assertEqual(409, result.status_code)
+        self.assertEqual(before, self.row(self.key)['body'])
+        self.assertEqual('stale', capture.get(request['id'])['status'])

@@ -36,20 +36,46 @@ def pairing_key() -> str:
                             ('browser_capture_pairing',)).fetchone()[0]
 
 
-def target(key: str) -> dict:
-    with reg.db() as conn:
-        row = conn.execute('SELECT * FROM feed_items WHERE key=? AND NOT EXISTS '
-                           '(SELECT 1 FROM feed_item_exclusions WHERE key=feed_items.key)',
-                           (key,)).fetchone()
-    if not row:
+def _items(conn, keys: list[str]) -> dict[str, dict]:
+    keys = list(dict.fromkeys(keys))
+    if not keys:
+        return {}
+    slots = ','.join('?' for key in keys)
+    rows = conn.execute(f'SELECT feed_items.*, EXISTS '
+                        f'(SELECT 1 FROM feed_item_exclusions WHERE key=feed_items.key) '
+                        f'AS capture_excluded FROM feed_items WHERE key IN ({slots})', keys)
+    return {row['key']: dict(row) for row in rows}
+
+
+def _checked_target(item: dict | None) -> dict:
+    if not item or item['capture_excluded']:
         raise LookupError('条目不存在或已不再收录')
-    item = dict(row)
     if not permits_link_body(item['kind']):
         raise ValueError('此来源的正文不允许被原文链接中的页面替换，不能从浏览器补抓')
     if item['content_kind'] == 'post' or item['x_post_meta']:
         raise ValueError('此入口用于单篇文章正文，不处理 X 观点或时间线覆盖问题')
     page_url(item['url'])
     return item
+
+
+def target(key: str) -> dict:
+    with reg.db() as conn:
+        return _checked_target(_items(conn, [key]).get(key))
+
+
+def writable(intent: dict, item: dict | None) -> bool:
+    try:
+        _checked_target(item)
+    except (LookupError, ValueError):
+        return False
+    return all(intent[field] == item[field] for field in
+               ('key', 'content_hash', 'content_rev', 'kind', 'url'))
+
+
+def _refresh_status(intent: dict, item: dict | None) -> bool:
+    if intent['status'] == 'pending' and not writable(intent, item):
+        intent['status'] = 'stale'
+    return intent['status'] == 'pending'
 
 
 def public(item: dict) -> dict:
@@ -84,12 +110,8 @@ def item_state(key: str) -> dict:
         _prune()
         waiting = []
         for intent in _intents.values():
-            if intent['key'] == key and intent['status'] == 'pending':
-                if any(intent[field] != item[field] for field in
-                       ('content_hash', 'content_rev', 'kind', 'url')):
-                    intent['status'] = 'stale'
-                else:
-                    waiting.append(view(intent))
+            if intent['key'] == key and _refresh_status(intent, item):
+                waiting.append(view(intent))
         with reg.db() as conn:
             row = conn.execute('SELECT id FROM browser_capture_audit WHERE item_key=? '
                                'ORDER BY rowid DESC LIMIT 1', (key,)).fetchone()
@@ -117,8 +139,7 @@ def create(key: str, expected_url: str) -> dict:
         for intent in _intents.values():
             if intent['key'] != key or intent['status'] != 'pending':
                 continue
-            if (intent['page_url'] == expected and all(intent[field] == item[field]
-                    for field in ('content_hash', 'content_rev', 'kind', 'url'))):
+            if intent['page_url'] == expected and writable(intent, item):
                 return view(intent)
             intent['status'] = 'superseded'
         if sum(intent['status'] == 'pending' for intent in _intents.values()) >= 100:
@@ -151,7 +172,13 @@ def get(identity: str) -> dict:
 def pending() -> list[dict]:
     with _lock:
         _prune()
-        return [view(intent) for intent in _intents.values() if intent['status'] == 'pending']
+        waiting = [intent for intent in _intents.values() if intent['status'] == 'pending']
+        if not waiting:
+            return []
+        with reg.db() as conn:
+            items = _items(conn, [intent['key'] for intent in waiting])
+        return [view(intent) for intent in waiting
+                if _refresh_status(intent, items.get(intent['key']))]
 
 
 def cancel(identity: str) -> dict:
@@ -188,10 +215,12 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
                           page_title=title, captured_at=reg.now(), confirmed=True)
         with reg.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
-            current = conn.execute('SELECT title FROM feed_items WHERE key=?',
-                                   (intent['key'],)).fetchone()
+            current = _items(conn, [intent['key']]).get(intent['key'])
+            allowed = _refresh_status(intent, current)
             if not current:
                 raise LookupError('条目已被删除，未写入正文')
+            if not allowed:
+                raise ValueError('条目已被其他操作修改或排除。本次没有覆盖，请重新核对并发起采集')
             changed = conn.execute("""UPDATE feed_items SET body=?,content_kind='content',
                 content_hash=?,content_rev=content_rev+1,lang=?,fulltext_at=?,
                 fulltext_error='',fulltext_hold='',extract_stale=1,body_provenance=?,

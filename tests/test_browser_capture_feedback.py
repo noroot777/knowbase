@@ -11,3 +11,9 @@ class BrowserCaptureFeedbackTests(unittest.TestCase):
         result = subprocess.run([shutil.which('node'), str(probe)],
                                 capture_output=True, text=True, timeout=30)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_capture_action_feedback_survives_polling(self):
+        probe = Path(__file__).with_name('browser_capture_notices.mjs')
+        result = subprocess.run([shutil.which('node'), str(probe)],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
