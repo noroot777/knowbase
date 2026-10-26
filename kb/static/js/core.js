@@ -79,6 +79,55 @@ const safeUrl = u => /^(https?:|obsidian:|\/|#)/i.test(String(u || '')) ? String
 // 两个库都随包在 /static/vendor/,正常不会走到兜底;真走到了在 console 留一句,
 // 否则"回答变纯文本"这种静默降级根本查不出是脚本没加载。
 let _mdWarned = false;
+function prepareMarkdownLinks(root) {
+  const anchors = new Map();
+  for (const heading of root.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
+    const slug = heading.textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}_\s-]/gu, '').replace(/\s/g, '-');
+    const count = anchors.get(slug) || 0;
+    anchors.set(slug, count + 1);
+    heading.dataset.markdownAnchor = slug + (count ? '-' + count : '');
+  }
+  for (const link of root.querySelectorAll('a[href]')) {
+    const href = link.getAttribute('href').trim();
+    delete link.dataset.markdownFragment;
+    let destination = null;
+    try { destination = new URL(href, document.baseURI); } catch {}
+    const sameDocument = destination && destination.origin === location.origin
+      && destination.pathname === location.pathname && destination.search === location.search;
+    const fragment = href.startsWith('#') ? href.slice(1)
+      : sameDocument && href.includes('#') ? destination.hash.slice(1) : null;
+    if (fragment !== null) {
+      link.dataset.markdownFragment = fragment;
+      link.removeAttribute('target');
+      continue;
+    }
+    if (destination && !/^https?:$/.test(destination.protocol)) continue;
+    link.setAttribute('target', '_blank');
+    const rel = new Set((link.getAttribute('rel') || '').split(/\s+/).filter(Boolean));
+    rel.add('noopener');
+    rel.add('noreferrer');
+    link.setAttribute('rel', [...rel].join(' '));
+  }
+}
+
+document.addEventListener('click', event => {
+  const link = event.target.closest('a[data-markdown-fragment]');
+  if (!link || event.defaultPrevented) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const root = link.closest('.md, .reader-prose, [data-snip-ref], #daily-reader-body');
+  if (!root) return;
+  let fragment;
+  try { fragment = decodeURIComponent(link.dataset.markdownFragment); } catch { return; }
+  if (!fragment) return;
+  const target = [...root.querySelectorAll('[data-markdown-anchor], [id], a[name]')].find(node =>
+    node.id === fragment || node.getAttribute('name') === fragment || node.dataset.markdownAnchor === fragment);
+  if (!target) return;
+  target.scrollIntoView({ block:'start', behavior:'instant' });
+  target.tabIndex = -1;
+  target.focus({ preventScroll:true });
+});
+
 function mdHtml(src, linkContext = null) {
   const md = String(src || '');
   if (!window.DOMPurify || !window.marked) {
@@ -89,13 +138,17 @@ function mdHtml(src, linkContext = null) {
     }
     return `<div style="white-space:pre-wrap">${esc(md)}</div>`;
   }
+  let html;
   if (linkContext !== null) {
     const links = marked.lexer(String(linkContext)).links;
     const lexer = new marked.Lexer();
     lexer.tokens.links = links;
-    return DOMPurify.sanitize(marked.parser(lexer.lex(md)));
-  }
-  return DOMPurify.sanitize(marked.parse(md));
+    html = marked.parser(lexer.lex(md));
+  } else html = marked.parse(md);
+  const body = document.createElement('div');
+  body.append(DOMPurify.sanitize(html, { RETURN_DOM_FRAGMENT: true }));
+  prepareMarkdownLinks(body);
+  return body.innerHTML;
 }
 // 页内阅读链接:点击滑出面板,href 保留 /doc 路径,中键/Cmd 点仍可新标签打开
 // hash 传 #kbq=…(片段定位锚点),doc 页加载后据此高亮滚动

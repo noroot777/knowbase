@@ -11,8 +11,8 @@ export const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 // 返回的那一套就是原来探针里那几个同名局部量,**`proc` / `ws` 也交回去** ——
 // 收尾要 `ws.close(); proc.kill()`。
-export async function attachCdp() {
-  const { proc, port } = await launchShell(["--window-size=1440,1000"]);
+export async function attachCdp({ profile, extraArgs = [] } = {}) {
+  const { proc, port } = await launchShell(["--window-size=1440,1000", ...extraArgs], { profile });
   const list = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
   const ws = new WebSocket(list.find(t => t.type === "page").webSocketDebuggerUrl);
   await new Promise(r => ws.addEventListener("open", r, { once: true }));
