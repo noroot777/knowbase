@@ -12,6 +12,7 @@
 **两条红各钉一边**:许可来源那边照旧换壳、放回队列(`..._return_to_a_real_refill_
 queue`);许可来源上一篇正常的补抓成品不许被这一轮新射程选中(`..._is_left_alone`)。
 """
+import os
 import sqlite3
 from dataclasses import replace
 from unittest.mock import patch
@@ -311,3 +312,65 @@ class RecheckCapabilityTests(CapabilityCase):
                 self.assertEqual(scope != (None, None), '简报不走正文补抓' in note)
         self.assertEqual('没有需要复查的条目。', recheck._nothing('rss', None))
         self.assertIn('不存在', recheck._nothing(None, 9999))
+
+    def test_naming_a_source_that_does_not_live_here_says_so(self):
+        """**公众号点名时要说「这里没有这一类」,不是「这一类按两道判据查过了」。**
+
+        公众号条目由它自己那条采集链存(`collector/`、`wechat_local`),压根不进
+        feeds.db。给它那段「不走正文补抓、这里按两道判据选」的解释,是把「这个脚本
+        管不着」说成了「这个脚本查过了」—— 而人正是拿这句话当结论用的。
+        """
+        note = recheck._nothing('wechat', None)
+        self.assertIn('不在这张表里', note)
+        self.assertIn('不是「这一类没问题」', note)
+        self.assertNotIn('按两道判据选', note)
+
+    def test_the_regrab_path_is_not_claimed_to_be_gated_for_tweets(self):
+        """空结果那句话里「新的不会再有」要说准到**哪一条路**。
+
+        通用那条路(补抓队列、浏览器采集)每条写语句自己的 WHERE 里都拦着不许可的
+        来源;人点「重新抓一次」问的是另一个问题(`url_is_origin`),**大V观点在那一问
+        上是放行的** —— 换回来的是推文本人的正文,不属于这里要找的损坏,但也不该被
+        那句话顺带说成「拦着」。反过来钉一边:简报两问都关,那一句不该出现。
+        """
+        self.assertIn('「重新抓一次」那条路对大V观点是放行的',
+                      recheck._nothing('social', None))
+        self.assertNotIn('是放行的', recheck._nothing('digest', None))
+
+    def test_the_automatic_scan_finds_a_flat_backup_file_too(self):
+        """**自动模式认两种摆法** —— 平铺的那一个曾经整份看不见。
+
+        生产上那份全库备份是 `backups/<名字>.db`(手工 `.backup` 出来的一个文件),
+        而自动模式只扫 `backups/*/feeds.db`;于是脚本说「备份里没有原始内容」,
+        而唯一那份有用的备份就躺在同一个目录里。名字也要分得开:平铺式再取
+        `parent.name` 会把几份备份一起叫成「backups」。
+        """
+        root = reg.DB_PATH.parent / 'backups'
+        (root / '2026-10-09').mkdir(parents=True, exist_ok=True)
+        nested, flat = root / '2026-10-09' / 'feeds.db', root / 'feeds-20261021.db'
+        for path, when in ((nested, 1760000000), (flat, 1761000000)):
+            sqlite3.connect(path).close()
+            os.utime(path, (when, when))
+        self.assertEqual([flat, nested], recheck._backups(None))   # 新的在前
+        self.assertEqual(['feeds-20261021', '2026-10-09'],
+                         [recheck._backup_tag(p) for p in recheck._backups(None)])
+
+    def test_a_backup_without_a_body_column_is_skipped_not_raised(self):
+        """**老备份缺 `body` 这一列时跳过它,不许抛。**
+
+        `sqlite3.Row` 对不存在的列抛的是 `IndexError`,**不在 `sqlite3.Error` 的射程
+        里** —— 那会一路穿出去把整趟 run 打断,而这个函数的全部设计就是「老备份缺列
+        时别整份跳过」。反过来钉一边:同一批里那份完好的备份照旧用得上。
+        """
+        source, key = self.wrong_article('digest')
+        broken = self.root / 'backup-no-body' / 'feeds.db'
+        broken.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(broken)
+        with conn:
+            conn.execute('CREATE TABLE feed_items(key TEXT PRIMARY KEY,content_kind TEXT)')
+            conn.execute("INSERT INTO feed_items VALUES(?,'summary')", (key,))
+        conn.close()
+        self.assertEqual(('', '', ''), recheck._from_backup([broken], key, 'digest'))
+        good = self.backup(key)
+        self.assertEqual((ORIGINAL, 'summary'),
+                         recheck._from_backup([broken, *good], key, 'digest')[:2])

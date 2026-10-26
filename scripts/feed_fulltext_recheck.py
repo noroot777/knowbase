@@ -94,7 +94,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb.feeds import fulltext, readable, registry as reg       # noqa: E402
-from kb.source_types import SOURCE_TYPES, feed_types, permits_link_body   # noqa: E402
+from kb.source_types import (SOURCE_TYPES, feed_types,                     # noqa: E402
+                             permits_link_body, permits_origin_body)
 
 
 def _not_article(body: str) -> str:
@@ -154,9 +155,13 @@ def _covered() -> str:
     **② 认的是 `content_kind` 这个结构信号,它只覆盖「会改 content_kind 的那几条
     路」。** 曾经漏过的是 `grab_store.replace`(人点「重新抓一次」):它刻意不动
     `content_kind`(一条推文换了正文还是推文),于是简报那条被换掉正文的简讯在这儿
-    **一条都选不中**。根治在写入层 —— 那几条 UPDATE 现在自己的 WHERE 里就带着能力
-    判据(`kb.source_types.link_body_sql`),不许可来源的正文**不会再**被外链那一页
-    换掉,所以 ② 看得见的那一类就是今后唯一还会出现的一类。
+    **一条都选不中**。根治在写入层 —— 每条 UPDATE 自己的 WHERE 里都带着闸,而且
+    **按内容来路带对应的那一道**:通用那条路(补抓队列、浏览器采集)带
+    `link_body_sql`,所以不许可来源的正文**不会再**被外链那一页换掉;人点「重新抓
+    一次」带的是另一道(`origin_body_sql`:这一行的 `url` 指向的是不是它自己),对简报
+    是拒、对推文是放行 —— 放行那一边换回来的是推文**本人**的正文,不属于这里要找的
+    损坏(它照旧不动 `content_kind`,所以 ② 本来也看不见它)。两道闸的分别见
+    `kb/source_types.py`。
 
     **把 ② 换成「和备份比 `content_hash`」试过,不可取**:生产只读实测
     (2026-10-26,`data/feeds.db` 对 20261021 那份全库备份)不许可来源里 hash 与备份
@@ -230,14 +235,32 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
     return [{**row, 'why': why} for row in rows if (why := _why(row))]
 
 
+def _backup_tag(path: Path) -> str:
+    """这份备份在报告里叫什么 —— 目录式取目录名、平铺式取文件名。
+
+    人要靠这个名字决定「换一份更早的备份再试」,所以两种摆法都得给出认得出的名字:
+    平铺式也取 `parent.name` 会把 `backups/feeds-20261021.db` 一律叫成「backups」,
+    几份备份在报告里就重名了。
+    """
+    return path.parent.name if path.name == 'feeds.db' else path.stem
+
+
 def _backups(explicit: str | None) -> list[Path]:
-    """备份库,新的在前。显式给了就只认那一个 —— 指错了要当场看出来。"""
+    """备份库,新的在前。显式给了就只认那一个 —— 指错了要当场看出来。
+
+    **自动模式认两种摆法**:`backups/<某一天>/feeds.db`(目录式,备份脚本那种)和
+    `backups/<名字>.db`(平铺一个文件,手工 `.backup` 出来那种)。只认前一种的后果
+    实测过:生产上那份全库备份是平铺的,自动模式整份看不见它,扫到的只有一份更早
+    的局部备份(里面压根没有要恢复的那一类条目)—— 于是脚本说「备份里没有原始内容」,
+    而唯一那份有用的备份就躺在同一个目录里。
+    """
     if explicit:
         path = Path(explicit)
         if path.is_dir():
             path = path / 'feeds.db'
         return [path] if path.exists() else []
-    found = sorted((reg.DB_PATH.parent / 'backups').glob('*/feeds.db'),
+    root = reg.DB_PATH.parent / 'backups'
+    found = sorted({*root.glob('*/feeds.db'), *root.glob('*.db')},
                    key=lambda p: p.stat().st_mtime, reverse=True)
     return found
 
@@ -291,16 +314,21 @@ def _from_backup(paths: list[Path], key: str, kind: str) -> tuple[str, str, str]
                 conn.close()
             except (sqlite3.Error, NameError, UnboundLocalError):
                 pass
-        body = (row['body'] if row else '') or ''
+        if row is None:
+            continue
+        # **缺列一律按 `in columns` 问,不许直接取** —— `sqlite3.Row` 对不存在的列
+        # 抛的是 `IndexError`,**不在上面那个 `sqlite3.Error` 的射程里**,会一路穿出
+        # 去把整趟 run 打断(而这个函数的全部设计就是「老备份缺列时别整份跳过」)。
+        columns = row.keys()
+        body = (row['body'] if 'body' in columns else '') or ''
         if not body.strip():
             continue
-        columns = row.keys()
         content_kind = (row['content_kind'] if 'content_kind' in columns else '') or ''
         if not content_kind and not permits_link_body(kind):
             continue                      # 老备份判不出结构那一道,不拿它赌
         if _why({'kind': kind, 'content_kind': content_kind, 'body': body}):
             continue                      # 和扫描同一道判据,往更早的备份找
-        return body, content_kind or 'summary', path.parent.name
+        return body, content_kind or 'summary', _backup_tag(path)
     return '', '', ''
 
 
@@ -345,6 +373,16 @@ def _nothing(kind: str | None, source: int | None) -> str:
         if not row:
             return base + f'\n（订阅 {source} 不存在 —— 核对一下 subscriptions.id。）'
         named.add(row['kind'])
+    # **先答「它住不住在这张表里」。** 公众号由自己那条链管(`collector/`、
+    # `wechat_local`),条目压根不进 feeds.db —— 给它那段「不走正文补抓、这里按两道
+    # 判据选」的解释是把「这个脚本管不着」说成了「这个脚本查过了」,而人正是拿这句话
+    # 当结论用的(元规则:判不准一律如实交出,不许返回「确定没有」)。
+    outside = [k for k in sorted(named) if k in SOURCE_TYPES and k not in feed_types()]
+    if outside:
+        labels = '、'.join(SOURCE_TYPES[k].label for k in outside)
+        return (base + f'\n（{labels}的条目不在这张表里,这个脚本只看 feeds.db —— '
+                '它那条采集链自己存自己的正文。所以这句话的意思是「这里没有这一类」,'
+                '不是「这一类没问题」。）')
     closed = [k for k in sorted(named) if k in SOURCE_TYPES and not permits_link_body(k)]
     if not closed:
         return base
@@ -352,12 +390,22 @@ def _nothing(kind: str | None, source: int | None) -> str:
     # **不许把「扫不中」说成「确定没有」**(元规则:判不准一律如实交出,不许返回
     # 「确定没有」)。射程 ② 认的是 `content_kind`,而换正文的入口里曾有一个刻意
     # 不动它(`_covered` 那一段);那句「当前一条都没有」实测过被当成结论用。
-    return (base + f'\n（{labels}不走正文补抓:正文就是这一类来源自己给的那一份。'
-            '这里按两道判据选:正文形态不像文章、或者这一类来源手里拿着一份网页'
-            '正文 —— 两道都没选中。\n这不等于「它的正文一定没被换过」:若有过一次'
-            '连 content_kind 都没改的覆盖,这里看不出来,要拿备份逐条比 content_hash '
-            '才查得到。改正文那几条语句现在自己的 WHERE 里就拦着不许可的来源,'
-            '所以新的不会再有。）')
+    out = (base + f'\n（{labels}不走正文补抓:正文就是这一类来源自己给的那一份。'
+           '这里按两道判据选:正文形态不像文章、或者这一类来源手里拿着一份网页'
+           '正文 —— 两道都没选中。\n这不等于「它的正文一定没被换过」:若有过一次'
+           '连 content_kind 都没改的覆盖,这里看不出来,要拿备份逐条比 content_hash '
+           '才查得到。通用那条路(补抓队列、浏览器采集)现在每条写语句自己的 WHERE 里'
+           '都拦着不许可的来源,所以靠外链那一页顶替正文这种新的不会再有。')
+    # **「新的不会再有」这个保证要说准到哪一条路。** 人点「重新抓一次」问的是另一个
+    # 问题(「这一行的 url 指向的是不是它自己」),大V观点在那一问上是放行的 —— 它换回
+    # 来的是这条推文本人的正文,不构成这个脚本要找的那种损坏,但也不该被这句话顺带
+    # 说成「拦着」(元规则:口径只有一份,话也只该有一份口径)。
+    regrab = [SOURCE_TYPES[k].label for k in closed if permits_origin_body(k)]
+    if regrab:
+        out += ('\n人点「重新抓一次」那条路对' + '、'.join(regrab) + '是放行的:'
+                '它换回来的是这一行链接指向的那一篇,而那就是它自己(推文的链接就是它本人的永久'
+                '链接),不是外链那一篇,所以不属于这里找的损坏。')
+    return out + '）'
 
 
 def _groups(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
