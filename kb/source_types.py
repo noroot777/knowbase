@@ -87,6 +87,21 @@ SOURCE_TYPES = {
 
 
 def permits_link_body(kind: str) -> bool:
+    """**「这一类来源的正文允不允许被 `url` 指向的那一页替换」—— 判据只有这一份。**
+
+    **每一个会写 `feed_items.body`、而内容来自条目自己那个链接的入口都要先过它**,
+    一共四处:自动补抓队列(`fulltext._eligible`)、采集时直取 Markdown
+    (`markdown_source.enrich`)、浏览器采集(`kb.browser_capture.target`)、存量
+    复查的写回(`feed_fulltext_recheck._downgrade` 的两支)。订阅保存
+    (`registry.save_subscription`)和编辑表单也读它,免得这个开关被打开。
+
+    **一处没接上就崩一条内容,而且不可恢复。** 简报的 `url` 指向的是别人家的文章
+    (`docs/decisions/digest.md`),它那条「不开 fulltext」原先只以三种间接形式存在
+    (defaults.json 不标、一句人话提示、`s.fulltext=1` 顺带挡住)。于是 `enrich` 的
+    闸门方向恰好是反的、浏览器采集按 kind 字面量只挡了大V —— 生产库里一条 TLDR AI
+    的简讯因此被整篇 README 顶掉。新增来源默认 `body_from_link=False`,要开就想清楚
+    那个链接指向的是不是这条内容自己的原文。
+    """
     source = SOURCE_TYPES.get(kind)
     return bool(source and source.body_from_link)
 

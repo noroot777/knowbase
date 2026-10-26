@@ -8,6 +8,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 
 from kb.feeds import fulltext, grab_page, registry as reg
+from kb.source_types import permits_link_body
 
 TTL = 900
 MAX_BODY = 200_000
@@ -43,7 +44,9 @@ def target(key: str) -> dict:
     if not row:
         raise LookupError('条目不存在或已不再收录')
     item = dict(row)
-    if item['content_kind'] == 'post' or item['kind'] == 'social' or item['x_post_meta']:
+    if not permits_link_body(item['kind']):
+        raise ValueError('此来源的正文不允许被原文链接中的页面替换，不能从浏览器补抓')
+    if item['content_kind'] == 'post' or item['x_post_meta']:
         raise ValueError('此入口用于单篇文章正文，不处理 X 观点或时间线覆盖问题')
     page_url(item['url'])
     return item

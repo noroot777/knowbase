@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
-"""存量复查:把「补抓报了成功、而抓回来的其实不是文章正文」的条目收拾干净。
+"""存量复查:把「正文不是这一条自己的内容」的条目收拾干净。
+
+**两条路留下的存量都在射程里**(`_covered`):①补抓报了成功、而抓回来的其实不是
+文章正文;②这一类来源压根不许「拿原文链接那一页替换正文」,而它手里拿着一份
+`content` —— 那只能来自 `markdown_source.enrich` 或 `kb.browser_capture`,这两条
+**不看订阅开关**。**而「怎么收拾」按来源能力分两支**(`_downgrade`):许可来源换壳
+放回补抓队列,不许可来源只从备份装回原文、补抓标记一个都不碰。
 
 这几道判据都是事后才加的(样板区那道在 2026-10-09 审查之后、准入那几道更晚),
 而它要挡的东西**已经在库里了** —— 补抓一旦报成功,`fulltext_at` 落下、条目
@@ -54,6 +60,10 @@
   形态和 feed 原本那份壳一致(标题 + 链接),是从库里现成的字段拼的,不编造
   任何内容。比留着 455 字版权声明严格地好:检索、提取打标、日报素材都不再
   被它污染。
+  **这一条只对许可来源成立** —— 它的前提是「下一轮同步会重抓一次」。不许可来源
+  不进补抓队列,在那儿拿两行标题链接盖掉已经在库里的正文就是**把内容毁掉**,
+  而且没有任何一轮同步会来补,所以那一支只认 ①,没有备份就报出来让人处理
+  (`_plan` / `cmd_scan` 的「收拾不了」那一栏)。
 
 **译文一并作废**:那份译文译的是这段样板文字,body 一换它就无效了(口径同
 `fulltext._save`)。`extract_stale=1` 留一个待办,新 body 落盘之后由
@@ -84,6 +94,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb.feeds import fulltext, readable, registry as reg       # noqa: E402
+from kb.source_types import SOURCE_TYPES, feed_types, permits_link_body   # noqa: E402
 
 
 def _not_article(body: str) -> str:
@@ -119,19 +130,59 @@ def _not_article(body: str) -> str:
     return readable.boilerplate_reason(body)
 
 
-def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
-    """开了补抓的订阅里,`body` 过不了纯文本判据的那些。
+def _covered() -> str:
+    """射程:**这一条的正文有可能是「`url` 指向的那一页」写进来的**,两支并集。
 
-    **射程是"开了补抓的订阅",不是"报过补抓成功"**(`fulltext_at<>''`)。后者
+    ①**属于某条开着补抓的订阅**(`s.fulltext=1`)—— 补抓那条路,含旧库误开的。
+    ②**这一类来源不许 `body_from_link`、而 `content_kind='content'`** —— 另外两条
+      **不看订阅开关**的路(`markdown_source.enrich`、`kb.browser_capture`)留下的
+      痕迹。这几类来源自己写的形态是 `summary`(简报,`digest.py`)或 `post`
+      (大V,`fetching`),`content` 只可能来自外链那一页。
+
+    **射程不受 `permits_link_body` 约束,受它约束的是写回时放不放回补抓队列**
+    (`_downgrade` 的两支)。两件事合成一个判据的后果实测过(审查第 1 轮):
+    `_suspect` 改用 `fulltext._eligible()` 之后,简报 / 大V上已经被换错的正文
+    **从此没有任何工具够得着** —— 全库扫、`--kind digest`、`--source <那条订阅>`
+    三种射程一律 0 条,还以「没有需要复查的条目。」成功退出。而生产库里当时就
+    躺着一条(TLDR AI 的一条简讯,正文是别人家仓库的 README,9242 字、已导出)。
+
+    ② 这一支是**结构事实**,不是启发式:它问的是「这条的正文形态本该是什么」,
+    答案由采集通道自己写死,不靠任何「这段文字像不像正文」的猜。所以它和
+    `_not_article` 并列成立(见 `_why`)—— 那条 README 逐字是一篇正常文章,
+    `boilerplate_reason` 对它返回空串(生产实测),光靠文字判据永远选不中它。
+    """
+    kinds = ','.join(f"'{kind}'" for kind in feed_types()
+                     if not permits_link_body(kind)) or 'NULL'
+    return ('(EXISTS(SELECT 1 FROM subscription_items x JOIN subscriptions s'
+            ' ON s.id=x.subscription_id WHERE x.item_key=fi.key AND s.fulltext=1)'
+            f" OR (fi.kind IN ({kinds}) AND fi.content_kind='content'))")
+
+
+def _why(row: dict) -> str:
+    """这一条**为什么**要收拾。空串 = 不收拾。
+
+    两道并列,先问结构、再问文字:不许 `body_from_link` 的来源手里拿着一份
+    `content`,这件事本身就说明那不是它自己的内容;其余的交给 `_not_article`。
+    """
+    if not permits_link_body(row['kind']) and row['content_kind'] == 'content':
+        return '正文是外链那一页的内容，不是这一条自己的'
+    return _not_article(row['body'])
+
+
+def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
+    """射程(`_covered`)之内,`_why` 答得出理由的那些。
+
+    **射程不是"报过补抓成功"**(`fulltext_at<>''`)。后者
     漏掉的恰恰是这个脚本自己制造出来的中间态:第 1 轮版本只清标记不换 body,
     于是那两条生产条目的 `fulltext_at` 和 `fulltext_tries` 都归了零、body 还是
     455 字版权声明 —— 和「从没补抓过」长得一模一样,再跑一次复查**一条都选不中**
     (2026-10-09 第 2 轮审查点名的就是这个:「不再被复查选中」)。
 
-    **在这个射程里"body 是样板文字"就是充分判据**:HN Buzzing 这类聚合源的
+    **在射程 ① 里"body 是样板文字"就是充分判据**:HN Buzzing 这类聚合源的
     feed 原本给的是跳转壳(标题 + 域名 + HN 得分),过得了判据;真正文同理。
-    一条 body 是版权声明或作者简介的,只能是补抓这条路写进去的。**没开补抓的
-    订阅一个都不碰** —— 它们的正文是 feed 自己给的,不在这个脚本的射程里。
+    一条 body 是版权声明或作者简介的,只能是补抓这条路写进去的。**既没开过补抓、
+    正文形态也正常的订阅一个都不碰** —— 它们的正文是 feed 自己给的,压根不在
+    `_covered()` 里。
 
     **写库准入那八道一道都不借**,理由和两次借出来的事故在模块说明那一段。
     生产只读实测(2026-10-21,`data/feeds.db`)是这个决定的底:开了补抓的订阅名下
@@ -145,7 +196,7 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
     同一轮里。**认不出来的代价是库里留着两条瘦正文,认错的代价是把正常正文写死** ——
     后者不可逆地更贵。
     """
-    where = [fulltext._eligible('fi.key')]
+    where = [_covered()]
     args: list = []
     if kind:
         where.append('fi.kind=?')
@@ -155,12 +206,12 @@ def _suspect(kind: str | None = None, source: int | None = None) -> list[dict]:
         join = ' JOIN subscription_items si ON si.item_key=fi.key'
         where.append('si.subscription_id=?')
         args.append(source)
-    sql = (f'SELECT DISTINCT fi.key,fi.kind,fi.title,fi.url,fi.body,fi.path,'
+    sql = (f'SELECT DISTINCT fi.key,fi.kind,fi.title,fi.url,fi.body,fi.path,fi.content_kind,'
            f"fi.exported_hash<>'' AS shipped FROM feed_items fi{join}"
            f' WHERE {" AND ".join(where)}')
     with reg.db() as c:
         rows = [dict(r) for r in c.execute(sql, args).fetchall()]
-    return [{**row, 'why': why} for row in rows if (why := _not_article(row['body']))]
+    return [{**row, 'why': why} for row in rows if (why := _why(row))]
 
 
 def _backups(explicit: str | None) -> list[Path]:
@@ -175,8 +226,13 @@ def _backups(explicit: str | None) -> list[Path]:
     return found
 
 
-def _from_backup(paths: list[Path], key: str) -> tuple[str, str]:
-    """备份里那份原始 body。返回 `(壳, 来自哪个备份)`,没有就两个空串。
+def _from_backup(paths: list[Path], key: str) -> tuple[str, str, str]:
+    """备份里那份原始 body。返回 `(壳, 它的 content_kind, 来自哪个备份)`,没有就三个空串。
+
+    **`content_kind` 一起取回来是给不许可来源那一支用的**:简报原生 `summary`、
+    大V原生 `post`,而降级那条路对许可来源一律写 `summary`(「从没补抓过」的形态)。
+    与其在这儿按 kind 写死两个字面量,不如恢复备份里那条**原本的样子** —— 新增
+    一类不许可来源时这儿不用跟着改。
 
     **恢复回来的要再过一遍判据,而且过的是和扫描同一道那份**(`_not_article`):
     备份可能是在某一轮错误补抓之后做的,里面那份同样不是文章正文 —— 那就不算有效
@@ -195,7 +251,8 @@ def _from_backup(paths: list[Path], key: str) -> tuple[str, str]:
             conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
             conn.row_factory = sqlite3.Row
             with conn:
-                row = conn.execute('SELECT body FROM feed_items WHERE key=?', (key,)).fetchone()
+                row = conn.execute('SELECT body,content_kind FROM feed_items WHERE key=?',
+                                   (key,)).fetchone()
         except sqlite3.Error:
             continue                      # 老备份的 schema 不同、或者文件坏了
         finally:
@@ -205,8 +262,8 @@ def _from_backup(paths: list[Path], key: str) -> tuple[str, str]:
                 pass
         body = (row['body'] if row else '') or ''
         if body.strip() and not _not_article(body):
-            return body, path.parent.name
-    return '', ''
+            return body, (row['content_kind'] or 'summary'), path.parent.name
+    return '', '', ''
 
 
 def _rebuild(row: dict) -> str:
@@ -215,42 +272,129 @@ def _rebuild(row: dict) -> str:
 
 
 def _plan(rows: list[dict], backups: list[Path]) -> list[dict]:
+    """给每一条配一份要写回去的内容。`shell` 空串 = **收拾不了,一个字都不许动**。
+
+    **「标题与链接」那份重建壳只给许可来源**:它成立的前提是「下一轮同步会重抓一
+    次」(`_downgrade` 把它放回队列),拿不到才永久停在壳上。不许可来源压根不进补抓
+    队列 —— 在那儿拿两行标题链接盖掉已经在库里的正文,是**把内容毁掉**,而且没有
+    任何一轮同步会来补。所以那一支只认备份,没有就报出来让人处理(元规则:拿不准
+    就别固化终态)。
+    """
     for row in rows:
-        shell, origin = _from_backup(backups, row['key'])
-        row['shell'] = shell or _rebuild(row)
-        row['origin'] = origin or '标题与链接'
+        shell, kind, origin = _from_backup(backups, row['key'])
+        row['requeue'] = permits_link_body(row['kind'])
+        if row['requeue']:
+            row['shell'] = shell or _rebuild(row)
+            row['shell_kind'] = 'summary'
+            row['origin'] = origin or '标题与链接'
+        else:
+            row['shell'], row['shell_kind'], row['origin'] = shell, kind, origin
     return rows
+
+
+def _nothing(kind: str | None, source: int | None) -> str:
+    """一条都没选中时那句话。**点名过不走补抓的来源,就把这件事说出来。**
+
+    光回一句「没有需要复查的条目。」读起来像「这一类来源的损坏不在这个脚本的射程
+    里」—— 而射程改对之后恰好相反(`_covered` ②)。那句误解实测过:简报上有一条
+    正文被外链文章换掉、人点名 `--kind digest` 来收拾,拿到的就是这句话加退出码 0。
+    """
+    base = '没有需要复查的条目。'
+    named = {kind} if kind else set()
+    if source is not None:
+        with reg.db() as c:
+            row = c.execute('SELECT kind FROM subscriptions WHERE id=?', (source,)).fetchone()
+        if not row:
+            return base + f'\n（订阅 {source} 不存在 —— 核对一下 subscriptions.id。）'
+        named.add(row['kind'])
+    closed = [k for k in sorted(named) if k in SOURCE_TYPES and not permits_link_body(k)]
+    if not closed:
+        return base
+    labels = '、'.join(SOURCE_TYPES[k].label for k in closed)
+    return (base + f'\n（{labels}不走正文补抓:正文就是这一类来源自己给的那一份。'
+            '这里只收拾「正文被原文链接那一页覆盖过」的条目 —— 当前一条都没有。）')
+
+
+def _groups(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """按「该怎么收拾」分三组:换壳回队列 / 只恢复原文 / 收拾不了。"""
+    refill = [row for row in rows if permits_link_body(row['kind'])]
+    rest = [row for row in rows if not permits_link_body(row['kind'])]
+    return refill, [r for r in rest if r['shell']], [r for r in rest if not r['shell']]
+
+
+def _lines(rows: list[dict], *, shell: bool = True) -> None:
+    for row in rows:
+        print(f"  [{'已入库' if row['shipped'] else '未入库'}] {row['title'][:48]}")
+        print(f"      {row['why']}（{len(row['body'])} 字）")
+        if shell:
+            print(f"      正文换成 → {row['origin']}（{len(row['shell'])} 字）")
+        print(f"      {row['url']}")
 
 
 def cmd_scan(args) -> int:
     rows = _plan(_suspect(args.kind, args.source), _backups(getattr(args, 'backup', None)))
     if not rows:
-        print('没有需要复查的条目。')
+        print(_nothing(args.kind, args.source))
         return 0
-    print(f'{len(rows)} 条补抓成品不是文章正文:\n')
-    for row in rows:
-        mark = '已入库' if row['shipped'] else '未入库'
-        print(f"  [{mark}] {row['title'][:48]}")
-        print(f"      {row['why']}（{len(row['body'])} 字）")
-        print(f"      正文换成 → {row['origin']}（{len(row['shell'])} 字）")
-        print(f"      {row['url']}")
-    restored = sum(1 for r in rows if r['origin'] != '标题与链接')
-    shipped = sum(1 for r in rows if r['shipped'])
-    print('\n要做的事:把这段样板文字换成壳、放回补抓队列、译文一并作废。')
-    print(f'  {restored} 条从备份里恢复原始内容，{len(rows) - restored} 条按标题与链接重建。')
-    print(f'  下一轮同步重抓一次:拿到真正文就补上;仍然拿不到 → 试满'
-          f' {fulltext.MAX_TRIES} 次之后按壳入库（和没开过补抓的条目一样）。')
+    refill, restore, stuck = _groups(rows)
+    print(f'{len(rows)} 条正文要收拾:')
+    if refill:
+        restored = sum(1 for r in refill if r['origin'] != '标题与链接')
+        print('\n补抓写进来的,不是文章正文（换成壳、放回补抓队列、译文一并作废）:')
+        _lines(refill)
+        print(f'  {restored} 条从备份里恢复原始内容，{len(refill) - restored} 条按标题与链接重建。')
+        print(f'  下一轮同步重抓一次:拿到真正文就补上;仍然拿不到 → 试满'
+              f' {fulltext.MAX_TRIES} 次之后按壳入库（和没开过补抓的条目一样）。')
+    if restore:
+        print('\n正文来自原文链接那一页（这一类来源不走补抓:只从备份装回原文、不放回队列）:')
+        _lines(restore)
+    if stuck:
+        print('\n收拾不了,要你自己处理（备份里没有这一条的原始内容）:')
+        _lines(stuck, shell=False)
+        print('  这一类来源不会重抓,所以不拿「标题与链接」顶替已经在库里的那份正文。')
+        print('  出路:换一份更早的备份（--backup），或者到那一期的落地页把这条摘要抄回来。')
+    # **只数真会动的那些** —— 「收拾不了」那一栏一个字都不改,它那篇 md 不会被覆盖。
+    shipped = sum(1 for r in refill + restore if r['shipped'])
     if shipped:
-        print(f'  其中 {shipped} 条已经写进过 vault，那篇 md 下一轮导出就会被覆盖。')
+        print(f'\n其中 {shipped} 条已经写进过 vault，那篇 md 下一轮导出就会被覆盖。')
     print('\n真要改:feed_fulltext_recheck.py run --yes')
     return 1
 
 
-def _downgrade(rows: list[dict]) -> tuple[list[dict], list[dict]]:
-    """把计划里的每一条换成壳。返回 `(真改了的, 这期间内容或补抓资格已变化的)`。
+def _downgrade(rows: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """把计划里的每一条写回去。返回 `(真改了的, 这期间变过的, 收拾不了的)`。
 
-    补抓资格和扫描、队列共用 `_eligible`,写入时再核对一次:计划生成后关掉最后
-    一条补抓归属或删除订阅,不得把已无机会补回的正文换成壳。
+    **动作按来源能力分两支,这才是 `permits_link_body` 在这个脚本里的落点**:
+    - **许可来源**(rss / web / inbox):换成壳、清掉补抓那三个标记**放回队列**、
+      译文作废。写入时再核一次 `fulltext._eligible()` —— 计划生成后关掉最后一条
+      补抓归属或删掉订阅,不得把已无机会补回的正文换成壳。
+    - **不许可来源**(简报 / 大V):**只把备份里那份原文装回去**,`fulltext_at` /
+      `fulltext_error` / `fulltext_tries` 一个都不碰 —— 它压根不该进补抓队列,清
+      掉标记只会让它看起来「在等全文」而永远没人来抓。这一支不带 `_eligible()`:
+      那个判据对它恒假,带上就是 0 行。它的 CAS 是 `body=?` 加 `content_kind=?`
+      (扫到那一刻的形态),同样待在 UPDATE 自己的 WHERE 里。
+
+    两支都让译文作废、`extract_stale=1`、不动 `exported_hash`(口径同下)。
+
+    **走哪一支读的是 `row['requeue']`,也就是算计划那一刻的能力,不是此刻重新问一
+    遍。** 这一道要紧:计划里那份壳是按某一支算出来的(许可支可能配的是「标题与
+    链接」重建壳,它成立的前提是紧接着回补抓队列),拿它去走另一支就是把内容毁掉。
+    定点注入过改成实时重判的后果:扫描时 rss 还是许可来源、配了重建壳,写回前能力
+    被撤销,于是那份重建壳走了**不许可**那一支 —— 那条 SQL 里没有 `_eligible()`,
+    `body` 和 `content_kind` 又都还是扫到那一版,`rowcount=1`,一条正文被盖成两行
+    标题加链接,而且永远不会有哪一轮同步来补。
+    **固定住之后不需要再加一道「能力变没变」的 CAS**:那一道定点注入下来红 0 条 ——
+    能力撤销时这一条照旧走许可支,而许可支自带的 `_eligible()` 当场判假、0 行、落进
+    `moved`(元规则:红 0 条先怀疑用例,想清楚是真冗余)。
+
+    **「不许可来源不拿『标题与链接』顶替」这道保护只在 `_plan` 里,这儿没有第二
+    道。** 想过在这条 UPDATE 前面再核一次「这份内容是不是从备份来的」,但写入口
+    能读到的只有 `_plan` 交过来的那几个字段 —— 核的还是同一个结论,不是独立证据
+    (元规则:口径只有一份,别在两处各判一遍)。定点注入过它的后果:把 `_plan` 里
+    不许可那一支换成「没备份就用 `_rebuild`」,这条 UPDATE 当场把一条简讯的正文
+    盖成两行标题加链接、`rowcount=1`、还报「已收拾 1 条」。所以钉住它的是回归
+    (`tests/test_fulltext_recheck_capability.py` 里那条「没有备份就整条留着」),
+    不是这儿的第二道 if。
 
     **判据是「这一条还是我扫到的那份 body 吗」,而且待在 UPDATE 自己的 WHERE
     里(`AND body=?`),不许在 Python 这边先 SELECT 一次比对。** 先查后写在两
@@ -273,32 +417,56 @@ def _downgrade(rows: list[dict]) -> tuple[list[dict], list[dict]]:
     整批在**一个**写事务里(`reg.db()` 退出时才 commit):第一条 UPDATE 就把写
     锁攥住,后面每一条的判据都在锁内求值。
     """
-    cut, moved = [], []
+    cut, moved, stuck = [], [], []
     with reg.db() as c:
         for row in rows:
-            cur = c.execute(
-                f"""UPDATE feed_items SET body=?,content_kind='summary',content_hash=?,lang=?,
-                   fulltext_at='',fulltext_error='',fulltext_tries=0,extract_stale=1,
-                   title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
-                   WHERE key=? AND body=? AND {fulltext._eligible()}""",
-                (row['shell'], fulltext.body_hash(row['shell']),
-                 reg.text_language(row['title'], row['shell']), row['key'], row['body']))
+            if not row['shell']:
+                stuck.append(row)         # 没有可恢复的原文(见 `_plan`),不许写空
+                continue
+            shell, key, body = row['shell'], row['key'], row['body']
+            digest = fulltext.body_hash(shell)
+            lang = reg.text_language(row['title'], shell)
+            if row['requeue']:
+                cur = c.execute(
+                    f"""UPDATE feed_items SET body=?,content_kind='summary',content_hash=?,lang=?,
+                       fulltext_at='',fulltext_error='',fulltext_tries=0,extract_stale=1,
+                       title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
+                       WHERE key=? AND body=? AND {fulltext._eligible()}""",
+                    (shell, digest, lang, key, body))
+            else:
+                cur = c.execute(
+                    """UPDATE feed_items SET body=?,content_kind=?,content_hash=?,lang=?,
+                       extract_stale=1,title_zh='',body_zh='',translated_at='',
+                       translate_error='',translate_tries=0
+                       WHERE key=? AND body=? AND content_kind=?""",
+                    (shell, row['shell_kind'], digest, lang, key, body, row['content_kind']))
             (cut if cur.rowcount else moved).append(row)
-    return cut, moved
+    return cut, moved, stuck
 
 
 def cmd_run(args) -> int:
     rows = _plan(_suspect(args.kind, args.source), _backups(getattr(args, 'backup', None)))
     if not rows:
-        print('没有需要复查的条目。')
+        print(_nothing(args.kind, args.source))
         return 0
     if not args.yes:
         print(f'{len(rows)} 条待收拾,加 --yes 才会真改。')
         return 1
-    cut, moved = _downgrade(rows)
-    restored = sum(1 for r in cut if r['origin'] != '标题与链接')
-    print(f'已收拾 {len(cut)} 条:正文换成壳（{restored} 条取自备份，'
-          f'{len(cut) - restored} 条按标题与链接重建）、放回补抓队列、译文一并作废。')
+    cut, moved, stuck = _downgrade(rows)
+    queued, restored_rows, _ = _groups(cut)
+    restored = sum(1 for r in queued if r['origin'] != '标题与链接')
+    print(f'已收拾 {len(cut)} 条。')
+    if queued:
+        print(f'  {len(queued)} 条正文换成壳（{restored} 条取自备份，'
+              f'{len(queued) - restored} 条按标题与链接重建）、放回补抓队列、译文一并作废。')
+    if restored_rows:
+        print(f'  {len(restored_rows)} 条从备份装回了原文、译文一并作废;'
+              '这一类来源不走补抓,补抓标记一个都没动、也没放回队列。')
+    if stuck:
+        print(f'\n另有 {len(stuck)} 条备份里没有原始内容，一个字都没动:')
+        for row in stuck:
+            print(f"  {row['title'][:48]}")
+        print('  （这一类来源不会重抓,不拿两行标题链接顶替。见 scan 里那一栏。）')
     if moved:
         print(f'\n另有 {len(moved)} 条在这一趟里内容已经换过或补抓资格已变化，原样留着没动:')
         for row in moved:

@@ -104,7 +104,55 @@ socket 连接被拒绝,真实网络调用为 0,没有模型调用。脚本及临
 本轮改动没有可见 UI 变化,没有进行任何浏览器操作,因此没有新增浏览器通道降级或截图。
 已修改代码文件均低于 700 行。
 
-### 浏览器覆盖意见的边界待裁定
+## 把判据接到剩下三个入口上
+
+用户裁定不采纳上一轮的范围驳回,按报告修。那份报告点的三条是同一个类问题的三个实例 ——
+「这一类来源的正文允不允许被 `url` 指向的那一页替换」在仓库里还有三处没接到 `permits_link_body()` 上。
+现在它是这个问题的唯一答案,四个入口都过它(补抓队列、采集直取、浏览器采集、存量复查写回),
+`kb/source_types.py` 的函数 docstring 把这四处列齐了;回归钉的是**集合**而不是实例,新增入口加进那条用例。
+
+- **采集时直取 Markdown**(`markdown_source.enrich`):闸门原先是订阅 `fulltext` 生值的**反面** ——
+  那不是资格判据而是分工(开了补抓的让补抓阶段去取),于是简报(规定 `fulltext` 必须为 0)正好落在打开那一侧。
+  生产库里一条 TLDR AI 的简讯因此被整篇 GitHub README 顶掉:9242 字、`content_kind` 变 `content`、已导出进 vault;
+  同一期另外 4 条同样指向 github.com 的没被换,差别只是那一刻 `api.github.com` 放不放行。现在能力那一道排在最前面。
+- **浏览器采集**(`browser_capture.target`):原先按 `kind == 'social'` 字面量挡人,只挡住大V、放过简报。
+  改动与原任务分支 `23f96aa` 的同一处**逐字相同**(`git show 23f96aa:kb/browser_capture.py` 的 `target()` 与本分支
+  `diff` 无输出),合并不会冲突。**没有照搬那边 `save()` 里的同一道**:那是它为「从审计表恢复 intent」那条新路径
+  加的纵深,本分支没有那条路径 —— `save()` 的 intent 只能由 `create()` 产生,而 `create()` 第一件事就是 `target()`。
+  把那边的 `save()` 整段搬过来会连它的回执重构一起带进来,那属于原任务。
+- **存量复查**(`feed_fulltext_recheck`):射程和动作**分开**。射程不再受来源能力约束(两支并集:属于开着补抓的订阅,
+  或者不许可来源手里拿着一份 `content`),否则简报 / 大V上已经被换错的正文没有任何工具够得着 —— 上一版实测三种
+  射程一律 0 条、还以「没有需要复查的条目。」成功退出。动作按能力分两支:许可来源照旧换壳放回队列;不许可来源
+  **只从备份装回原文**、补抓标记一个都不碰、**不拿「标题与链接」顶替**(它不会重抓,顶替就是永久毁掉),
+  没有备份就报「收拾不了」并给出路。点名了不走补抓的来源却一条都没选中时,把原因说出来。
+
+### 实际执行的检查
+
+```text
+.venv/bin/python -m py_compile kb/source_types.py kb/browser_capture.py \
+    kb/feeds/markdown_source.py scripts/feed_fulltext_recheck.py \
+    tests/test_fulltext_capability.py tests/test_fulltext_recheck_capability.py \
+    tests/test_fulltext_recheck_race.py
+git diff --check
+```
+
+遵守项目约定,**没有执行任何回归测试**(包括本轮新增和改动的用例),改为一次性缺陷冒烟 + 定点反向注入,
+跑在独立临时 `KB_DATA_DIR` 上,无网络、无模型调用,收工已删除脚本与临时库。本轮没有可见 UI 变化,未操作浏览器。
+
+正向(修复在位)实测:简报那条 `enrich` 一次请求都不发、正文与 `summary` 形态原样;**未开补抓的**许可来源照旧直取
+(反向对照 —— 开着补抓的那条本来就该早退,拿它当对照会把这道闸测成假绿);四种射程都选中那条被 README 顶掉的简讯、
+而许可来源上一篇正常补抓成品一条都不选;没有备份时 `stuck=1`、整条记录逐字不变、不进补抓队列;给了备份则装回原
+摘要、`content_kind` 回 `summary`、`content_hash` 重算、`fulltext_at`/`fulltext_tries`/`exported_hash` 一个都没动、
+译文清空、`extract_stale=1`、再扫 0 条;浏览器采集对简报抛「此来源的正文不允许被原文链接中的页面替换」、对 RSS
+照旧放行;扫描与写回之间撤销来源能力时 `moved=1`、正文原样。
+
+反向(定点撤回,一次只动一处,每轮用 git 还原并核对工作区干净)六处全部变红:去掉 `enrich` 的能力判据 → 当场去取
+外链那一页;射程退回共享资格 → 一条都选不中;写回不分两支 → 简报条目配上重建壳、有备份也装不回去;只放开「配什么
+壳」那一道 → 正文被盖成两行标题加链接;写回时实时重判走哪一支 → 同一形态的真实损坏;浏览器采集退回 kind 字面量 →
+简报重新放行。另有一处注入**红 0 条**:在写回前再加一道「能力变没变」的 CAS —— 分流已经固定在算计划那一刻,
+能力撤销由许可支自带的 `_eligible()` 挡住,那一道是真冗余,已经删掉并把这个结论记进了脚本。
+
+### 上一轮的边界请求已由用户裁定
 
 审查第 3 条技术事实成立,但落点是原任务明确保留的「从已打开文章标签主动读取、预览并回填」链路,
 不属于独立转出的旧自动补抓/订阅设置范围。当前分支仍保留该基线行为,**不声称此分支已修复浏览器覆盖问题**。
@@ -119,12 +167,13 @@ socket 连接被拒绝,真实网络调用为 0,没有模型调用。脚本及临
   `permits_link_body()`,`kb/static/js/source_reader.js:48` 的入口使用相同能力字段。
   本任务没有重复合入该提交;应由原任务交付该链路,整合前本分支上的该缺陷仍存在。
 
-就第 3 条提交范围裁定请求;第 1、2 条已修复,不将有效事实写成驳回理由。
+用户裁定**不采纳**这条驳回。浏览器采集那一处已按上面所写在本分支接上同一份判据,与原任务分支逐字相同。
 
 ## 留给验收
 
 新增回归覆盖旧误开值、直接 API 开启、部分编辑保留设置、默认种子、默认关闭能力、混合归属、补抓正向对照、翻译和挂起出口。
 验收阶段执行 `tests.test_fulltext_capability`、`tests.test_fulltext_recheck_capability`,并覆盖既有
+`tests.test_markdown_source`(改了 `enrich`)、`tests.test_browser_capture`(改了 `target`)、
 `tests.test_failure_sources`、`tests.test_fulltext_failures`、`tests.test_fulltext_recheck_race`、`tests.test_fulltext_admit`、
 `tests.test_feed_fulltext`、`tests.test_admit_three_ways`、`tests.test_fulltext_held_exit`、`tests.test_fulltext_browser`、
 `tests.test_feed_sources`,再按项目统一闸门执行全量回归。

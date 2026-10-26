@@ -1,15 +1,28 @@
-"""原文链接能力约束旧补抓、订阅保存和翻译/挂起出口。仅在验收阶段执行。"""
+"""原文链接能力约束旧补抓、订阅保存和翻译/挂起出口。仅在验收阶段执行。
+
+**`test_every_link_body_entry_refuses_a_disallowed_source` 钉的是集合,不是实例。**
+「这一类来源的正文允不允许被 `url` 指向的那一页替换」这个问题在仓库里冒出来过三次,
+每次都是某个入口自己列一张排除名单(先是补抓队列只看订阅开关,再是采集直取把闸门
+写成了那个开关的反面,再是浏览器采集按 kind 字面量只挡大V)—— 每次只修复现到的那
+一个,下一个入口原样再崩一条内容。所以这条红遍历**所有**不许可来源 × **每一个**写
+正文的入口;新增入口时把它加进这条用例,而不是再加一条实例级的红。
+"""
 import hashlib
+import time
 from dataclasses import replace
 from unittest.mock import Mock, patch
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb.feeds import fulltext, registry as reg, translate
+from kb import browser_capture
+from kb.feeds import fulltext, markdown_source, registry as reg, translate
 from kb.source_types import SOURCE_TYPES, SourceType, catalog, feed_types
 from kb.web import intake_api
 from tests.test_feed_fulltext import FullTextCase, PAGE, SHELL, page
+
+#: `markdown_source.target()` 认得的地址 —— 生产库里那条受害简讯指的就是它。
+REPOSITORY = 'https://github.com/openai/openai-cli'
 
 
 class CapabilityCase(FullTextCase):
@@ -66,6 +79,38 @@ class FulltextCapabilityTests(CapabilityCase):
                         self.assertEqual(before[field], after[field], field)
                     self.assertEqual('这还是原简讯的译文', after['body_zh'])
                     reg.delete_subscription(kind, source['id'])
+
+    def test_every_link_body_entry_refuses_a_disallowed_source(self):
+        clock = dict(deadline=time.monotonic() + 30, collect_deadline=time.monotonic() + 60)
+        feed_entry = {'url': REPOSITORY, 'title': 'OpenAI CLI (GitHub Repo)',
+                      'body': '简报自己写的那段摘要', 'content_kind': 'summary'}
+        for kind, spec in feed_types().items():
+            if spec.body_from_link:
+                continue
+            with self.subTest(kind=kind):
+                source, key = self.legacy_item(kind)
+                # ① 采集时直取 Markdown(`markdown_source.enrich`):一次都不取。
+                # **这一支的闸门原先是订阅开关的反面**,所以这里刻意让 source 那
+                # 份 dict 的 fulltext 留在 0 —— 旧库误开的真实形态。
+                fetch = Mock(side_effect=AssertionError('不应取外链那一页'))
+                with patch.object(markdown_source, 'fetch', fetch):
+                    returned = markdown_source.enrich(source, [dict(feed_entry)], **clock)
+                fetch.assert_not_called()
+                self.assertEqual('简报自己写的那段摘要', returned[0]['body'])
+                self.assertEqual('summary', returned[0]['content_kind'])
+                # ② 浏览器采集(`browser_capture.target`):连目标都不交出来。
+                with self.assertRaises(ValueError) as refused:
+                    browser_capture.target(key)
+                self.assertIn('不允许', str(refused.exception))
+                # ③ 自动补抓队列与挂起出口由上一条用例钉;④ 存量复查的写回在
+                # `tests/test_fulltext_recheck_capability.py`。
+                reg.delete_subscription(kind, source['id'])
+        # 反过来钉一边:许可来源照旧直取,这道闸没把正常那条路也关上。
+        with patch.object(markdown_source, 'fetch', return_value='外链那一页的正文') as ok:
+            returned = markdown_source.enrich(self.plain, [dict(feed_entry)], **clock)
+        ok.assert_called_once()
+        self.assertEqual('外链那一页的正文', returned[0]['body'])
+        self.assertEqual('content', returned[0]['content_kind'])
 
     def test_supported_sources_still_fetch_then_queue_the_new_body_for_translation(self):
         for kind in ('rss', 'web', 'inbox'):
