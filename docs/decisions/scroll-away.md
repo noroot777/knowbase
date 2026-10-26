@@ -357,3 +357,52 @@ Chrome 扩展具名后台标签返回 `Capability is not available: visibility`�
 通用 mdHtml，而非阅读抽屉。基线 f97482a 已有相同调用；本任务对这两个模块无
 任何改动，也未改动 mdHtml 的链接行为。本轮没有扩修它们，按边界协议申请独立
 处理主文档 Markdown 链接的统一策略，等待用户裁定；不宣称报告全部通过。
+
+### 离页源头与文章夹具契约修复（2026-10-26）
+
+本轮 f5Yl0USdpAKo 第 1 轮的两条意见都落在阅读器链路内，分别修复：
+
+- 订阅布局探针不再拿 CSS/JS 静态文件冒充文章。布局夹具在自己的临时 vault
+  写入 `reader-layout/first.md` 和 `second.md`，探针通过正式 `/doc/` 路由加载，
+  等待正确文章与让位绑定均就绪后再滚动；没有放宽生产的 `readerPath` 判据。
+- 离页目标由文章源头记录，不再从 iframe 的 `src` 属性推断。捕获阶段记录
+  同框 HTTP(S) 链接点击，Navigation API 在可用时记录包括 `location.href`
+  在内的脚本导航，`beforeunload` 补发已知目标。点击被取消时撤销意图，页内
+  锚点、修饰键、新标签与下载不当作同框离页目标。
+- 同源文章先同步调用父页接收器，再发送 `postMessage`。定向点检中仅异步通知
+  在真实跨源点击时未被父页收到，因此不依赖消息任务赶在文档退出前执行。
+  两条通道复用同一处校验：当前 iframe、来源 origin、源文章 URL 和本次
+  iframe 导航编号必须匹配；恢复、换篇或关闭后旧通知失效。
+- 恢复正文时保留真实请求入口；初次失败仅使用已登记的打开请求作兜底，不把
+  本地 `src` 冒充远端地址。独立阅读页脚本拆入 `kb/web/doc_links.py`，继续由
+  生产模板同步内联，避免主路由文件超过 700 行。
+
+同步更新了单测和浏览器探针的验收覆盖：内部导航不再给 `frame.src` 赋目标值，
+增加无 Navigation API 的真实点击、取消意图、非法来源和过期通知的覆盖。
+**按项目约定，本轮没有运行回归套件，也没有执行新增测试用例**；不宣称原先
+5 条失败已由测试跑绿，回归统一留在验收阶段。逐文件 JS 语法、嵌入脚本语法、
+Python AST 和 `git diff --check` 是本轮静态校验依据。
+
+本轮独立无头浏览器定向点检记录：
+
+- 正文内部通过 `contentWindow.location.href` 跨源跳到拒绝嵌入页，赋值后
+  iframe 的 `src` 仍是原文章；恢复后目标入口指向 `localhost` 的实际请求，
+  正文可读，焦点回到 `reader-close`，目标入口可实际打开该请求。
+- 禁用 Navigation API 后，将正文链接设成同框目标并真实点击，仍恢复原文章、
+  保留拒绝嵌入页的目标入口；实际点击关闭按钮可退出。
+- 初次直接打开拒绝嵌入页时，错误面板的链接指向实际请求，焦点在关闭按钮、
+  iframe inert；分别用 Esc 与关闭按钮均能退出，父页异常记录为空。
+- 使用真实订阅布局夹具的两篇文章：第一篇带正式 `readerPath`，iframe 未隐藏；
+  下滚后标题栏高度 61→0、正文高度 659→720，标题栏 inert、常驻关闭按钮出现，
+  点它能退出。连续打开第一、第二篇后最终停在第二篇，仍能下滚收头并用 Esc 退出。
+
+Chrome 扩展具名后台标签返回 `Capability is not available: visibility`，因此
+降级为独立临时 profile 的无头 Chrome。未连接用户 Chrome、接管普通标签、
+激活窗口或使用登录态；只访问本地隔离夹具。证据：
+`output/playwright/reader-navigation-observation.log`、
+`output/playwright/reader-inner-navigation-restored.png`、
+`output/playwright/reader-captured-click-restored.png`、
+`output/playwright/reader-real-article-scroll-away.png`。
+
+上一节申请转出的主文档问答/图鉴链接问题，用户已裁定交由独立任务
+`3VpdKYp6Ao4c` 处理；本轮未改动 chat/gallery 或通用 Markdown 链接策略。

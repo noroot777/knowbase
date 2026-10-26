@@ -20,6 +20,7 @@ from kb import store
 from kb.config import VAULT_ROOT
 from kb.scanner import body_version, read_md_text
 from kb.web.common import VAULT_NAME, _STATIC
+from kb.web.doc_links import _DOC_LINKS_JS
 
 router = APIRouter()
 _STATIC_REF = re.compile(
@@ -169,20 +170,6 @@ if (window.marked) marked.use({ renderer: { html(t) {
   const s = typeof t === 'string' ? t : (t && t.text) || '';
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 } } });
-"""
-
-_DOC_LINKS_JS = r"""
-document.documentElement.dataset.readerPath = DOC_PATH;
-for (const link of document.querySelectorAll('#content a[href]')) {
-  let url;
-  try { url = new URL(link.getAttribute('href'), location.href); } catch { continue; }
-  if (!/^https?:$/.test(url.protocol)) continue;
-  const current = new URL(location.href);
-  if (url.origin === current.origin && url.pathname === current.pathname
-      && url.search === current.search && (url.hash || link.getAttribute('href').startsWith('#'))) continue;
-  link.setAttribute('target', '_blank');
-  link.setAttribute('rel', [...new Set((link.getAttribute('rel') || '').split(/\s+/).filter(Boolean).concat('noopener'))].join(' '));
-}
 """
 
 # 片段收藏脚本(纯常量、不走 str.format,所以里面可以放心用大括号):

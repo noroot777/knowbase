@@ -4,8 +4,8 @@ import { test } from 'node:test';
 import vm from 'node:vm';
 
 const root = new URL('../kb/static/js/', import.meta.url);
-const pages = readFileSync(new URL('../kb/web/pages.py', import.meta.url), 'utf8');
-const docLinks = pages.match(/_DOC_LINKS_JS = r"""([\s\S]*?)"""/)[1];
+const docLinksSource = readFileSync(new URL('../kb/web/doc_links.py', import.meta.url), 'utf8');
+const docLinks = docLinksSource.match(/_DOC_LINKS_JS = r"""([\s\S]*?)"""/)[1];
 
 function target() {
   const listeners = new Map();
@@ -19,7 +19,7 @@ function target() {
 function rig() {
   const elements = new Map();
   const document = { ...target(), activeElement: null, getElementById: element,
-    readyState: 'interactive', querySelectorAll: () => links };
+    readyState: 'interactive', querySelectorAll: () => links, querySelector: () => null };
   function element(id) {
     if (!elements.has(id)) {
       const classes = new Set();
@@ -70,19 +70,25 @@ function rig() {
   const state = vm.createContext({ document, window, URL, DOC_PATH: 'article.md',
     favSet: new Set(), setFavBtn() {},
     location: { origin: 'https://kb.local', href: 'https://kb.local/doc/article.md' },
-    setTimeout: () => 1, clearTimeout() {},
+    setTimeout: () => 1, clearTimeout() {}, queueMicrotask,
     ResizeObserver: class { observe() {} disconnect() { disconnected = true; } },
   });
   for (const name of ['scrollaway.js', 'core.js'])
     vm.runInContext(readFileSync(new URL(name, root), 'utf8'), state, { filename: name });
-  return { element, document, window, frameDoc, links, popups,
+  const message = (data, overrides = {}) => {
+    const handler = [...window.listeners].find(([, type]) => type === 'message')?.[0];
+    handler?.({ source: frameWindow, origin: 'https://kb.local', data, ...overrides });
+  };
+  return { element, document, window, frameDoc, links, popups, message,
     run: code => vm.runInContext(code, state),
     open(path) {
       vm.runInContext(`openReader({ getAttribute: () => ${JSON.stringify(path)}, dataset: {} })`, state);
     },
     load: () => [...frame.listeners].find(([, type]) => type === 'load')?.[0],
-    navigateAway(url = 'https://external.test/blocked') {
-      foreign = true; frame.src = url; document.activeElement = frame;
+    navigateAway(url = 'https://external.test/blocked', notify = true) {
+      if (notify) message({ type: 'reader-navigation', navigationId: frame.dataset.readerNavigation,
+        documentUrl: frameDoc.URL, destination: url });
+      foreign = true; document.activeElement = frame;
     },
     get disconnected() { return disconnected; },
   };
@@ -90,15 +96,16 @@ function rig() {
 
 test('cross-origin load releases every accessible listener and returns Escape focus to the reader', () => {
   const app = rig();
+  app.open('https://external.test/blocked');
   app.run('bindReaderScrollAway()');
   app.element('reader-head').setAttribute('inert', '');
   app.run('readerLastDocument = null');
-  app.navigateAway();
+  app.navigateAway('https://external.test/blocked', false);
   assert.doesNotThrow(() => app.run('bindReaderScrollAway()'));
   assert.equal(app.run('readerAway'), null);
   assert.equal(app.run('SCROLL_AWAY.length'), 0);
   assert.equal(app.frameDoc.listeners.size, 0);
-  assert.equal(app.window.listeners.size, 1);
+  assert.equal(app.window.listeners.size, 2);
   assert.equal(app.disconnected, true);
   assert.equal(app.element('reader-head').hasAttribute('inert'), false);
   assert.equal(app.document.activeElement, app.element('reader-close'));
@@ -120,7 +127,7 @@ test('closing during cross-origin navigation always removes the drawer and mask'
   assert.equal(app.run('readerAway'), null);
   assert.equal(app.run('SCROLL_AWAY.length'), 0);
   assert.equal(app.frameDoc.listeners.size, 0);
-  assert.equal(app.window.listeners.size, 1);
+  assert.equal(app.window.listeners.size, 2);
   assert.equal(app.disconnected, true);
 });
 
@@ -169,7 +176,9 @@ test('a non-reader destination restores the verified article and retains the act
   const app = rig();
   app.open('/doc/article.md');
   app.load()();
+  const navigationId = app.element('reader-frame').dataset.readerNavigation;
   app.navigateAway();
+  assert.equal(app.element('reader-frame').src, '/doc/article.md');
   app.load()();
   assert.equal(app.element('reader-frame').src, 'https://kb.local/doc/article.md');
   assert.equal(app.element('reader-destination').href, 'https://external.test/blocked');
@@ -177,6 +186,82 @@ test('a non-reader destination restores the verified article and retains the act
   assert.deepEqual(app.popups[0], ['https://external.test/blocked', '_blank', 'noopener']);
   assert.equal(app.document.activeElement, app.element('reader-close'));
   assert.equal(app.element('reader-error').hidden, true);
+  app.message({ type: 'reader-navigation', navigationId, documentUrl: app.frameDoc.URL,
+    destination: 'https://stale.test/' });
+  assert.equal(app.run('readerPendingDestination'), null);
+});
+
+test('navigation notifications reject foreign sources, origins, unsafe URLs and obsolete documents', () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  app.load()();
+  const notification = { type: 'reader-navigation',
+    navigationId: app.element('reader-frame').dataset.readerNavigation,
+    documentUrl: app.frameDoc.URL, destination: 'https://external.test/blocked' };
+  for (const overrides of [{ source: {} }, { origin: 'https://external.test' }]) {
+    app.message(notification, overrides);
+    assert.equal(app.run('readerPendingDestination'), null);
+  }
+  for (const changes of [{ destination: 'javascript:alert(1)' }, { documentUrl: 'https://external.test/' },
+    { documentUrl: 'https://kb.local/doc/old.md' }, { navigationId: 'obsolete' }]) {
+    app.message({ ...notification, ...changes });
+    assert.equal(app.run('readerPendingDestination'), null);
+  }
+  app.message(notification);
+  assert.equal(app.run('readerPendingDestination'), notification.destination);
+  app.message({ ...notification, destination: null });
+  assert.equal(app.run('readerPendingDestination'), null);
+  app.open('/doc/next.md');
+  app.message(notification);
+  assert.equal(app.run('readerPendingDestination'), null);
+  app.run('closeReader()');
+  app.message({ ...notification, navigationId: undefined });
+  assert.equal(app.run('readerPendingDestination'), null);
+});
+
+test('article-side navigation reports script destinations without changing the iframe src attribute', () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  const notifications = [];
+  app.window.frameElement = app.element('reader-frame');
+  app.window.parent = { postMessage: (...args) => notifications.push(args) };
+  app.window.navigation = target();
+  app.run(docLinks);
+  const navigate = [...app.window.navigation.listeners.keys()][0];
+  navigate({ destination: { url: 'https://external.test/blocked' }, hashChange: false });
+  assert.equal(notifications[0][0].destination, 'https://external.test/blocked');
+  assert.equal(notifications[0][0].navigationId, app.element('reader-frame').dataset.readerNavigation);
+  assert.equal(notifications[0][1], 'https://kb.local');
+  assert.equal(app.element('reader-frame').src, '/doc/article.md');
+  navigate({ destination: { url: 'https://kb.local/doc/article.md#section' }, hashChange: true });
+  assert.equal(notifications.at(-1)[0].destination, null);
+  navigate({ destination: { url: 'https://external.test/file' }, downloadRequest: 'file.txt' });
+  assert.equal(notifications.at(-1)[0].destination, null);
+});
+
+test('capture-phase links report on beforeunload even without the Navigation API', async () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  const notifications = [];
+  const synchronous = [];
+  app.window.frameElement = app.element('reader-frame');
+  app.window.parent = { recordReaderNavigation: event => synchronous.push(event),
+    postMessage: message => notifications.push(message) };
+  app.run(docLinks);
+  const clickHandlers = [...app.document.listeners].filter(([, type]) => type === 'click');
+  const click = clickHandlers.at(-1)[0];
+  const beforeUnload = [...app.window.listeners].find(([, type]) => type === 'beforeunload')[0];
+  const link = { href: 'https://external.test/blocked', hasAttribute: () => false, getAttribute: () => null };
+  click({ button: 0, target: { closest: () => link } });
+  assert.equal(synchronous[0].data.destination, link.href);
+  assert.equal(synchronous[0].source, app.window);
+  beforeUnload();
+  assert.equal(notifications[0].destination, link.href);
+  notifications.length = 0;
+  click({ button: 0, target: { closest: () => link }, defaultPrevented: true });
+  await Promise.resolve();
+  beforeUnload();
+  assert.equal(notifications.at(-1).destination, null);
 });
 
 test('a readable non-reader error page cannot become a reader document', () => {

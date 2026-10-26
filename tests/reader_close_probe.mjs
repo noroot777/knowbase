@@ -112,14 +112,37 @@ try {
   }
   await fetch(base + '/release-image');
   await waitFor(`$('reader-frame').contentDocument?.readyState === 'complete' && readerAway !== null`);
-  await evaluate(`$('reader-frame').src = ${JSON.stringify(base + '/go-external')}`);
+  const unchangedSource = await evaluate(`(() => {
+    const frame = $('reader-frame'), before = frame.getAttribute('src');
+    frame.contentWindow.location.href = ${JSON.stringify(base.replace('127.0.0.1', 'localhost') + '/blocked')};
+    return frame.getAttribute('src') === before;
+  })()`);
   await waitFor(`$('reader-frame').contentDocument?.URL.endsWith('/doc/slow.md') && readerAway !== null
     && $('reader-destination').style.display !== 'none'`);
-  check('意外离开阅读页后恢复正文并保留实际目标入口', await evaluate(`$('reader-destination').href.endsWith('/go-external')
+  check('正文内部跨源导航后恢复正文并保留实际目标入口', await evaluate(`$('reader-destination').href === ${JSON.stringify(base.replace('127.0.0.1', 'localhost') + '/blocked')}
     && $('reader-open').href.endsWith('/doc/slow.md') && !$('reader-frame').hidden`));
+  check('内部导航未把 iframe 的 src 改成目标地址', unchangedSource);
   const recoveryPopup = (await send('Target.getTargets')).targetInfos.find(target =>
     target.type === 'page' && target.url.endsWith('/blocked'));
   if (recoveryPopup) await send('Target.closeTarget', { targetId: recoveryPopup.targetId });
+  const fallbackScript = await send('Page.addScriptToEvaluateOnNewDocument', { source:
+    `if (window.frameElement) Object.defineProperty(window, 'navigation', { value: undefined });` });
+  await openReader('/doc/legacy.md');
+  await waitFor(`$('reader-frame').contentDocument?.URL.endsWith('/doc/legacy.md') && readerAway !== null`);
+  await evaluate(`$('reader-frame').contentDocument.querySelector('#content a[href$="/blocked"]').target = '_self'`);
+  await click(`(() => {
+    const frame = $('reader-frame').getBoundingClientRect();
+    const link = $('reader-frame').contentDocument.querySelector('#content a[href$="/blocked"]').getBoundingClientRect();
+    return { x: frame.x + link.x + link.width / 2, y: frame.y + link.y + link.height / 2 };
+  })()`);
+  await waitFor(`$('reader-frame').contentDocument?.URL.endsWith('/doc/legacy.md') && readerAway !== null
+    && $('reader-destination').style.display !== 'none'`);
+  check('缺少 Navigation API 时真实点击仍保留离页目标', await evaluate(`!$('reader-frame').contentWindow.navigation
+    && $('reader-destination').href.endsWith('/blocked') && !$('reader-frame').hidden`));
+  const fallbackPopup = (await send('Target.getTargets')).targetInfos.find(target =>
+    target.type === 'page' && target.url.endsWith('/blocked'));
+  if (fallbackPopup) await send('Target.closeTarget', { targetId: fallbackPopup.targetId });
+  await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: fallbackScript.identifier });
   await foreignPage();
   check('不可访问的 iframe 隐藏且不可交互', await evaluate(`$('reader-frame').hidden && $('reader-frame').inert
     && $('reader-frame').getAttribute('tabindex') === '-1' && !$('reader-error').hidden`));
