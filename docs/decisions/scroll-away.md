@@ -243,20 +243,47 @@
 仅保护滚动位置读数不够，事件解绑也必须逐项容忍窗口变成跨域，继续清理同源监听、
 ResizeObserver 和注册表。其它异常不吞掉，便于发现真正的逻辑错误。
 
-阅读器 load 时将正文中跨域 HTTP(S) 链接改为新标签打开并补 `noopener`，保留页内
-锚点、站内链接和 Obsidian 协议。遇到意外跨域或浏览器错误页时，如果焦点仍在
-iframe，交回阅读器关闭按钮，使父页面可以收到 Esc。关闭本身通过 `finally`
+文章正文渲染时立即将跨域 HTTP(S) 链接改为新标签打开并补 `noopener`，保留页内
+锚点、站内链接和 Obsidian 协议，不等图片等子资源完成。遇到意外跨域或浏览器错误页时，
+隐藏并 inert 掉 iframe，由父页面的提示面板接管原正文区域，避免焦点再次进入子文档。
+关闭本身通过 `finally`
 撤掉抽屉、遮罩和正文，并在清理前释放当前句柄，不允许辅助行为锁死退出入口。
 
 新增 `tests/reader_close_test.mjs`，覆盖跨域 load、导航期间直接关闭、清理异常兜底、
 外链与本地链接区分；由 `tests/test_reader_close.py` 接入统一验收，按项目约定未在
 执行阶段运行，留待验收阶段执行。
 
-定向页面点检使用截图中同一篇文章：外链在新标签打开，阅读器正文保持；强制绕过
-新标签规则并构造 `X-Frame-Options: DENY` 错误页后，关闭按钮和 Esc 均能退出，
+首轮定向页面点检使用截图中同一篇文章：外链在新标签打开，阅读器正文保持；强制绕过
+新标签规则并构造 `X-Frame-Options: DENY` 错误页后，当时仅确认刚加载时关闭按钮和 Esc 均能退出，
 遮罩与主区域 inert 状态同步解除，滚动绑定数恢复原值，没有未捕获页面异常。
 Chrome 扩展创建具名后台标签返回 `Capability is not available: visibility`，因此
 降级独立无头临时 profile；未接管用户标签，未使用登录态，也未访问真实外站。
 截图保存在 `output/playwright/reader-external-link-fixed.png`、
 `output/playwright/reader-error-recoverable.png` 和
 `output/playwright/reader-escape-closed.png`。
+
+### 第 1 轮审查修复（2026-10-26）
+
+审查复现了首轮漏掉的两个窗口：错误页加载后再次点击或 Tab 进入 iframe，Esc 不再
+到达父页面；慢图尚未完成时，文章已经可点击，但 load 中的外链改写还未执行。
+
+- 错误页现在由父页面提示面板替代，iframe 同时设置 `hidden`、`inert` 和
+  `tabindex=-1`；鼠标与键盘均不能重新进入它。同源文章加载后恢复正文与交互。
+- 外链规则移到生产 `/doc/` 模板，净化后的正文写入与链接处理在同一个同步脚本中
+  完成；不再与 scroll-away 的 load 绑定耦合。直接解析 href，保留其它 rel 值。
+- `tests/reader_close_probe.mjs` 使用生产模板、可控慢图和本地拒绝嵌入页，覆盖 load 前
+  真实点击开新标签、错误区域点击再 Esc、Tab 循环再 Esc、同源文章恢复；由
+  `tests/test_reader_close_browser.py` 接入统一验收。单测同步补齐状态恢复与早期外链。
+
+本轮仅执行语法检查、diff 检查与独立浏览器定向点检，未运行任何回归测试或新增用例。
+点检记录：慢图未完成时 `readyState=interactive`、外链已有 `_blank/noopener`，真实
+点击打开独立标签且原 iframe 仍在 slow.md；点击原错误区域后焦点为 reader-error，
+Esc 关闭抽屉/遮罩并解除主区域 inert；连续 6 次 Tab 及程序 focus 均未进入 iframe，
+Esc 仍能关闭。同源文章重开恢复正常，无未捕获页面异常。隔离夹具对业务 API 返回
+预期 503，不代表业务接口验证通过；不使用真实库或外站。
+
+扩展再次返回 `Capability is not available: visibility`，因此按规范降级独立无头临时
+profile，未接管用户标签或使用登录态。截图保存在
+`output/playwright/reader-review-slow-before-load.png`、
+`output/playwright/reader-review-error-click.png`、
+`output/playwright/reader-review-error-closed.png`。

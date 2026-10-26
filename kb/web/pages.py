@@ -129,6 +129,7 @@ document.getElementById('content').innerHTML = MD_OK
   ? DOMPurify.sanitize(marked.parse(MD))
   : '<div style="white-space:pre-wrap"></div>';
 if (!MD_OK) document.querySelector('#content div').textContent = MD;
+{links_js}
 {snip_js}
 </script>
 </body></html>"""
@@ -168,6 +169,16 @@ if (window.marked) marked.use({ renderer: { html(t) {
   const s = typeof t === 'string' ? t : (t && t.text) || '';
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 } } });
+"""
+
+_DOC_LINKS_JS = r"""
+for (const link of document.querySelectorAll('#content a[href]')) {
+  let url;
+  try { url = new URL(link.getAttribute('href'), location.href); } catch { continue; }
+  if (!/^https?:$/.test(url.protocol) || url.origin === location.origin) continue;
+  link.setAttribute('target', '_blank');
+  link.setAttribute('rel', ((link.getAttribute('rel') || '') + ' noopener').trim());
+}
 """
 
 # 片段收藏脚本(纯常量、不走 str.format,所以里面可以放心用大括号):
@@ -664,7 +675,7 @@ def doc_page(doc_path: str):
         _DOC_TMPL.format(
             title=html_mod.escape(title), meta=" · ".join(meta_parts),
             md_json=md_json, path_json=path_json, version_json=version_json,
-            literal_js=_DOC_LITERAL_JS, snip_js=_DOC_SNIP_JS,
+            literal_js=_DOC_LITERAL_JS, links_js=_DOC_LINKS_JS, snip_js=_DOC_SNIP_JS,
         ),
         # 动态渲染页,改版后旧缓存会让新脚本(片段收藏)不生效
         headers={"Cache-Control": "no-cache"},

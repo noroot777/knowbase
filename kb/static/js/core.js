@@ -146,6 +146,16 @@ function openReader(a) {
 // 页面上」得看 iframe 元素自己(跨文档量不着)。头收起之后右上角留一颗常驻的
 // 关闭按钮 —— 原本唯一的出口就在那条头里。机制见 kb/static/js/scrollaway.js。
 let readerAway = null;
+function setReaderUnavailable(unavailable) {
+  const frame = $('reader-frame');
+  frame.hidden = unavailable;
+  frame.inert = unavailable;
+  if (unavailable) frame.setAttribute('tabindex', '-1');
+  else frame.removeAttribute('tabindex');
+  $('reader-error').hidden = !unavailable;
+  if (unavailable && document.activeElement === frame)
+    $('reader-head').querySelector('[aria-label="关闭阅读器"]').focus({ preventScroll: true });
+}
 function bindReaderScrollAway() {
   const previous = readerAway;
   readerAway = null;
@@ -154,16 +164,8 @@ function bindReaderScrollAway() {
   const frame = $('reader-frame');
   try {
     const doc = frame.contentDocument;
-    if (!doc) {
-      if (document.activeElement === frame)
-        $('reader-head').querySelector('[aria-label="关闭阅读器"]').focus({ preventScroll: true });
-      return;
-    }
-    for (const link of doc.querySelectorAll('a[href]')) {
-      if (!/^https?:$/.test(link.protocol) || link.origin === location.origin) continue;
-      link.target = '_blank';
-      link.relList.add('noopener');
-    }
+    setReaderUnavailable(!doc);
+    if (!doc) return;
     readerAway = bindScrollAway(frame.contentWindow, ['reader-head'],
       { visible: frame, host: $('reader') });
   } catch { /* An external document cannot be measured from here. */ }
