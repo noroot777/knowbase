@@ -160,8 +160,8 @@ def _same_life(item: dict, row) -> bool:
     `item_key` 按网址算:存量清理删掉一条、下一轮又从同一个链接收回来,key 一个字
     都没变,而库里那是另一行、另一份正文。两条判据各补对方的洞:`fetched_at` 只在
     INSERT 时写(`put_items` 撞 key 是 DO NOTHING,换内容的几个写入方一个都不碰它),
-    是一世的身份;`content_rev` 在一行的生命里**只增**(见 registry 的
-    `_ADDED_COLUMNS`),新插进来的那一行从 0 起 —— 同一秒里删掉又收回来时
+    是一世的身份;`content_rev` 在一行的生命里**只增**(见 `kb/feeds/schema.py`
+    的 `_ADDED_COLUMNS`),新插进来的那一行从 0 起 —— 同一秒里删掉又收回来时
     `fetched_at` 会撞上(它只记到秒),这一下由倒退的 `content_rev` 认出来。
 
     认不出来就当**「没有回执」,不是「正文被改过」**:后者会在那篇文章的补抓页上
