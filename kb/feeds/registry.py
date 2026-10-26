@@ -268,6 +268,9 @@ def x_handle(url: str) -> str:
 
 def source_url(kind: str, value: str) -> str:
     url = normalize_url(value)
+    if kind == 'youtube':
+        from kb.youtube.channels import normalize
+        return normalize(url)
     if feed_types()[kind].adapter == 'social' and (handle := x_handle(url)):
         return 'https://x.com/' + handle.lower()
     return url
@@ -335,6 +338,8 @@ def db():
         conn.execute('BEGIN IMMEDIATE')
         _migrate(conn)
         _seed_defaults(conn)
+        from kb.youtube.storage import initialize
+        initialize(conn)
         conn.commit()
         yield conn
         conn.commit()
@@ -388,6 +393,9 @@ def get_settings(kind: str) -> dict:
     # 之后另一条分支或者还没重启的进程读到的就是一份缺字段的设置。
     default = {'enabled': False, 'interval_minutes': feed_types()[kind].interval_minutes,
                'next_run': 0}
+    if kind == 'youtube':
+        from kb.youtube.settings import DEFAULTS
+        default['youtube'] = dict(DEFAULTS)
     if feed_types()[kind].adapter == 'social':
         # X 的取法是个设置 —— 存量库里这一段压根没有这个键,
         # 读出来必须和升级前逐字同义。
@@ -409,7 +417,12 @@ def get_settings(kind: str) -> dict:
 
 def save_settings(kind: str, values: dict) -> dict:
     cur = get_settings(kind)
+    if kind == 'youtube' and isinstance(values.get('youtube'), dict):
+        values = {**values, 'youtube': {**cur['youtube'], **values['youtube']}}
     cur.update(values)
+    if kind == 'youtube':
+        from kb.youtube.settings import of
+        cur['youtube'] = of(cur)
     if not isinstance(cur['interval_minutes'], int) or not 15 <= cur['interval_minutes'] <= 10080:
         raise ValueError('同步间隔须在 15 分钟至 7 天之间')
     if feed_types()[kind].adapter == 'social':
@@ -471,6 +484,8 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
         raise ValueError('名称不能为空，且不能超过 120 个字符')
     url = source_url(kind,data.get('url', old.get('url', '')))
     feed_url = data.get('feed_url', old.get('feed_url', '')).strip()
+    if kind == 'youtube' and feed_url:
+        raise ValueError('YouTube 频道不使用专用订阅链接，请填写频道主页')
     if feed_url:
         feed_url = normalize_url(feed_url)
     mode = data.get('mode', old.get('mode', 'feed'))
@@ -482,6 +497,8 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
     # 「这条订阅要不要买提取」。默认关,理由见 `_ADDED_COLUMNS` 里那一段。
     extract = bool(data.get('extract', old.get('extract', False)))
     reset = any(old.get(k) != v for k, v in [('url', url), ('feed_url', feed_url), ('mode', mode)])
+    from kb.youtube.channels import subscription_values
+    youtube = subscription_values(kind, data, old, reset)
     try:
         with db() as c:
             if source_id:
@@ -510,6 +527,9 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
                      created_at,updated_at,history_floor)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''', (kind,name,url,feed_url,mode,group,enabled,
                     int(fulltext),int(extract),now(),now(),history_floor())).lastrowid
+            if youtube is not None:
+                c.execute('UPDATE subscriptions SET config=?,fulltext=0 WHERE id=?',
+                          (json.dumps(youtube, ensure_ascii=False), source_id))
     except sqlite3.IntegrityError:
         raise ValueError('这个链接已经在订阅列表中') from None
     return subscription(kind, source_id)

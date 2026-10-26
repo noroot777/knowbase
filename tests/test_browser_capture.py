@@ -215,6 +215,9 @@ class BrowserCaptureTests(FullTextCase):
         self.assertTrue(permits_link_body('inbox'))
         self.assertFalse(permits_link_body('digest'))
         self.assertFalse(permits_link_body('social'))
+        # YouTube 的正文是转录稿,原文链接后面那一页是播放页:从浏览器补抓会拿
+        # 页面文字把转录稿整篇换掉,而那一步不可逆。
+        self.assertFalse(permits_link_body('youtube'))
         self.assertFalse(permits_link_body('unknown'))
         modules = {item['id']: item for item in catalog()}
         self.assertFalse(modules['digest']['body_from_link'])

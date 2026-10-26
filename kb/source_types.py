@@ -38,6 +38,15 @@ SOURCE_TYPES = {
                               '也可以为单个账号填写专用订阅链接，它优先于任何通道。',
                          adapter='social'),
     'rss': SourceType('rss', 'RSS', '让值得读的文章，自己来到这里。', ('rss',), body_from_link=True),
+    # **不开 `body_from_link`**:这一类的正文是视频的转录稿,而原文链接后面那一页是
+    # 播放页 —— 从浏览器补抓会拿页面文字把转录稿整篇换掉,而那一步不可逆
+    # (见 `docs/decisions/browser-capture.md`)。
+    'youtube': SourceType('youtube', 'YouTube', '频道更新先排名，只处理值得读的视频。',
+                         ('youtube',), icon='paper', interval_minutes=1440,
+                         url_hint='输入 YouTube 的 /channel/UC… 或 /@频道名 主页',
+                         note='先按热度和价值排名，再按数量与时长预算处理；优先复用字幕，'
+                              '需要时仅下载音频转录，英文内容翻译为中文。不分析画面。',
+                         adapter='youtube'),
     # 没有 feed 的站点走这条路:解析列表页。独立成一类而不是塞进 rss,是因为
     # 它的失败形态不同 —— 读 feed 坏在对方服务,解析页面还会坏在**对方改版**,
     # 而那需要人去适配。混在一起的话 rss 那条线的状态和定时会被它带着抖。

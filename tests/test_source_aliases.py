@@ -70,7 +70,7 @@ class SourceAliasTests(unittest.TestCase):
     def test_mixed_list_expands_and_dedupes(self):
         """列表里混着别名和具体来源名:逐项展开、去重、保序。"""
         self.assertEqual(
-            ["dr-gzh", "dr-gzh-projects", "gzh", "dr-youtube-dig", "dr-video-projects"],
+            ["dr-gzh", "dr-gzh-projects", "gzh", "youtube", "dr-youtube-dig", "dr-video-projects"],
             expand_sources(["绿泡泡", "dr-gzh", "视频", "公众号"]),
         )
         # 同一批内容的两种写法混在一起,不该把那一篇数两遍
