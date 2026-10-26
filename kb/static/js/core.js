@@ -124,6 +124,16 @@ function openReader(a) {
   readerLoadListener = () => bindReaderScrollAway(generation);
   frame.addEventListener('load', readerLoadListener);
   frame.src = a.getAttribute('href');
+  setReaderHeader(a);
+  // 从哪一边滑出来。默认右边;日报正文里的译文入口要左边 —— 出处编号就在正文
+  // 那一列里,抽屉从同一侧出来,眼睛不用横跨整屏去追它。**要在 display 之前设**:
+  // 滑入动画是跟着 class 走的 CSS 动画,先显示再换 class 的话这一次还是按旧的
+  // 那一边播完。
+  $('reader').classList.toggle('from-left', a.dataset.side === 'left');
+  $('reader-mask').style.display = '';
+  $('reader').style.display = '';
+}
+function setReaderHeader(a) {
   $('reader-title').textContent = a.dataset.title || '';
   $('reader-open').href = a.getAttribute('href');
   $('reader-obs').href = a.dataset.obs || '#';
@@ -137,13 +147,6 @@ function openReader(a) {
   } else {
     fav.style.display = 'none';
   }
-  // 从哪一边滑出来。默认右边;日报正文里的译文入口要左边 —— 出处编号就在正文
-  // 那一列里,抽屉从同一侧出来,眼睛不用横跨整屏去追它。**要在 display 之前设**:
-  // 滑入动画是跟着 class 走的 CSS 动画,先显示再换 class 的话这一次还是按旧的
-  // 那一边播完。
-  $('reader').classList.toggle('from-left', a.dataset.side === 'left');
-  $('reader-mask').style.display = '';
-  $('reader').style.display = '';
 }
 
 // 读正文时让出位置:正文在 iframe 里,所以绑的是它那份 window,而「这块还在不在
@@ -152,22 +155,51 @@ function openReader(a) {
 let readerAway = null;
 let readerLoadGeneration = 0;
 let readerLoadListener = null;
+let readerLastDocument = null;
 function resetReaderNavigation() {
   readerLoadGeneration++;
   if (readerLoadListener) $('reader-frame').removeEventListener('load', readerLoadListener);
   readerLoadListener = null;
+  readerLastDocument = null;
+  $('reader-destination').style.display = 'none';
   setReaderUnavailable(false);
   return readerLoadGeneration;
 }
 function setReaderUnavailable(unavailable) {
   const frame = $('reader-frame');
+  const restoreFocus = document.activeElement === frame || document.activeElement === document.body;
   frame.hidden = unavailable;
   frame.inert = unavailable;
   if (unavailable) frame.setAttribute('tabindex', '-1');
   else frame.removeAttribute('tabindex');
   $('reader-error').hidden = !unavailable;
-  if (unavailable && document.activeElement === frame)
-    $('reader-head').querySelector('[aria-label="关闭阅读器"]').focus({ preventScroll: true });
+  if (unavailable && restoreFocus) $('reader-close').focus({ preventScroll: true });
+}
+function recoverReaderDocument(doc) {
+  const frame = $('reader-frame');
+  const destination = doc?.URL || frame.src;
+  if (!/^https?:/i.test(destination)) { setReaderUnavailable(true); return; }
+  $('reader-open').href = destination;
+  if (!readerLastDocument || destination === readerLastDocument) {
+    setReaderUnavailable(true);
+    return;
+  }
+  const link = $('reader-destination');
+  link.href = destination;
+  link.style.display = '';
+  $('reader-close').focus({ preventScroll: true });
+  frame.src = readerLastDocument;
+  setReaderUnavailable(false);
+  window.open(destination, '_blank', 'noopener');
+}
+function syncReaderHeader(doc) {
+  const links = [...doc.querySelectorAll('.meta a[href]')];
+  setReaderHeader({ getAttribute: () => doc.URL, dataset: {
+    title: doc.querySelector('.doc-title')?.textContent || doc.title,
+    path: encodeURIComponent(doc.documentElement.dataset.readerPath),
+    obs: links.find(link => link.href.startsWith('obsidian:'))?.href || '#',
+    url: links.find(link => /^https?:/i.test(link.href))?.href || '',
+  } });
 }
 function bindReaderScrollAway(generation = readerLoadGeneration) {
   if (generation !== readerLoadGeneration) return;
@@ -176,10 +208,16 @@ function bindReaderScrollAway(generation = readerLoadGeneration) {
   previous?.release();
   if ($('reader').style.display === 'none') return;      // about:blank,关掉那一下
   const frame = $('reader-frame');
+  let doc;
+  try { doc = frame.contentDocument; } catch {}
+  if (typeof doc?.documentElement?.dataset?.readerPath !== 'string') {
+    recoverReaderDocument(doc);
+    return;
+  }
   try {
-    const doc = frame.contentDocument;
-    setReaderUnavailable(!doc);
-    if (!doc) return;
+    readerLastDocument = doc.URL;
+    setReaderUnavailable(false);
+    syncReaderHeader(doc);
     readerAway = bindScrollAway(frame.contentWindow, ['reader-head'],
       { visible: frame, host: $('reader') });
   } catch { /* An external document cannot be measured from here. */ }

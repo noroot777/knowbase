@@ -172,12 +172,16 @@ if (window.marked) marked.use({ renderer: { html(t) {
 """
 
 _DOC_LINKS_JS = r"""
+document.documentElement.dataset.readerPath = DOC_PATH;
 for (const link of document.querySelectorAll('#content a[href]')) {
   let url;
   try { url = new URL(link.getAttribute('href'), location.href); } catch { continue; }
-  if (!/^https?:$/.test(url.protocol) || url.origin === location.origin) continue;
+  if (!/^https?:$/.test(url.protocol)) continue;
+  const current = new URL(location.href);
+  if (url.origin === current.origin && url.pathname === current.pathname
+      && url.search === current.search && (url.hash || link.getAttribute('href').startsWith('#'))) continue;
   link.setAttribute('target', '_blank');
-  link.setAttribute('rel', ((link.getAttribute('rel') || '') + ' noopener').trim());
+  link.setAttribute('rel', [...new Set((link.getAttribute('rel') || '').split(/\s+/).filter(Boolean).concat('noopener'))].join(' '));
 }
 """
 

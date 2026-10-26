@@ -36,6 +36,11 @@ def main():
             path = urlsplit(self.path).path
             if path == "/blocked":
                 self.respond(b"Embedding denied", "text/html", headers={"X-Frame-Options": "DENY"})
+            elif path in {"/go-external", "/doc/redirect.md"}:
+                self.respond(b"", "text/html", 302, {"Location": f"http://localhost:{args.port}/blocked"})
+            elif path in {"/missing", "/failed", "/elsewhere"}:
+                status = {"/missing": 404, "/failed": 500}.get(path, 200)
+                self.respond(b"<h1>Not a reader document</h1>", "text/html", status)
             elif path == "/release-image":
                 image_ready.set()
                 self.respond(b"ok", "text/plain")
@@ -47,10 +52,15 @@ def main():
                 self.respond(b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>', "image/svg+xml")
             elif path.startswith("/doc/"):
                 markdown = f"[外链](http://localhost:{args.port}/blocked)\n\n[页内锚点](#section)"
+                markdown += "\n\n[站内跳转](/go-external)\n\n[另一篇](/doc/ready.md)"
+                markdown += "\n\n[不存在](/missing)\n\n[服务错误](/failed)\n\n[其它页面](/elsewhere)"
                 if path == "/doc/slow.md":
                     markdown += "\n\n![等待中的图片](/slow-image.svg)"
                 rendered = pages._DOC_TMPL.format(
-                    title="阅读器关闭点检", meta="本地隔离夹具", md_json=pages._script_json(markdown),
+                    title=f"阅读器关闭点检 {path}",
+                    meta=f'本地隔离夹具 <a href="http://localhost:{args.port}/elsewhere?doc={path[5:]}" target="_blank">原文</a>'
+                         f' <a href="obsidian://open?file={path[5:]}">Obsidian</a>',
+                    md_json=pages._script_json(markdown),
                     path_json=json.dumps(path[5:]), version_json='"fixture"',
                     literal_js=pages._DOC_LITERAL_JS, links_js=pages._DOC_LINKS_JS,
                     snip_js=pages._DOC_SNIP_JS,

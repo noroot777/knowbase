@@ -25,7 +25,7 @@ function rig() {
       const classes = new Set();
       const attributes = new Map();
       const node = {
-        ...target(), style: {}, innerHTML: '', isConnected: true,
+        ...target(), style: {}, dataset: {}, innerHTML: '', isConnected: true,
         classList: {
           remove(name) { classes.delete(name); },
           contains(name) { return classes.has(name); },
@@ -43,9 +43,12 @@ function rig() {
     }
     return elements.get(id);
   }
+  document.body = element('body');
+  document.documentElement = { dataset: {} };
   const links = [];
-  const frameDoc = { ...target(), documentElement: { contains: () => false },
-    querySelectorAll: () => links };
+  const frameDoc = { ...target(), URL: 'https://kb.local/doc/article.md', title: 'Article',
+    documentElement: { contains: () => false, dataset: { readerPath: 'article.md' } },
+    querySelector: () => null, querySelectorAll: () => links };
   let foreign = false;
   const securityError = Object.assign(new Error('cross-origin frame'), { name: 'SecurityError' });
   const frameWindow = { ...target() };
@@ -53,24 +56,34 @@ function rig() {
   for (const [name, value] of Object.entries({ scrollY: 0, document: frameDoc, removeEventListener: remove }))
     Object.defineProperty(frameWindow, name, { get() { if (foreign) throw securityError; return value; } });
   const frame = element('reader-frame');
+  let frameHidden = false;
+  Object.defineProperty(frame, 'hidden', { get: () => frameHidden, set(value) {
+    frameHidden = value;
+    if (value && document.activeElement === frame) document.activeElement = document.body;
+  } });
   frame.contentWindow = frameWindow;
   Object.defineProperty(frame, 'contentDocument', { get: () => foreign ? null : frameDoc });
   const window = target();
+  const popups = [];
+  window.open = (...args) => popups.push(args);
   let disconnected = false;
-  const state = vm.createContext({ document, window, URL,
+  const state = vm.createContext({ document, window, URL, DOC_PATH: 'article.md',
+    favSet: new Set(), setFavBtn() {},
     location: { origin: 'https://kb.local', href: 'https://kb.local/doc/article.md' },
     setTimeout: () => 1, clearTimeout() {},
     ResizeObserver: class { observe() {} disconnect() { disconnected = true; } },
   });
   for (const name of ['scrollaway.js', 'core.js'])
     vm.runInContext(readFileSync(new URL(name, root), 'utf8'), state, { filename: name });
-  return { element, document, window, frameDoc, links,
+  return { element, document, window, frameDoc, links, popups,
     run: code => vm.runInContext(code, state),
     open(path) {
       vm.runInContext(`openReader({ getAttribute: () => ${JSON.stringify(path)}, dataset: {} })`, state);
     },
     load: () => [...frame.listeners].find(([, type]) => type === 'load')?.[0],
-    navigateAway() { foreign = true; document.activeElement = frame; },
+    navigateAway(url = 'https://external.test/blocked') {
+      foreign = true; frame.src = url; document.activeElement = frame;
+    },
     get disconnected() { return disconnected; },
   };
 }
@@ -79,6 +92,7 @@ test('cross-origin load releases every accessible listener and returns Escape fo
   const app = rig();
   app.run('bindReaderScrollAway()');
   app.element('reader-head').setAttribute('inert', '');
+  app.run('readerLastDocument = null');
   app.navigateAway();
   assert.doesNotThrow(() => app.run('bindReaderScrollAway()'));
   assert.equal(app.run('readerAway'), null);
@@ -92,6 +106,7 @@ test('cross-origin load releases every accessible listener and returns Escape fo
   assert.equal(app.element('reader-frame').inert, true);
   assert.equal(app.element('reader-frame').getAttribute('tabindex'), '-1');
   assert.equal(app.element('reader-error').hidden, false);
+  assert.equal(app.element('reader-open').href, 'https://external.test/blocked');
 });
 
 test('closing during cross-origin navigation always removes the drawer and mask', () => {
@@ -125,7 +140,7 @@ test('unexpected cleanup errors remain observable but cannot trap the reader ope
   assert.doesNotThrow(() => app.run('closeReader()'));
 });
 
-test('external links are safe before load without changing local anchors or Obsidian', () => {
+test('all article destinations open outside the reader except same-document anchors and Obsidian', () => {
   const app = rig();
   const link = href => {
     const attributes = new Map([['href', href]]);
@@ -135,17 +150,63 @@ test('external links are safe before load without changing local anchors or Obsi
   const external = link('https://example.com/article');
   const protocolRelative = link('//example.org/');
   const local = link('/doc/next.md');
+  const redirect = link('/go-external');
+  const missing = link('/missing');
   const anchor = link('#section');
   const obsidian = link('obsidian://open?vault=notes');
   external.setAttribute('rel', 'nofollow');
-  app.links.push(external, protocolRelative, local, anchor, obsidian);
+  app.links.push(external, protocolRelative, local, redirect, missing, anchor, obsidian);
   app.run(docLinks);
-  for (const externalLink of [external, protocolRelative]) {
+  for (const externalLink of [external, protocolRelative, local, redirect, missing]) {
     assert.equal(externalLink.getAttribute('target'), '_blank');
     assert.ok(externalLink.getAttribute('rel').includes('noopener'));
   }
   assert.ok(external.getAttribute('rel').includes('nofollow'));
-  for (const localLink of [local, anchor, obsidian]) assert.equal(localLink.getAttribute('target'), null);
+  for (const localLink of [anchor, obsidian]) assert.equal(localLink.getAttribute('target'), null);
+});
+
+test('a non-reader destination restores the verified article and retains the actual link', () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  app.load()();
+  app.navigateAway();
+  app.load()();
+  assert.equal(app.element('reader-frame').src, 'https://kb.local/doc/article.md');
+  assert.equal(app.element('reader-destination').href, 'https://external.test/blocked');
+  assert.equal(app.element('reader-destination').style.display, '');
+  assert.deepEqual(app.popups[0], ['https://external.test/blocked', '_blank', 'noopener']);
+  assert.equal(app.document.activeElement, app.element('reader-close'));
+  assert.equal(app.element('reader-error').hidden, true);
+});
+
+test('a readable non-reader error page cannot become a reader document', () => {
+  const app = rig();
+  app.open('/missing');
+  delete app.frameDoc.documentElement.dataset.readerPath;
+  app.frameDoc.URL = 'https://kb.local/missing';
+  app.document.activeElement = app.element('reader-frame');
+  app.load()();
+  assert.equal(app.element('reader-open').href, 'https://kb.local/missing');
+  assert.equal(app.element('reader-error').hidden, false);
+  assert.equal(app.document.activeElement, app.element('reader-close'));
+  assert.equal(app.run('readerAway'), null);
+});
+
+test('reader headers follow the loaded article metadata instead of the entry link', () => {
+  const app = rig();
+  app.open('/doc/first.md');
+  app.frameDoc.URL = 'https://kb.local/doc/next.md';
+  app.frameDoc.title = 'Next article';
+  app.frameDoc.documentElement.dataset.readerPath = 'next.md';
+  app.frameDoc.querySelectorAll = () => [
+    { href: 'https://source.test/next' }, { href: 'obsidian://open?file=next' },
+  ];
+  app.load()();
+  assert.equal(app.element('reader-title').textContent, 'Next article');
+  assert.equal(app.element('reader-open').href, 'https://kb.local/doc/next.md');
+  assert.equal(app.element('reader-fav').dataset.path, 'next.md');
+  assert.equal(app.element('reader-src').href, 'https://source.test/next');
+  assert.equal(app.element('reader-obs').href, 'obsidian://open?file=next');
 });
 
 test('a same-origin article restores the frame after an unavailable page', () => {

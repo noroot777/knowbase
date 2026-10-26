@@ -55,7 +55,10 @@ const openReader = async path => {
     && $('reader-frame').contentDocument.querySelector('#content a')`);
 };
 const foreignPage = async () => {
-  await evaluate(`$('reader-frame').focus(); $('reader-frame').src = ${JSON.stringify(base.replace('127.0.0.1', 'localhost') + '/blocked')}`);
+  await evaluate(`(() => {
+    const link = document.createElement('a'); link.href = ${JSON.stringify(base.replace('127.0.0.1', 'localhost') + '/blocked')};
+    link.dataset.title = '无法嵌入的目标'; openReader(link); $('reader-frame').focus();
+  })()`);
   await waitFor(`!$('reader-error').hidden && readerAway === null`);
 };
 const closed = `$('reader').style.display === 'none' && $('reader-mask').style.display === 'none'
@@ -90,11 +93,38 @@ try {
   check('load 前点击确实打开新标签', !!popup);
   check('load 前点击没有替换正文', await evaluate(`$('reader-frame').contentDocument?.URL.endsWith('/doc/slow.md')`));
   if (popup) await send('Target.closeTarget', { targetId: popup.targetId });
+  for (const [path, destination] of [['/go-external', '/blocked'], ['/missing', '/missing'],
+    ['/failed', '/failed'], ['/elsewhere', '/elsewhere'], ['/doc/ready.md', '/doc/ready.md']]) {
+    await click(`(() => {
+      const frame = $('reader-frame').getBoundingClientRect();
+      const link = $('reader-frame').contentDocument.querySelector('a[href="${path}"]').getBoundingClientRect();
+      return {x: frame.x + link.x + link.width / 2, y: frame.y + link.y + link.height / 2};
+    })()`);
+    let target;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      target = (await send('Target.getTargets')).targetInfos.find(item =>
+        item.type === 'page' && item.url.endsWith(destination));
+      if (target) break;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    check(`${path} 在新标签打开且不替换正文`, !!target && await evaluate(`$('reader-frame').contentDocument?.URL.endsWith('/doc/slow.md')`));
+    if (target) await send('Target.closeTarget', { targetId: target.targetId });
+  }
   await fetch(base + '/release-image');
   await waitFor(`$('reader-frame').contentDocument?.readyState === 'complete' && readerAway !== null`);
+  await evaluate(`$('reader-frame').src = ${JSON.stringify(base + '/go-external')}`);
+  await waitFor(`$('reader-frame').contentDocument?.URL.endsWith('/doc/slow.md') && readerAway !== null
+    && $('reader-destination').style.display !== 'none'`);
+  check('意外离开阅读页后恢复正文并保留实际目标入口', await evaluate(`$('reader-destination').href.endsWith('/go-external')
+    && $('reader-open').href.endsWith('/doc/slow.md') && !$('reader-frame').hidden`));
+  const recoveryPopup = (await send('Target.getTargets')).targetInfos.find(target =>
+    target.type === 'page' && target.url.endsWith('/blocked'));
+  if (recoveryPopup) await send('Target.closeTarget', { targetId: recoveryPopup.targetId });
   await foreignPage();
   check('不可访问的 iframe 隐藏且不可交互', await evaluate(`$('reader-frame').hidden && $('reader-frame').inert
     && $('reader-frame').getAttribute('tabindex') === '-1' && !$('reader-error').hidden`));
+  check('错误出现后焦点留在抽屉关闭按钮', await evaluate(`document.activeElement === $('reader-close')`));
+  check('错误提示的新标签指向失败目标', await evaluate(`$('reader-open').href.endsWith('/blocked')`));
   await click(errorCenter);
   check('点击原正文区域不能重新聚焦 iframe', await evaluate(`document.activeElement !== $('reader-frame')`));
   await press('Escape');
@@ -112,6 +142,11 @@ try {
   await fetch(base + '/release-image');
   await waitFor(`$('reader-frame').contentDocument?.readyState === 'complete' && readerAway !== null`);
   check('新文章 load 后仍保持正常正文', await evaluate(`!$('reader-frame').hidden && $('reader-error').hidden`));
+  await evaluate(`$('reader-frame').src = '/doc/ready.md'`);
+  await waitFor(`$('reader-frame').contentDocument?.URL.endsWith('/doc/ready.md') && $('reader-fav').dataset.path === 'ready.md'`);
+  check('抬头与加载后的当前文章一致', await evaluate(`$('reader-title').textContent.endsWith('/doc/ready.md')
+    && $('reader-open').href.endsWith('/doc/ready.md') && $('reader-obs').href.endsWith('file=ready.md')
+    && $('reader-src').href.endsWith('doc=ready.md')`));
   await foreignPage();
   for (let step = 0; step < 6; step++) {
     await press('Tab');

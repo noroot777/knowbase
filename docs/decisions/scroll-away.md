@@ -316,3 +316,44 @@ Chrome 扩展创建具名后台标签仍返回 `Capability is not available: vis
 `output/playwright/reader-round2-reopen-before-load.png`、
 `output/playwright/reader-round2-closed.png`、
 `output/playwright/reader-round2-observation.log`。
+
+### 新一轮阅读器审查修复（2026-10-26）
+
+本轮报告第 2–5 条落在阅读器的链接、落点、错误焦点和抬头链路，合并处理：
+
+- 正文的 HTTP(S) 链接统一在新标签打开，只有同一文档的锚点留在正文；不再用
+  同源字符串推断最终落点。站内重定向、404、500、其它页面和另一篇文章都不会
+  替换当前正文，Obsidian 协议保持不变。
+- 生产阅读页同步声明 `readerPath`，load 时检查实际文档标记，不只检查是否同源。
+  意外离开阅读页时恢复上一次已确认的正文，并尝试在新标签打开实际请求；抬头保留
+  「打开刚才的链接」入口，弹窗被拦时仍能继续。没有可恢复正文时，错误面板的
+  「新标签」指向失败目标，不再指向上一篇文章。
+- 隐藏 iframe 前保存焦点归属，错误出现后把 iframe 或 BODY 上的焦点送到稳定
+  `reader-close` 按钮，不再依赖中文 aria-label 或隐藏后的 activeElement。
+- 有效文章 load 后从其实际标题、路径和元信息同步抬头、收藏、Obsidian 与原文；
+  即便发生同源文章内部导航，也不沿用上一篇的字段。
+
+补充了落点恢复、同源非阅读错误页、真实隐藏导致焦点丢失、目标入口与抬头同步的
+单测和浏览器探针覆盖。按项目约定，未运行任何回归套件或新增用例；逐文件 JS
+语法检查、Python AST 检查与 diff 检查通过。
+
+独立浏览器定向点检使用生产模板的本地隔离夹具：慢图仍未完成时，真实点击站内
+重定向、另一篇文章、404、500、普通同源页面，均打开独立标签，主页面和 iframe
+仍留在原处。绕过链接规则强制导航到这类非阅读页，均恢复 slow.md 并保留真实
+目标入口；直接加载 ready.md 后标题、收藏路径、Obsidian、原文均对应 ready.md。
+初始加载拒绝嵌入页时，焦点为 reader-close，连续 6 次 Tab 均在抽屉内；实际点击
+「新标签」打开 blocked 目标。Esc 关闭后，重开慢图仍在 interactive 阶段即可读，
+父页异常记录为空。业务 API 的 503 和拒绝嵌入日志为夹具预期，不代表业务接口通过。
+
+Chrome 扩展具名后台标签返回 `Capability is not available: visibility`，按规范
+降级独立无头临时 profile；未接管用户标签、激活窗口或使用登录态。截图和记录：
+`output/playwright/reader-destinations-kept.png`、
+`output/playwright/reader-restored-destination.png`、
+`output/playwright/reader-current-header.png`、
+`output/playwright/reader-error-focus-fixed.png`、
+`output/playwright/reader-destination-observation.log`。
+
+报告第 1 条是问答回答/图鉴条目在主文档里的既有导航问题，涉及 chat/gallery 与
+通用 mdHtml，而非阅读抽屉。基线 f97482a 已有相同调用；本任务对这两个模块无
+任何改动，也未改动 mdHtml 的链接行为。本轮没有扩修它们，按边界协议申请独立
+处理主文档 Markdown 链接的统一策略，等待用户裁定；不宣称报告全部通过。
