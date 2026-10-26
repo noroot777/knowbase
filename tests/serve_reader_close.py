@@ -1,4 +1,4 @@
-"""只读阅读器点检夹具：生产文章模板、可控慢图和本地拒绝嵌入页。"""
+"""只读阅读器点检夹具：生产文章模板、可控慢图、有界离页和本地拒绝嵌入页。"""
 
 import json
 import sys
@@ -65,6 +65,16 @@ def main():
                     literal_js=pages._DOC_LITERAL_JS, links_js=pages._DOC_LINKS_JS,
                     snip_js=pages._DOC_SNIP_JS,
                 )
+                if path == "/doc/loop.md":
+                    departure = f'http://localhost:{args.port}/blocked'
+                    departure_script = (
+                        '<script>setTimeout(() => {'
+                        'const host = window.parent;'
+                        'host.readerLoopDepartures = (host.readerLoopDepartures || 0) + 1;'
+                        f'if (host.readerLoopDepartures <= 4) location.href = {json.dumps(departure)};'
+                        '}, 0);</script>'
+                    )
+                    rendered = rendered.replace('</body>', departure_script + '</body>')
                 self.respond(rendered.encode(), "text/html; charset=utf-8")
             elif path == "/" or path.startswith("/static/"):
                 target = (STATIC / ("index.html" if path == "/" else path[8:])).resolve()

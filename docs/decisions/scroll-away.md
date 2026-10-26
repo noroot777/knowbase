@@ -406,3 +406,47 @@ Chrome 扩展具名后台标签返回 `Capability is not available: visibility`�
 
 上一节申请转出的主文档问答/图鉴链接问题，用户已裁定交由独立任务
 `3VpdKYp6Ao4c` 处理；本轮未改动 chat/gallery 或通用 Markdown 链接策略。
+
+### 恢复熔断与提前离页断言（2026-10-26）
+
+本轮按 f5Yl0USdpAKo 第 2 轮报告修复两条阻塞意见：
+
+- 两条旧断言改为期望恢复已解析正文，而不是隐藏 iframe。另加明确的首次
+  `load` 前离页用例，保留源文章与实际目标的契约，不回退生产的提前记账行为。
+- 在 `recoverReaderDocument` 动作层记录恢复目标和时间，同一文章（忽略 hash）
+  5 秒内只自动恢复一次。第二次离页进入不可显示面板，并锁住后续自动恢复和
+  弹窗；即使等待超过时间窗或再次收到 load，也不自动解锁。用户显式重开、
+  切篇或关闭时清零。未触发锁定、间隔至少 5 秒的独立离页仍允许恢复。
+- 熔断前先更新实际目标入口，保留「新标签」与「打开刚才的链接」，隐藏并
+  inert 失败的 iframe，焦点留在关闭按钮。自动恢复或有效文章 load 都不重置
+  熔断记忆，避免恢复后的文档再次离页时绕过保护。
+
+补齐验收覆盖：可控时钟下的重复失败、超过时间窗仍锁定、显式重开后重置、
+间隔达到时间窗后允许独立恢复；浏览器夹具增加最多离页 4 次的安全上限，
+探针期望实际只离页 2 次（首次打开加一次恢复）。慢图恢复观察会等待正文
+解析完成和图片元素存在，避免把新文档刚创建、内容尚未解析的瞬间当作正文。
+
+本轮仅做独立无头浏览器的本地定向点检：
+
+- 打开立即离页的夹具后，离页次数 2、导航增量 2、弹窗 1；继续观察 5.5 秒
+  数值不变，iframe hidden/inert、错误面板可见、焦点为 `reader-close`，两个
+  目标入口均指向实际拒绝嵌入页。
+- 慢图文章首次 load 前真实点击同框链接：点击前 `interactive`、图片未完成、
+  无让位绑定；恢复后仍是 `interactive`、图片未完成，正文可见、错误面板隐藏、
+  目标入口保留。释放图片后 load 完成并正常绑定，实际点击关闭按钮可退出。
+- 重开立即离页夹具后可以重新恢复一次并熔断，Esc 能关闭且清空保护状态；
+  随后打开普通文章正常可读，实际点击遮罩可退出。慢图点检期间未捕获页面异常。
+  主页面 API 的 503 与拒绝嵌入提示均来自隔离夹具，不作为真实服务失败。
+
+**未执行任何回归套件或新增用例**，原报告两条失败没有由执行者复跑绿；所有
+回归留到验收。JS 语法、Python AST、代码文件行数及 `git diff --check` 为静态
+检查依据。主文档链接策略仍由 `3VpdKYp6Ao4c` 承接，本轮未扩修非阻塞项。
+
+Chrome 扩展具名后台标签返回 `Capability is not available: visibility`，故降级为
+独立临时 profile 的无头 Chrome；仅访问本地夹具，未连接用户 Chrome、激活
+窗口、接管普通标签或使用登录态。自己的弹窗、浏览器与夹具服务用后关闭。
+证据：`output/playwright/reader-recovery-observation.log`、
+`output/playwright/reader-recovery-stopped.png`、
+`output/playwright/reader-early-departure-observation.log`、
+`output/playwright/reader-early-departure-restored.png`、
+`output/playwright/reader-recovery-exits-observation.log`。

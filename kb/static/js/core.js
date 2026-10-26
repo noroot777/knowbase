@@ -159,6 +159,8 @@ let readerLastDocument = null;
 let readerRequestedDocument = null;
 let readerPendingDestination = null;
 let readerNavigationId = 0;
+let readerRecovery = null;
+const READER_RECOVERY_WINDOW_MS = 5000;
 function navigateReader(url) {
   const frame = $('reader-frame');
   readerRequestedDocument = new URL(url, location.href).href;
@@ -191,6 +193,7 @@ function resetReaderNavigation() {
   readerLastDocument = null;
   readerRequestedDocument = null;
   readerPendingDestination = null;
+  readerRecovery = null;
   delete $('reader-frame').dataset.readerNavigation;
   $('reader-destination').style.display = 'none';
   setReaderUnavailable(false);
@@ -217,6 +220,15 @@ function recoverReaderDocument(doc) {
   const link = $('reader-destination');
   link.href = destination;
   link.style.display = '';
+  const recoveryUrl = readerLastDocument.split('#')[0];
+  const now = Date.now();
+  if (readerRecovery?.blocked || (readerRecovery?.url === recoveryUrl
+      && now - readerRecovery.time < READER_RECOVERY_WINDOW_MS)) {
+    readerRecovery.blocked = true;
+    setReaderUnavailable(true);
+    return;
+  }
+  readerRecovery = { url: recoveryUrl, time: now, blocked: false };
   $('reader-close').focus({ preventScroll: true });
   navigateReader(readerLastDocument);
   setReaderUnavailable(false);

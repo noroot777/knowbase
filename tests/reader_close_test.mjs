@@ -17,6 +17,7 @@ function target() {
 }
 
 function rig() {
+  let now = 10000;
   const elements = new Map();
   const document = { ...target(), activeElement: null, getElementById: element,
     readyState: 'interactive', querySelectorAll: () => links, querySelector: () => null };
@@ -68,6 +69,7 @@ function rig() {
   window.open = (...args) => popups.push(args);
   let disconnected = false;
   const state = vm.createContext({ document, window, URL, DOC_PATH: 'article.md',
+    Date: class extends Date { static now() { return now; } },
     favSet: new Set(), setFavBtn() {},
     location: { origin: 'https://kb.local', href: 'https://kb.local/doc/article.md' },
     setTimeout: () => 1, clearTimeout() {}, queueMicrotask,
@@ -80,6 +82,7 @@ function rig() {
     handler?.({ source: frameWindow, origin: 'https://kb.local', data, ...overrides });
   };
   return { element, document, window, frameDoc, links, popups, message,
+    advance: milliseconds => { now += milliseconds; },
     run: code => vm.runInContext(code, state),
     open(path) {
       vm.runInContext(`openReader({ getAttribute: () => ${JSON.stringify(path)}, dataset: {} })`, state);
@@ -316,12 +319,13 @@ test('opening another article clears the error state before its load event', () 
   assert.equal(app.run('readerAway'), null);
 });
 
-test('closing an error page and reopening does not wait for load to restore the frame', () => {
+test('closing a restored page and reopening does not wait for load to restore the frame', () => {
   const app = rig();
   app.open('/doc/first.md');
   app.navigateAway();
   app.load()();
-  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-error').hidden, true);
   app.run('closeReader()');
   assert.equal(app.element('reader-error').hidden, true);
   assert.equal(app.element('reader-frame').hidden, false);
@@ -348,7 +352,8 @@ test('obsolete load callbacks cannot change a switched, closed or reopened reade
   assert.equal(app.run('readerAway'), previousBinding);
   assert.equal(app.element('reader-error').hidden, true);
   secondLoad();
-  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-error').hidden, true);
   assert.equal(app.run('readerAway'), null);
   app.run('closeReader()');
   secondLoad();
@@ -360,4 +365,60 @@ test('obsolete load callbacks cannot change a switched, closed or reopened reade
   assert.equal(app.element('reader-error').hidden, true);
   assert.equal(app.run('readerAway'), null);
   assert.equal([...app.element('reader-frame').listeners.values()].filter(type => type === 'load').length, 1);
+});
+
+test('departure before the first load restores the rendered article and keeps its destination', () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  assert.equal(app.run('readerLastDocument'), null);
+  assert.equal(app.run('readerAway'), null);
+  app.navigateAway();
+  assert.equal(app.run('readerLastDocument'), app.frameDoc.URL);
+  app.load()();
+  assert.equal(app.element('reader-frame').src, app.frameDoc.URL);
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-error').hidden, true);
+  assert.equal(app.element('reader-destination').href, 'https://external.test/blocked');
+  assert.equal(app.popups.length, 1);
+});
+
+test('repeated recovery stops reloading and opening popups until the reader is explicitly reopened', () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  app.navigateAway();
+  app.load()();
+  const recoveryId = app.element('reader-frame').dataset.readerNavigation;
+  app.navigateAway('https://external.test/second');
+  app.load()();
+  assert.equal(app.element('reader-frame').dataset.readerNavigation, recoveryId);
+  assert.equal(app.popups.length, 1);
+  assert.equal(app.element('reader-frame').hidden, true);
+  assert.equal(app.element('reader-frame').inert, true);
+  assert.equal(app.element('reader-error').hidden, false);
+  assert.equal(app.element('reader-destination').href, 'https://external.test/second');
+  assert.equal(app.element('reader-open').href, 'https://external.test/second');
+  assert.equal(app.document.activeElement, app.element('reader-close'));
+  app.advance(6000);
+  app.load()();
+  assert.equal(app.element('reader-frame').dataset.readerNavigation, recoveryId);
+  assert.equal(app.popups.length, 1);
+  app.run('closeReader()');
+  app.open('/doc/article.md');
+  app.navigateAway();
+  app.load()();
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.popups.length, 2);
+});
+
+test('a later isolated departure can recover outside the short recovery window', () => {
+  const app = rig();
+  app.open('/doc/article.md');
+  app.navigateAway();
+  app.load()();
+  app.advance(5000);
+  app.navigateAway('https://external.test/later');
+  app.load()();
+  assert.equal(app.element('reader-frame').hidden, false);
+  assert.equal(app.element('reader-destination').href, 'https://external.test/later');
+  assert.equal(app.popups.length, 2);
 });

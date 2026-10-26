@@ -178,6 +178,48 @@ try {
   await press('Escape');
   await waitFor(closed);
   check('Tab 循环后 Escape 仍能退出', await evaluate(closed));
+  await fetch(base + '/hold-image');
+  await openReader('/doc/slow.md');
+  await evaluate(`$('reader-frame').contentDocument.querySelector('#content a[href$="/blocked"]').target = '_self'`);
+  await click(`(() => {
+    const frame = $('reader-frame').getBoundingClientRect();
+    const link = $('reader-frame').contentDocument.querySelector('#content a[href$="/blocked"]').getBoundingClientRect();
+    return { x: frame.x + link.x + link.width / 2, y: frame.y + link.y + link.height / 2 };
+  })()`);
+  await waitFor(`(() => {
+    const doc = $('reader-frame').contentDocument;
+    return doc?.URL.endsWith('/doc/slow.md') && doc.readyState === 'interactive'
+      && doc.images.length > 0 && $('reader-destination').style.display !== 'none';
+  })()`);
+  check('首个 load 前离页也恢复已渲染正文并保留目标', await evaluate(`(() => {
+    const frame = $('reader-frame'), doc = frame.contentDocument;
+    return doc.readyState === 'interactive' && !doc.images[0].complete && readerAway === null
+      && !frame.hidden && $('reader-error').hidden && $('reader-destination').href.endsWith('/blocked');
+  })()`));
+  await fetch(base + '/release-image');
+  await waitFor(`readerAway !== null`);
+  const earlyPopup = (await send('Target.getTargets')).targetInfos.find(target =>
+    target.type === 'page' && target.url.endsWith('/blocked'));
+  if (earlyPopup) await send('Target.closeTarget', { targetId: earlyPopup.targetId });
+  await evaluate(`closeReader()`);
+  const loopStart = await evaluate(`readerNavigationId`);
+  await evaluate(`(() => {
+    window.readerLoopDepartures = 0;
+    const link = document.createElement('a'); link.href = '/doc/loop.md'; openReader(link);
+  })()`);
+  await waitFor(`readerRecovery?.blocked && !$('reader-error').hidden`);
+  await new Promise(resolve => setTimeout(resolve, 350));
+  check('重复离页只自动恢复一次且停止继续加载', await evaluate(`readerNavigationId === ${loopStart + 2}
+    && window.readerLoopDepartures === 2 && $('reader-frame').hidden && $('reader-frame').inert`));
+  const loopPopups = (await send('Target.getTargets')).targetInfos.filter(target =>
+    target.type === 'page' && target.url.endsWith('/blocked'));
+  check('重复恢复不会持续弹出新标签', loopPopups.length <= 1);
+  check('停止恢复后仍保留实际目标入口', await evaluate(`$('reader-destination').style.display !== 'none'
+    && $('reader-destination').href.endsWith('/blocked') && $('reader-open').href.endsWith('/blocked')`));
+  for (const target of loopPopups) await send('Target.closeTarget', { targetId: target.targetId });
+  await press('Escape');
+  await waitFor(closed);
+  check('停止恢复后 Escape 仍能退出', await evaluate(closed));
   check('无未捕获页面异常', errors.length === 0);
 } finally {
   await fetch(base + '/release-image').catch(() => {});
