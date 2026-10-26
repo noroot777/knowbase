@@ -11,6 +11,7 @@
   let pendingSignature = '';
   let loadError = '';
   let actionError = '';
+  let urlAuto = null;
 
   async function api(path, options = {}) {
     const response = await fetch(`/api/browser-capture${path}`, {
@@ -28,6 +29,28 @@
     return new Date(timestamp * 1000).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'});
   }
 
+  // 只为了好读:百分号编码过的中文地址显示成人能对着地址栏核对的样子。回填给服务端
+  // 时它会被重新规范化成同一份,所以这只是显示 —— **判据不在前端**(网址是不是同一
+  // 页由 kb/browser_capture.page_url 一处判,见 docs/decisions/browser-capture.md)。
+  function plainUrl(value) {
+    try { return decodeURI(value); } catch { return value; }
+  }
+
+  // 自动填入只认「框里还是上一次自动填进去的那一份」。`force` 用于已有请求:那时
+  // 框是禁用的,必须显示服务端记下的那一份。
+  //
+  // 事故形态(2026-10-26 审查实测):本页每 2 秒重画一次,原来的判据是「框是空的就
+  // 当作还没填过」—— 人清空、切出去复制浏览器里真正的地址、切回来一粘贴,2.6 秒前
+  // 就被填回的原网址还在,贴的那一截接在它后面,拼成一个谁也打不开的地址,之后扩展
+  // 只会一直说「当前标签网址与指定文章不同」。草稿态(点过「重新采集正文」、框解禁)
+  // 是同一个形态的第二处,所以这道闸不能只挡首次渲染。
+  function autofillUrl(value, force = false) {
+    const field = element('page-url');
+    if (!force && urlAuto !== null && field.value !== urlAuto) return;
+    if (field.value !== value) field.value = value;
+    urlAuto = value;
+  }
+
   function renderPending(waiting) {
     const signature = JSON.stringify(waiting);
     if (signature !== pendingSignature) {
@@ -40,7 +63,7 @@
         note.textContent = `${dateTime(request.created_at)} 发起 · ${dateTime(request.expires_at)} 到期 · ${request.id.slice(-8)}`;
         const url = document.createElement('p');
         url.className = 'url';
-        url.textContent = request.page_url;
+        url.textContent = plainUrl(request.page_url);
         const cancel = document.createElement('button');
         cancel.className = 'secondary';
         cancel.dataset.cancelIntent = request.id;
@@ -68,8 +91,8 @@
     element('title').textContent = snapshot.title;
     element('original-url').textContent = snapshot.url;
     element('kind').textContent = snapshot.kind;
-    if (pending) element('page-url').value = pending.page_url;
-    else if (!element('page-url').value) element('page-url').value = snapshot.url;
+    if (pending) autofillUrl(plainUrl(pending.page_url), true);
+    else if (!element('page-url').value) autofillUrl(snapshot.url);
     element('page-url').disabled = processing || locked;
     element('create').disabled = processing || locked;
     element('create').textContent = pending ? '等待浏览器采集' : saved && !drafting ? '正文已补入' : '发起浏览器采集';
@@ -80,7 +103,7 @@
     element('restart').hidden = drafting || !!pending;
     element('restart').disabled = processing;
     element('step-capture').classList.toggle('on', !!pending || !!saved);
-    element('step-process').classList.toggle('on', !!saved);
+    element('step-process').classList.toggle('on', !!saved && continued === saved.id);
     element('intent-note').textContent = pending ? `请求 ${pending.id.slice(-8)} · ${dateTime(pending.expires_at)} 到期`
       : saved ? `回执 ${saved.id.slice(-8)} · 已持久保存` : '';
     renderPending(snapshot.pending);
@@ -160,6 +183,7 @@
   element('pair').addEventListener('click', async () => {
     try {
       const pairing = await api('/pairing');
+      element('pairing-key').type = 'password';
       element('pairing-key').value = pairing.key;
       element('pairing').hidden = false;
     } catch (error) { toast(error.message, {key: 'capture-pairing'}); }

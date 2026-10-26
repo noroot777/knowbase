@@ -119,13 +119,38 @@ def extension_pending():
     return {'intents': capture.pending()}
 
 
+#: 传输上限,**不是判据** —— 「正文够不够」只有 `capture._admit_body` 一份(按行去重的
+#: 400 字门槛 + 20 万字上限)。这里特意留宽一截:卡在同一个数上的话,越界那一下回的
+#: 是 pydantic 的英文校验话,而不是那句能照着做的中文。
+_TRANSPORT_BODY = capture.MAX_BODY * 2
+_METHOD_PATTERN = '^(' + '|'.join(capture.METHODS) + ')$'
+
+
+class PrecheckRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    intent_id: str = Field(min_length=1, max_length=100)
+    page_url: str = Field(min_length=1, max_length=4096)
+    body: str = Field(default='', max_length=_TRANSPORT_BODY)
+    method: str = Field(pattern=_METHOD_PATTERN)
+
+
+@router.post('/api/browser-capture/precheck', dependencies=[Depends(extension_access)])
+def precheck(body: PrecheckRequest):
+    """扩展在**读页之前**和**渲染预览之前**各问一次:这一页、这一份正文写得了吗。
+
+    判据与 `upload` 同一组(`capture._admit_*`),这里只是不落库 —— 扩展自己不许
+    再判网址、长度或条目版本,否则放行口径一分叉,代价就是人白读一整篇。
+    """
+    return invoke(capture.precheck, body.intent_id, body.page_url, body.body, body.method)
+
+
 class UploadRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     intent_id: str = Field(min_length=1, max_length=100)
     page_url: str = Field(min_length=1, max_length=4096)
     title: str = Field(max_length=1000)
-    body: str = Field(min_length=400, max_length=capture.MAX_BODY)
-    method: str = Field(pattern='^(article|selection)$')
+    body: str = Field(min_length=1, max_length=_TRANSPORT_BODY)
+    method: str = Field(pattern=_METHOD_PATTERN)
     confirmed_complete: bool
 
 

@@ -41,6 +41,12 @@ class BrowserCaptureTests(FullTextCase):
         self.assertEqual(200, result.status_code)
         return result.json()
 
+    def precheck(self, intent, body='', method='article', **overrides):
+        payload = dict(intent_id=intent['id'], page_url='https://e.org/post',
+                       body=body, method=method)
+        payload.update(overrides)
+        return self.client.post('/api/browser-capture/precheck', json=payload, headers=self.auth)
+
     def upload(self, intent, **overrides):
         body = dict(intent_id=intent['id'], page_url='https://e.org/post',
                     title='Browser title', body=BODY, method='article', confirmed_complete=True)
@@ -67,6 +73,74 @@ class BrowserCaptureTests(FullTextCase):
         self.assertEqual(row['content_rev'], self.row(self.key)['content_rev'])
         with reg.db() as conn:
             self.assertEqual(1, conn.execute('SELECT count(*) FROM browser_capture_audit').fetchone()[0])
+
+    def test_browser_normalised_address_is_the_same_page(self):
+        """人填的网址和浏览器交回来的那一份,规范化之后必须是同一页。
+
+        事故形态:服务端原来直接拼回原字符串、扩展自己 `new URL()` 比一遍 ——
+        网址带中文的订阅**每一次**都是人把整篇文章读完、勾完确认才被 409 拒。
+        默认端口、路径空格、末尾 `?` 是同一形态的另外三种。反过来钉一边:
+        真的是另一篇照旧拒(否则「宽一点」会变成拿别的文章覆盖这一条)。
+        """
+        shapes = (
+            ('https://e.org/文章/第一篇', 'https://e.org/%E6%96%87%E7%AB%A0/%E7%AC%AC%E4%B8%80%E7%AF%87'),
+            ('https://e.org/q?k=中文', 'https://e.org/q?k=%E4%B8%AD%E6%96%87'),
+            ('https://e.org:443/post2', 'https://e.org/post2'),
+            ('https://e.org/a b', 'https://e.org/a%20b'),
+            ('https://e.org/trailing?', 'https://e.org/trailing?'),
+            ('https://e.org/d/../post3', 'https://e.org/post3'),
+            ('https://E.ORG/upper', 'https://e.org/upper'),
+        )
+        for typed, from_browser in shapes:
+            with self.subTest(typed=typed):
+                key = self.put(url=typed)
+                request = capture.create(key, typed)
+                self.assertEqual(200, self.client.post(
+                    '/api/browser-capture/precheck', headers=self.auth,
+                    json={'intent_id': request['id'], 'page_url': from_browser,
+                          'method': 'article'}).status_code)
+                self.assertEqual(200, self.upload(request, page_url=from_browser).status_code)
+                self.assertEqual(BODY, self.row(key)['body'])
+        other = self.put(url='https://e.org/apart')
+        request = capture.create(other, 'https://e.org/apart')
+        for wrong in ('https://e.org/apart-two', 'https://e.org/Apart', 'http://e.org/apart',
+                      'https://e.org/apart/', 'https://e.org/%2Fapart'):
+            with self.subTest(wrong=wrong):
+                self.assertEqual(409, self.client.post(
+                    '/api/browser-capture/precheck', headers=self.auth,
+                    json={'intent_id': request['id'], 'page_url': wrong,
+                          'method': 'article'}).status_code)
+                self.assertEqual(409, self.upload(request, page_url=wrong).status_code)
+        self.assertNotEqual(BODY, self.row(other)['body'])
+
+    def test_precheck_refuses_before_reading_with_the_same_verdict_as_upload(self):
+        """读之前先问一次,判据和 `save` 同一组 —— 否则人白读一整页。
+
+        三种在扩展侧曾经放行、服务端却拒的形状:同一段铺满整页的提示页(扩展
+        数原始长度过线、服务端按行去重只剩两百来字)、读的那几分钟里条目被
+        同步改过、请求已经过期。`precheck` 一个字都不落库。
+        """
+        repeated = 'Sign in to continue reading this story. Subscribe to unlock it now.\n' * 17
+        self.assertGreater(len(repeated), 1300)
+        request = self.intent()
+        before = self.row(self.key)
+        thin = self.precheck(request, body=repeated)
+        self.assertEqual(409, thin.status_code)
+        self.assertEqual(thin.json()['detail'], self.upload(request, body=repeated).json()['detail'])
+        self.assertEqual(200, self.precheck(request, body=BODY).status_code)
+        self.assertEqual(len(BODY), self.precheck(request, body=BODY).json()['characters'])
+        self.assertEqual(before, self.row(self.key))
+        with reg.db() as conn:
+            self.assertEqual(0, conn.execute('SELECT count(*) FROM browser_capture_audit').fetchone()[0])
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET content_rev=content_rev+1 WHERE key=?', (self.key,))
+        stale = self.precheck(request)
+        self.assertEqual(409, stale.status_code)
+        self.assertEqual(capture._STALE, stale.json()['detail'])
+        expired = self.intent()
+        with patch.object(capture.time, 'time', return_value=time.time() + capture.TTL + 1):
+            self.assertEqual(404, self.precheck(expired).status_code)
+        self.assertEqual(422, self.precheck(self.intent(), method='screenshot').status_code)
 
     def test_wrong_page_unconfirmed_and_short_body_cannot_write(self):
         intent = self.intent()

@@ -53,7 +53,8 @@ class RestoreRequest(BaseModel):
     **拒的那个码是 422,不是 400**:`extra='forbid'` 走的是 FastAPI 的请求体校验
     (`RequestValidationError`),和下面那几处手写的 `HTTPException(400, …)` 不是
     一条路。两边的消费方都按整个 4xx 分支处理(命令行 `ApiRefused`、面板
-    `apiFail`),所以**这里不为了对齐注释去改校验的状态码** —— 那会把项目里
+    `apiFail`,在 kb/static/browser-extension/knowbase-capture/api.js),所以**这里不为了
+    对齐注释去改校验的状态码** —— 那会把项目里
     「校验错 = 422」这条约定改掉。回归在 `tests/test_grab_endpoint.py`。
     """
 

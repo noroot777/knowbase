@@ -46,11 +46,24 @@
     return apiResponse(response, '浏览器采集请求失败');
   }
 
+  // 只为了好读:百分号编码过的中文地址在这里显示成人能对着地址栏核对的样子。
+  // **判据不在这里** —— 网址是不是同一页一律由服务端 /precheck 判(见
+  // docs/decisions/browser-capture.md「准入判据只有一份」)。
+  function plainUrl(value) {
+    try { return decodeURI(value); } catch { return value; }
+  }
+
   async function loadIntents() {
     clearPreview();
     const result = await api('/pending');
     intents = result.intents;
     element('intent').replaceChildren();
+    if (!intents.length) {
+      const empty = document.createElement('option');
+      empty.value = '';
+      empty.textContent = '请先在知识库发起采集请求';
+      element('intent').append(empty);
+    }
     for (const intent of intents) {
       const option = document.createElement('option');
       option.value = intent.id;
@@ -65,7 +78,7 @@
   function updateExpected() {
     clearPreview();
     const intent = intents.find(item => item.id === element('intent').value);
-    element('expected').textContent = intent ? `指定文章：${intent.page_url}` : '';
+    element('expected').textContent = intent ? `指定文章：${plainUrl(intent.page_url)}` : '';
     setBusy(busy);
   }
 
@@ -75,12 +88,13 @@
     setBusy(true);
     try {
       const intent = intents.find(item => item.id === element('intent').value);
-      if (!intent || intent.expires_at * 1000 <= Date.now()) throw new Error('采集请求已过期，请回知识库重新发起');
+      if (!intent) throw new Error('请先在上面选中本次要补回的待办');
       const [tab] = await chrome.tabs.query({active: true, currentWindow: true});
       if (!tab?.id || !/^https?:\/\//.test(tab.url || '')) throw new Error('请在要采集的文章标签上打开扩展，而不是扩展管理页或知识库页面');
-      const actual = new URL(tab.url); actual.hash = '';
-      const expected = new URL(intent.page_url); expected.hash = '';
-      if (actual.href !== expected.href) throw new Error('当前标签网址与指定文章不同。请在正确的文章标签上使用，或回知识库明确指定最终网址');
+      // 读之前先问服务端:这个请求还在不在、这一页是不是它指定的那一篇、条目还是
+      // 绑定的那一版吗。不通过就一个字都不读 —— 否则人读完整页才被拒(2026-10-26
+      // 审查实测的三种:网址带中文、复读提示页、读的那几分钟里条目被同步改过)。
+      await api('/precheck', {method: 'POST', body: JSON.stringify({intent_id: intent.id, page_url: tab.url, method: mode})});
       await chrome.scripting.executeScript({target: {tabId: tab.id}, files: ['extract.js']});
       const results = await chrome.scripting.executeScript({target: {tabId: tab.id}, func: method => {
         try { return readKnowbaseArticle(method); }
@@ -89,12 +103,14 @@
       const captured = results[0]?.result;
       if (captured?.error) throw new Error(captured.error);
       if (!captured?.body) throw new Error('页面没有返回正文，未上传任何内容');
-      const capturedAddress = new URL(captured.page_url); capturedAddress.hash = '';
-      if (capturedAddress.href !== expected.href) throw new Error('读取过程中页面发生跳转，已丢弃结果，请重新核对网址');
+      // 再问一次,这次带上正文:读的过程中跳转了吗、这份正文过得了入库那道门槛吗。
+      // 预览之后人还要逐段核对,所以判据必须在渲染预览之前就拿到,不能留到提交。
+      const verified = await api('/precheck', {method: 'POST', body: JSON.stringify(
+        {intent_id: intent.id, page_url: captured.page_url, body: captured.body, method: mode})});
       preview = {...captured, intent_id: intent.id};
       element('page-title').textContent = captured.title;
-      element('page-url').textContent = captured.page_url;
-      element('count').textContent = `${captured.body.length} 字符 · ${mode === 'selection' ? '你所选的文字，请确认不是选段' : '自动识别的文章区域'} · 尚未上传`;
+      element('page-url').textContent = plainUrl(captured.page_url);
+      element('count').textContent = `${verified.characters} 字符 · ${mode === 'selection' ? '你所选的文字，请确认不是选段' : '自动识别的文章区域'} · 尚未上传`;
       element('body').value = captured.body;
       element('preview').hidden = false;
       status('先核对全文。只有勾选确认并点击使用，才会向本机知识库提交正文。');

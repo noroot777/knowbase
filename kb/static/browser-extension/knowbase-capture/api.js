@@ -1,3 +1,12 @@
+/* 整站共用的 HTTP 错误解析:知识库页面(`index.html` / `browser-capture.html` 在
+ * `ui.js` 之前加载它)和浏览器扩展各一份消费方,实现只有这一份。
+ *
+ * **不许写成 `(await r.json()).detail || '失败'`**:未捕获异常时 Starlette 回的是
+ * 纯文本 500,`r.json()` 会当场抛,真因就被吞成一句无信息的「失败」。所以这里先
+ * 取文本、再试着当 JSON 解,两条路都兜住,并且把 HTTP 状态码带上。口径同
+ * `docs/decisions/frontend-feedback.md`;它住在扩展目录是因为下发的 ZIP 要带上它,
+ * 扩展装在浏览器里,取不到 `kb/static/js/` 下的文件。
+ */
 async function apiFail(response, fallback = '请求失败') {
   let text = '';
   try { text = (await response.text()).trim(); } catch {}

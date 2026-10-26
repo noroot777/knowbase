@@ -176,6 +176,7 @@
 | 域名解析被污染、出口配置与「出口与解析」那块面板(`kb/feeds/egress.py`、`resolve.py`、`fetching.public_addresses`、`scripts/web_env.sh`、`kb/static/js/egress.js`) | `dns-egress.md` |
 | 没有 feed 的站点、网页专栏解析(`kb/feeds/page_list.py`) | `page-list.md` |
 | 手动收录(粘一条链接抓进知识库:`kb/feeds/grab.py`、`grab_store.py`、`grab_page.py`、`kb/web/grab_api.py`、`kb/static/js/grab.js`) | `link-grab.md` |
+| 从已打开的浏览器标签补正文、补抓页与采集扩展(`kb/browser_capture.py`、`kb/web/browser_capture_api.py`、`kb/static/js/browser_capture.js`、`kb/static/browser-extension/`) | `browser-capture.md` |
 | 简报 / TLDR(`kb/feeds/digest.py`) | `digest.md` |
 | 往 `defaults.json` 加来源、存量库补种(`kb/feeds/registry.py` 的 `DEFAULTS_REV`) | `defaults-backfill.md` |
 | 英文内容翻译、译文显示口径(`kb/feeds/translate.py`) | `translate.md` |

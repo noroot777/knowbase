@@ -55,40 +55,23 @@
 | 补抓页面 | `kb/static/browser-capture.html`、`kb/static/js/browser_capture.js`、`kb/static/css/browser_capture.css` |
 | 扩展目录 | `kb/static/browser-extension/knowbase-capture/` |
 | 页面与扩展共用的 HTTP 反馈 | `kb/static/browser-extension/knowbase-capture/api.js` |
-| 验收阶段回归用例 | `tests/test_browser_capture.py` |
+| 验收阶段回归用例 | `tests/test_browser_capture.py`、`tests/test_browser_capture_feedback.py`(挂着四条 node 探针) |
 
-页面路径为 `/browser-capture?item=<真实条目key>`。API 前缀为 `/api/browser-capture`：`target/{key}`、`pairing`、`extension.zip`、`intents`、`intents/{id}`、`intents/{id}/continue`、`pending`、`upload`。`target/{key}` 除条目信息外返回 `pending`、最近有效 `saved` 及 `saved_error`，应用侧无需扩展密钥即可查看和取消本篇请求；扩展的全局待办接口仍须配对。扩展资源随 `kb` 包分发，ZIP 包含清单、popup HTML/CSS/JS、共用 `api.js`、提取器和 README 共七个文件，不依赖仓库外文件。
+页面路径为 `/browser-capture?item=<真实条目key>`。API 前缀为 `/api/browser-capture`：`target/{key}`、`pairing`、`extension.zip`、`intents`、`intents/{id}`、`intents/{id}/continue`、`pending`、`precheck`、`upload`。`target/{key}` 除条目信息外返回 `pending`、最近有效 `saved` 及 `saved_error`，应用侧无需扩展密钥即可查看和取消本篇请求；扩展的全局待办接口仍须配对。扩展资源随 `kb` 包分发，ZIP 包含清单、popup HTML/CSS/JS、共用 `api.js`、提取器和 README 共七个文件，不依赖仓库外文件。
 
-## 本轮验证记录（2026-10-26）
+## 判据在哪一边
 
-按项目约定，**未执行任何回归测试**。新增用例仅检查语法，留待验收阶段执行，例如 `python -m unittest tests.test_browser_capture`。
+网址是不是同一页、正文够不够、这条还写得了吗 —— **三问都由本机服务回答**。扩展在
+读取页面之前先问一次，不通过就一个字都不读；读完之后、渲染预览之前再问一次（带上
+正文）。所以它不会让你读完整篇、勾完确认才说没写进去。网址按浏览器同一套规范化之后
+比对，带中文的地址、默认端口、路径里的空格都算同一页；真的是另一篇照旧拒绝。
 
-### 浏览器降级
+硬约束、事故形态与回归清单见 `docs/decisions/browser-capture.md`，**动这一块的代码
+之前先读那一份**。
 
-先尝试 Chrome 扩展通道的具名会话 `🧭 正文采集验证`，创建标签指定 `visible: false`，工具返回 `Capability is not available: visibility`，无法保证后台标签约束，因此没有移除限制重试，也未接管用户普通标签、激活 Chrome 或切换用户标签。
+## 还没验过的
 
-随后用独立无头 Chrome for Testing、新建临时 profile 加载本地扩展。页面仅位于 `127.0.0.1:8913`，数据库和 vault 指向 `/tmp/knowbase-capture-smoke.*`。没有生产正文、登录态或模型调用；未启动有头浏览器，未向用户 Chrome 安装扩展。
-
-### 实际完成的冒烟
-
-- 真实补抓页面创建、取消、重发和刷新恢复请求；从页面取出的临时密钥通过真实扩展配置连接成功。
-- 真实 `chrome.scripting` 注入提取器，自动提取 1444 字符并保留段落，导航、表单、页脚和隐藏内容的哨兵文字均未混入正文。
-- 错误网址拒绝读取，不足 400 字符的选段被拒绝，完整所选正文可预览；确认前保存按钮不可用，预览未写入数据。
-- 确认后真实上传并更新临时原条目、写入审计。数据库实查正文长度、修订号、来源证明、旧译文清空及待重提取标记，页面显示后续入库仍待执行。
-- 保存后再次采集、原页 DOM 不变、保存状态刷新恢复；真实重启临时服务后旧请求立即变为可重发，不会锁住按钮等满 15 分钟。
-- 未配对待办请求返回 401、跨站配对和直接连接错误 Host 请求返回 403，扩展 ZIP 包含完整六个文件。错误 Host 的一次 curl 请求得到 502，改用直连回环服务的标准 HTTP 客户端核实为 403。
-- 桌面页面、扩展预览及 390px 手机布局已截图检查，手机无横向溢出；Python 编译、JavaScript 语法及 Git 空白检查通过。
-
-本地截图和隔离服务脚本在不入版本库的 `output/playwright/`：`browser-capture-desktop.png`、`browser-capture-extension-preview.png`、`browser-capture-saved.png`、`browser-capture-mobile.png`。
-
-### 仍需验收
-
-- 未在用户 Chrome 安装扩展，未读取真实登录文章。无头夹具具有本机 host 权限，已测真实扩展注入和上传，但**不能代替**真实站点上工具栏用户手势、快捷键授予 `activeTab` 和登录态文章的人工验收。
-- 未启动后续实际管道或调用模型，未验证第三方网站提取覆盖率；不能宣称全链路回归通过。
-- 版本冲突、排除 / 删除、取消 / 到期、幂等和鉴权用例已写入测试文件，执行结论留待验收。
-
-安装步骤也随扩展目录的 `README.md` 分发。
-
-审查修复后的隔离点检、浏览器降级原因和已转出的边界见 `docs/browser-capture-review.md`。回归用例仍交由验收阶段执行。
-
-多标签和回执生命周期的补充修复、当前点检证据见 `docs/browser-capture-lifecycle.md`。共用反馈断言已由 `tests/test_browser_capture_feedback.py` 接入 unittest 的发现入口；执行者仍未运行回归。
+- 没有在真实站点的登录态文章上走完整条链：工具栏手势 / 快捷键授予 `activeTab`、
+  第三方网站的提取覆盖率，都只能人工验收。
+- 没有跑完整的翻译 / 导出 / 索引 / 提取链，不能声称全链路通过。
+- 按项目约定，执行者与审查者都不跑回归测试，统一在验收阶段执行。
