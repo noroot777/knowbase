@@ -54,9 +54,19 @@ window.diagnosticSeed = [
   {
     id: 'KB-0213', title: 'X 时间线暂时限流（示例）', source: '大V观点', subscription: '示例账号 · 时间线',
     url: '', stage: '来源连接', status: 'attention', type: 'source', attempts: 1, date: '10/26 09:10',
-    reason: '这次没有读到账号时间线', explanation: '示例情形：页面返回访问频率限制，本轮没有获得完整时间线。不能据此说这个来源没有新内容。',
-    recommendation: '过一段时间后重试这个来源，不需要反复登录。只重试当前来源，不扩大到全部订阅。',
-    evidence: '示例：HTTP 429 / 本轮未读到时间线', history: [['09:10', '来源连接受限，待人工决定重试']]
+    retryKind: 'x-boot', account: '@example_boot', since: '2026-10-23 00:00 UTC', preserved: '本轮未读到时间线',
+    reason: '启动请求被限流，页面应用没有启动', explanation: '启动接口返回 429，且没有读到推文或有效内容响应。不是登录过期或安全验证，也不能据此说这个账号没有新内容。',
+    recommendation: '冷却后只重试此账号。现有同步会在同一会话等待 45 秒，反复受限时翻倍至最多 180 秒，并在预算内将受影响账号排到队尾重试一次。',
+    evidence: '示例：启动请求 HTTP 429 / 页面已加载，但应用未启动；未读到时间线', history: [['09:10', '启动限流，原同步下界保留，等待冷却重试']]
+  },
+  {
+    id: 'KB-0218', title: 'X 时间线没有读到上次的位置（示例）', source: '大V观点', subscription: '示例账号 · 覆盖不完整',
+    url: '', stage: '来源连接', status: 'attention', type: 'source', attempts: 1, date: '10/26 09:09',
+    retryKind: 'x-coverage', account: '@example_scroll', since: '2026-10-23 00:00 UTC', preserved: '已取得的 6 条内容保留（示例）',
+    reason: '只读到部分时间线，尚未覆盖上次同步位置', explanation: '可能用完 40 次滚动或单账号 50 秒预算，也可能连续 3 次未加载新内容且不在底部。已读到部分内容，不等于目标范围已经读完。',
+    recommendation: '按原同步下界重试此账号：重新打开时间线、重叠读取，已收内容按 URL 去重。不是从上次像素位置继续滚动；如果仍遇到相同预算或加载障碍，重试仍可能读不完。',
+    evidence: '示例：页面不再长出新内容，而且不在时间线底部；最早读到 2026-10-25，目标下界为 2026-10-23',
+    history: [['09:09', '时间线未读完，同步水位不前移'], ['09:08', '已取得部分内容，保留原下界供下次重抓']]
   },
   {
     id: 'KB-0212', title: '一篇未补齐正文的公众号文章（示例）', source: '公众号', subscription: '正文补齐示例',

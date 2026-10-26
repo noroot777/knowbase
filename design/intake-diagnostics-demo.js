@@ -10,7 +10,7 @@
   const cloneSeed = () => structuredClone(window.diagnosticSeed);
   const tabNames = ['attention', 'queued', 'running', 'resolved', 'archived'];
   const explanations = {
-    attention: '需要你决定，不会自行恢复', queued: '已排队，不代表正在抓取',
+    attention: '人工待办与来源异常，分别处理', queued: '已排队，不代表正在抓取',
     running: '仅显示此页正在模拟的工作', resolved: '必要环节全部完成后才进入这里',
     archived: '暂缓与不再收录，不冒充已解决'
   };
@@ -20,6 +20,8 @@
   let selected = new Set();
   let operationLog = [];
   let busy = false;
+  let coolingId = '';
+  let cooldownUntil = 0;
   let revision = 0;
   let undoState = null;
   let toastTimer;
@@ -41,7 +43,8 @@
   }
 
   function statusText(issue) {
-    if (issue.status === 'attention') return issue.type === 'held' ? '待人工确认' : issue.type === 'source' ? '来源受限' : issue.attempts >= 3 ? '重试已停止' : '待决定重试';
+    if (issue.id === coolingId) return '等待冷却（演示）';
+    if (issue.status === 'attention') return issue.retryKind === 'x-coverage' ? '覆盖未完成' : issue.type === 'held' ? '待人工确认' : issue.type === 'source' ? '来源受限' : issue.attempts >= 3 ? '重试已停止' : '待决定重试';
     return ({ queued: '待执行', running: '演示执行中', resolved: '已完成（演示）',
       snoozed: '已暂缓', excluded: '不再收录' })[issue.status];
   }
@@ -98,6 +101,8 @@
 
   function render() {
     const visible = visibleIssues();
+    const cooling = !!coolingId;
+    const cooldownLeft = Math.max(0, Math.ceil((cooldownUntil - Date.now()) / 1000));
     if (!visible.some(issue => issue.id === activeId)) activeId = visible[0]?.id || '';
     const visibleIds = new Set(visible.map(issue => issue.id));
     selected = new Set([...selected].filter(id => visibleIds.has(id)));
@@ -112,13 +117,15 @@
     byId('tab-explanation').textContent = explanations[currentTab];
     byId('visible-count').textContent = `${visible.length} 条`;
     byId('log-count').textContent = operationLog.length;
+    document.querySelectorAll('[data-sample-count]').forEach(element => { element.textContent = issues.length; });
     const queued = issues.filter(issue => issue.status === 'queued');
-    byId('run-label').textContent = busy ? '演示执行中…' : `执行待办${queued.length ? ` · ${queued.length}` : ''}`;
+    byId('run-label').textContent = busy ? cooling ? '等待冷却…' : '演示执行中…' : `执行待办${queued.length ? ` · ${queued.length}` : ''}`;
     byId('run-queue').disabled = busy || !queued.length;
     byId('reset-demo').disabled = busy;
-    byId('health-dot').classList.toggle('is-running', busy);
-    byId('health-title').textContent = busy ? '正在模拟执行，不会向真实站点发起请求' : '管道空闲，没有后台抓取在运行';
-    byId('health-hint').textContent = busy ? '仅本次明确选择的样例会执行；其他排队项保持原状。' : '待执行只代表已排队。点击「执行待办」才会开始本页模拟。';
+    byId('health-dot').classList.toggle('is-running', busy && !cooling);
+    byId('health-dot').classList.toggle('is-cooling', cooling);
+    byId('health-title').textContent = cooling ? `等待 X 冷却，${cooldownLeft} 秒后重试（演示）` : busy ? '正在模拟执行，不会向真实站点发起请求' : '管道空闲，没有后台抓取在运行';
+    byId('health-hint').textContent = cooling ? '还没有开始抓取。原型用 5 秒演示；实际等待由后端共享冷却决定，不可绕过。' : busy ? '仅本次明确选择的样例会执行；其他排队项保持原状。' : '需处理可「立即执行」，也可只排队；X 限流会先等待冷却。所有执行均为本页模拟。';
     renderList(visible);
     renderSelection(visible);
     renderDetail(issues.find(issue => issue.id === activeId));
@@ -151,10 +158,11 @@
     byId('list-order').hidden = !!selected.size;
     const retry = document.querySelector('[data-batch="retry"], [data-batch="restore"]');
     retry.dataset.batch = currentTab === 'archived' ? 'restore' : 'retry';
-    retry.textContent = currentTab === 'archived' ? '恢复处理' : '重新排队';
+    retry.textContent = currentTab === 'archived' ? '恢复处理' : '仅重新排队';
     retry.hidden = currentTab === 'queued';
     retry.disabled = busy || (currentTab !== 'archived' && currentTab !== 'attention');
-    document.querySelector('[data-batch="run"]').hidden = currentTab !== 'queued';
+    document.querySelector('[data-batch="run"]').hidden = !['attention', 'queued'].includes(currentTab);
+    document.querySelector('[data-batch="run"]').disabled = busy;
     document.querySelector('[data-batch="snooze"]').hidden = currentTab === 'archived';
     const selectedSourceIssue = visible.some(issue => selected.has(issue.id) && issue.stage === '来源连接');
     document.querySelector('[data-batch="exclude"]').disabled = busy || currentTab === 'archived' || selectedSourceIssue;
@@ -163,7 +171,7 @@
 
   function pipeline(issue) {
     const stages = issue.stage === '来源连接' ? ['访问来源', '读取时间线', '检查覆盖', '结束检查'] : ['发现链接', '补齐正文', '翻译处理', '写入知识库'];
-    const position = issue.manualBody ? 2 : ({ '来源连接': 0, '正文抓取': 1, '翻译': 2, '入库处理': 3 })[issue.stage];
+    const position = issue.retryKind === 'x-coverage' ? 2 : issue.manualBody ? 2 : ({ '来源连接': 0, '正文抓取': 1, '翻译': 2, '入库处理': 3 })[issue.stage];
     return stages.map((name, index) => {
       const complete = issue.status === 'resolved' || index < position;
       const current = index === position;
@@ -174,6 +182,15 @@
     }).join('');
   }
 
+  function runLabel(issue) {
+    return issue.retryKind === 'x-boot' ? '冷却后重试' : issue.retryKind === 'x-coverage' ? '重试此范围' : '立即执行';
+  }
+
+  function sourceContext(issue) {
+    if (!issue.retryKind) return '';
+    return `<section class="source-context"><h3 class="section-caption">这次只处理这个账号</h3><dl><div><dt>账号</dt><dd>${escapeHtml(issue.account)}（示例）</dd></div><div><dt>保留的同步下界</dt><dd>${escapeHtml(issue.since)}</dd></div><div><dt>上轮已取得的内容</dt><dd>${escapeHtml(issue.preserved)}</dd></div></dl><p>${issue.retryKind === 'x-boot' ? '共用 X 会话冷却，不通过反复点击绕过限流；不需要重新登录。' : '从时间线顶部重抓原下界之后的范围，按 URL 去重；不是从上次滚动位置续传，也不跳过缺口。'}</p></section>`;
+  }
+
   function renderDetail(issue) {
     if (!issue) {
       byId('detail-pane').innerHTML = `<div class="empty-state">${icon('file')}<h3>选择一条，看看下一步</h3><p>失败原因、处理建议和记录会显示在这里。</p></div>`;
@@ -181,20 +198,21 @@
     }
     const archived = ['snoozed', 'excluded'].includes(issue.status);
     const tone = issue.status === 'resolved' ? 'success' : issue.status === 'attention' ? '' : 'neutral';
-    const reason = issue.status === 'queued' ? '已经排队，但还没有开始执行' : issue.status === 'running' ? '本条正在演示执行中'
+    const reason = issue.id === coolingId ? '等待 X 共享冷却，尚未开始抓取（演示）' : issue.status === 'queued' ? '已经排队，但还没有开始执行' : issue.status === 'running' ? '本条正在演示执行中'
       : issue.status === 'resolved' ? issue.stage === '来源连接' ? '来源复查已完成（本页模拟）' : '必要处理已完成（本页模拟）' : archived ? issue.status === 'excluded' ? '已决定不再收录此条' : '已暂缓，保留问题记录' : issue.reason;
-    const explanation = issue.status === 'queued' ? (issue.manualBody ? '手动补入的正文已保留在本页内存中。接下来执行后续处理，不再重复抓取正文。' : '不会在后台持续补抓。可以执行这一条，或与其他待办一起运行。')
+    const explanation = issue.id === coolingId ? '倒计时结束后，本次已确认的范围会自动开始模拟。不需要再次点击；等待不算正在抓取，也不计为成功。' : issue.status === 'queued' ? (issue.manualBody ? '手动补入的正文已保留在本页内存中。接下来执行后续处理，不再重复抓取正文。' : '不会在后台持续补抓。可以执行这一条，或与其他待办一起运行；来源问题保留原账号与同步下界。')
       : issue.status === 'running' ? '这是模拟进度，没有真实网络请求。执行结果出来后，才会更新最终状态。'
       : issue.status === 'resolved' ? issue.stage === '来源连接' ? '仅代表这条来源检查问题已恢复，不代表发现了新文章或已完成文章入库。没有访问真实账号。' : '演示流程已完成。此原型没有向真实知识库写入文档。'
       : archived ? '这不是问题已解决，也不会计入成功数。恢复处理会回到搁置前的状态，不会立刻发起抓取。' : issue.explanation;
     let actions = '';
     if (issue.status === 'attention') {
       const preferManual = issue.stage === '正文抓取' && (issue.preferred === 'manual' || issue.type === 'held');
-      const retryButton = `<button class="button ${preferManual ? 'secondary' : 'primary'}" data-action="retry">${icon('sync')}重新排队</button>`;
+      const runButton = `<button class="button ${preferManual ? 'secondary' : 'primary'}" data-action="run">${icon('play')}${runLabel(issue)}</button>`;
+      const retryButton = `<button class="button secondary" data-action="retry">${icon('sync')}仅重新排队</button>`;
       const manualButton = issue.stage === '正文抓取' ? `<button class="button ${preferManual ? 'primary' : 'secondary'}" data-action="manual">${icon('edit')}手动补正文</button>` : '';
-      actions = preferManual ? manualButton + retryButton : retryButton + manualButton;
+      actions = preferManual ? manualButton + runButton + retryButton : runButton + retryButton + manualButton;
     } else if (issue.status === 'queued') {
-      actions = `<button class="button primary" data-action="run">${icon('play')}执行此条（演示）</button>`;
+      actions = `<button class="button primary" data-action="run">${icon('play')}${runLabel(issue)}</button>`;
       if (issue.stage === '正文抓取') actions += '<button class="button secondary" data-action="manual">手动补正文</button>';
     } else if (archived) actions = `<button class="button primary" data-action="restore">${icon('sync')}恢复处理</button>`;
     else if (issue.status === 'running') actions = '<button class="button primary" disabled>等待演示结果…</button>';
@@ -207,6 +225,7 @@
       <div class="pipeline" aria-label="收录进度">${pipeline(issue)}</div>
       <div class="reason-box ${tone}"><strong>${escapeHtml(reason)}</strong><p>${escapeHtml(explanation)}</p></div>
       <dl class="detail-facts"><div><dt>已尝试次数</dt><dd>${issue.attempts} 次 · 记录不随重排抹去</dd></div><div><dt>当前是否执行</dt><dd>${issue.status === 'running' ? '是，仅本页模拟' : '否'}</dd></div></dl>
+      ${sourceContext(issue)}
       <section class="recommended"><h3 class="section-caption">${archived ? '改变这个决定' : '建议的下一步'}</h3><p>${escapeHtml(advice)}</p><div class="detail-actions">${actions}</div>${!archived && !['resolved', 'running'].includes(issue.status) ? `<div class="minor-actions">${issue.stage === '正文抓取' ? '<button data-action="link">换个链接再试</button>' : '<span></span>'}<button data-action="snooze">暂缓处理</button>${issue.stage !== '来源连接' ? '<button data-action="exclude" class="danger-text">不再收录</button>' : ''}</div>` : ''}</section>
       <section class="item-history"><h3 class="section-caption">这条内容的处理记录</h3>${issue.history.slice(0, 3).map(([time, message]) => `<div class="history-entry"><time>${escapeHtml(time)}</time><p>${escapeHtml(message)}</p></div>`).join('')}<details><summary class="dialog-note">查看原始原因${issue.manualBody ? '与补入正文' : ''}</summary><p class="dialog-note">${escapeHtml(issue.evidence)}</p>${issue.manualBody ? `<p class="dialog-note">${escapeHtml(issue.manualBody.slice(0, 300))}</p>` : ''}</details></section>`;
     byId('detail-pane').querySelectorAll('[data-action]').forEach(button => { button.disabled = (busy && button.dataset.action !== 'back-list') || button.disabled; });
@@ -285,10 +304,13 @@
 
   function requestRun(targets) {
     if (busy) return;
-    const queued = targets.filter(issue => issue.status === 'queued');
-    if (!queued.length) return showToast('没有可执行的待办。请先重新排队。');
-    openDialog('执行这批待办（演示）', `<p>只执行下面明确列出的范围，不附带其他来源。所有结果都是模拟，不会联网或写入真实知识库。</p>${scopeMarkup(queued)}<label class="dialog-field">这次要查看的演示分支<select id="simulation-result"><option value="success">模拟成功 → 完成对应的必要处理</option><option value="failure">模拟失败 → 返回需处理，保留记录</option></select></label>`, '开始模拟执行', () => {
-      runSimulation(queued, byId('simulation-result').value);
+    const eligible = targets.filter(issue => ['attention', 'queued'].includes(issue.status));
+    if (!eligible.length) return showToast('当前选择中没有可执行的条目。');
+    const cooling = eligible.some(issue => issue.retryKind === 'x-boot');
+    const retryScope = eligible.filter(issue => issue.retryKind).map(sourceContext).join('');
+    const notes = eligible.some(issue => issue.preferred === 'manual' || issue.type === 'held') ? '<p class="dialog-note">包含正文未确认项：原样重试不保证有效；也可以取消后手动补正文或换链接。</p>' : '';
+    openDialog(cooling ? '冷却后执行这些条目（演示）' : '立即执行这些条目（演示）', `<p>无需先手动排队，只执行下面明确列出的范围，不顺带运行其他已排队内容。所有结果都是模拟，不会联网或写入真实知识库。</p>${scopeMarkup(eligible)}${retryScope}${cooling ? '<p class="cooldown-note">先用 5 秒模拟共享冷却，再自动执行本次范围；等待期间仍是「待执行」。真实后端从 45 秒起步，重复受限时翻倍至 180 秒，不保证到点就恢复，也不应绕过冷却。</p>' : ''}${notes}<label class="dialog-field">这次要查看的演示分支<select id="simulation-result"><option value="success">模拟成功 → 完成对应的必要处理</option><option value="failure">模拟失败 → 返回需处理，保留记录</option></select></label>`, cooling ? '确认冷却后重试' : '开始模拟执行', () => {
+      runSimulation(eligible, byId('simulation-result').value);
     });
   }
 
@@ -301,9 +323,27 @@
     byId('source-filter').value = 'all';
     byId('stage-filter').value = 'all';
     byId('search').value = '';
-    currentTab = 'running';
-    record('开始模拟执行', targets, `仅运行这 ${targets.length} 条；预设分支：${outcome === 'success' ? '成功' : '失败'}`);
+    targets.forEach(issue => {
+      issue.status = 'queued';
+      addHistory(issue, '已确认立即执行，仅等待本轮调度（演示）');
+    });
+    record('确认模拟执行范围', targets, `仅运行这 ${targets.length} 条；预设分支：${outcome === 'success' ? '成功' : '失败'}`);
+    const limited = targets.find(issue => issue.retryKind === 'x-boot');
+    if (limited) {
+      coolingId = limited.id;
+      cooldownUntil = Date.now() + 5000;
+      currentTab = 'queued';
+      activeId = limited.id;
+      addHistory(limited, '等待共享 X 冷却，5 秒为演示时长，尚未抓取');
+      record('等待 X 冷却', [limited], '本轮确认范围等待模拟冷却，不绕过限流、不提前计为执行');
+      while (Date.now() < cooldownUntil) {
+        render();
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000, cooldownUntil - Date.now())));
+      }
+      coolingId = '';
+    }
     for (const issue of targets) {
+      currentTab = 'running';
       issue.status = 'running';
       activeId = issue.id;
       addHistory(issue, '本页开始模拟执行，没有真实网络请求');
@@ -316,11 +356,13 @@
         addHistory(issue, issue.stage === '来源连接' ? '模拟结果：来源复查完成，不代表新文章已入库' : '模拟结果：必要环节与入库已完成');
       } else {
         issue.status = 'attention';
-        issue.type = 'failed';
+        if (!issue.retryKind) issue.type = 'failed';
         issue.reason = '本次模拟执行失败，等待你决定';
-        issue.explanation = '演示失败分支：没有取得可确认的成功结果，因此回到需处理，不自动再次执行。';
-        issue.evidence = '本页预设的模拟失败，不是生产环境的失败证据';
-        issue.recommendation = '核对原因后可以重新排队、补正文或暂缓。已发生的尝试继续保留。';
+        issue.explanation = issue.retryKind ? '演示失败分支：来源问题仍未恢复；原账号、同步下界、已取得内容与原始原因全部保留，没有推进水位，不自动连续重试。' : '演示失败分支：没有取得可确认的成功结果，因此回到需处理，不自动再次执行。';
+        if (!issue.retryKind) {
+          issue.evidence = '本页预设的模拟失败，不是生产环境的失败证据';
+          issue.recommendation = '核对原因后可以立即执行、仅重新排队、补正文或暂缓。已发生的尝试继续保留。';
+        }
         addHistory(issue, '模拟结果：执行失败，回到需处理');
       }
     }
@@ -405,7 +447,7 @@
   byId('dialog-confirm').addEventListener('click', () => { if (confirmAction && confirmAction() !== false) byId('action-dialog').close(); });
   byId('action-dialog').addEventListener('close', () => { confirmAction = null; });
   byId('reset-demo').addEventListener('click', () => {
-    openDialog('重置这个演示？', '<p>清空本页操作记录，恢复最初的 12 条样例。不会触碰真实数据。</p>', '重置演示', () => {
+    openDialog('重置这个演示？', `<p>清空本页操作记录，恢复最初的 ${window.diagnosticSeed.length} 条样例。不会触碰真实数据。</p>`, '重置演示', () => {
       issues = cloneSeed(); currentTab = 'attention'; activeId = issues[0].id; selected.clear(); operationLog = [];
       revision += 1; undoState = null;
       byId('search').value = ''; byId('source-filter').value = 'all'; byId('stage-filter').value = 'all';
