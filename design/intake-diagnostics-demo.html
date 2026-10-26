@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2317604f'/%3E%3Ctext x='9' y='24' font-size='27' fill='white'%3Ek%3C/text%3E%3C/svg%3E">
+  <title>问题与待办 · Knowbase 交互原型</title>
+  <link rel="stylesheet" href="intake-diagnostics-demo.css">
+  <script defer src="intake-diagnostics-demo-data.js"></script>
+  <script defer src="intake-diagnostics-demo.js"></script>
+</head>
+<body>
+  <aside class="sidebar" aria-label="应用导航示意">
+    <a class="brand" href="#"><span class="brand-mark">k<span>·</span></span><span>Knowbase<small>给知识一个去处</small></span></a>
+    <div class="nav-label">我的空间 <span>PERSONAL</span></div>
+    <nav>
+      <span class="nav-item"><span data-icon="library"></span>知识库</span>
+      <span class="nav-item"><span data-icon="bookmark"></span>我的收藏</span>
+      <span class="nav-item"><span data-icon="layers"></span>我的订阅</span>
+      <span class="nav-item"><span data-icon="sun"></span>每日日报</span>
+      <div class="nav-divider"></div>
+      <span class="nav-item"><span data-icon="sync"></span>同步中心</span>
+      <a class="nav-item is-current" href="#" aria-current="page"><span data-icon="inbox"></span>问题与待办<span id="nav-count" class="nav-count">7</span></a>
+    </nav>
+    <div class="sidebar-note"><span data-icon="sprout"></span><p>值得读的内容，<br>不该停在半路。</p></div>
+    <div class="profile"><span class="avatar">S</span><div>我的知识空间<small>本地优先 · 由你掌握</small></div><span class="profile-dot"></span></div>
+  </aside>
+
+  <div class="app">
+    <header class="topbar"><div>我的空间 <span>/</span> <b>问题与待办</b></div><span class="prototype-tag"><span></span>交互原型 · 非生产页面</span></header>
+    <main>
+      <div class="page-heading">
+        <div><div class="eyebrow">COLLECTION CARE</div><h1>问题与待办<span class="title-dot">.</span></h1><p>看清内容卡在哪里，把下一步交还给你。</p></div>
+        <div class="heading-actions"><button id="show-log" class="button secondary"><span data-icon="history"></span>操作记录<span id="log-count" class="button-count">0</span></button><button id="run-queue" class="button primary"><span data-icon="play"></span><span id="run-label">执行待办</span></button></div>
+      </div>
+
+      <div class="demo-notice"><span data-icon="flask"></span><p><b>这是可操作的演示，不连接生产库。</b> 下方 12 条样例覆盖典型情况；重试、补正文、暂缓等操作仅在此页模拟。</p><button id="reset-demo">重置演示 <span aria-hidden="true">↗</span></button></div>
+
+      <section class="health-strip" aria-label="演示执行状态">
+        <div class="health-copy"><span id="health-dot" class="health-dot"></span><div><b id="health-title">管道空闲，没有后台抓取在运行</b><p id="health-hint">待执行只代表已排队。点击「执行待办」才会开始本页模拟。</p></div></div>
+        <div class="health-fact"><span>下次自动同步</span><strong>未模拟调度</strong><small>正式版显示真实计划时间</small></div>
+      </section>
+
+      <div class="workspace-heading"><div><h2>收录工作台</h2><span>12 条交互样例</span></div><span class="workspace-caption">问题不是结局，是一个待决定的下一步</span></div>
+      <div class="tabs" role="tablist" aria-label="处理状态">
+        <button role="tab" id="tab-attention" data-tab="attention" aria-selected="true" aria-controls="workbench" tabindex="0">需处理 <span id="count-attention">7</span></button>
+        <button role="tab" id="tab-queued" data-tab="queued" aria-selected="false" aria-controls="workbench" tabindex="-1">待执行 <span id="count-queued">4</span></button>
+        <button role="tab" id="tab-running" data-tab="running" aria-selected="false" aria-controls="workbench" tabindex="-1">执行中 <span id="count-running">0</span></button>
+        <button role="tab" id="tab-resolved" data-tab="resolved" aria-selected="false" aria-controls="workbench" tabindex="-1">已完成 <span id="count-resolved">1</span></button>
+        <button role="tab" id="tab-archived" data-tab="archived" aria-selected="false" aria-controls="workbench" tabindex="-1">已搁置 <span id="count-archived">0</span></button>
+        <span class="tabs-end" id="tab-explanation">需要你决定，不会自行恢复</span>
+      </div>
+
+      <section id="workbench" class="workbench" role="tabpanel" aria-labelledby="tab-attention">
+        <div class="list-pane">
+          <div class="filters">
+            <label class="search"><span data-icon="search"></span><input id="search" type="search" placeholder="搜索标题、来源或失败原因" aria-label="搜索问题"><kbd>/</kbd></label>
+            <div class="filter-selects"><label><span class="sr-only">按来源筛选</span><select id="source-filter"><option value="all">全部来源</option><option>RSS</option><option>网页专栏</option><option>大V观点</option><option>公众号</option><option>简报</option></select></label><label><span class="sr-only">按环节筛选</span><select id="stage-filter"><option value="all">全部环节</option><option>正文抓取</option><option>来源连接</option><option>翻译</option><option>入库处理</option></select></label><span id="visible-count">7 条</span></div>
+          </div>
+          <div id="batch-bar" class="batch-bar"><label class="check-all"><input id="select-all" type="checkbox" aria-label="选择当前筛选下全部条目"><span id="selection-label">选择本页</span></label><div id="batch-actions" hidden><button data-batch="run" hidden>执行已选</button><button data-batch="retry">重新排队</button><button data-batch="snooze">暂缓</button><button data-batch="exclude" class="danger-text">不再收录</button><button id="clear-selection" aria-label="清除选择">×</button></div><span id="list-order">按处理优先级排列</span></div>
+          <div id="issue-list" class="issue-list" aria-label="问题列表"></div>
+          <div class="list-foot"><span data-icon="shield"></span><p>重新排队 ≠ 抓取成功。<br>只有正文与后续处理完成，才计入「已完成」。</p></div>
+        </div>
+        <aside id="detail-pane" class="detail-pane" aria-label="所选问题的详情与操作"></aside>
+      </section>
+      <footer class="page-footer"><span><span class="footer-mark">k·</span> 先看见问题，再让知识继续流动。</span><span>原型 v1 · 状态与操作均为本页演示</span></footer>
+    </main>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="action-dialog" class="action-dialog" aria-labelledby="dialog-title">
+    <div class="dialog-top"><span id="dialog-eyebrow">处理这条内容</span><button id="dialog-close" aria-label="关闭对话框">×</button></div>
+    <h2 id="dialog-title"></h2><div id="dialog-body"></div><p id="dialog-error" class="dialog-error" role="alert"></p>
+    <div class="dialog-actions"><button id="dialog-cancel" class="button secondary">取消</button><button id="dialog-confirm" class="button primary">确认</button></div>
+  </dialog>
+  <noscript>这个交互原型需要启用 JavaScript。所有数据均为本页样例，不会操作生产库。</noscript>
+</body>
+</html>
