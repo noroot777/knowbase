@@ -32,7 +32,8 @@ def _scope_entries(crawl_filter: dict | str | None) -> list[dict]:
     **`crawl_channels` 在它之上只留 `channel` / `accounts` 两个键,那是有意的**
     —— 那一份是**要递给执行器的真范围**,多一个键就会跟着跑进执行和付费边界
     (见 `kb/feeds/translate.py` 那段「`crawl_filter` 到不了这里」)。要读某一段上
-    别的字段(`retry`)的,从这里读,别去扩那一份。
+    别的字段(`retry` 那个展示标记、`expect` 那份确认描述)的,从这里读,别去扩
+    那一份。
     """
     if isinstance(crawl_filter, str) or crawl_filter is None:
         crawl_filter = {"channel": crawl_filter or ""}
@@ -267,6 +268,14 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
         key, seg=seg,
         materializes="export" in planned if isinstance(planned, list) else True)
 
+    # **人确认那一刻那几个目标各是什么样**,按来源分开拿(`_scope_entries` 那一份
+    # 才有这一键:执行范围 `crawl_channels` 照旧只有两个键,理由在它的 docstring)。
+    # 这一份要交到执行器手里 —— 只在入口核一次关不掉「确认完、真读到之前被改指」
+    # 那个窗口,而执行器手上只有编号时会按编号重读一份新配置当成旧授权来跑
+    # (第 1 轮自由审查 R2 实测)。
+    expects = {s.get("channel") or "": dict(s.get("expect") or {})
+               for s in _scope_entries(crawl_filter)}
+
     def _fetch(collector, scope: dict):
         """**采集器报的覆盖范围要原样交上去**(见 `_one_channel`)。"""
         _log(f"采集通道: {_channel_label(collector)}")
@@ -275,6 +284,8 @@ def _run_crawl(crawl_filter: dict | None = None) -> None:
             since=filters.get("since_date", ""),
             until=filters.get("until_date", ""),
             force=bool(filters.get("force")),
+            expect=tuple(sorted(
+                (str(k), str(v)) for k, v in expects.get(scope["channel"], {}).items())),
         ))
 
     _per_channel("crawl", crawl_filter, _fetch)

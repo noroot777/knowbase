@@ -23,6 +23,9 @@ from __future__ import annotations
 import hashlib
 
 from kb.feeds import registry as reg
+# 搁置那一道判据(`RETRY_SQL` 和 `manual_sql` 都要 AND 上它)。模块层 import
+# 不成环:`shelf` 自己对 kb 的依赖全是函数内的延迟 import。
+from kb.intake_diag import shelf
 
 
 MAX_TRIES = 3
@@ -41,6 +44,11 @@ def queued_sql() -> tuple[str, list]:
     ——只有标题的短动态译完之后 body_zh 仍然是空串,拿它判的话这一条译完了
     还赖在队列里,每轮重译一遍。
 
+    **被人搁置的条目不算待翻译**(`kb.intake_diag.shelf`):「暂缓」要连这一步
+    一起停住 —— 只拦补抓的话,一条正文已经试满额度、人刚点过暂缓的英文内容照旧
+    被买走一次翻译。**搁置那一道加在这里而不是 `unsettled_sql` 里**,理由见
+    `shelf.free_sql`。
+
     **正文还没定下来的条目不算待翻译**(`fulltext.unsettled_sql`,**不是**
     `queued_sql`):它们此刻手里那份正文是 feed 给的跳转壳,正文马上要被整条换掉。
     不排掉的话同一条内容买两次模型调用 —— 先按壳译一遍,补上正文再译一遍,而第
@@ -49,8 +57,10 @@ def queued_sql() -> tuple[str, list]:
     里问的必须是 `unsettled_sql` —— 用 `queued_sql` 的后果实测过,见它自己的说明。
     """
     from kb.feeds import fulltext      # 函数内 import:两个模块互相认识对方的口径
+    from kb.intake_diag import shelf
     cond, args = fulltext.unsettled_sql()
-    return (f"lang='en' AND translated_at='' AND translate_tries<? AND NOT ({cond})",
+    return (f"lang='en' AND translated_at='' AND translate_tries<? AND NOT ({cond})"
+            f" AND {shelf.free_sql()}",
             [MAX_TRIES, *args])
 
 
@@ -96,7 +106,14 @@ def pending(kind: str, source_id: int | None = None,
 #
 # **也不含 `translate_tries=0` 的那些** —— 它们会在同步时自动取走，
 # 额度一条没动过，放回队列是空操作。
-RETRY_SQL = "lang='en' AND translated_at='' AND translate_tries>0"
+#
+# **也要带上「这一世没有被搁置」。** 这一段同时是三件事的判据:那颗手动重试按钮的
+# 射程、`stuck()` 里 `shipped`/`exhausted` 两档的计数、以及面板上「翻译重试已停止」
+# 那一档。不带的话:人点完「暂缓」,这一档照旧把它数进去,而那颗按钮一点就把它的
+# 翻译额度清零、重新买一次模型调用 —— 人刚刚说的是「这条先别动」(审查第 1 轮 F01
+# 的对称面)。同源见 `shelf.free_sql`。
+RETRY_SQL = ("lang='en' AND translated_at='' AND translate_tries>0"
+             f" AND {shelf.free_sql()}")
 
 
 def _retry_where(source_id: int | None) -> tuple[str, list]:
@@ -200,10 +217,17 @@ def manual_sql() -> tuple[str, list]:
     补抓成功之后 `fulltext._save` 会把译文和额度一起清掉,所以它是一条全新的
     待译条目 —— 下一轮常规同步正常轮到它。**少译一条是如实的**(确认框说的
     就是 1 条),多译一条是花用户没确认过的钱。
+
+    **搁置的那几条一个都不许标记,理由和 `RETRY_SQL` 那一段一样** —— 这是付费边界
+    的另一半:`manual_sql` 同时是 `scope_signature`(确认框的指纹)和
+    `requeue_failed`(真正点名那一下)的射程。不带搁置判据的话,确认框里那个数字把
+    人刚点过「暂缓」的条目算了进去,点下去也真的会去译它(审查第 1 轮 F01 的对称
+    面)。同源见 `shelf.free_sql`。
     """
     from kb.feeds import fulltext      # 函数内 import:两个模块互相认识对方的口径
     cond, args = fulltext.unsettled_sql()
-    return f"lang='en' AND translated_at='' AND NOT ({cond})", list(args)
+    return (f"lang='en' AND translated_at='' AND NOT ({cond})"
+            f" AND {shelf.free_sql()}"), list(args)
 
 
 # 点名标记的清场语句。`requeue_failed`(开工前作废上一轮)和 `clear_manual`

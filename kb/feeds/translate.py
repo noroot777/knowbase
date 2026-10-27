@@ -120,10 +120,34 @@ def _parse_titled(out: str) -> tuple[str, str]:
     return head.replace('###TITLE###', '').strip(), body.strip()
 
 
-def _title_only(title: str, model) -> str:
+class Shelved(Exception):
+    """**译到一半,人把这一条暂缓 / 不再收录了** —— 余下的调用一笔都不发。
+
+    不是失败:额度不扣、错误不记、下一轮恢复之后它照旧回到队列。已经发出去的
+    那一笔回包照旧收下(那笔钱付过了),这道闸管的只有「别再开始新的」。
+    """
+
+
+def _permit(allowed) -> None:
+    """**每一笔出站调用之前现问一遍「现在还获准吗」。**
+
+    一篇长文会拆成好几块,再加一次补标题 —— 整篇开工时问一遍只挡得住「下一篇」,
+    挡不住「下一块」:人点完「不再收录」拿到成功,这一篇后面那两三笔照旧发出去、
+    照旧花钱(实测 `new_calls_after_exclude=2`)。所以判据要待在**真正花钱那一步
+    之前**,而不是在取数或开工处筛得更严。
+
+    `allowed` 为 None = 不设闸(直接调 `translate_item` 的那几个入口:重试脚本、
+    用例)。射程、以及它关不掉的那一瞬,在 `kb.intake_diag.shelf.admitted` 里。
+    """
+    if allowed is not None and not allowed():
+        raise Shelved()
+
+
+def _title_only(title: str, model, allowed=None) -> str:
     """单独译一行标题。译不出来就抛错,让整条走失败重试。"""
     if not title.strip():
         return ''
+    _permit(allowed)
     for line in _call(_TITLE_ONLY.format(title=title), model).splitlines():
         line = line.replace('###TITLE###', '').replace('###BODY###', '').strip()
         if line:
@@ -131,7 +155,7 @@ def _title_only(title: str, model) -> str:
     raise RuntimeError('标题没有译出来')
 
 
-def translate_item(item, model) -> tuple[str, str]:
+def translate_item(item, model, allowed=None) -> tuple[str, str]:
     """返回 (标题译文, 正文译文)。**标题和正文都得有译文才算这一条译完了。**
 
     标题单独兜一道:模型偶尔漏掉 ###TITLE### 分隔标记,那时只解析得出正文。
@@ -146,18 +170,20 @@ def translate_item(item, model) -> tuple[str, str]:
     if _has(item, 'body_zh') and not _has(item, 'title_zh') and original:
         # 存量半成品(见 `_requeue_partial`):正文已经是中文,只差标题那一行。
         # 整篇重译一遍是把同一份正文再买一次,而它已经在 vault 里了。
-        return _title_only(original, model), item['body_zh']
+        return _title_only(original, model, allowed), item['body_zh']
     body, protected, cutoff = markdown_blocks.prepare(item['body'] or '', MAX_BODY)
     truncated = len(item['body'] or '') > cutoff
     parts = _split(body)
     if not parts:                                # 只有标题
         if truncated:
             raise RuntimeError('首个代码块超过翻译长度上限，无法保真截断，请查看原文')
-        return _title_only(original, model), ''
+        return _title_only(original, model, allowed), ''
+    _permit(allowed)
     title_zh, out = _parse_titled(_call(
         _WITH_TITLE.format(title=original or '(无标题)', body=parts[0]), model))
     pieces = [out]
     for extra in parts[1:]:
+        _permit(allowed)
         pieces.append(_call(_BODY_ONLY.format(body=extra), model))
     text = '\n\n'.join(p for p in pieces if p)
     if not text.strip():
@@ -166,7 +192,7 @@ def translate_item(item, model) -> tuple[str, str]:
     if truncated:
         text += _TRUNCATED.format(n=cutoff)
     if original and not title_zh:
-        title_zh = _title_only(original, model)
+        title_zh = _title_only(original, model, allowed)
     return title_zh, text
 
 
@@ -322,6 +348,12 @@ def _fail(key: str, error: Exception, seen: tuple[str, str]) -> bool:
         return bool(cur.rowcount)
 
 
+#: **「取样之后、调模型之前,人把这一条暂缓 / 不再收录了」。** 一个哨兵,不是异常
+#: —— 它既不是失败也不是作废,而是**这笔钱压根没花**。射程、以及它关不掉的那一瞬,
+#: 全在 `kb.intake_diag.shelf.admitted` 的说明里。
+_SHELVED = object()
+
+
 def translate_pending(kind: str, limit: int | None = None, progress=None,
                       only_manual: bool = False,
                       source_id: int | None = None) -> dict:
@@ -355,8 +387,8 @@ def translate_pending(kind: str, limit: int | None = None, progress=None,
     # 它既不算成功也不算失败 —— 什么都没坏,只是这份译文不是当前内容的译文;
     # 统计要如实反映**实际写回结果**,按"调了几次模型"报的话这一轮会说"已翻译
     # N 条"而库里一个字都没改。
-    summary = {'done': 0, 'failed': 0, 'left': 0, 'stale': 0, 'skipped': '',
-               'errors': [], 'failed_keys': []}
+    summary = {'done': 0, 'failed': 0, 'left': 0, 'stale': 0, 'shelved': 0,
+               'skipped': '', 'errors': [], 'failed_keys': []}
     _label_unknown(kind)
     _requeue_partial(kind)
     cond, cargs = queued_sql()          # 队列判据只有这一份,别在这里另写一遍
@@ -411,8 +443,29 @@ def translate_pending(kind: str, limit: int | None = None, progress=None,
         """
         if _state.get('stop_requested'):
             return item, None, None, True
+        # **派发前再问一次「这一条还获准吗」。** 取数是整批一次、不限条数,而这里
+        # 每条各买一次模型调用 —— 一批几百条时,最后那几条的派发距离取样已经过了
+        # 几十分钟。只认取样那一刻的结果就是把「取样时获准」当成「整批一直获准」:
+        # 审查第 2 轮 R1 实测,第一条正在调模型时把第二条「不再收录」,第二条随后
+        # 照旧被派发出去 —— 而那是一笔**还没花的钱**。
+        # **和 `_save` 那一侧刻意不对称**:已经付过钱的回包照旧收下(理由在
+        # `kb/feeds/fulltext.py` 的 `_save` 末尾那段),这一道管的是「别开始」。
+        from kb.intake_diag import shelf
+
+        def allowed() -> bool:
+            return shelf.admitted(item['key'])
+
+        if not allowed():
+            return item, None, _SHELVED, True
         try:
-            return item, *translate_item(item, model), True
+            # **闸交到每一笔调用之前**(`_permit`):一篇长文拆成好几块,这里只
+            # 问一遍只挡得住「下一篇」。
+            return item, *translate_item(item, model, allowed), True
+        except Shelved:
+            # 译到一半被搁置:**一个字都不写**,额度和错误一个字没动(走下面
+            # `_SHELVED` 那一支)。已经发出去的那几笔回包就地丢掉 —— 这一篇
+            # 没有完整译文,存一半比不存更坏。
+            return item, None, _SHELVED, True
         except Exception as e:                       # noqa: BLE001 - 逐条隔离
             return item, None, e, _fail(item['key'], e, input_version(item))
 
@@ -426,6 +479,11 @@ def translate_pending(kind: str, limit: int | None = None, progress=None,
                 summary['errors'].append(failure(item, result, kind))
             elif isinstance(result, Exception):      # 原文已经换过,这次失败不算它的
                 summary['stale'] += 1
+            elif result is _SHELVED:
+                # 人在这一轮中途把它暂缓 / 不再收录了:**一次模型调用都没买**,
+                # 额度和错误一个字没动,恢复之后它回到队列照旧被取。不混进
+                # `stale`(那一档是「译完了、原文已经换过、这份译文作废」)。
+                summary['shelved'] += 1
             elif result is None:                     # 收到停止请求,剩下的留给下一轮
                 summary['left'] += 1
             elif _save(item['key'], title_zh, result, input_version(item)):
@@ -441,7 +499,7 @@ def summarize(summary: dict) -> str:
     if summary['skipped']:
         return f"英文内容未翻译({summary['skipped']})"
     if not (summary['done'] or summary['failed'] or summary['left']
-            or summary.get('stale')):
+            or summary.get('stale') or summary.get('shelved')):
         return ''
     text = f"已翻译 {summary['done']} 条英文内容"
     if summary['failed']:
@@ -450,6 +508,10 @@ def summarize(summary: dict) -> str:
         # 不混进 failed:那会让面板判红,而这不是故障。也不混进 left:那句话
         # 说的是"这一轮没轮到",而这一条是译过了、结果作废了。
         text += f",{summary['stale']} 条的原文在这期间换过、旧译文作废(下一轮按新正文重译)"
+    if summary.get('shelved'):
+        # **跳过的如实列出**(元规则)。和 `stale` 分开说:那一档是钱已经花了、
+        # 结果作废,这一档是**一次模型调用都没买**。
+        text += f"，{summary['shelved']} 条在这期间被暂缓或不再收录、没有翻译"
     if summary['left']:
         text += f",{summary['left']} 条留到下一轮译完再入库"
     return text

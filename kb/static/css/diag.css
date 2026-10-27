@@ -1,0 +1,174 @@
+/* ── 问题与待办(#carepanel) ───────────────────────────────────────────────
+   色值一律走 base.css 的 :root token。演示页里那三个写死的十六进制
+   (#B3402F / #8A5A22 / #DCE3E0)在这套色板里本来就有名字:
+   --danger / --warn / --line —— 所以这里一个十六进制都不写。
+   演示页的英文 eyebrow、副标题和居中大图标空态**刻意没有搬过来**
+   (CLAUDE.md「视觉语言」:这是自己每天开的工具,不是落地页)。
+   页头那一行复用同步中心的 .pipe-title-row / .pipe-head-facts,不另写一份。
+   ────────────────────────────────────────────────────────────────────── */
+
+#carepanel button, #carepanel select, #carepanel input { min-height: 36px; font-size: 13px; }
+/* 页头那行数字:**按组换行,不按字换行**。每一组(数字 + 量词)由 `careRenderHead`
+   包成一个 `<span>`,这里只负责「它不许被拆开」和「整行可以折到下一行」。
+   **只作用在本面板**:`.pipe-head-facts` 是和同步中心共用的那一份,那一屏装的是
+   另一组文案,不在这一轮的射程里。 */
+.care-heading .pipe-head-facts { flex-wrap: wrap; row-gap: 3px; }
+.care-heading .pipe-head-facts > span { white-space: nowrap; }
+.care-note { margin: -8px 0 16px; color: var(--muted); font-size: 13px; max-width: 72ch; }
+.care-note b { color: var(--ink-2); font-weight: 600; }
+
+/* 正在跑的那一轮。**和「待执行」的证据不是一回事**,所以它长在列表外面,
+   是一条运行时快照,不是条目的状态。 */
+.care-running { display: flex; align-items: center; gap: 12px; padding: 11px 16px;
+  border: 1px solid var(--line); border-left: 3px solid var(--brand);
+  background: var(--brand-tint); border-radius: 9px; margin-bottom: 14px; font-size: 13px; }
+.care-running b { color: var(--brand-deep); }
+.care-running span { color: var(--ink-2); }
+.care-running em { font-style: normal; font-family: var(--font-mono); color: var(--muted); }
+
+.care-tabs { display: flex; gap: 4px; flex-wrap: wrap; border-bottom: 1px solid var(--line);
+  margin-bottom: 14px; }
+.care-tabs button { min-height: 34px; padding: 7px 14px; border: 0; background: none;
+  color: var(--muted); border-bottom: 2px solid transparent; border-radius: 0; }
+.care-tabs button:hover { color: var(--ink); background: var(--brand-tint); }
+.care-tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--brand);
+  font-weight: 600; }
+.care-tabs button span { font-family: var(--font-mono); font-size: 12px; color: var(--muted);
+  margin-left: 6px; }
+.care-tabs button[aria-selected="true"] span { color: var(--brand-deep); }
+
+.care-bench { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 16px;
+  align-items: start; }
+.care-list-pane { min-width: 0; }
+.care-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 10px; }
+.care-search { display: flex; align-items: center; gap: 7px; flex: 1 1 220px; min-width: 0;
+  padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+.care-search .icon { width: 15px; height: 15px; color: var(--muted); flex: none; }
+.care-search input { flex: 1; min-width: 0; border: 0; background: none; padding: 7px 0; }
+.care-search input:focus { outline: none; }
+.care-visible { font-family: var(--font-mono); font-size: 12px; color: var(--muted); }
+
+.care-batch { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 9px 12px;
+  border: 1px solid var(--brand); background: var(--brand-soft); border-radius: 9px;
+  margin-bottom: 10px; font-size: 13px; }
+.care-batch strong { color: var(--brand-deep); font-family: var(--font-mono); }
+.care-batch .care-batch-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.care-batch button { min-height: 32px; padding: 5px 11px; }
+
+.care-list { display: flex; flex-direction: column; gap: 14px; }
+.care-section { border: 1px solid var(--line); border-radius: 11px; background: var(--card);
+  overflow: hidden; }
+.care-section-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 11px 15px; background: var(--paper-2); border-bottom: 1px solid var(--line-soft); }
+.care-section-head h3 { font-size: 14px; font-weight: 600; }
+.care-section-head .care-section-n { font-family: var(--font-mono); font-size: 12px;
+  color: var(--muted); }
+.care-section-head p { flex: 1 1 100%; margin: 0; color: var(--muted); font-size: 12px; }
+
+.care-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px;
+  align-items: start; width: 100%; padding: 11px 15px; border: 0; border-top: 1px solid var(--line-soft);
+  background: none; text-align: left; border-radius: 0; }
+.care-section-head + .care-row { border-top: 0; }
+.care-row:hover { background: var(--brand-tint); }
+.care-row.on { background: var(--brand-tint); box-shadow: inset 3px 0 0 var(--brand); }
+.care-row input[type="checkbox"] { min-height: 0; margin: 3px 0 0; }
+/* 行里那块可点区域是 `<button>`,**通用 button 样式要整个重置掉**:base.css 给
+   button 的是深松绿底、居中、圆角(主操作的样子),于是列表标题和那半句红色报错
+   都压在深绿底上 —— 实测计算样式背景 rgb(23,96,79)、标题 rgb(20,32,43)、报错
+   rgb(179,64,47)(审查第 1 轮 B01)。深绿留给真正的主操作。 */
+.care-row-main { min-width: 0; padding: 0; border: 0; border-radius: 0;
+  background: none; color: inherit; font: inherit; text-align: left;
+  min-height: 0; width: 100%; }
+.care-row-main:hover { opacity: 1; }
+.care-row-title { display: block; color: var(--ink); font-size: 13.5px; line-height: 1.45;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.care-row-meta { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; font-size: 12px;
+  color: var(--muted); }
+.care-row-meta em { font-style: normal; font-family: var(--font-mono); }
+.care-row-why { margin-top: 4px; font-size: 12px; color: var(--danger);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.care-row-why.warn { color: var(--warn); }
+.care-row-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px;
+  font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+/* 勾中那几条没有共同出口时说一句,而不是给一颗点了只部分生效的按钮。 */
+.care-batch-none { font-style: normal; font-size: 12px; color: var(--muted); }
+
+.care-pill { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--paper-2);
+  font-size: 11.5px; color: var(--ink-2); }
+.care-pill.bad { border-color: var(--danger); color: var(--danger); background: var(--card); }
+.care-pill.warn { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
+.care-pill.ok { border-color: var(--ok); color: var(--ok); background: var(--card); }
+
+.care-more { display: block; width: 100%; padding: 9px; border: 0; border-top: 1px solid var(--line-soft);
+  background: none; color: var(--brand-deep); border-radius: 0; font-size: 12.5px; }
+.care-more:hover { background: var(--brand-tint); }
+.care-empty { padding: 16px 15px; color: var(--muted); font-size: 13px; }
+
+/* 详情。演示页里是 aside,这里同构;窄屏时它掉到列表下面。 */
+.care-detail { position: sticky; top: 14px; border: 1px solid var(--line); border-radius: 11px;
+  background: var(--card); padding: 16px; font-size: 13px; }
+.care-detail h2 { font: 900 17px/1.4 var(--font-display); margin-bottom: 4px;
+  overflow-wrap: anywhere; }
+.care-detail .care-detail-link { display: inline-flex; align-items: center; gap: 4px;
+  color: var(--brand-deep); font-size: 12px; overflow-wrap: anywhere; }
+.care-detail-hint { color: var(--muted); font-size: 12.5px; }
+.care-block { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.care-block h4 { font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 6px;
+  letter-spacing: .02em; }
+.care-block p { color: var(--ink-2); line-height: 1.6; }
+.care-block p + p { margin-top: 6px; }
+.care-evidence { padding: 9px 11px; background: var(--paper-2); border-radius: 7px;
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-2); line-height: 1.55;
+  overflow-wrap: anywhere; white-space: pre-wrap; }
+
+/* 四步进度。来源级问题走它自己那四步(访问来源 → 读取时间线 → …),
+   **不套文章入库那四步**(状态契约)。 */
+.care-steps { display: flex; gap: 4px; }
+.care-step { flex: 1; min-width: 0; }
+.care-step span { display: block; height: 3px; border-radius: 2px; background: var(--line); }
+.care-step.done span { background: var(--brand); }
+.care-step.stuck span { background: var(--danger); }
+.care-step b { display: block; margin-top: 5px; font-size: 11px; font-weight: 400;
+  color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.care-step.stuck b { color: var(--danger); }
+
+.care-exits { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.care-exits button { min-height: 32px; padding: 6px 11px; }
+.care-exits .care-exit-danger { background: var(--card); border: 1px solid var(--danger);
+  color: var(--danger); }
+/* 色值一律走 token(CLAUDE.md):`--card` 就是那块白。 */
+.care-exits .care-exit-danger:hover { background: var(--danger); color: var(--card); }
+.care-exits button[disabled] { opacity: .5; }
+
+.care-log-rows { display: flex; flex-direction: column; gap: 10px; max-height: 60vh;
+  overflow: auto; }
+.care-log-row { border-bottom: 1px solid var(--line-soft); padding-bottom: 9px; }
+.care-log-row:last-child { border-bottom: 0; }
+.care-log-row b { display: block; font-size: 13px; }
+.care-log-row em { font-style: normal; font-family: var(--font-mono); font-size: 11.5px;
+  color: var(--muted); }
+.care-log-row p { margin-top: 3px; color: var(--ink-2); font-size: 12px; line-height: 1.55;
+  white-space: pre-line; }
+
+/* 粘正文 / 换链接那两个表单,字段级校验就地红字(.field-err),不弹 toast。 */
+.care-form label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 12px; }
+.care-form textarea { width: 100%; min-height: 180px; padding: 9px 11px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--card); font: 13px/1.6 var(--font-body); resize: vertical; }
+.care-form input[type="url"] { width: 100%; padding: 8px 11px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--card); font: 13px var(--font-mono); }
+.care-form .care-form-count { float: right; font-family: var(--font-mono); }
+
+@media (max-width: 1100px) {
+  .care-bench { grid-template-columns: minmax(0, 1fr); }
+  .care-detail { position: static; }
+}
+@media (max-width: 760px) {
+  .care-heading { align-items: flex-start; flex-direction: column; gap: 14px; }
+  .care-row { grid-template-columns: 22px minmax(0, 1fr); }
+  .care-row-side { grid-column: 2; align-items: flex-start; }
+  .care-steps { flex-wrap: wrap; }
+  .care-step { flex: 1 1 44%; }
+}

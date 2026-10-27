@@ -96,7 +96,11 @@ body {
 .confirm-mask { z-index: 80; }
 .modal.confirm { width: min(400px, 92vw); padding: 22px 24px; }
 .modal.confirm h2 { margin-bottom: 8px; }
-.confirm-body { margin-bottom: 2px; }
+/* `confirmBox` 的 body 走 textContent(不吃 HTML),而「问题与待办」那几个确认框
+   的射程声明是服务端给的多行清单(一行一笔钱)。`pre-line` 只保留换行、照旧
+   折叠空白,对现有那些单行 body 一个像素都不动。 */
+.confirm-body { margin-bottom: 2px; white-space: pre-line; }
+.modal.confirm.confirm-wide { width: min(560px, 94vw); }
 .confirm-acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
 .confirm-acts button { padding: 8px 16px; font-size: 13.5px; }
 

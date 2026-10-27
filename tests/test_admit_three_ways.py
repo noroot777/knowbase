@@ -299,8 +299,10 @@ class EvidenceTooThinTests(AdmitCase):
             fulltext.fetch_pending('rss')
         row = self.row(key)
         self.assertNotEqual('', row['fulltext_hold'])
+        # 工作身份一律过 `work_version`(内容两道 + 抓取目标),不在这里手拼元组
+        # —— 手拼那一份在加第三道的时候就和实现分叉了。
         self.assertTrue(fulltext._save(key, 'A real body.' * 60,
-                                       (row['content_hash'], row['content_rev'])))
+                                       fulltext.work_version(row)))
         self.assertEqual('', self.row(key)['fulltext_hold'])
         self.assertEqual([], fulltext.held('rss'))
 
@@ -335,7 +337,7 @@ class EvidenceTooThinTests(AdmitCase):
                 self.assertNotEqual('', said)
                 # 这一轮是在 `release` 之前就发出去的,所以它那份取样仍然有效
                 self.assertTrue(fulltext._fail(key, failure,
-                                               (row['content_hash'], row['content_rev'])))
+                                               fulltext.work_version(row)))
                 after = self.row(key)
                 self.assertEqual(SHELL, after['body'])            # 正文一个字节没动
                 self.assertEqual('', after['fulltext_at'])

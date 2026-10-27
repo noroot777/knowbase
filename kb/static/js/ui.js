@@ -58,14 +58,17 @@ function dismissToastGroup(key) {
   });
 }
 
-/** 确认框(取代原生 confirm)。返回 Promise<boolean>,Esc / 点遮罩 = 取消 */
-function confirmBox({ title, body = '', ok = '确定', cancel = '取消', danger = false }) {
+/** 确认框(取代原生 confirm)。返回 Promise<boolean>,Esc / 点遮罩 = 取消
+ *  `wide`:body 是一份多行的射程清单时放宽盒子(默认 400px 放 6 行会挤成一团,
+ *  而那几行每一行都是一笔钱 —— 「问题与待办」的「立即执行」就是这一档)。 */
+function confirmBox({ title, body = '', ok = '确定', cancel = '取消', danger = false,
+                      wide = false }) {
   return new Promise(resolve => {
     const prevFocus = document.activeElement;
     const mask = document.createElement('div');
     mask.className = 'modal-mask confirm-mask';
     mask.innerHTML =
-      `<div class="modal confirm" role="dialog" aria-modal="true">` +
+      `<div class="modal confirm${wide ? ' confirm-wide' : ''}" role="dialog" aria-modal="true">` +
       `<h2></h2>` +
       `${body ? '<div class="hint confirm-body"></div>' : ''}` +
       `<div class="confirm-acts">` +

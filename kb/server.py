@@ -15,6 +15,7 @@
     settings_api   /api/models*、/api/stages、/api/keys、/api/mcp/*
     pipeline_api   /api/pipeline/*
     daily_api      /api/daily/*  每日日报:定时、立即生成、历史日报
+    intake_diag_api /api/intake-care/*  问题与待办:全库还有多少条内容没走完收录
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from kb.web import (
     settings_api,
     sources_api,
     intake_api,
+    intake_diag_api,
     wechat_api,
     browser_capture_api,
 )
@@ -41,7 +43,8 @@ app = FastAPI(title="knowbase")
 
 for _r in (pages.router, library_api.router, chat_api.router,
            favorites_api.router, settings_api.router, pipeline_api.router,
-           sources_api.router, intake_api.router, wechat_api.router,
+           sources_api.router, intake_api.router, intake_diag_api.router,
+           wechat_api.router,
            daily_api.router, grab_api.router, browser_capture_api.router):
     app.include_router(_r)
 

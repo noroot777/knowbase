@@ -8,6 +8,7 @@ from kb import pipeline
 from kb import run_trigger
 from kb.feeds import registry as reg
 from kb.feeds import x_channels
+from kb.intake_diag import warrant
 from kb.scanner import body_version_of
 from kb.source_types import catalog
 
@@ -361,8 +362,20 @@ class TranslateRetryRequest(BaseModel):
     scope_sig: str = Field(default='', max_length=120)
 
 
+#: 这个端点原来的阶段清单。**译文落盘之后那几篇 md 换了内容**,所以 index 要重建;
+#: extract 跟着是因为旧的摘要/标签是按英文那一份算出来的。
+#: 「问题与待办」那块面板**不走这一份** —— 一颗开在某几条内容上的按钮不该顺手买下
+#: 全库那一轮条目化提取(`kb.intake_diag.actions.RUN_STAGES`,审查第 1 轮 F04)。
+TRANSLATE_RETRY_STAGES = ('export', 'index', 'extract')
+
+
 @router.post('/{kind}/translate-retry')
 def translate_retry(kind: str, body: TranslateRetryRequest):
+    """面板上那颗「重试翻译」。阶段清单是这个端点自己的那一份,行为逐字不变。"""
+    return start_translate_retry(kind, body, TRANSLATE_RETRY_STAGES)
+
+
+def start_translate_retry(kind: str, body: TranslateRetryRequest, stages) -> dict:
     """把等待翻译的内容点名放到队首,并立刻跑一轮翻译 + 导出。
 
     **为什么要有这个端点**:试满 `MAX_TRIES` 的条目按设计离开翻译队列、按原文
@@ -384,6 +397,13 @@ def translate_retry(kind: str, body: TranslateRetryRequest):
     因为源站退避什么都拿不到,而翻译就挂在 export 阶段上。index/extract 跟在
     后面是因为译文落盘之后那几篇 md 换了内容,不重建索引的话检索到的还是英文
     那一份。
+
+    **`stages` 由调用方给,不在这里写死。** 这个端点自己那一份是
+    `TRANSLATE_RETRY_STAGES`(含 extract,行为逐字不变);「问题与待办」那块面板
+    传的是它自己那份不含 extract 的清单 —— 一颗开在某几条内容上的按钮不该顺手
+    买下全库那一轮条目化提取(审查第 1 轮 F04)。除了阶段清单,这条路上的付费
+    边界(`translate_manual`)、指纹校验和拒绝文案两边**完全共用**:再写一遍
+    就是第二份射程口径。
     """
     kind_checked(kind)
     from kb.feeds import translate
@@ -439,7 +459,7 @@ def translate_retry(kind: str, body: TranslateRetryRequest):
                                      '请回面板看一眼新的条数，再点一次。')
     # 收下真实原因再报:没起跑的另一种是持久化边界落不下来(理由同 `pipeline_api`)。
     why: list[str] = []
-    if not pipeline.start_pipeline(['export','index','extract'], refused=why,
+    if not pipeline.start_pipeline(list(stages), refused=why,
             crawl_filter={
             'channel':kind, 'translate_retry':{'channel':kind,
                                                'source_id':body.source_id,
@@ -458,14 +478,62 @@ class SyncRequest(BaseModel):
     source_ids: list[int] = Field(default_factory=list,max_length=500)
 
 
+#: 这个端点原来的阶段清单。extract 在里面的理由在下面那段注释里(订阅级开关默认
+#: 关,没开过的库跑到这一步一次模型都不调)。**「问题与待办」那块面板不走这一份**,
+#: 理由同 `TRANSLATE_RETRY_STAGES`。
+SYNC_STAGES = ('crawl', 'export', 'index', 'extract')
+
+
 @router.post('/{kind}/sync')
-def sync(kind: str,body: SyncRequest):
+def sync(kind: str, body: SyncRequest):
+    """「我的订阅」上那颗同步。阶段清单是这个端点自己的那一份,行为逐字不变。"""
+    return start_sync(kind, body, SYNC_STAGES)
+
+
+def start_sync(kind: str, body: SyncRequest, stages, expect=None) -> dict:
+    """起跑一轮同步。**`expect` 是调用方确认时那几条订阅的整份执行描述。**
+
+    `{source_id: sig}`,`sig` 的口径只有 `kb.intake_diag.warrant.source_sig` 一份
+    (订阅代次 + 实际通道 + 当前通道的下界 + 跑不跑得起来)。缺省 `None` = 不带这
+    份描述(「我的订阅」那颗同步按钮:它点的就是「现在这几条」,没有「确认时」可
+    言)。「问题与待办」那块面板带着它来 —— `actions._source_scope` 把它签进执行
+    凭证,这里**用同一份描述再核一次**,而不是按编号重读一份新配置。核的那一下和
+    下面取 `accounts` 读的是**同一次** `reg.subscriptions(kind)`,所以这个端点里
+    不再有「验证完又读一遍」那个窗口。
+
+    **核完还要把这份描述交下去。** 只在这里核一次关不掉那个窗口:占住管道之后、
+    crawl 真读到这一条之前仍有一段时间,而执行器手上只有编号,它会按编号重读一份
+    **新**配置当成旧授权来跑 —— 实测确认文字点名来源 A、响应说「同步已开始」,
+    而传下去的范围只剩 `accounts=['id:117']`,采集器选中并访问了改指之后的 B
+    (第 1 轮自由审查 R2)。所以它随 `crawl_filter` 一路带到 `sync.collect`,
+    由执行器用同一份口径重算一次;对不上就作废那一条,不许认领当前版本。
+
+    对不上时 409:这一下什么都没有开始 —— `start_pipeline` 还没被调过,来源退避
+    也没被跳过。再往后那一瞬由执行器那道和 `sync._repointed` 一起兜住。
+    """
     kind_checked(kind)
     active = [s for s in reg.subscriptions(kind) if s['enabled']]
     selected = [s for s in active if not body.source_ids or s['id'] in body.source_ids]
     if not selected or (body.source_ids and len(selected) != len(set(body.source_ids))):
         raise HTTPException(400,'请选择存在且已启用的订阅')
     settings = reg.get_settings(kind)
+    expected: dict[str, str] = {}
+    if expect:
+        # 键一律归成字符串再比:调用方可能给 int 也可能给 str,而两种键在同一个
+        # dict 里压根不相等 —— 那样这道校验会**静默**什么都不比(漏报是静默丢
+        # 数据,所以认不出的键一律当「没带这一条的描述」而不是「对上了」)。
+        want = {str(k): str(v or '') for k, v in dict(expect).items()}
+        # **空描述一律拒**:带了这个参数就是「我有一份确认过的描述」,而一份算不
+        # 出来的描述放过去等于拿「没有确认框」的待遇跑一次人确认过的操作。
+        if [s for s in selected
+                if str(s['id']) in want
+                and (not want[str(s['id'])]
+                     or want[str(s['id'])] != warrant.source_sig(s, kind, settings))]:
+            raise HTTPException(409, '这一条订阅在你确认期间被改过了（换了链接、改了名、'
+                                     '换了取数通道，或者被停用）。这一下什么都没有开始，'
+                                     '请回面板看一眼新的说明，再点一次。')
+        expected = {reg.id_target(s['id']): want[str(s['id'])]
+                    for s in selected if str(s['id']) in want}
     if all(reg.configuration_error(s, settings) for s in selected):
         raise HTTPException(400, reg.configuration_error(selected[0], settings))
     # extract 在列里,但「哪些条目值得提取」由订阅级开关回答(默认关,见
@@ -480,9 +548,14 @@ def sync(kind: str,body: SyncRequest):
     # 是另一条的编号时(名字叫「11」)照旧会被一起抓走(见
     # `docs/decisions/sync-entry.md`)。
     if not pipeline.start_pipeline(
-            ['crawl','export','index','extract'], refused=why,
+            list(stages), refused=why,
             crawl_filter=run_trigger.apply_force(
-                {'channel':kind,'accounts':[reg.id_target(s['id']) for s in selected]},
+                # **描述和范围同一份地交下去。** `expect` 这一键按目标身份索引
+                # (和 `accounts` 同一个口径 `reg.id_target`),执行器那一侧从
+                # `_scope_entries` 读它 —— 执行范围那一份(`crawl_channels`)照旧
+                # 只有两个键,理由在 `pipeline_stages._scope_entries`。
+                {'channel':kind,'accounts':[reg.id_target(s['id']) for s in selected],
+                 **({'expect': expected} if expected else {})},
                 run_trigger.MANUAL)):
         raise HTTPException(409, why[0] if why
                             else '其他同步正在运行，请结束后重试；自动同步会顺延')

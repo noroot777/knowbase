@@ -14,6 +14,10 @@ from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
 from kb.feeds import digest, fulltext, translate, x_channels
+# 选源判据(本文件越过 700 行硬上限时拆出去的,见那边的模块头)。
+from kb.feeds.sync_select import pick_sources
+# 交付层那道搁置闸门(`_export` 里那一句)。判据只有 `shelf` 那一份。
+from kb.intake_diag import shelf
 # 新订阅的历史下界那道闸在 `history` 里(本文件越过 700 行硬上限时拆出去的)。
 # 这里原地再导出:`_save_result` 调的是本模块这个名字,全仓注释和回归里那些
 # `sync._within_history` 的指向也照旧成立。
@@ -22,9 +26,17 @@ from kb.feeds.exclusion import failure
 # 导出那一步的两个零件(frontmatter 归属、本轮新失败怎么数)在 `export_meta` 里
 # (本文件越过 700 行硬上限时拆出去的,口径没动)。这里原地再导出:本模块调的是
 # 这两个名字,全仓注释和回归里那些 `sync._kept_meta` 的指向也照旧成立。
+from kb.feeds.export_commit import Delivery
 from kb.feeds.export_meta import _kept_meta, _new_failures, _OWNED_META  # noqa: F401
 from kb.feeds.history import _within_history
 from kb.feeds.paths import export_path
+# 逐条取数之前那两遍整批预取(X 登录态通道、简报)在 `prefetch` 里(本文件越过
+# 700 行硬上限时拆出去的,口径没动)。这里原地再导出:`collect` 调的是本模块这两
+# 个名字,全仓那些 `patch.object(sync, '_prefetch_x')` 的打桩点也照旧成立。
+# **两份预算常量跟着搬**(只有那两个函数读它们);改预算要改 `prefetch` 那一份,
+# 本模块这两个名字只是给别处引用用的别名。
+from kb.feeds.prefetch import (DIGEST_SECONDS, X_LOCAL_SECONDS,  # noqa: F401
+                               _prefetch_digest, _prefetch_x)
 # 「那一轮失败之后它还用不用重抓」那两道(当日继承、失败名单收窄)在 `retry_targets`
 # 里(本文件越过 700 行硬上限时拆出去的,口径没动)。这里原地再导出:`collect` 调的
 # 是本模块这个名字,全仓注释和回归里那些 `sync.still_failing` / `sync._succeeded_today`
@@ -39,14 +51,6 @@ from kb.pipeline_state import _state, _stage
 
 FETCH_WORKERS = 4
 COLLECT_SECONDS = 90
-# 简报预取另算一份预算:它是串行的,每期一次 HTTP(RSS 一次 + 最多 `MAX_ISSUES`
-# 期),跟 HTTP 那一侧 90 秒的并发预算不是一回事 —— 口径同 `X_LOCAL_SECONDS`。
-DIGEST_SECONDS = 240
-# X 的登录态通道(feedgrab / 浏览器)另算预算:它们是串行的 —— 同一个浏览器
-# profile 只能被一个实例打开 —— 而单个账号要滚时间线、必要时还要等懒加载,
-# 90 秒连五个号都跑不完。这条通道按天同步(见 `source_types` 里 social 的
-# interval),所以给得宽;用完的账号记成"留待下次",靠 last_attempt 轮转补齐。
-X_LOCAL_SECONDS = float(os.environ.get('KB_X_LOCAL_SECONDS', '1200'))
 BUDGET_MESSAGE = '本轮采集时间预算不足，剩余订阅留待下次同步'
 
 
@@ -192,67 +196,6 @@ def _save_failure(source, error, summary) -> bool:
     return True
 
 
-def _prefetch_x(kind, sources, settings, scope):
-    """X 登录态通道的整批预取。跑在起线程池之前,所以读侧不必加锁。
-
-    一个账号都抓不到也不抛:每个账号的失败已经落在它自己那一项上,随后
-    `fetch_source` 会把它翻成这条订阅的失败 —— 一个改了名的号不该把整轮带掉。
-    这一类来源没有通道概念时 `targets()` 返回空,直接空转。
-    """
-    x_channels.reset()
-    if not x_channels.supports_channels(kind):
-        return
-    picked = x_channels.targets(sources, settings)
-    if not picked:
-        return
-    name = x_channels.label(x_channels.channel_of(settings))
-    _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name}:准备读取 {len(picked)} 个账号')
-
-    def progress(done, count='', handle=''):
-        # **两种形状都要接**:逐账号那条是 `(第几个, 共几个, handle)`,而整批里
-        # 还有几处要报的是一句话(关掉到点的登录窗口、等限流冷却过去)。只写三参
-        # 的话那几处单参调用当场 TypeError 把整条大V采集带掉,而面板上只会看到
-        # 采集失败、指不到任何跟业务有关的东西。
-        if not count:
-            _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name}:{done}')
-            return
-        _stage('crawl', 'running', f'{reg.KINDS[kind]} · {name} {done}/{count} · @{handle}')
-
-    # 区间补抓把它那段日期的起点交给采集器当下界:日常水位可能已经停在那段
-    # 日期之后,按水位读的话用户点名的那几天一条都翻不到(见 `prefetch`)。
-    x_channels.prefetch(sources, settings, budget=X_LOCAL_SECONDS,
-                        since=scope.since if scope.ranged else '',
-                        on_progress=progress,
-                        should_stop=lambda: bool(_state.get('stop_requested')))
-
-
-def _prefetch_digest(kind, sources, settings, scope):
-    """简报通道的整批预取。跑在起线程池之前,所以读侧不必加锁。
-
-    一期都抓不到也不抛:失败落在它自己那一项上,随后 `fetch_source` 会把它
-    翻成这条订阅的失败 —— 口径同 `_prefetch_x`。
-
-    **区间补抓那段日期要在这儿交下去**(口径同 `_prefetch_x`)。这条通道是预取
-    的:`unconditional` 压根到不了它,而 `_save_result` 的日期筛选排在拿到结果
-    之后 —— 预取时按日常水位筛掉的期号,后面没有任何一步救得回来(实测点名一段
-    旧日期时一期页面都不请求、报"新增 0 条、同步已完成",2026-10-10 审查)。
-    """
-    digest.reset()
-    picked = digest.targets(sources) if digest.supports(kind) else []
-    if not picked:
-        return
-    _stage('crawl', 'running', f'{reg.KINDS[kind]}:准备读取 {len(picked)} 份简报')
-
-    def progress(url):
-        _stage('crawl', 'running', f'{reg.KINDS[kind]} · {url}')
-
-    digest.prefetch(sources, settings, budget=DIGEST_SECONDS,
-                    since=scope.since if scope.ranged else '',
-                    until=scope.until if scope.ranged else '',
-                    on_progress=progress,
-                    should_stop=lambda: bool(_state.get('stop_requested')))
-
-
 def collect(kind, scope):
     started = reg.now()
     # **不可轮询的来源在这一步空转**(手动收录:内容在用户给出链接的那一刻就抓好
@@ -268,22 +211,24 @@ def collect(kind, scope):
         return {'sources': 0, 'checked': 0, 'added': 0, 'deferred': 0,
                 'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
                 'errors': [], 'partial': [], 'notices': [], 'repointed': 0,
-                'stopped': False, 'failed_ids': [], 'succeeded_ids': []}
-    # 匹配判据只有一份(`reg.in_scope`):这一轮抓哪几条,和「这几条现在抓不抓
-    # 得动」(`FeedCollector.status(targets=...)`)必须认同一批订阅。
-    sources = [s for s in reg.subscriptions(kind)
-               if s['enabled'] and reg.in_scope(s, scope.targets)]
+                'stopped': False, 'stale': 0, 'failed_ids': [], 'succeeded_ids': []}
+    settings = reg.get_settings(kind)
+    # 选谁、以及「确认过的那份描述还对得上吗」只有一份口径(`pick_sources`):
+    # 对不上的那几条**作废**,不进名单 —— 因此既不算检查过,也不会去结清谁的旧失败。
+    sources, stale_names = pick_sources(kind, scope, settings)
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
                'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
                'errors': [], 'partial': [], 'notices': [], 'repointed': 0,
                'stopped': False,
+               # 确认之后被改掉、这一轮**作废**的那几条(上面那段注释)。它不是
+               # 失败:退避一格没动、水位一个字没改,下一轮按新身份照常跑。
+               'stale': len(stale_names),
                # 这一轮失败的那几条订阅的稳定身份,留给「重试失败项」收窄范围
                'failed_ids': [],
                # 这一轮**真取过文而且成了**的那几条。失败的、退避跳过的、缺配置
                # 的、预算没轮到的、采集期间被改指的都不在里面 —— 它是「哪几格的
                # 旧失败可以结清」的唯一依据(契约在 `kb.collectors.Coverage`)。
                'succeeded_ids': []}
-    settings = reg.get_settings(kind)
     pending, unconfigured_why = [], ''
     for source in sources:
         if problem := reg.configuration_error(source, settings):
@@ -389,6 +334,10 @@ def collect(kind, scope):
         label += f"，{len(summary['notices'])} 个来源有跳过说明（{summary['notices'][0]['reason']}）"
     if summary['repointed']:
         label += f"，{summary['repointed']} 个采集期间改了订阅链接（这一轮的结果已丢弃）"
+    if summary['stale']:
+        # **这一句要说清「没跑」**:说成「检查过」等于替改完之后那一条宣布它同步过了。
+        label += (f"，{summary['stale']} 个在你确认之后改过"
+                  f"（{stale_names[0]}；这一轮没有跑它，下一轮按新设置照常跑）")
     if summary['unconfigured']:
         label += f"，待配置 {summary['unconfigured']} 个（{unconfigured_why}）"
     if summary['message']:
@@ -525,6 +474,16 @@ def _export(kind: str, hold_untranslated: bool = False,
         args += extra
     base += f' AND NOT ({fetch_cond})'
     args += fetch_args
+    # **交付层自己说一句「这一世没有被搁置」,不靠队列的反集推。**
+    # 上面两道收窄用的是队列的**反集**(「不在补抓队列里」「不在翻译队列里」),
+    # 而搁置是加在那两个队列的**正向**判据里的 —— 取反之后它变成**放行**:人点完
+    # 「暂缓 / 不再收录」,这一条当场两个队列都不在,导出照旧把它写进知识库
+    # (审查第 1 轮 F01 实测:三条未导出的内容全标成「不再收录」,真跑一次
+    # `_export` 之后 vault 里出现 3 篇 md、三条 `exported_hash` 全从空变成非空)。
+    # **离开某个队列不等于获准进入下一个环节**,所以这一句不能省,也不能改成
+    # 「从列表上消失」那种修法。位置同上面两道:**排在所有统计之后**(理由见
+    # 上面那段注释,在统计之前往 `args` 里追加会让绑定数当场对不上)。
+    base += f' AND {shelf.free_sql()}'
     with reg.db() as c:
         rows = c.execute(f'SELECT * {base}', args).fetchall()
     # written:这一轮**新落下**的那几篇,每一篇带着身份(`Fetched`:稳定内容身份
@@ -532,7 +491,9 @@ def _export(kind: str, hold_untranslated: bool = False,
     # (口径见 `kb.collectors` 的 materialize 契约)。判据见下面 `fresh` 那一行。
     from kb.collectors import Fetched
     written: set[Fetched] = set()
-    errors, done = [], 0
+    # refused:交付闸门拒掉的那几篇(人在这一轮中途把它们暂缓 / 不再收录了)。
+    # **跳过的如实列出**(元规则),不混进 `done` 也不混进 `errors`。
+    errors, done, refused = [], 0, 0
     root = VAULT_ROOT / 'source' / kind
     root.mkdir(parents=True, exist_ok=True)
     for item in rows:
@@ -588,12 +549,20 @@ def _export(kind: str, hold_untranslated: bool = False,
             with tempfile.NamedTemporaryFile('w', dir=root, suffix='.tmp', encoding='utf-8', delete=False) as f:
                 temp = Path(f.name)
                 f.write(text)
-            os.replace(temp, path)
+            # **落盘这一下要可以退回去**(`Delivery`:覆盖之前把旧那一份硬链
+            # 一份到旁边)。「暂缓 / 不再收录」承诺的是「正文、文件和已经入库的
+            # 内容一个字都不动」,而取数之后这一句之前隔着渲染 —— 人在这中间点
+            # 下按钮时,**已经入库的那一篇原先会被这一份覆盖掉、而且换不回来**
+            # (上一版只删得掉头一回落盘的那种)。理由和另一种顺序为什么更坏,
+            # 都在 `export_commit` 的模块说明里。
+            delivery = Delivery(path)
+            delivery.replace(temp)
             # **回执排在入库确认前面**:文件进了 vault 就是既成事实,后面那次
             # 确认失败不许把它从成果里抹掉(实测形态见 docs/decisions/daily.md)。
-            if fresh:
-                written.add(Fetched(f'{kind}:{item["key"]}',
-                                    str(item['fetch_round'] or ''), rel))
+            receipt = Fetched(f'{kind}:{item["key"]}',
+                              str(item['fetch_round'] or ''), rel) if fresh else None
+            if receipt:
+                written.add(receipt)
             with reg.db() as c:
                 # **确认的是「刚落盘的这一份」,不是「UPDATE 跑到时库里那一份」。**
                 # 右侧原先写 `exported_hash=content_hash`:那是 SQL 执行当刻行上的
@@ -608,12 +577,48 @@ def _export(kind: str, hold_untranslated: bool = False,
                 # 判据跟着待在 WHERE 里(元规则):行还是我们渲染的那一版才确认,
                 # `rowcount == 0` 说明这期间正文被换过 —— 欠账照旧留着,下一轮
                 # 导出自然选中它,**这不是失败**。
-                c.execute('UPDATE feed_items SET exported_hash=?,path=? '
-                          'WHERE key=? AND content_hash=?',
-                          (item['content_hash'], rel, item['key'], item['content_hash']))
-            # 文件确实落了盘,所以这一篇照旧算进这一轮写了几篇(回执排在确认前面
-            # 那条同理);确认没成只是说「它已经不是最新那一版了」。
-            done += 1
+                #
+                # **搁置那一道也在这一句里,而这一句就是交付层的互斥点。** 上面
+                # 取数时带过一次 `shelf.free_sql()`,但那之后还隔着渲染、写临时
+                # 文件和 `os.replace` —— 人点「不再收录」拿到成功之后,这一篇照旧
+                # 会出现在 vault 里、回执照旧落下(审查第 2 轮 R1 实测:在取数
+                # 之后、写文件之前真调一次 `shelf.shelve(...,'exclude')`,拿到
+                # `shelved=1`、条目当场分到「已搁置」那一档,而 export 返回之后
+                # 文件在、`exported_hash==content_hash`)。判据待在这条写语句
+                # 自己的 WHERE 里才和这次写入同生共死(元规则)——「取数时获准」
+                # 不是「一直获准」。
+                claimed = c.execute(
+                    # `exported_at` 和回执同一笔写下:它答的是「知识库里这一份是
+                    # 什么时候写下的」,「已完成」那一组靠它盖住纯入库那条路
+                    # (理由在 `kb/feeds/schema.py` 那一列的注释)。
+                    'UPDATE feed_items SET exported_hash=?,path=?,exported_at=? '
+                    f'WHERE key=? AND content_hash=? AND {shelf.free_sql()}',
+                    (item['content_hash'], rel, reg.now(), item['key'],
+                     item['content_hash'])).rowcount
+                # 拒了之后再问一句**是哪一道拒的**:两档的善后方式相反 —— 正文
+                # 被换过那一档**文件照旧留在 vault 里**(既成事实,`daily.md` 和
+                # `test_grab_store.py` 都钉着),被搁置那一档才收回。
+                # **这不是准入检查**(准入由上面那条 UPDATE 自己的 WHERE 一锤定
+                # 音),只是给一个已经发生的拒绝归因,所以它判错的两个方向都安全。
+                shelved = not claimed and not c.execute(
+                    f'SELECT 1 FROM feed_items WHERE key=? AND {shelf.free_sql()}',
+                    (item['key'],)).fetchone()
+            if shelved:
+                # **退回到这次交付之前的样子**:覆盖过的换回旧那一份(已经入库
+                # 的那一篇于是一个字节都没变),头一回落盘的删掉。回执跟着撤掉
+                # —— 文件没留在 vault 里,它就不是这一轮的成果(`daily.md` 那条
+                # 说的是「**留在** vault 里的不许被抹掉」,两句不冲突)。
+                delivery.refuse()
+                if receipt:
+                    written.discard(receipt)
+                refused += 1
+            else:
+                # 获准了(或者只是「正文这期间被换过」那一档 —— 那一档文件照旧
+                # 留着,欠账还在、下一轮重渲染一份新的)。
+                delivery.settle()
+                # 文件确实落了盘,所以这一篇照旧算进这一轮写了几篇(回执排在确认
+                # 前面那条同理);确认没成只是说「它已经不是最新那一版了」。
+                done += 1
         except Exception as e:
             errors.append(failure(item, e, kind))
         finally:
@@ -630,6 +635,8 @@ def _export(kind: str, hold_untranslated: bool = False,
     except Exception as e:               # noqa: BLE001
         errors.append({'title': '让补抓条目的旧摘要作废', 'reason': str(e)[:300]})
     note = f'已保存 {done} 条到知识库'
+    if refused:
+        note += f'，{refused} 条在这一轮里被暂缓或不再收录（没有写进知识库）'
     # 补抓那几档,拆法和下面翻译那几档逐字对应:本轮故障 / 此前故障（排队重试）
     # / 还没轮到。混成一个「N 条待补抓」的话,一条原文 403 的新文章和一条排在
     # 第 21 位还没轮到的新文章在面板上长得一模一样,而前者这一轮确实出了故障。

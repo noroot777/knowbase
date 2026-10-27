@@ -171,6 +171,7 @@
 | 订阅正文转纯文本、阅读页渲染、来源卡片(`kb/feeds/fetching.py` 的 `plain`、`kb/web/pages.py`) | `feed-plain.md`、`doc-reader.md`、`source-cards.md` |
 | 新订阅只收几天、存量清理(`kb/feeds/history.py`、`scripts/feed_trim_history.py`) | `history-depth.md` |
 | 「重试失败项」那颗按钮的范围、当日账本、逐来源的结果账(`kb/pipeline_retry.py`、`pipeline_daybook.py`、`pipeline_results.py`、`pipeline_state.py`、`kb/feeds/retry_targets.py`、`kb/static/js/pipe_view.js` 的需处理区) | `retry-scope.md` |
+| 「问题与待办」那块面板:全库积压的分档与计数、可撤销的搁置、「立即执行」的射程、X 两类问题的措辞(`kb/intake_diag/`、`kb/web/intake_diag_api.py`、`kb/static/js/diag*.js`) | `intake-diagnostics.md` |
 | 失败明细里那一条怎么点开、怎么「不再抓取」(`kb/pipeline_failures.py`、`collectors.ItemDropping`、`kb/feeds/exclusion.py`、`kb/feeds/paths.py`、`kb/collectors/wechat_documents.py`、`pipe_view.js`) | `failure-drop.md` |
 | 同步的历史运行、一轮的红怎么留档、留几天、恢复时挑哪一轮(`kb/pipeline_state.py`、`pipeline_history.py`、`pipeline_persist.py`、`pipeline_retention.py`、`pipeline_open.py`、`pipe_history.js`) | `pipeline-history.md` |
 | **任何写 kb.db 或 vault 文件的入口**(索引、导出、提取回写、条目化、清理脚本) | `maintenance-lock.md` |

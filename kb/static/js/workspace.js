@@ -1,5 +1,5 @@
 // Workspace navigation, addressable filters and accessible overlay lifecycle.
-const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', daily: '每日日报', subs: '我的订阅', pipe: '同步中心' };
+const WORKSPACE_TITLES = { gallery: '工具图鉴', search: '全文检索', ask: '知识问答', fav: '我的收藏', daily: '每日日报', subs: '我的订阅', pipe: '同步中心', care: '问题与待办' };
 let activeTab = 'gallery';
 let restoringLocation = false;
 // 地址栏里那个 #tab 在 initWorkspace 收尾时才被读走(restoreWorkspaceLocation),

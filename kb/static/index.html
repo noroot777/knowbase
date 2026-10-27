@@ -27,6 +27,7 @@
 <link rel="stylesheet" href="/static/css/favorites.css">
 <link rel="stylesheet" href="/static/css/snip.css">
 <link rel="stylesheet" href="/static/css/egress.css">
+<link rel="stylesheet" href="/static/css/diag.css">
 </head>
 <body>
 
@@ -50,6 +51,7 @@
     <button id="tab-subs" onclick="switchTab('subs')"><i data-icon="rss"></i><span class="nav-text">我的订阅</span></button>
     <button id="nav-grab" onclick="grabFromNav()" title="给一个链接，内容抓进知识库"><i data-icon="box"></i><span class="nav-text">存链接</span></button>
     <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span class="nav-text">同步中心</span><span id="nav-sync-dot" hidden aria-label="同步进行中"></span></button>
+    <button id="tab-care" onclick="switchTab('care')" title="没走完收录的内容在这里处理"><i data-icon="list"></i><span class="nav-text">问题与待办</span><span id="nav-care-count" class="nav-count"></span></button>
   </nav>
   <div class="nav-label">发现关联</div>
   <nav class="explore-links nav-section" aria-label="知识图谱">
@@ -275,6 +277,11 @@
     <div class="pipe-log-footer"><button id="pipe-log-latest" class="text-button" onclick="followPipeLog()" hidden>查看最新<i data-arrow="down"></i></button><button class="text-button" onclick="downloadPipeLog()">下载日志</button></div>
   </details>
 </div>
+
+<!-- 骨架在 `kb/static/js/diag.js`(`CARE_SKELETON`,`loadCarePanel()` 建一次)。
+     搬过去是因为这个文件连上这一块就到了 720 行,越过单文件 700 行的上限
+     (CLAUDE.md),而骨架和渲染它的代码本来就该在一起。 -->
+<div id="carepanel" style="display:none"></div>
 
 <div id="subspanel" style="display:none">
   <div class="pipe-page-heading subs-page-heading"><div class="subs-title"><h1>我的订阅</h1></div>
@@ -667,6 +674,10 @@
 <script src="/static/js/x_channel_own.js"></script>
 <script src="/static/js/x_channel.js"></script>
 <script src="/static/js/wechat_setup.js"></script>
+<script src="/static/js/diag.js"></script>
+<script src="/static/js/diag_list.js"></script>
+<script src="/static/js/diag_detail.js"></script>
+<script src="/static/js/diag_actions.js"></script>
 <script src="/static/js/workspace.js"></script>
 <script>
 loadMeta().catch(() => { $('stats').textContent = '统计暂不可用'; });

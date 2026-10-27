@@ -160,9 +160,17 @@ def _same_life(item: dict, row) -> bool:
     `item_key` 按网址算:存量清理删掉一条、下一轮又从同一个链接收回来,key 一个字
     都没变,而库里那是另一行、另一份正文。两条判据各补对方的洞:`fetched_at` 只在
     INSERT 时写(`put_items` 撞 key 是 DO NOTHING,换内容的几个写入方一个都不碰它),
-    是一世的身份;`content_rev` 在一行的生命里**只增**(见 registry 的
-    `_ADDED_COLUMNS`),新插进来的那一行从 0 起 —— 同一秒里删掉又收回来时
+    是一世的身份;`content_rev` 在一行的生命里**只增**(见 `kb/feeds/schema.py` 的
+    `ADDED_COLUMNS`),新插进来的那一行从 0 起 —— 同一秒里删掉又收回来时
     `fetched_at` 会撞上(它只记到秒),这一下由倒退的 `content_rev` 认出来。
+
+    **这两道组合有一个认不出来的角**:上一世的代次本来就是 0、又恰好在同一秒里被
+    删掉重收时,两道一起判反。那个角由 `feed_items.life`(不可复用的生命周期标识,
+    见 `kb/feeds/schema.py`)彻底关掉,搁置那一族判据已经换成它
+    (`kb.intake_diag.shelf.live_sql`)。**这条回执链还没换过来** —— 它的审计表上
+    没有那一列,换过去要连带改这一族的回归;记在
+    `docs/decisions/intake-diagnostics.md` 的「还没做的」里。两边方向一致:认不出
+    来一律当「没有回执 / 没有搁置」,不会把一个针对别的内容做过的决定搬到新内容上。
 
     认不出来就当**「没有回执」,不是「正文被改过」**:后者会在那篇文章的补抓页上
     常驻一句假红字,还连带藏掉回执区、禁掉继续处理那颗按钮,而重抓一次也去不掉
@@ -281,6 +289,22 @@ def cancel(identity: str) -> dict:
         return view(_intents[identity])
 
 
+#: **换掉一条的正文时要一起复位的那几列 —— 两个入口共用这一份。**
+#:
+#: 两个入口:扩展在那篇文章的标签上采回来的(`save`),和人在「问题与待办」里直接
+#: 粘贴的(`save_pasted`,`kb.intake_diag`)。**不许各抄一份** —— 漏掉哪一列的后果
+#: 都是旧结论赖在新正文身上:漏 `title_zh`/`body_zh`/`translated_at` 是新正文配
+#: 旧译文(而译文是这条链上最贵的一步),漏 `fulltext_hold` 是正文已经补上了、
+#: 待办还挂着,漏 `extract_stale` 是知识库里那份旧提取结果不作废。
+#:
+#: 绑定的六个值按顺序是:正文、正文指纹、语言、补抓时刻、来源说明、以及
+#: 调用方自己的 WHERE 参数。
+_REPLACE_BODY = """body=?,content_kind='content',
+ content_hash=?,content_rev=content_rev+1,lang=?,fulltext_at=?,
+ fulltext_error='',fulltext_hold='',extract_stale=1,body_provenance=?,
+ title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0"""
+
+
 def _admit_body(body: str) -> tuple[str, str]:
     """正文**够不够** —— 唯一判据,返回规整过的正文和它的摘要。
 
@@ -359,13 +383,11 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
                 raise LookupError('条目已被删除，未写入正文')
             if not allowed:
                 raise ValueError(_STALE)
-            changed = conn.execute("""UPDATE feed_items SET body=?,content_kind='content',
-                content_hash=?,content_rev=content_rev+1,lang=?,fulltext_at=?,
-                fulltext_error='',fulltext_hold='',extract_stale=1,body_provenance=?,
-                title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
-                WHERE key=? AND kind=? AND url=? AND content_hash=? AND content_rev=?
-                AND content_kind<>'post' AND x_post_meta=''
-                AND NOT EXISTS (SELECT 1 FROM feed_item_exclusions WHERE key=feed_items.key)""",
+            changed = conn.execute(
+                f'UPDATE feed_items SET {_REPLACE_BODY}'
+                " WHERE key=? AND kind=? AND url=? AND content_hash=? AND content_rev=?"
+                " AND content_kind<>'post' AND x_post_meta=''"
+                ' AND NOT EXISTS (SELECT 1 FROM feed_item_exclusions WHERE key=feed_items.key)',
                 (body, fulltext.body_hash(body), reg.text_language(current['title'], body),
                  reg.now(), json.dumps(provenance, ensure_ascii=False), intent['key'],
                  intent['kind'], intent['url'], intent['content_hash'], intent['content_rev']))
@@ -386,3 +408,60 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
         receipt = _receipt(intent, digest, provenance, len(body))
         intent.update(status='saved', receipt=receipt)
         return dict(receipt)
+
+
+def save_pasted(key: str, body: str, life: str = '') -> dict:
+    """**人直接粘贴的正文** —— 「问题与待办」里那颗「手动补正文」的后端。
+
+    和扩展那条路**共用准入判据和复位列**:正文够不够只有 `_admit_body` 一份
+    (`grab_page.body_confirmed`,按行去重之后的字数门槛),要换的那几列只有
+    `_REPLACE_BODY` 一份。所以这里不是第二套口径,而是同一套的第二个入口。
+
+    **它拿不到、也不假装拿到「这一页就是那篇文章」的证据。** 扩展那条路有
+    `_admit_page`(浏览器交回来的网址规范化之后必须等于指定的最终网址),而粘贴
+    压根没有「一页」可比 —— 断言正文属于这篇文章的是**人自己**,所以
+    `body_provenance` 记 `manual_paste` 并且 `confirmed=True` 指的是「人确认过」,
+    不是「我们核对过那一页」。两者在知识库里要分得出来,这就是分得出来的地方。
+
+    **互斥照旧待在 UPDATE 自己的 WHERE 里**(元规则),而且判据和扩展那条路**逐字
+    相同**:key / 来源 / 原网址 / 正文指纹 / 修订号 / 非 X 观点 / 未被永久排除。
+    身份那几个值在**同一个写事务里现读**(`BEGIN IMMEDIATE` 之后),不在外面先
+    SELECT 一次 —— 这中间 kb-web 里那一轮补抓 worker 完全可能已经把这一行换掉。
+    `rowcount != 1` 就是拒绝信号。
+
+    **`fulltext_at` 一写上,这条就退出自动补抓队列**(口径在
+    `fulltext.queued_sql`)。好处是刚补的正文不会被下一轮补抓盖掉;代价是万一粘
+    错了,出路是再粘一次(这条路可重复,不像导出那样不可逆)。
+
+    **`life` 是人打开那个粘贴框时这一条在第几世**(口径在
+    `kb.intake_diag.warrant.life_sql`)。上面那段「身份那几个值在同一个写事务里
+    现读」防的是**并发写入方**(补抓 worker 刚把这一行换掉),它防不了**旧表单**:
+    框开着的时候这条内容被清理删掉又从同一个链接收回来,现读到的是新一世的
+    url / 指纹 / 修订号,于是这段正文**写得进去** —— 而人断言「这段正文属于这篇
+    文章」时看着的是另一条(第 1 轮自由审查 R2)。带了就 AND 进同一条 UPDATE;
+    没带照旧(扩展那条路有它自己那道 `_same_life`)。
+    """
+    from kb.intake_diag import warrant
+
+    body, digest = _admit_body(body)
+    life_cond, life_args = warrant.life_sql(life)
+    with reg.db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        current = _checked_target(_items(conn, [key]).get(key))
+        provenance = dict(method='manual_paste', page_url=current['url'],
+                          page_title=current['title'], captured_at=reg.now(), confirmed=True)
+        changed = conn.execute(
+            f'UPDATE feed_items SET {_REPLACE_BODY}'
+            " WHERE key=? AND kind=? AND url=? AND content_hash=? AND content_rev=?"
+            " AND content_kind<>'post' AND x_post_meta=''"
+            f' AND ({life_cond})'
+            ' AND NOT EXISTS (SELECT 1 FROM feed_item_exclusions WHERE key=feed_items.key)',
+            (body, fulltext.body_hash(body),
+             reg.text_language(current['title'], body), reg.now(),
+             json.dumps(provenance, ensure_ascii=False), key, current['kind'],
+             current['url'], current['content_hash'], current['content_rev'],
+             *life_args))
+        if changed.rowcount != 1:
+            raise ValueError(_STALE)
+    return {'key': key, 'characters': len(body), 'digest': digest,
+            'content_rev': current['content_rev'] + 1}
