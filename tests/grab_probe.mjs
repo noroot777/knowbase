@@ -290,6 +290,42 @@ try {
         swapped.stage === 'writing' && /换掉/.test(swapped.hint)
           && swapped.run === 'r-swap', JSON.stringify(swapped));
 
+  // 12c. **「重新抓一次」只对「`url` 指向它自己」的来源露面。** `known()` 按
+  //      **url** 查全表,命中的可能是任何一类来源的条目:简报那条简讯的 `url` 指向
+  //      的是别人家那篇文章,后端会拒(`grab_api._recover`)—— 亮着就只是一颗必定
+  //      失败的按钮,和后端静默覆盖是同一处口径分家的两半(来源卡片那一侧曾经就是
+  //      这么留下一颗必定 409 的入口,见 tests/source_post_probe.mjs)。
+  //      **问的不是「这一类进不进补抓队列」**:推文在那一问上不许可、在这一问上
+  //      许可(它的链接就是它本人的永久链接),两者只在这一类上分叉 —— 按前者判的
+  //      后果是那几百条残片唯一的出路连按钮都没了,所以下面三档里有一档专钉它。
+  //      走的是真实赋值路径(打桩 `/api/grab/state` 的回包再调 `grabCheckItem`),
+  //      不是直接设那个变量。
+  const refetchShown = payload => evalJs(`(async () => {
+    const real = window.fetch;
+    window.fetch = (u, o) => String(u).includes('/api/grab/state')
+      ? Promise.resolve(new Response(JSON.stringify(${payload}), { status: 200 }))
+      : real(u, o);
+    try { await grabCheckItem(); } finally { window.fetch = real; }
+    return !$('grab-refetch').hidden;
+  })()`);
+  const KNOWN = "ok: true, known: true, done: false, content_ok: true, "
+                + "owing: '还没写成 vault 里那一篇'";
+  check("链接指向别处的来源:「重新抓一次」不露面",
+        await refetchShown(`{ ${KNOWN}, kind: 'digest', url_is_origin: false }`) === false);
+  // **反过来钉一边**:链接指向它自己的来源照旧露面 —— 这是错存唯一的出路
+  // (`put_items` 是 DO NOTHING),一律收走等于把它整条打死。
+  check("链接指向它自己的来源:「重新抓一次」照旧露面",
+        await refetchShown(`{ ${KNOWN}, kind: 'inbox', url_is_origin: true }`) === true);
+  // **分叉那一档**:大V观点进不了补抓队列,但它的链接是它本人的永久链接 —— 按
+  // 「进不进补抓队列」判的话这一颗会消失,而那是那几百条推文残片唯一的人工出路。
+  check("大V观点:进不了补抓队列,这颗按钮照旧露面",
+        await refetchShown(`{ ${KNOWN}, kind: 'social', url_is_origin: true }`) === true);
+  // **字段缺失不算「不许可」**:浏览器里缓存着旧脚本、回包没走到那几档,按原来那样
+  // 亮,不凭「读不到」就把那条出路收走(前端只拿它和 `false` 比;后端那几条回包路径
+  // 也因此必须把这个键填齐,见 `test_grab_endpoint.py` 撞车那一条)。
+  check("回包没给这一列时照旧露面",
+        await refetchShown(`{ ${KNOWN}, kind: 'inbox' }`) === true);
+
   // ── 13. 刷新之后立刻点侧栏:首次定位不许把人点的那一下扔掉 ────────────────
   // 这一局是**摆出来的**,不靠抢时机:把页面还回「地址还没被读走」那一刻
   // (`workspaceLocated = false`),再按真实顺序走一遍 —— 人先点,定位后到。

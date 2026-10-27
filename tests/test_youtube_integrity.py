@@ -112,7 +112,7 @@ class YouTubeIntegrity(YouTubeFixture):
                                                  'zh': [{'url': 'https://example.org/zh'}]}}
         selected = []
 
-        def download(arguments, *rest):
+        def download(arguments, log, *rest, **kwargs):
             selected.append(arguments[arguments.index('--sub-langs') + 1])
             output = arguments[arguments.index('-o') + 1].replace('%(ext)s', 'vtt')
             text = ('WEBVTT\n\n00:09:50.000 --> 00:10:00.000\nThank you for watching this AI tutorial.'
@@ -120,9 +120,14 @@ class YouTubeIntegrity(YouTubeFixture):
                     'WEBVTT\n\n00:00:00.000 --> 00:10:00.000\n完整视频字幕，介绍智能体实践、测试方法和结果验证。')
             from pathlib import Path
             Path(output).write_text(text)
+            # 真实现返回「这次调用自己的」那份日志(`media.unique`),调用方拿它去 unlink。
+            actual = media.unique(log)
+            actual.write_bytes(b'')
+            return actual
 
         with patch.object(media, 'ytdlp', side_effect=download):
-            result = media.captions(self.row, metadata, False, time.monotonic() + 5, lambda: False)
+            result = media.captions(self.row, metadata, {'youtube': {}}, False,
+                                    time.monotonic() + 5, lambda: False)
         self.assertEqual(['en', 'zh'], selected)
         self.assertEqual('zh', result['language'])
 
@@ -188,9 +193,15 @@ class YouTubeIntegrity(YouTubeFixture):
             media.save_json(path, self.metadata)
             if expired:
                 os.utime(path, (time.time() - 200, time.time() - 200))
-            with self.subTest(expired=expired, force=force), patch.object(media, 'ytdlp',
-                    side_effect=lambda arguments, output, *rest: output.write_text(json.dumps(updated))) as probe:
-                self.assertEqual(updated, media.probe(self.row, time.monotonic() + 5, lambda: False, force))
+            def dumped(arguments, output, *rest, **keywords):
+                actual = media.unique(output)
+                actual.write_text(json.dumps(updated), encoding='utf-8')
+                return actual
+
+            with self.subTest(expired=expired, force=force), \
+                    patch.object(media, 'ytdlp', side_effect=dumped) as probe:
+                self.assertEqual(updated, media.probe(self.row, {'youtube': {}},
+                                                      time.monotonic() + 5, lambda: False, force))
             probe.assert_called_once()
         with patch.object(media, 'captions', return_value=None), patch.object(media, 'asr', side_effect=RuntimeError('无字幕')):
             with self.assertRaises(RuntimeError):

@@ -1,0 +1,59 @@
+{
+  "digest": {
+    "pending": 0,
+    "fetch_done": 0,
+    "request_count": 0,
+    "held": [],
+    "released": 0,
+    "unsettled": false,
+    "translation_queued": true
+  },
+  "create_disallowed": [
+    400,
+    {
+      "detail": "简报不支持去原文链接补抓正文"
+    }
+  ],
+  "enable_disallowed": [
+    400,
+    {
+      "detail": "简报不支持去原文链接补抓正文"
+    }
+  ],
+  "repair_legacy": {
+    "status": 200,
+    "fulltext": 0,
+    "extract": 1,
+    "enabled": 0
+  },
+  "digest_stored": {
+    "body": "The summary must remain intact.",
+    "content_kind": "summary",
+    "content_rev": 0,
+    "fulltext_at": "",
+    "fulltext_tries": 0,
+    "fulltext_hold": "正文身份待确认"
+  },
+  "rss_held": {
+    "pending": 0,
+    "unsettled": true,
+    "translation_queued": false,
+    "held_keys": [
+      "ad0eb03e7b11f36cd113f1ee27a8022c"
+    ],
+    "released": 1
+  },
+  "rss_released": {
+    "pending": 1,
+    "released_again": 0
+  },
+  "rss_fetched": {
+    "done": 1,
+    "body_matches": true,
+    "content_kind": "content",
+    "content_rev": 1,
+    "fulltext_at_set": true,
+    "hold": "",
+    "translation_queued": true
+  }
+}

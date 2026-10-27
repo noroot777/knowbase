@@ -38,15 +38,27 @@ const LONG_TITLE = "为什么说检索增强这条路走到今天已经不是把
 
 const LONG_TITLE_LEN = LONG_TITLE.length;
 const post = (key, body, extra = {}) => ({
-  key, title: body.slice(0, 500), body, author: "向阳乔木",
+  key, kind: "social", title: body.slice(0, 500), body, author: "向阳乔木",
   url: "https://example.org/x/" + key, published: "2026-10-09 14:58",
   content_kind: "post", title_zh: "", body_zh: "", lang: "zh", ...extra });
 const article = (key, title, body) => ({
-  key, title, body, author: "测试作者", url: "https://example.org/rss/" + key,
+  key, kind: "rss", title, body, author: "测试作者", url: "https://example.org/rss/" + key,
   published: "2026-10-09 09:30", content_kind: "content",
   title_zh: "", body_zh: "", lang: "zh" });
 
+// 简报里一条简讯:`url` 指向的是**别人家那篇文章**,`body` 是简报自己写的那两句话。
+// 它的正文不许被那一页替换(`SourceType.body_from_link=False`),所以卡片底栏上不该
+// 有「从浏览器补抓」那个入口。
+const brief = (key, title, body) => ({
+  key, kind: "digest", title, body, author: "TLDR AI",
+  url: "https://github.com/openai/openai-cli",
+  published: "2026-10-26 08:00", content_kind: "summary",
+  title_zh: "", body_zh: "", lang: "zh" });
+
 const ITEMS = {
+  digest: { items: [brief("digest-brief", "OpenAI CLI (GitHub Repo)",
+                          "简报自己写的那两句话：OpenAI 发了一个终端客户端。")],
+            total: 1, translating: 0 },
   social: { items: [post("tweet-long", TWEET), post("tweet-short", SHORT),
                     // 等翻译那一档:它的「标题」是状态文案,不是这条内容叫什么,
                     // 所以在大V观点上照旧显示(见 renderSourceItems 的注释)。
@@ -79,11 +91,17 @@ const FIXTURES = {
   "/api/mcp/status": { config: "{}", command: "", tools: [], cli_available: false },
   "/api/conversations": { conversations: [] },
   // adapter 不给 'social':那会让 x_channel.js 去读取法清单,而这一轮验的是条目卡片。
+  // **`body_from_link` 要跟着真 catalog 给**(`kb/source_types.py` 的 `asdict`),
+  // 条目那一侧也要带 `kind`(真回包是 `registry.items` 的 `SELECT *`):
+  // 缺了它,卡片底栏那个「从浏览器补抓」入口在**所有**来源上都不出现 —— 该亮的
+  // 那一边也测不出来,而面板看起来一切正常。
   "/api/intake/modules": { modules: [
     { id: "social", label: "大V观点", description: "关注的人，此刻的想法。", note: "",
-      channels: ["social"], manager: "feeds", icon: "chat" },
+      channels: ["social"], manager: "feeds", icon: "chat", body_from_link: false },
+    { id: "digest", label: "简报", description: "每期一个汇总页。", note: "",
+      channels: ["digest"], manager: "feeds", icon: "rss", body_from_link: false },
     { id: "rss", label: "RSS", description: "让值得读的文章，自己来到这里。", note: "",
-      channels: ["rss"], manager: "feeds", icon: "rss" } ] },
+      channels: ["rss"], manager: "feeds", icon: "rss", body_from_link: true } ] },
   "/api/pipeline/channels": { channels: [{ id: "social", label: "大V观点", hint: "" },
                                          { id: "rss", label: "RSS", hint: "" }],
                               default: "rss", labels: { social: "大V观点", rss: "RSS" }, aliases: {} },
@@ -105,7 +123,7 @@ const server = createServer((req, res) => {
   };
   const items = path.match(/^\/api\/intake\/(\w+)\/items$/);
   if (items) return json(ITEMS[items[1]] ?? { items: [], total: 0, translating: 0 });
-  const over = path.match(/^\/api\/intake\/(social|rss)$/);
+  const over = path.match(/^\/api\/intake\/(social|rss|digest)$/);
   if (over) return json(overview(over[1]));
   if (path.startsWith("/api/")) return json(FIXTURES[path] ?? {});
   const file = path === "/" ? "index.html" : path.replace(/^\/static\//, "");
@@ -194,6 +212,13 @@ if (!await until(`document.querySelectorAll('#source-list .source-entry').length
 // 旧实现红的就是这一条:标题那个 <button> 一行到底,撑出卡片右边界几百像素。
 let over = JSON.parse(await overflowPx());
 check("大V观点:没有任何东西画到卡片外面", over.px <= 1, JSON.stringify(over));
+// 顺手钉住「从浏览器补抓」在这一档不露面:两道都该挡 —— `content_kind === 'post'`,
+// 而且这一类来源本身不许 `body_from_link`。另两档(简报不亮 / RSS 亮)在收尾那一节。
+// **这一类在另一位上是许可的**(`url_is_origin`:它的链接就是它本人的永久链接),
+// 那一位管的是投递栏里那颗「重新抓一次」,不是这个入口 —— 两个问题只在这一类上
+// 分叉,别据这一条以为 social 两边都关(回归 tests/grab_probe.mjs 12c)。
+check("大V观点:卡片上没有「从浏览器补抓」", await evalJs(
+  `document.querySelectorAll('#source-list .source-entry a[href^="/browser-capture"]').length`) === 0);
 
 // ── 2. 后果:正文一个字没少,而且只出现一遍 ───────────────────────────────────
 // 列表顶上可能还有一条「N 条外文内容还在等翻译」的 <p>,所以按元素类型数,
@@ -310,6 +335,27 @@ if (process.env.X_SKIP_SCREENSHOT) {
                Buffer.from(screenshot.result.data, "base64"));
 }
 
+// ── 「从浏览器补抓」那个入口按来源能力露面 ────────────────────────────────────
+// 后端 `browser_capture.target` 的准入判据是 `permits_link_body()`,而这个入口原先
+// 按来源**名字**渲染(`item.kind !== 'social'`):于是简报那条简讯上亮着一颗必定
+// 收到 409 的按钮(实测「此来源的正文不允许被原文链接中的页面替换」),人点下去
+// 落在采集页的死胡同里。两边现在读同一列(`sourceModules.get(kind).body_from_link`)。
+const captureLinks = () => evalJs(
+  `document.querySelectorAll('#source-list .source-entry a[href^="/browser-capture"]').length`);
+await send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 1000,
+                                                   deviceScaleFactor: 1, mobile: false });
+await evalJs(`openSubsPanel('digest')`);
+if (!await until(`document.querySelectorAll('#source-list .source-entry').length === 1`))
+  throw new Error("简报的条目没渲染出来");
+check("简报:正文不是外链那一页的内容,卡片上没有「从浏览器补抓」",
+      await captureLinks() === 0, `实际 ${await captureLinks()} 个`);
+// **反过来钉一边**:许可来源照旧有这个入口 —— 不然「一律不画」也能让上面那条绿,
+// 而那等于把这条补抓出路整条收走。
+await evalJs(`openSubsPanel('rss')`);
+if (!await until(`document.querySelectorAll('#source-list .source-entry').length === 2`))
+  throw new Error("RSS 的条目没渲染出来");
+check("RSS:正文就是外链那一页,卡片上照旧有「从浏览器补抓」",
+      await captureLinks() === 2, `实际 ${await captureLinks()} 个`);
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | "));
 
 // ── 收尾 ─────────────────────────────────────────────────────────────────────

@@ -16,7 +16,7 @@ import time
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from kb.feeds import fulltext, grab_page, readable, registry as reg
-from kb.source_types import permits_link_body
+from kb.source_types import link_body_sql, permits_link_body
 
 TTL = 900
 MAX_BODY = 200_000
@@ -160,8 +160,8 @@ def _same_life(item: dict, row) -> bool:
     `item_key` 按网址算:存量清理删掉一条、下一轮又从同一个链接收回来,key 一个字
     都没变,而库里那是另一行、另一份正文。两条判据各补对方的洞:`fetched_at` 只在
     INSERT 时写(`put_items` 撞 key 是 DO NOTHING,换内容的几个写入方一个都不碰它),
-    是一世的身份;`content_rev` 在一行的生命里**只增**(见 `kb/feeds/schema.py` 的
-    `ADDED_COLUMNS`),新插进来的那一行从 0 起 —— 同一秒里删掉又收回来时
+    是一世的身份;`content_rev` 在一行的生命里**只增**(见 `kb/feeds/schema.py`
+    的 `_ADDED_COLUMNS`),新插进来的那一行从 0 起 —— 同一秒里删掉又收回来时
     `fetched_at` 会撞上(它只记到秒),这一下由倒退的 `content_rev` 认出来。
 
     **这两道组合有一个认不出来的角**:上一世的代次本来就是 0、又恰好在同一秒里被
@@ -385,8 +385,8 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
                 raise ValueError(_STALE)
             changed = conn.execute(
                 f'UPDATE feed_items SET {_REPLACE_BODY}'
-                " WHERE key=? AND kind=? AND url=? AND content_hash=? AND content_rev=?"
-                " AND content_kind<>'post' AND x_post_meta=''"
+                ' WHERE key=? AND kind=? AND url=? AND content_hash=? AND content_rev=?'
+                f" AND content_kind<>'post' AND x_post_meta='' AND {link_body_sql()}"
                 ' AND NOT EXISTS (SELECT 1 FROM feed_item_exclusions WHERE key=feed_items.key)',
                 (body, fulltext.body_hash(body), reg.text_language(current['title'], body),
                  reg.now(), json.dumps(provenance, ensure_ascii=False), intent['key'],
@@ -424,7 +424,9 @@ def save_pasted(key: str, body: str, life: str = '') -> dict:
     不是「我们核对过那一页」。两者在知识库里要分得出来,这就是分得出来的地方。
 
     **互斥照旧待在 UPDATE 自己的 WHERE 里**(元规则),而且判据和扩展那条路**逐字
-    相同**:key / 来源 / 原网址 / 正文指纹 / 修订号 / 非 X 观点 / 未被永久排除。
+    相同**:key / 来源 / 原网址 / 正文指纹 / 修订号 / 非 X 观点 / 这一类来源准不准
+    从链接取正文(`link_body_sql`,名单齐不齐由 `tests/test_link_body_entries.py`
+    集合级地钉着)/ 未被永久排除。
     身份那几个值在**同一个写事务里现读**(`BEGIN IMMEDIATE` 之后),不在外面先
     SELECT 一次 —— 这中间 kb-web 里那一轮补抓 worker 完全可能已经把这一行换掉。
     `rowcount != 1` 就是拒绝信号。
@@ -452,8 +454,8 @@ def save_pasted(key: str, body: str, life: str = '') -> dict:
                           page_title=current['title'], captured_at=reg.now(), confirmed=True)
         changed = conn.execute(
             f'UPDATE feed_items SET {_REPLACE_BODY}'
-            " WHERE key=? AND kind=? AND url=? AND content_hash=? AND content_rev=?"
-            " AND content_kind<>'post' AND x_post_meta=''"
+            ' WHERE key=? AND kind=? AND url=? AND content_hash=? AND content_rev=?'
+            f" AND content_kind<>'post' AND x_post_meta='' AND {link_body_sql()}"
             f' AND ({life_cond})'
             ' AND NOT EXISTS (SELECT 1 FROM feed_item_exclusions WHERE key=feed_items.key)',
             (body, fulltext.body_hash(body),

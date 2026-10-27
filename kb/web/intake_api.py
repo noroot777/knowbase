@@ -169,10 +169,54 @@ def youtube_ranking(source_id: int | None = None):
 
 @router.get('/youtube/status')
 def youtube_status():
-    from kb.youtube import notes
+    """面板每次打开都读这一条,所以**只放便宜的判断**:谁装了、配的是哪个浏览器。
+
+    登录态有没有过期、上游有没有新版本,都要么连一次网要么跑一次真请求 —— 那些在
+    `/youtube/check` 里,用户点了才走。口径同 `x_channels.readiness` 和 `check` 的分工。
+    """
+    from kb.youtube import login, notes, toolchain
     from kb.youtube.settings import tools
+    settings = reg.get_settings('youtube')
     ready, reason = notes.available()
-    return {'tools': tools(reg.get_settings('youtube')), 'models_ready': ready, 'model_hint': reason}
+    return {'tools': tools(settings), 'models_ready': ready, 'model_hint': reason,
+            'login': login.readiness(settings), 'ytdlp': toolchain.local(),
+            'browsers': [{'id': key, 'label': login.LABELS[key], 'installed': login.installed(key)}
+                         for key in login.BROWSERS]}
+
+
+@router.post('/youtube/check')
+def youtube_check():
+    """真连一次:列一个频道(不需要登录态)+ 取一条视频的元数据(登录墙在这一步)。
+
+    **结论要带着「检的是哪个浏览器」回去**(`login.browser`):这一下要几秒,期间在面板上
+    改掉浏览器并保存是真会发生的事。不带身份回去,前端就会把一条按旧选择跑出来的
+    「登录态有效」贴在另一个浏览器旁边 —— 那句话当场变成谎话(口径同 X 那边的
+    `x_channel/check` 把 `config` 带回去)。
+
+    上游版本顺带一起查:用户点的是同一颗按钮,没有理由让他为了看版本再点一次。
+    """
+    from kb.youtube import login, toolchain
+    settings = reg.get_settings('youtube')
+    return {'login': call(login.check, settings), 'ytdlp': toolchain.status()}
+
+
+@router.post('/youtube/ytdlp/upgrade')
+def youtube_ytdlp_upgrade():
+    """把自备那份 yt-dlp 装成最新版。**只动数据目录,不碰用户的 brew/pip。**
+
+    慢(要下载和安装),但这是用户显式点的一下。装完回新版本,前端那一行跟着更新 ——
+    否则页面上会同时挂着「已更新」和一个旧版本号。
+    """
+    from kb.youtube import toolchain
+    try:
+        return {'ytdlp': toolchain.upgrade()}
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from None
+    except RuntimeError as error:
+        # **装不上要给出能照着做的一句话。** `call()` 只翻 ValueError/LookupError,
+        # 让 RuntimeError 漏出去的话 Starlette 回的是纯文本 500,前端那边
+        # `r.json()` 当场炸、原因被吞成一句无信息的「失败」(见 CLAUDE.md 前端反馈那节)。
+        raise HTTPException(500, str(error)) from None
 
 
 # ── X 的采集通道(只有 social 这一类有)──────────────────────────────────────

@@ -9,7 +9,7 @@
 //
 // 正文内容由探针自己撑高:这一层要钉的是「轴绑没绑上、头收不收、退不退得出去」,
 // 跟里面装的是哪一篇无关,而夹具库里没有图鉴和收藏数据。文章阅读器那一处
-// iframe 装的是一份静态文本(同源即可)—— 跨文档绑定成不成立只看这个。
+// iframe 装的是夹具库里的正式文章页,由生产模板声明阅读页身份。
 
 const SETTLE = 380;
 const settle = (ms = SETTLE) => new Promise(resolve => setTimeout(resolve, ms));
@@ -103,12 +103,13 @@ export async function checkDrawerScrollAway({ evaluate, wait, check, screenshot,
   // ── 文章阅读器(正文在同源 iframe 里) ──────────────────────────────────
   await evaluate(`(() => {
     const a = document.createElement('a');
-    a.setAttribute('href', '/static/css/base.css');
+    a.setAttribute('href', '/doc/reader-layout/first.md');
     a.dataset.title = '跨文档收起验证';
     openReader(a);
     return true;
   })()`);
-  await wait(`$('reader').style.display !== 'none' && $('reader-frame').contentDocument?.readyState === 'complete'`);
+  await wait(`$('reader').style.display !== 'none' && readerAway !== null
+    && $('reader-frame').contentDocument?.URL.endsWith('/doc/reader-layout/first.md')`);
   await evaluate(`(() => {
     const doc = $('reader-frame').contentDocument;
     doc.body.innerHTML = '<div style="height:3000px"></div>';
@@ -134,21 +135,22 @@ export async function checkDrawerScrollAway({ evaluate, wait, check, screenshot,
   // 上一份再绑新的)。这一档单独钉一次 —— 头一次打开永远绕过它。
   await evaluate(`(() => {
     const a = document.createElement('a');
-    a.setAttribute('href', '/static/css/base.css');
+    a.setAttribute('href', '/doc/reader-layout/first.md');
     a.dataset.title = '第一篇';
     openReader(a);
     return true;
   })()`);
-  await wait(`$('reader').style.display !== 'none' && $('reader-frame').contentDocument?.readyState === 'complete'`);
+  await wait(`$('reader').style.display !== 'none' && readerAway !== null
+    && $('reader-frame').contentDocument?.URL.endsWith('/doc/reader-layout/first.md')`);
   await evaluate(`(() => {
     const a = document.createElement('a');
-    a.setAttribute('href', '/static/js/scrollaway.js');
+    a.setAttribute('href', '/doc/reader-layout/second.md');
     a.dataset.title = '第二篇';
     openReader(a);
     return true;
   })()`);
-  await wait(`$('reader-frame').contentWindow?.location.pathname === '/static/js/scrollaway.js'
-    && $('reader-frame').contentDocument?.readyState === 'complete'`);
+  await wait(`$('reader-frame').contentDocument?.URL.endsWith('/doc/reader-layout/second.md')
+    && readerAway !== null`);
   await evaluate(`(() => {
     const doc = $('reader-frame').contentDocument;
     doc.body.innerHTML = '<div style="height:3000px"></div>';

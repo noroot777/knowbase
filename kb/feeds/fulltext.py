@@ -55,6 +55,7 @@ from kb.feeds.exclusion import failure
 from kb.feeds.fetching import FeedError, Gated, SOURCE_SECONDS, request
 from kb.intake_diag import shelf
 from kb.pipeline_state import _state
+from kb.source_types import link_body_sql
 
 # 一轮补抓多少条。存量几百条壳的话一次全抓会把一次同步拖很久,而且每抓一条就
 # 多一条待翻译 —— 分批消化,每轮啃一截。
@@ -258,12 +259,12 @@ def _save(key: str, body: str, seen: tuple[str, int, str, str, int]) -> bool:
         row = c.execute('SELECT title FROM feed_items WHERE key=?', (key,)).fetchone()
         if not row:                      # 这期间被存量清理删掉了,没什么可写的
             return False
-        cur = c.execute("""UPDATE feed_items SET body=?,content_kind='content',content_hash=?,lang=?,
+        cur = c.execute(f"""UPDATE feed_items SET body=?,content_kind='content',content_hash=?,lang=?,
             fulltext_at=?,fulltext_error='',fulltext_hold='',extract_stale=1,
             content_rev=content_rev+1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
             WHERE key=? AND content_hash=? AND content_rev=? AND fulltext_url=?
-            AND life=? AND fulltext_gen=?
+            AND life=? AND fulltext_gen=? AND {link_body_sql()}
             AND """ + shelf.free_sql(),
             (body, digest, reg.text_language(row['title'], body), reg.now(), key, *seen))
         return cur.rowcount > 0

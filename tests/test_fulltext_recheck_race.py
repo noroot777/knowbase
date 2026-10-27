@@ -176,8 +176,8 @@ class RecheckRaceTests(RecheckCase):
         with reg.db() as c:
             c.execute("UPDATE feed_items SET body=?,content_kind='content' WHERE key=?",
                       (OTHER_BODY, key))
-        cut, moved = mod._downgrade(plan)
-        self.assertEqual([], [r['key'] for r in cut])
+        cut, moved, stuck = mod._downgrade(plan)
+        self.assertEqual(([], []), (cut, stuck))
         self.assertEqual([key], [r['key'] for r in moved])
         self.assertEqual(OTHER_BODY, self.row(key)['body'])
         self.assertEqual('content', self.row(key)['content_kind'])
@@ -186,9 +186,9 @@ class RecheckRaceTests(RecheckCase):
         """反过来钉一边:没有交错时照旧全部收拾掉,别把正常降级也拦了。"""
         key = self._waiting_for_recheck()
         mod, plan = plan_now()
-        cut, moved = mod._downgrade(plan)
+        cut, moved, stuck = mod._downgrade(plan)
         self.assertEqual([key], [r['key'] for r in cut])
-        self.assertEqual([], moved)
+        self.assertEqual(([], []), (moved, stuck))
         self.assertEqual('', readable.boilerplate_reason(self.row(key)['body']))
         self.assertEqual('summary', self.row(key)['content_kind'])
 
@@ -198,7 +198,7 @@ class RecheckRaceTests(RecheckCase):
         """
         key = self._waiting_for_recheck()
         mod, plan = plan_now()
-        cut, _ = mod._downgrade(plan)
+        cut, _, _ = mod._downgrade(plan)
         self.assertEqual([key], [r['key'] for r in cut])
         self.assertEqual(1, fulltext.pending('rss'))        # 回到队列里了
         self._sync_succeeds()

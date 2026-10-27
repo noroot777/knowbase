@@ -80,6 +80,55 @@ const safeUrl = u => /^(https?:|obsidian:|\/|#)/i.test(String(u || '')) ? String
 // 两个库都随包在 /static/vendor/,正常不会走到兜底;真走到了在 console 留一句,
 // 否则"回答变纯文本"这种静默降级根本查不出是脚本没加载。
 let _mdWarned = false;
+function prepareMarkdownLinks(root) {
+  const anchors = new Map();
+  for (const heading of root.querySelectorAll('h1,h2,h3,h4,h5,h6')) {
+    const slug = heading.textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}_\s-]/gu, '').replace(/\s/g, '-');
+    const count = anchors.get(slug) || 0;
+    anchors.set(slug, count + 1);
+    heading.dataset.markdownAnchor = slug + (count ? '-' + count : '');
+  }
+  for (const link of root.querySelectorAll('a[href]')) {
+    const href = link.getAttribute('href').trim();
+    delete link.dataset.markdownFragment;
+    let destination = null;
+    try { destination = new URL(href, document.baseURI); } catch {}
+    const sameDocument = destination && destination.origin === location.origin
+      && destination.pathname === location.pathname && destination.search === location.search;
+    const fragment = href.startsWith('#') ? href.slice(1)
+      : sameDocument && href.includes('#') ? destination.hash.slice(1) : null;
+    if (fragment !== null) {
+      link.dataset.markdownFragment = fragment;
+      link.removeAttribute('target');
+      continue;
+    }
+    if (destination && !/^https?:$/.test(destination.protocol)) continue;
+    link.setAttribute('target', '_blank');
+    const rel = new Set((link.getAttribute('rel') || '').split(/\s+/).filter(Boolean));
+    rel.add('noopener');
+    rel.add('noreferrer');
+    link.setAttribute('rel', [...rel].join(' '));
+  }
+}
+
+document.addEventListener('click', event => {
+  const link = event.target.closest('a[data-markdown-fragment]');
+  if (!link || event.defaultPrevented) return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  const root = link.closest('.md, .reader-prose, [data-snip-ref], #daily-reader-body');
+  if (!root) return;
+  let fragment;
+  try { fragment = decodeURIComponent(link.dataset.markdownFragment); } catch { return; }
+  if (!fragment) return;
+  const target = [...root.querySelectorAll('[data-markdown-anchor], [id], a[name]')].find(node =>
+    node.id === fragment || node.getAttribute('name') === fragment || node.dataset.markdownAnchor === fragment);
+  if (!target) return;
+  target.scrollIntoView({ block:'start', behavior:'instant' });
+  target.tabIndex = -1;
+  target.focus({ preventScroll:true });
+});
+
 function mdHtml(src, linkContext = null) {
   const md = String(src || '');
   if (!window.DOMPurify || !window.marked) {
@@ -90,13 +139,17 @@ function mdHtml(src, linkContext = null) {
     }
     return `<div style="white-space:pre-wrap">${esc(md)}</div>`;
   }
+  let html;
   if (linkContext !== null) {
     const links = marked.lexer(String(linkContext)).links;
     const lexer = new marked.Lexer();
     lexer.tokens.links = links;
-    return DOMPurify.sanitize(marked.parser(lexer.lex(md)));
-  }
-  return DOMPurify.sanitize(marked.parse(md));
+    html = marked.parser(lexer.lex(md));
+  } else html = marked.parse(md);
+  const body = document.createElement('div');
+  body.append(DOMPurify.sanitize(html, { RETURN_DOM_FRAGMENT: true }));
+  prepareMarkdownLinks(body);
+  return body.innerHTML;
 }
 // 页内阅读链接:点击滑出面板,href 保留 /doc 路径,中键/Cmd 点仍可新标签打开
 // hash 传 #kbq=…(片段定位锚点),doc 页加载后据此高亮滚动
@@ -120,7 +173,22 @@ function promoBadge(h) {
 }
 
 function openReader(a) {
-  $('reader-frame').src = a.getAttribute('href');
+  const frame = $('reader-frame');
+  const generation = resetReaderNavigation();
+  readerLoadListener = () => bindReaderScrollAway(generation);
+  frame.addEventListener('load', readerLoadListener);
+  setReaderHeader(a);
+  // 从哪一边滑出来。默认右边;日报正文里的译文入口要左边 —— 出处编号就在正文
+  // 那一列里,抽屉从同一侧出来,眼睛不用横跨整屏去追它。**要在 display 之前设**:
+  // 滑入动画是跟着 class 走的 CSS 动画,先显示再换 class 的话这一次还是按旧的
+  // 那一边播完。
+  $('reader').classList.toggle('from-left', a.dataset.side === 'left');
+  $('reader-mask').style.display = '';
+  $('reader').style.display = '';
+  navigateReader(a.getAttribute('href'));
+  watchReaderDocument(generation);
+}
+function setReaderHeader(a) {
   $('reader-title').textContent = a.dataset.title || '';
   $('reader-open').href = a.getAttribute('href');
   $('reader-obs').href = a.dataset.obs || '#';
@@ -134,37 +202,274 @@ function openReader(a) {
   } else {
     fav.style.display = 'none';
   }
-  // 从哪一边滑出来。默认右边;日报正文里的译文入口要左边 —— 出处编号就在正文
-  // 那一列里,抽屉从同一侧出来,眼睛不用横跨整屏去追它。**要在 display 之前设**:
-  // 滑入动画是跟着 class 走的 CSS 动画,先显示再换 class 的话这一次还是按旧的
-  // 那一边播完。
-  $('reader').classList.toggle('from-left', a.dataset.side === 'left');
-  $('reader-mask').style.display = '';
-  $('reader').style.display = '';
 }
 
 // 读正文时让出位置:正文在 iframe 里,所以绑的是它那份 window,而「这块还在不在
 // 页面上」得看 iframe 元素自己(跨文档量不着)。头收起之后右上角留一颗常驻的
 // 关闭按钮 —— 原本唯一的出口就在那条头里。机制见 kb/static/js/scrollaway.js。
 let readerAway = null;
-function bindReaderScrollAway() {
-  readerAway?.release();
-  readerAway = null;
-  if ($('reader').style.display === 'none') return;      // about:blank,关掉那一下
+let readerLoadGeneration = 0;
+let readerLoadListener = null;
+let readerLastDocument = null;
+let readerRequestedDocument = null;
+let readerPendingDestination = null;
+let readerNavigationId = 0;
+let readerRecoveryCount = 0;
+let readerGuardStop = null;
+let readerGuardRelease = null;
+let readerGuardDocument = null;
+let readerGuardNavigation = null;
+let readerRequestPending = false;
+let readerBlankRetried = false;
+const MAX_READER_RECOVERIES = 1;
+function navigateReader(url) {
+  const frame = $('reader-frame');
+  let source;
+  try { source = readerDocumentUrl(frame.contentDocument); } catch {}
+  readerRequestedDocument = new URL(url, location.href).href;
+  readerRequestPending = true;
+  readerPendingDestination = null;
+  frame.dataset.readerNavigation = String(++readerNavigationId);
+  setReaderUnavailable(true, true);
+  if (source && source.href.split('#')[0] === readerRequestedDocument.split('#')[0]) {
+    if (source.href !== readerRequestedDocument) frame.src = url;
+    bindReaderScrollAway();
+  } else frame.src = url;
+}
+function readerDocumentUrl(doc) {
   try {
-    const win = $('reader-frame').contentWindow;
-    if (win?.document) readerAway = bindScrollAway(win, ['reader-head'],
-      { visible: $('reader-frame'), host: $('reader') });
+    const source = new URL(doc.URL);
+    return source.origin === location.origin && source.pathname.startsWith('/doc/') ? source : null;
+  } catch { return null; }
+}
+function protectReaderDocument(doc) {
+  const frame = $('reader-frame');
+  const navigationId = frame.dataset.readerNavigation;
+  if (readerGuardDocument === doc && readerGuardNavigation === navigationId) return;
+  readerGuardRelease?.();
+  readerGuardDocument = doc;
+  readerGuardNavigation = navigationId;
+  const removers = [];
+  const listen = (target, type, handler) => {
+    target.addEventListener(type, handler, true);
+    removers.push(() => { try { target.removeEventListener(type, handler, true); } catch {} });
+  };
+  readerGuardRelease = () => { removers.splice(0).forEach(remove => remove()); };
+  const current = () => navigationId === frame.dataset.readerNavigation
+    && $('reader').style.display !== 'none';
+  const notify = destination => recordReaderNavigation({
+    source: frame.contentWindow, origin: location.origin,
+    data: { type: 'reader-navigation', navigationId, documentUrl: doc.URL, destination },
+  });
+  listen(doc, 'keydown', event => {
+    if (current() && event.key === 'Escape' && !event.isComposing) {
+      event.preventDefault();
+      closeReader();
+    }
+  });
+  listen(frame.contentWindow, 'click', event => {
+    if (!current() || event.defaultPrevented || event.button !== 0
+        || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target.closest?.('a[href]');
+    if (!link || link.hasAttribute('download')) return;
+    let destination;
+    try { destination = new URL(link.href, doc.URL); } catch { return; }
+    if (!/^https?:$/.test(destination.protocol)
+        || destination.href.split('#')[0] === doc.URL.split('#')[0]) return;
+    link.setAttribute('target', '_blank');
+    link.setAttribute('rel', [...new Set((link.getAttribute('rel') || '').split(/\s+/)
+      .filter(Boolean).concat('noopener'))].join(' '));
+    notify(null);
+  });
+  listen(frame.contentWindow, 'beforeunload', () => {
+    if (!current()) return;
+    readerLastDocument ||= doc.URL;
+    setReaderUnavailable(true);
+    $('reader-close').focus({ preventScroll: true });
+  });
+  if (frame.contentWindow.navigation) listen(frame.contentWindow.navigation, 'navigate', event => {
+    if (!current() || event.hashChange || event.downloadRequest != null) return;
+    if (event.destination.url.split('#')[0] !== doc.URL.split('#')[0]) notify(event.destination.url);
+  });
+}
+function watchReaderDocument(generation) {
+  let timer;
+  const inspect = () => {
+    if (generation !== readerLoadGeneration) return;
+    let doc;
+    try { doc = $('reader-frame').contentDocument; } catch {}
+    if (readerDocumentUrl(doc) && readerOwnsDocument(doc)) {
+      if (readerGuardDocument !== doc || readerGuardNavigation !== $('reader-frame').dataset.readerNavigation) {
+        protectReaderDocument(doc);
+        readerLastDocument = doc.URL;
+        readerRequestPending = false;
+        setReaderUnavailable(false);
+      }
+    } else if (readerGuardDocument && readerGuardNavigation === $('reader-frame').dataset.readerNavigation
+        && (!doc || (doc.URL !== 'about:blank' && !readerDocumentUrl(doc)))) {
+      setReaderUnavailable(true);
+    }
+    timer = setTimeout(inspect, 25);
+  };
+  readerGuardStop = () => clearTimeout(timer);
+  inspect();
+}
+function readerOwnsDocument(doc) {
+  return !readerRequestPending
+    || doc.URL.split('#')[0] === readerRequestedDocument?.split('#')[0];
+}
+function recordReaderNavigation(event) {
+  const frame = $('reader-frame');
+  const message = event.data;
+  if (event.source !== frame.contentWindow || event.origin !== location.origin
+      || message?.type !== 'reader-navigation' || $('reader').style.display === 'none'
+      || message.navigationId !== frame.dataset.readerNavigation) return;
+  let source;
+  try { source = new URL(message.documentUrl); } catch { return; }
+  if (source.origin !== location.origin
+      || (readerLastDocument && source.href.split('#')[0] !== readerLastDocument.split('#')[0])) return;
+  if (message.destination === null) {
+    readerPendingDestination = null;
+    let doc;
+    try { doc = frame.contentDocument; } catch {}
+    if (doc?.URL === source.href && readerGuardDocument === doc
+        && readerGuardNavigation === frame.dataset.readerNavigation) setReaderUnavailable(false);
+    return;
+  }
+  let destination;
+  try { destination = new URL(message.destination); } catch { return; }
+  if (!/^https?:$/.test(destination.protocol)) return;
+  readerLastDocument ||= source.href;
+  readerPendingDestination = destination.href;
+  if (destination.origin !== location.origin || !destination.pathname.startsWith('/doc/')) {
+    setReaderUnavailable(true);
+    $('reader-close').focus({ preventScroll: true });
+  }
+}
+window.addEventListener('message', recordReaderNavigation);
+function resetReaderNavigation() {
+  readerLoadGeneration++;
+  readerGuardStop?.();
+  readerGuardRelease?.();
+  readerGuardStop = readerGuardRelease = readerGuardDocument = readerGuardNavigation = null;
+  readerRequestPending = readerBlankRetried = false;
+  if (readerLoadListener) $('reader-frame').removeEventListener('load', readerLoadListener);
+  readerLoadListener = null;
+  readerLastDocument = null;
+  readerRequestedDocument = null;
+  readerPendingDestination = null;
+  readerRecoveryCount = 0;
+  delete $('reader-frame').dataset.readerNavigation;
+  $('reader-destination').style.display = 'none';
+  setReaderUnavailable(false);
+  return readerLoadGeneration;
+}
+function setReaderUnavailable(unavailable, loading = false) {
+  const frame = $('reader-frame');
+  const restoreFocus = document.activeElement === frame || document.activeElement === document.body;
+  frame.hidden = unavailable;
+  frame.inert = unavailable;
+  if (unavailable) frame.setAttribute('tabindex', '-1');
+  else frame.removeAttribute('tabindex');
+  $('reader-error').hidden = !unavailable;
+  $('reader-status').textContent = loading ? '正在加载正文…' : '此页面无法在阅读器内显示。';
+  const back = $('reader-return');
+  back.hidden = !unavailable || loading || !readerLastDocument;
+  if (!back.hidden) {
+    back.href = readerLastDocument;
+    back.dataset.title = $('reader-title').textContent;
+  }
+  if (unavailable && restoreFocus) $('reader-close').focus({ preventScroll: true });
+}
+function recoverReaderDocument(doc) {
+  const destination = readerPendingDestination || doc?.URL || readerRequestedDocument;
+  if (!/^https?:/i.test(destination)) { setReaderUnavailable(true); return; }
+  $('reader-open').href = destination;
+  if (!readerLastDocument || destination === readerLastDocument) {
+    setReaderUnavailable(true);
+    return;
+  }
+  const link = $('reader-destination');
+  link.href = destination;
+  link.style.display = '';
+  if (readerRecoveryCount >= MAX_READER_RECOVERIES) {
+    setReaderUnavailable(true);
+    return;
+  }
+  readerRecoveryCount++;
+  $('reader-close').focus({ preventScroll: true });
+  navigateReader(readerLastDocument);
+}
+function syncReaderHeader(doc, path) {
+  const links = [...doc.querySelectorAll('.meta a[href]')];
+  setReaderHeader({ getAttribute: () => doc.URL, dataset: {
+    title: doc.querySelector('.doc-title')?.textContent || doc.title,
+    path: encodeURIComponent(path),
+    obs: links.find(link => link.href.startsWith('obsidian:'))?.href || '#',
+    url: links.find(link => /^https?:/i.test(link.href))?.href || '',
+  } });
+}
+function bindReaderScrollAway(generation = readerLoadGeneration) {
+  if (generation !== readerLoadGeneration) return;
+  if ($('reader').style.display === 'none') return;      // about:blank,关掉那一下
+  const frame = $('reader-frame');
+  let doc;
+  try { doc = frame.contentDocument; } catch {}
+  if (doc?.URL === 'about:blank') {
+    if (readerRequestedDocument && !readerBlankRetried) {
+      readerBlankRetried = true;
+      readerRequestPending = true;
+      setReaderUnavailable(true, true);
+      frame.src = readerRequestedDocument;
+    }
+    return;
+  }
+  const source = readerDocumentUrl(doc);
+  if (source && !readerOwnsDocument(doc)) return;
+  const previous = readerAway;
+  readerAway = null;
+  previous?.release();
+  if (!source) {
+    readerGuardRelease?.();
+    readerGuardRelease = readerGuardDocument = readerGuardNavigation = null;
+    recoverReaderDocument(doc);
+    return;
+  }
+  let path = doc.documentElement?.dataset?.readerPath;
+  if (typeof path !== 'string') {
+    try { path = decodeURIComponent(source.pathname.slice(5)); }
+    catch { path = source.pathname.slice(5); }
+  }
+  try {
+    protectReaderDocument(doc);
+    readerRequestPending = false;
+    readerLastDocument = doc.URL;
+    readerPendingDestination = null;
+    setReaderUnavailable(false);
+    syncReaderHeader(doc, path);
+    readerAway = bindScrollAway(frame.contentWindow, ['reader-head'],
+      { visible: frame, host: $('reader') });
   } catch { /* An external document cannot be measured from here. */ }
 }
-$('reader-frame').addEventListener('load', bindReaderScrollAway);
+
+$('reader').addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !event.isComposing) {
+    event.preventDefault();
+    event.stopPropagation();
+    closeReader();
+  }
+}, true);
 
 function closeReader() {
-  readerAway?.release();
+  const previous = readerAway;
   readerAway = null;
-  $('reader').style.display = 'none';
-  $('reader-mask').style.display = 'none';
-  $('reader-frame').src = 'about:blank';
+  try { previous?.release(); }
+  finally {
+    $('reader').style.display = 'none';
+    $('reader-mask').style.display = 'none';
+    resetReaderNavigation();
+    $('reader-frame').src = 'about:blank';
+  }
 }
 document.addEventListener('click', e => {
   const a = e.target.closest('a[data-doc]');

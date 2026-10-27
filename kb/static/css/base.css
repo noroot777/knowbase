@@ -111,7 +111,12 @@ body {
   gap: 8px; pointer-events: none;
 }
 .toast {
-  pointer-events: auto; display: flex; align-items: flex-start; gap: 10px;
+  /* **本体不接点击,只有那颗关闭叉接。** 它居中压在页面底部、z 90、报错那一档存活
+     6 秒,而底下常常正是下一步要点的东西:点完「检查登录态」拿到一条红字,紧接着
+     要改旁边的下拉再保存 —— 那几秒里底部中间那块按下去毫无反应,既不报错也没有
+     任何迹象(youtube_probe 的点击命中校验实测抓到:坐标 720,741 上盖着 toast err)。
+     toast 是取代原生 alert 的,不该把 alert 的阻塞性换个样子留下来。 */
+  pointer-events: none; display: flex; align-items: flex-start; gap: 10px;
   width: min(460px, calc(100vw - 32px)); padding: 12px 14px;
   background: var(--card); border: 1px solid var(--line);
   border-left: 4px solid var(--muted); border-radius: 12px;
@@ -132,6 +137,7 @@ body {
   margin-top: 2px; word-break: break-word;
 }
 .toast-x {
+  pointer-events: auto;                 /* 本体放行点击之后,这一颗要自己收回来 */
   background: transparent; color: var(--muted); padding: 0 2px;
   font-size: 12px; line-height: 1.55; border-radius: 6px;
 }
@@ -297,6 +303,7 @@ input[type=date] {
   font-size: 12.5px; color: var(--accent); text-decoration: none; white-space: nowrap;
 }
 #reader-frame { flex: 1; border: 0; width: 100%; background: var(--bg); }
+#reader-error { flex: 1; padding: 28px 24px; color: var(--muted); }
 
 .spin {
   display: inline-block; width: 16px; height: 16px; border: 2px solid var(--line);

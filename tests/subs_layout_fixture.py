@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.source_types import feed_types
 
@@ -20,6 +21,10 @@ THEMES = (
 
 
 def populate():
+    reader_dir = VAULT_ROOT / 'reader-layout'
+    reader_dir.mkdir(parents=True, exist_ok=True)
+    for name in ('first', 'second'):
+        (reader_dir / f'{name}.md').write_text(f'# {name}\n\n阅读器布局夹具。\n', encoding='utf-8')
     published = datetime.now().strftime('%Y-%m-%d %H:%M')
     # **按 `feed_types()` 整批造,不写死一张清单** —— 新增一类来源时这张夹具
     # 自动把它也撑开,否则胶囊栏上会多出一个空视图,而「切到最后一类」那条用例

@@ -22,23 +22,23 @@ from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
 from kb.feeds.exclusion import item_key
+# 库结构整组搬去了 `kb/feeds/schema.py`(这边到了 700 行上限):建表语句、后加的
+# 那些列、以及老库的补列。这里**原地再导出**:`reg.SCHEMA` / `reg._migrate` 那些
+# 调用一个字都没改,实现仍然只有一份 —— 下面 `db()` 拿的也是这个模块属性,所以
+# 回归里那一处打桩照旧穿得过去。`EXCLUSION_SCHEMA` 跟着搬走了,它只在拼建表
+# 语句那一处用。
+from kb.feeds.schema import (SCHEMA, _ADDED_COLUMNS,   # noqa: F401 - 再导出
+                             _migrate)
 # 范围目标的身份口径整组搬去了 `kb/feeds/targets.py`(这边到了 700 行上限),
 # 这里**原地再导出**:`reg.in_scope` / `reg.id_target` 那些调用一个字都没改,
 # 实现仍然只有一份。
 from kb.feeds.targets import (ID_PREFIX, NAME_PREFIX,   # noqa: F401 - 再导出
                               bare_target, id_target, in_scope, name_target,
                               target_source_id, target_source_name)
-from kb.source_types import feed_types
+from kb.source_types import feed_types, permits_link_body
 
 DB_PATH = DATA_DIR / 'feeds.db'
 KINDS = {k: s.label for k, s in feed_types().items()}
-# 建表脚本、后加列表和补列迁移整组搬去了 `kb/feeds/schema.py`(这边又到了 700 行
-# 上限),这里**原地再导出**:`reg.SCHEMA` / `reg._migrate` 的调用点和打桩点
-# (`patch.object(reg, '_migrate', …)`)一个字都没改 —— `db()` 走的也是这两个模块
-# 全局,所以这一行既是出口也是打桩点,实现仍然只有一份。
-from kb.feeds.schema import (SCHEMA,                      # noqa: F401 - 再导出
-                             ADDED_COLUMNS as _ADDED_COLUMNS,
-                             migrate as _migrate)
 
 
 # 「这段文字要不要翻译」搬去了 `kb/feeds/lang.py`(700 行上限)。**公开名字仍然
@@ -165,7 +165,8 @@ def _seed_defaults(conn) -> None:
             (kind,name,url,mode,group_name,config,created_at,updated_at,history_floor,fulltext,extract)
             VALUES(?,?,?,?,?,?,?,?,?,?,?)''',
             (s['kind'], s['name'], source_url(s['kind'],s['url']), s['mode'], s['group_name'],
-             '{}', now(), now(), floor, int(bool(s.get('fulltext'))),
+             '{}', now(), now(), floor,
+             int(bool(s.get('fulltext')) and permits_link_body(s['kind'])),
              int(bool(s.get('extract')))))
     if not seeded:
         conn.execute("INSERT INTO feed_meta VALUES('defaults-v1',?)", (now(),))
@@ -349,7 +350,12 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
     group = str(data.get('group_name', old.get('group_name', ''))).strip()[:80]
     enabled = bool(data.get('enabled', old.get('enabled', True)))
     fulltext = bool(data.get('fulltext', old.get('fulltext', False)))
-    # 「这条订阅要不要买提取」。默认关,理由见 `_ADDED_COLUMNS` 里那一段。
+    if not permits_link_body(kind):
+        if data.get('fulltext'):
+            raise ValueError(f'{KINDS[kind]}不支持去原文链接补抓正文')
+        fulltext = False
+    # 「这条订阅要不要买提取」。默认关,理由见 `kb/feeds/schema.py` 的
+    # `_ADDED_COLUMNS` 里那一段。
     extract = bool(data.get('extract', old.get('extract', False)))
     reset = any(old.get(k) != v for k, v in [('url', url), ('feed_url', feed_url), ('mode', mode)])
     from kb.youtube.channels import subscription_values

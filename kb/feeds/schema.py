@@ -1,11 +1,22 @@
 # -*- coding: utf-8 -*-
-"""订阅库的建表脚本、后加列表和补列迁移 —— **这三件事只有这一份**。
+"""`feeds.db` 的库结构:建表语句、后加的那些列、以及老库的补列 —— **这三件事
+只有这一份**。
 
 从 `kb/feeds/registry.py` 搬出来**只因为 700 行上限**(口径同
 `kb/feeds/targets.py`、`kb/feeds/lang.py`)。分界线是「问的是哪个问题」:这里只
 回答「库长什么样、老库怎么补齐」,取数、判据、默认订阅补种留在 `registry.py`。
-**公开名字仍然从 `registry` 取**(`reg.SCHEMA` / `reg._migrate`,它们有回归在
-打桩),所以那边是原地再导出,实现只有一份。
+搬出来的是**整组**:建表语句里那几句「排在最后,和老库 ALTER 补出来的列序一致」
+指的就是同一份文件里的 `_ADDED_COLUMNS` —— 新加一列时两边都要动,摆在一处才看得
+见漏了哪一边,而漏了的代价是老库上永远少一列(静默丢数据、不可恢复)。
+
+**公开名字仍然从 `registry` 取**:`reg.SCHEMA` 有几组回归在建老库时用、
+`reg._migrate` 还有一组在打桩,所以那边留一行原地再导出 —— registry 自己的 `db()`
+也是走模块属性拿 `_migrate` 的,打桩照旧穿得过去,实现只有一份。
+
+这里不碰连接、不开事务:`_migrate` 要求调用方已经持有写锁,那把锁和它的锁序在
+`registry.db()` 里(理由写在那几行上面)。排除名单那张表的 DDL 也不在这里,它是
+`kb/feeds/exclusion.py` 自己的 `SCHEMA`,这边只按 `EXCLUSION_SCHEMA` 的名字拼在
+末尾;搁置和处理记录那两张同理(`kb/intake_diag/`)。
 
 **主干的迁移只增不减**(CLAUDE.md 元规则):表和列一视同仁,要停用一列就停止
 读写它,别 DROP —— 判据是「另一条分支**不重启**会不会当场坏」。
@@ -27,7 +38,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
  last_error TEXT NOT NULL DEFAULT '', failures INTEGER NOT NULL DEFAULT 0,
  retry_at REAL NOT NULL DEFAULT 0, etag TEXT NOT NULL DEFAULT '',
  modified TEXT NOT NULL DEFAULT '', resolved_url TEXT NOT NULL DEFAULT '',
- -- 排在最后,和老库 ALTER 补出来的列序一致(见 ADDED_COLUMNS)。
+ -- 排在最后,和老库 ALTER 补出来的列序一致(见 `_ADDED_COLUMNS`)。
  history_floor TEXT NOT NULL DEFAULT '', last_note TEXT NOT NULL DEFAULT '',
  fulltext INTEGER NOT NULL DEFAULT 0, extract INTEGER NOT NULL DEFAULT 0,
  last_notice TEXT NOT NULL DEFAULT '', rev INTEGER NOT NULL DEFAULT 0,
@@ -38,7 +49,7 @@ CREATE TABLE IF NOT EXISTS feed_items (
  author TEXT NOT NULL, published TEXT NOT NULL DEFAULT '', body TEXT NOT NULL,
  content_kind TEXT NOT NULL DEFAULT 'feed', fetched_at TEXT NOT NULL,
  content_hash TEXT NOT NULL, exported_hash TEXT NOT NULL DEFAULT '', path TEXT NOT NULL DEFAULT '',
- -- 排在最后,和老库 ALTER 补出来的列序一致(见 ADDED_COLUMNS)。
+ -- 排在最后,和老库 ALTER 补出来的列序一致(见 `_ADDED_COLUMNS`)。
  extract_stale INTEGER NOT NULL DEFAULT 0, fetch_round TEXT NOT NULL DEFAULT '',
  content_rev INTEGER NOT NULL DEFAULT 0, x_post_meta TEXT NOT NULL DEFAULT '',
  body_provenance TEXT NOT NULL DEFAULT '', life TEXT NOT NULL DEFAULT '',
@@ -48,7 +59,7 @@ CREATE INDEX IF NOT EXISTS feed_items_recent ON feed_items(kind, published DESC,
 CREATE TABLE IF NOT EXISTS browser_capture_audit (
  id TEXT PRIMARY KEY,item_key TEXT NOT NULL,provenance TEXT NOT NULL,
  body_digest TEXT NOT NULL,content_rev INTEGER NOT NULL,
- -- 排在最后,和老库 ALTER 补出来的列序一致(见 ADDED_COLUMNS)。
+ -- 排在最后,和老库 ALTER 补出来的列序一致(见 `_ADDED_COLUMNS`)。
  item_fetched_at TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS browser_capture_item ON browser_capture_audit(item_key);
@@ -71,7 +82,7 @@ CREATE TABLE IF NOT EXISTS feed_runs (
 # 译文列是后加的(见 kb/feeds/translate.py)。老库里已有几千条英文条目,建表语句
 # 的 IF NOT EXISTS 对它们不生效,只能逐列 ALTER 补——补不上就不是"少个字段",
 # 而是整个翻译流程在老库上永远报 no such column。
-ADDED_COLUMNS = {
+_ADDED_COLUMNS = {
     # 这一条是新订阅的历史下界(见 `history_floor`)。老库里的订阅补成空串 =
     # 不设下界:它们的存档早就抓完了,回头给它们钉一个下界只会在源站补发旧文
     # 时静默丢内容,挡不住任何已经发生的事。
@@ -220,14 +231,14 @@ ADDED_COLUMNS = {
 _LIFE = 'lower(hex(randomblob(16)))'
 
 
-def migrate(conn) -> None:
+def _migrate(conn) -> None:
     """补上后加的列。调用方必须已经持有写锁(见 `db()`)。
 
     "读一遍列集合 → 逐列 ALTER"这两步分开跑的话,两个连接同时首访老库时会读到
     同一份旧列集合,后一个 ALTER 撞上 `duplicate column name`,那一个请求当场
     500(2026-09-30 审查实测:升级后的第一次并发访问,一个成功一个报错)。
     """
-    for table, columns in ADDED_COLUMNS.items():
+    for table, columns in _ADDED_COLUMNS.items():
         have = {r['name'] for r in conn.execute(f'PRAGMA table_info({table})')}
         for name, decl in columns:
             if name not in have:
@@ -239,7 +250,7 @@ def migrate(conn) -> None:
                     # 都要付的钱。存量那几千行各拿一个随机值:它们在补列之前就已经
                     # 在库里,没有「上一世」可言,拿到什么值都行,只要彼此不同。
                     conn.execute('UPDATE feed_items SET life=' + _LIFE)
-    # **触发器统一种 `life`,不靠各个写入方自觉**(理由见 `ADDED_COLUMNS`)。
+    # **触发器统一种 `life`,不靠各个写入方自觉**(理由见 `_ADDED_COLUMNS`)。
     # 建在这里而不是 `SCHEMA` 里:老库跑 `executescript(SCHEMA)` 的那一刻 `life`
     # 这一列还不存在,而 SQLite 在 `CREATE TRIGGER` 时就要解析触发器体里的列名,
     # 当场报 no such column、整个首访请求 500。

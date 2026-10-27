@@ -40,6 +40,15 @@ let grabUrl = '', grabResume = '', grabWhy = '';
 // 它上面,这种错存就一辈子换不回来(第 3 轮审查实测)。所以**只要库里有这一行,
 // 人就随时能要求重抓**;换不换得成由后端的八道准入和 CAS 决定(grab_api._recover)。
 let grabKnown = false;
+// 这一行的 `url` 指向的是不是它自己的原文(`/api/grab` 与 `/state` 都交出
+// `url_is_origin`)。不是的那一类(简报:那个链接指向它引用的别人家那篇)重抓一次
+// 换回来的就不是它了,所以不亮这颗按钮。**只拿它和 false 比**:字段缺失(浏览器里
+// 缓存着旧脚本、或者回包没走到)时按原来那样亮按钮,不凭「读不到」就把唯一的恢复
+// 出口收走 —— 后端那几条回包路径也因此必须把这个键填齐,**缺键和显式 false 在这里
+// 是同一个结果**,正好抵消这道兜底(`grab_api.grab_link` 撞车那一支)。
+// **问的不是「这一类进不进补抓队列」**:推文在那一问上不许可、在这一问上许可,
+// 口径见 `kb/source_types.py`。
+let grabUrlIsOrigin = true;
 
 const GRAB_HINT = 'X 的单条推文走公开接口（长文连正文一起取），'
   + '其他站点按文章正文提取；抓不到正文的不会入库。';
@@ -70,7 +79,7 @@ function applyGrabBar(spec) {
     // **输入框里没提交的那一串留着**:切去别的来源看一眼再回来是常见动作,
     // 替用户把草稿清掉等于让他重新粘一次。只有本次收录成功才清它。
     grabNav++;
-    grabStage = ''; grabNote = ''; grabKnown = false;
+    grabStage = ''; grabNote = ''; grabKnown = false; grabUrlIsOrigin = true;
   }
   updateGrabControls();
   if (manual && grabWantsFocus) { grabWantsFocus = false; focusGrabInput(); }
@@ -129,7 +138,7 @@ async function grabCheckItem(because) {
     if (r.ok) data = await r.json();
   } catch (e) { data = null; }
   if (action !== grabAction || nav !== grabNav) return;
-  if (data) grabKnown = !!data.known;
+  if (data) { grabKnown = !!data.known; grabUrlIsOrigin = data.url_is_origin !== false; }
   const resume = '；' + (grabResume || '稍后在「手动收录」里点一次「写入知识库」')
     .replace(/^，/, '') + '。';
   const lead = because ? because + '：' : '';
@@ -188,7 +197,9 @@ function updateGrabControls() {
   $('grab-url').disabled = grabBusy;
   // 库里有这一行时才给「重新抓一次」:它是**错存的唯一出路**(`put_items` 是
   // DO NOTHING,普通重投一个字节都不会动那一行),而没收过的链接直接存就行。
-  $('grab-refetch').hidden = !grabKnown || grabBusy;
+  // **不许可那一类不亮它**:简报那条简讯的正文不是它外链那一页的内容,后端会拒
+  // (`grab_api._recover`),亮着就只是一颗必定失败的按钮。
+  $('grab-refetch').hidden = !grabKnown || grabBusy || !grabUrlIsOrigin;
   grabConverge();
   $('grab-hint').textContent = grabHintText();
   // **投递栏会跟着正文一起收起**(`scroll-away`,见 docs/decisions/scroll-away.md),
@@ -236,7 +247,7 @@ async function submitGrab(opts) {
   const mine = () => action === grabAction && nav === grabNav
     && kind === (typeof sourceKind !== 'undefined' ? sourceKind : '');
   grabBusy = true;
-  grabStage = ''; grabNote = ''; grabKnown = false;
+  grabStage = ''; grabNote = ''; grabKnown = false; grabUrlIsOrigin = true;
   // 这一轮的身份要等后端发(不自己猜);起跑之前那一轮的 id 先记下来,收敛时用它
   // 分清「还没轮询到」和「核不上」。
   grabRun = '';
@@ -286,6 +297,7 @@ async function submitGrab(opts) {
   // 库里有这一行了 —— 「重新抓一次」从此露面,不管这一份是刚收的还是早就收过的
   // (刚收的那一份也可能是一道我们没认出的提示页,那正是它的用处)。
   grabKnown = !!(data.duplicate || data.added);
+  grabUrlIsOrigin = data.url_is_origin !== false;
   if (!data.duplicate) $('grab-url').value = '';
   // 终态按后端给的事实分档:started=那一轮起跑了(等 grabConverge 收尾)、
   // busy=存下了但没占到管道(要用户再点一次)、没有 pipeline 这个字段=它早就

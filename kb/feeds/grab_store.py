@@ -19,6 +19,7 @@ import json
 import sqlite3
 
 from kb.feeds import grab_page, registry as reg
+from kb.source_types import origin_body_sql, permits_origin_body
 
 #: 这一类来源的 id。`kb.source_types.SOURCE_TYPES` 里那一条。
 KIND = 'inbox'
@@ -207,6 +208,13 @@ def known(url: str) -> dict | None:
     # `content`(网页正文)的条目上。
     seen['content_ok'] = (seen['kind'] != KIND or seen['content_kind'] != 'content'
                           or grab_page.body_confirmed(seen['body']))
+    # **「这一条的 `url` 指向的是不是它自己」同样是这一行自己的事实**
+    # (`permits_origin_body`):`known` 按 **url** 查全表,命中的可能是任何一类来源的
+    # 条目 —— 简报那条简讯的 `url` 指向的正是别人家那篇文章,重抓一次换回来的就不是
+    # 它了。交出来给两个消费方:`_recover` 据它直接拒(连 HTTP 都不发)、界面据它不亮
+    # 那颗按钮。**问的不是「这一类进不进补抓队列」**(那是 `permits_link_body`,推文
+    # 在那一问上是 False、在这一问上是 True)—— 两个问题的分别见 `kb/source_types.py`。
+    seen['url_is_origin'] = permits_origin_body(seen['kind'])
     seen['exported'] = bool(seen['path'] and seen['exported_hash']
                             and seen['exported_hash'] == seen['content_hash'])
     seen['stored'] = _stored(seen['path'])
@@ -251,6 +259,18 @@ def replace(seen: dict, entry: dict) -> bool:
     `content_kind='post'` 的 X 残片)从此 `content_ok` 恒真,恢复要是也架在它上面
     就一辈子换不回来(第 3 轮审查实测)。
 
+    **「这一行的 `url` 指向的是不是它自己」也待在同一条 WHERE 里**
+    (`origin_body_sql`)。`known` 按 url 查全表,所以这条路能走到任何一类来源的条目
+    上:简报那条简讯的 `url` 指向的就是别人家那篇文章,换一次就把简报自己写的那两句
+    话毁掉,而简报不进补抓队列、没有任何一轮同步会来补。入口那一侧也拒
+    (`grab_api._recover`,那一道还省掉一次白跑的抓取),这一道是写语句自己的那一份
+    —— 两道都在,因为这个入口曾经是五个写入口里唯一漏接的那个,而漏接的形态是静默覆盖。
+
+    **这里要的是「`url` 的归属」,不是「这一类进不进补抓队列」。** 一度用了后者
+    (`link_body_sql`),于是推文被连带拦住:它不进补抓队列(通用提取器对 x.com 无效),
+    但它的 `url` 就是它本人的永久链接、重抓走的是 X 的公开接口 —— 而那是生产库里
+    3356 条推文中空正文/短残片**唯一**的人工出路,被静默收走了一整轮。
+
     **只在确认得了的内容上替换**(调用方保证:能走到这里的 `entry` 刚过完
     `grab_page.verdict` 那八道),而且**判据待在 UPDATE 自己的 WHERE 里** ——
     `content_hash` 要还是我们读到的那一版;`rowcount == 0` 说明这期间别人已经
@@ -290,10 +310,10 @@ def replace(seen: dict, entry: dict) -> bool:
     # 它那份更早的抓取照旧被接受(见 `work_version`)。`seen` 一律是 `known()` 交出
     # 来的那份快照,缺了代次就该当场抛,不许退回「只比指纹」。
     with reg.db() as c:
-        cur = c.execute("""UPDATE feed_items SET title=?,body=?,author=?,published=?,
+        cur = c.execute(f"""UPDATE feed_items SET title=?,body=?,author=?,published=?,
             content_hash=?,lang=?,x_post_meta=?,body_provenance=?,extract_stale=1,content_rev=content_rev+1,
             title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
-            WHERE key=? AND content_hash=? AND content_rev=?""",
+            WHERE key=? AND content_hash=? AND content_rev=? AND {origin_body_sql()}""",
             (fresh['title'], fresh['body'], fresh['author'], fresh['published'],
              item_version(fresh), reg.text_language(fresh['title'], fresh['body']),
              entry.get('x_post_meta', seen['x_post_meta']),

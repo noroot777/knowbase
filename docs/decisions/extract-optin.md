@@ -177,7 +177,8 @@ feeds 来源的提取从来不跑 —— 积压全靠绿泡泡那轮全流程定
 
 ## 老库迁移
 
-`_ADDED_COLUMNS` 里 ALTER 补 `extract INTEGER NOT NULL DEFAULT 0` —— **老库里的
+`kb/feeds/schema.py` 的 `_ADDED_COLUMNS` 里 ALTER 补
+`extract INTEGER NOT NULL DEFAULT 0` —— **老库里的
 订阅一律补 0**,这是一次有意的口径收紧。补成 1(「保持原样」)会让存量那几十条
 聚合订阅继续往标签里灌噪声,而用户以为自己拿到的是新规则。
 

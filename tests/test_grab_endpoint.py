@@ -12,8 +12,10 @@ from unittest.mock import patch
 
 from kb import config, pipeline
 from kb.feeds import grab, registry as reg
-from tests.grab_fixtures import (BODY, SOFT_WALL, WALL, GrabCase, PAGE, TWEET,
-                                 html_resp, page_html)
+from kb.feeds.fetching import Response
+from tests.grab_fixtures import (BODY, DIGEST_SUMMARY, SOFT_WALL, TWEET_FULL, WALL,
+                                 GrabCase, PAGE, TWEET, html_resp, page_html,
+                                 tweet_payload)
 
 
 class EndpointTests(GrabCase):
@@ -375,6 +377,87 @@ class EndpointTests(GrabCase):
         self.assertNotIn('Sign in to continue', self.items()[0]['body'])
         self.assertEqual(self.pending_export(), 1)
         self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
+
+    def test_a_refetch_is_refused_when_the_row_owns_its_own_body(self):
+        """**简报那条简讯的 `url` 指向的是别人家那篇文章** —— 「重新抓一次」不许拿
+        那一页去换简报自己写的那两句话。
+
+        `known()` 按 **url** 查全表,所以这条路能走到任何一类来源的条目上;而
+        `content_ok` 对非手动收录的条目**恒真**,于是 `refetch=True` 一步落到替换
+        那一支。审查实测:28 字的简讯摘要被换成 1338 字的仓库 README、`content_rev`
+        跟着 +1、译文整组作废、后半条链被起起来 —— 而简报**不进补抓队列**,没有任何
+        一轮同步会把那两句话补回来。
+
+        **这一档连 HTTP 都不发**:只靠写语句那一道的话,人得先白等一次抓取,拿到的
+        还是「和它一样,或者这期间有人换过」那句答不出原因的话。写语句自己那一道在
+        `tests/test_grab_store.py` 里单独钉(入口可以被别的调用方绕过,那一道不行)。
+        **反过来钉两边**:手动收录那一类照旧重抓、照旧替换(见
+        `test_an_explicit_refetch_recovers_what_the_gate_cannot_see`),**大V观点那一类
+        也照旧**(见下一条)—— 判据问的是「这一行的 `url` 指向的是不是它自己」,不是
+        「这一类进不进补抓队列」,而那两个问题恰好在推文上分叉。
+        """
+        key = self.digest_item()
+        before = dict(next(r for r in self.items() if r['key'] == key))
+        with patch.object(grab, 'grab', side_effect=AssertionError('不许发请求')), \
+             self.pipeline_patch():
+            data = self.post(refetch=True).json()
+        self.assertEqual((data['duplicate'], data['replaced']), (True, False))
+        self.assertIs(data['url_is_origin'], False)
+        self.assertIn('指向的是它引用的那一篇', data['detail'])
+        self.assertEqual(self.runs, [])              # 拒绝不起后半条链
+        # **后果断言**:那一行一个字都没动 —— 正文、代次、指纹、译文各钉一处。
+        after = dict(next(r for r in self.items() if r['key'] == key))
+        self.assertEqual(after['body'], DIGEST_SUMMARY)
+        for column in ('body', 'content_kind', 'content_rev', 'content_hash',
+                       'body_zh', 'translated_at', 'extract_stale'):
+            self.assertEqual(after[column], before[column], column)
+
+    def test_a_refetch_goes_through_for_a_tweet_whose_url_points_at_itself(self):
+        """**推文那条短残片照旧重抓得成** —— 它的 `url` 就是它本人的永久链接。
+
+        这是上面那条的**分叉边**:推文不进正文补抓队列(通用提取器对 x.com 无效),
+        所以按「进不进补抓队列」判就会把它连带拒掉 —— 而生产库里 3356 条推文中
+        12 条空正文、651 条不足 40 字,**唯一**的人工出路就是这颗按钮(浏览器采集
+        入口对这一类也不开)。第 2 轮审查实测到的倒退正是这个形态:入口早返回、
+        连 HTTP 都不发,给出的理由还是一句反过来的话。
+
+        后果逐项钉:HTTP 真发了一次、换成了、`content_kind` 不动(换了正文还是
+        推文)、译文整组作废、后半条链按**它自己那一类**的通道起起来。
+        """
+        key = self.social_item()
+        before = dict(next(r for r in self.items() if r['key'] == key))
+        resp = Response(200, TWEET, tweet_payload(text=TWEET_FULL),
+                        {'Content-Type': 'application/json'})
+        with patch.object(grab, 'request', return_value=resp) as got, \
+             patch.object(grab.x_article, 'fetch', return_value=None), \
+             self.pipeline_patch():
+            data = self.post(url=TWEET, refetch=True).json()
+        self.assertEqual(got.call_count, 1)          # 这一档必须真发 HTTP
+        self.assertEqual((data['duplicate'], data['replaced']), (True, True))
+        self.assertIs(data['url_is_origin'], True)
+        self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'social')])
+        after = dict(next(r for r in self.items() if r['key'] == key))
+        self.assertIn('这次取回来的是整篇长文', after['body'])
+        self.assertEqual(after['content_kind'], before['content_kind'])
+        self.assertEqual((after['content_rev'], after['body_zh']), (1, ''))
+
+    def test_the_race_fallback_fills_the_capability_field_in(self):
+        """**撞车那条回退路上,那个字段要按「存进来会是哪一类」填齐。**
+
+        前端刻意写 `data.url_is_origin !== false`,好让字段缺失(缓存着旧脚本、回包
+        没走到)时按钮照旧亮 —— 不凭「读不到」就把唯一的恢复出口收走。可是后端这条
+        回退路给的是一个**手搭的**字典:少这个键的话 `bool(seen.get(...))` 填成
+        `False`,**正好把前端那道兜底抵消**,而给出的理由对手动收录并不成立。
+
+        局:`save` 报 0 行(并发撞车,`DO NOTHING`),紧接着 `known()` 又查不到那一行。
+        窄,但判据不该押在「它多窄」上。
+        """
+        with patch.object(grab, 'request', return_value=html_resp(page_html())), \
+             patch.object(grab, 'save', return_value={'added': 0}), \
+             self.pipeline_patch():
+            data = self.post().json()
+        self.assertEqual((data['added'], data['duplicate']), (0, True))
+        self.assertIs(data['url_is_origin'], True)
 
     def test_an_explicit_refetch_that_hits_a_wall_leaves_the_row_alone(self):
         """重抓撞上关卡:**库里原样留着,不占管道,也不说「已完成」。**

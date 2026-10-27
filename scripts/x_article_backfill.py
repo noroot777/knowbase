@@ -42,6 +42,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb.feeds import registry as reg, x_article, x_post_meta
+from kb.source_types import origin_body_sql
 
 # 三档结论:有长文 / 确定没有长文(纯图、纯视频推文)/ 这一次问不到(推文已删、
 # 接口故障)。只有第一档会写库,后两档如实报出来 —— 第三档下次再跑就是。
@@ -109,6 +110,14 @@ def apply_one(conn, row, title, body):
     一个只改其中一列的写入方(手工 SQL、一个只刷 hash 的迁移),另一道还兜着。
     各有一条**契约**用例钉着(摆的局只有其中一道挡得住)。
 
+    **第三道是「这一行的 `url` 指向的是不是它自己」**(`origin_body_sql`)。这里取回
+    的正文来自拿这一行的 `url` 问 X 的公开接口 —— 和人点「重新抓一次」
+    (`grab_store.replace`)是**同一个来路**,所以带同一道闸;两处同来路而判据不同的话,
+    下一个读代码的人没法知道哪一边才是口径(第 2 轮审查实测到的正是这种分家)。
+    今天它在真实路径上行为等价(`empty_items` 已经写死 `kind='social'`,而 social
+    的 `url_is_origin=True`),留着的理由同上:射程是 scan 那条 SELECT 的事,闸是写
+    语句自己的事,哪天 social 这一位改了声明,这条脚本不该继续静默写。
+
     **0 行不是失败,是我们想要的末态** —— 另一边已经把这件事做了,这一趟什么都
     不该动。也**不就地重判**:`empty_items` 的判据是"正文是空的",现在它非空,
     下一次 scan 自己就不会再选中它。
@@ -116,11 +125,12 @@ def apply_one(conn, row, title, body):
     final_title = title or row['title']
     annotated = x_post_meta.stamp(dict(title=final_title, body=body), 'article', '')
     cur = conn.execute(
-        """UPDATE feed_items
+        f"""UPDATE feed_items
               SET title=?, body=?, content_hash=?, exported_hash='', lang='',
                   title_zh='', body_zh='', translated_at='', translate_error='',
                   translate_tries=0, x_post_meta=?
-            WHERE key=? AND content_hash=? AND length(trim(body))=0""",
+            WHERE key=? AND content_hash=? AND length(trim(body))=0
+              AND {origin_body_sql()}""",
         (final_title, body, _hash(row, final_title, body), annotated[x_post_meta.FIELD],
          row['key'], row['content_hash']))
     return cur.rowcount > 0

@@ -25,7 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from kb import pipeline
 from kb.feeds import grab
 from kb.feeds.registry import KINDS
-from kb.source_types import SOURCE_TYPES
+from kb.source_types import SOURCE_TYPES, permits_origin_body
 
 router = APIRouter(prefix='/api/grab')
 
@@ -139,6 +139,23 @@ def _recover(out: dict, url: str, seen: dict, label: str, asked: bool = False) -
     到的就是同一份。**失败那两档不是终态**:界面据 `replaced` 为假说「没换成」,
     而不是说「已完成」—— 再来一次照旧会重抓。
     """
+    if not seen.get('url_is_origin'):
+        # **这一行的 `url` 指向的不是它自己**(`permits_origin_body`),所以这一档
+        # **连 HTTP 都不发**:简报那条简讯的 `url` 指向的是它引用的那篇别人家的文章,
+        # 换一次就把简报自己写的那两句话毁掉,而简报不进补抓队列、没有任何一轮同步
+        # 会来补。`replace` 自己的 WHERE 也挡着(`origin_body_sql`),但只靠那一道的
+        # 话人得先白等一次抓取、拿到的还是「和它一样,或者这期间有人换过」那句答不出
+        # 原因的话。界面上那颗按钮据 `url_is_origin` 本就不露面,这一道是给直接打接口
+        # 的那一侧。
+        #
+        # **问的是 `url` 的归属,不是「这一类进不进补抓队列」**(`permits_link_body`)
+        # —— 一度用了后者,于是推文被连带拒掉:它的 `url` 就是它本人的永久链接、重抓
+        # 走 X 的公开接口取回它自己的正文,而那是那些空正文/短残片唯一的人工出路。
+        out['replaced'] = False
+        out['detail'] = (f'这条之前被「{label}」收过了；它的正文是「{label}」自己写的'
+                         '那段内容，而这个链接指向的是它引用的那一篇 —— '
+                         '重抓一次换回来的就不是它了，要读那一篇请点原文链接')
+        return out
     why = '你要求重新抓一次' if out.get('content_ok') else '库里那一份看不出是正文'
     try:
         fresh = grab.grab(url)
@@ -167,7 +184,10 @@ def _duplicate(url: str, seen: dict, refetch: bool = False,
     label = KINDS.get(seen['kind'], seen['kind'])
     out = {'ok': True, 'added': 0, 'duplicate': True, 'url': url,
            'title': seen['title'], 'kind': seen['kind'], 'done': bool(seen['done']),
-           'content_ok': bool(seen.get('content_ok'))}
+           'content_ok': bool(seen.get('content_ok')),
+           # 界面据它决定「重新抓一次」露不露面:亮一颗必定被拒的按钮,和后端静默
+           # 覆盖是同一处口径分家的两半(第 3 条审查形态)。
+           'url_is_origin': bool(seen.get('url_is_origin'))}
     if restore_only and not out['content_ok']:
         # 恢复不替任何人做「换掉它」这个决定(出路是 `refetch`,见 `_recover`)。
         out['owing'] = grab.owing(seen)
@@ -216,7 +236,11 @@ def grab_state(url: str = Query(..., min_length=1, max_length=2048)):
     seen = grab.known(norm)
     out = {'ok': True, 'url': norm, 'known': bool(seen),
            'done': bool(seen and seen['done']), 'owing': grab.owing(seen or {}),
-           'content_ok': bool(seen and seen['content_ok'])}
+           'content_ok': bool(seen and seen['content_ok']),
+           # 没收过的那一档按手动收录算(存进来就会是它),按钮本来也被 `known`
+           # 那一道挡着。
+           'url_is_origin': (bool(seen['url_is_origin']) if seen
+                             else permits_origin_body(grab.KIND))}
     if seen:
         out.update(kind=seen['kind'], title=seen['title'],
                    exported=seen['exported'], stored=seen['stored'],
@@ -261,9 +285,14 @@ def grab_link(body: GrabRequest):
         # 同一条链接在**这一类**里撞上了(两条投递同时落地):`DO NOTHING` 挡住
         # 了后一个,库里那一份一个字节都没动。这正是想要的末态,不是故障(元规则
         # 「0 行不是失败」)—— 但「它写进知识库没有」仍然要现查一次再答。
+        # **这份兜底字典要按「存进来会是哪一类」把字段填齐**:缺一个键,
+        # `_duplicate` 那边 `bool(seen.get(...))` 就填成 False,**正好抵消前端
+        # 「字段读不到时按钮照旧亮」那道兜底** —— 收走的是唯一的恢复出路,给出的
+        # 理由还是一句对手动收录并不成立的话。所以写的是判据函数,不是字面量。
         return _duplicate(url, grab.known(url) or
                           {'title': entry['title'], 'kind': grab.KIND,
-                           'path': '', 'done': False})
+                           'path': '', 'done': False,
+                           'url_is_origin': permits_origin_body(grab.KIND)})
     # 已经入库的事实先定下来,再谈写不写得进知识库这一轮。
     # `content_ok` 恒真:它的含义就是「这份内容过完了准入那八道」,而新收的这一条
     # 刚过完(`grab_page.verdict` 的 ⑧)。两端字段对齐,界面不必按「有没有这个键」猜。

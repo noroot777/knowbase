@@ -13,6 +13,7 @@ lockfile。少指一个,那一组用例就会去问**生产**那一份,答案跟
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -43,7 +44,20 @@ def tweet_payload(**tweet) -> bytes:
 #: 一段**确认得了**的正文:`grab_page.body_confirmed` 要求「不重复的字数」过得了
 #: 提取器那道 400 的门槛。保存类用例原先用两个字的 `'正文'`,而那一份在新判据下
 #: 正是「看不出是正文」的那一档 —— 夹具要像真条目(真条目一定过完了那八道)。
+#: 简报那条简讯**自己**那段摘要。它的 `url` 指向的是别人家那篇文章 —— `known()`
+#: 按 url 查全表,所以手动收录那条路会命中它(`GrabCase.digest_item`)。
+DIGEST_SUMMARY = '简报自己写的那两句话：OpenAI 发了一个终端客户端。'
+
 BODY = '这是一段确认得了的正文，它说的东西足够多，不是同一句话在复读。' * 14
+
+#: 一条推文的**短残片**:采集那一轮只拿到这么点。生产库里 social 有 3356 条,其中
+#: 12 条正文为空、651 条不足 40 字 —— 它们进不了补抓队列、没有浏览器采集入口,
+#: 唯一的出路是人点「重新抓一次」(`GrabCase.social_item`)。
+TWEET_STUB = '随手记一笔'
+
+#: 重抓那一次取回来的整篇长文(`tweet_payload(text=TWEET_FULL)`)。够长才看得出
+#: 「换掉了」,也够短才不至于让标题那一列塞满整篇(推文没有标题,`grab` 拿正文开头当)。
+TWEET_FULL = '这次取回来的是整篇长文，内容足够多，不是同一句话在复读。' * 4
 
 #: 一份**看不出是正文**的内容:同一段铺满整页(以前那一版判据漏放存下的形状)。
 #: 保存那一半和端点那一半都拿它当素材,所以住在夹具里。
@@ -108,6 +122,47 @@ class GrabCase(unittest.TestCase):
         self.state = deepcopy(pipeline_state._state)
         pipeline_state._state.update(running=False, stop_requested=False)
         self.addCleanup(lambda: pipeline_state._state.update(self.state))
+
+    def digest_item(self, url: str = PAGE, body: str = DIGEST_SUMMARY) -> str:
+        """一条**简报**条目:`url` 指向别人家那篇文章,`body` 是简报自己写的那两句
+        话,而且**已经译过**(要能钉住「译文有没有被白白作废」)。返回它的 key。
+
+        简报不进正文补抓队列,所以这两句话一旦被外链那一页顶掉,没有任何一轮同步
+        会把它补回来 —— 这就是能力判据要拦在写入层的那一类条目。
+        """
+        source = reg.save_subscription('digest', {
+            'name': 'TLDR AI', 'url': 'https://example.org/digest/rss'})
+        reg.put_items(source, [{'url': url, 'title': 'OpenAI CLI (GitHub Repo)',
+                                'body': body, 'content_kind': 'summary',
+                                'published': reg.now()}])
+        key = hashlib.sha256(f'digest:{url}'.encode()).hexdigest()[:32]
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET title_zh='简报标题译文',"
+                      "body_zh='简报摘要译文',translated_at=? WHERE key=?",
+                      (reg.now(), key))
+        return key
+
+    def social_item(self, url: str = TWEET, body: str = TWEET_STUB) -> str:
+        """一条**大V观点**条目:`url` 就是这条推文自己的永久链接,`body` 是一段
+        短残片,`content_kind='post'`,而且**已经译过**。返回它的 key。
+
+        **这一类在两个判据上分叉,所以它是这组用例里最要紧的那个局。** 推文进不了
+        正文补抓队列(通用提取器对 x.com 无效),但它的 `url` 指向的是它本人 ——
+        人点「重新抓一次」走 X 的公开接口取回的就是这条推文自己的正文。生产库里
+        3356 条推文中空正文和不足 40 字的那几百条,**唯一**的人工出路就是这条;
+        给它挂上通用路那道闸的后果是整条出路静默消失(第 2 轮审查实测)。
+        """
+        source = reg.save_subscription('social', {
+            'name': 'example', 'url': 'https://x.com/example'})
+        reg.put_items(source, [{'url': url, 'title': '某某：随手记一笔',
+                                'body': body, 'content_kind': 'post',
+                                'published': reg.now()}])
+        key = hashlib.sha256(f'social:{url}'.encode()).hexdigest()[:32]
+        with reg.db() as c:
+            c.execute("UPDATE feed_items SET title_zh='推文标题译文',"
+                      "body_zh='推文译文',translated_at=? WHERE key=?",
+                      (reg.now(), key))
+        return key
 
     def items(self) -> list[dict]:
         with reg.db() as c:

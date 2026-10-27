@@ -87,10 +87,8 @@ function enhanceDailyBody(el, materialList = null) {
       node.replaceWith(frag);
     }
   }
+  prepareMarkdownLinks(el);
   for (const a of el.querySelectorAll('a[href]')) {
-    if (/^https?:/i.test(a.getAttribute('href') || '')) {
-      a.target = '_blank'; a.rel = 'noopener noreferrer';
-    }
     // 角标样式认的是"链接文字就是 [12]",落盘写进去的和刚补上的一视同仁。
     if (/^\[\d{1,3}\]$/.test((a.textContent || '').trim())) a.classList.add('daily-ref');
   }

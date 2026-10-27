@@ -22,6 +22,7 @@ from kb.feeds import registry as reg
 # `item_version` 和工作身份 `work_version` —— 要摆在一起对照着读)。
 from kb.feeds.grab_store import work_version as _content_version
 from kb.intake_diag import shelf
+from kb.source_types import link_body_sql
 
 #: 确定失败的重试额度。试满就离开补抓队列,按 feed 原本那份壳走完翻译和导出 ——
 #: 留着原文比把它永远挡在知识库外面强(理由见 `queued_sql` 的 ③ ④)。
@@ -30,6 +31,8 @@ MAX_TRIES = 3
 
 def _eligible(ref: str = 'feed_items.key') -> str:
     """**「这一条现在还属于某条开着补抓的订阅」—— 补抓这一族判据只有这一份。**
+
+    条目和归属订阅都须开放 `SourceType.body_from_link`,旧库误开的开关不授予资格。
 
     一条内容可能同时属于聚合源和单号源,**任意一条开着就算有资格**(补到的正文对
     另一条同样有用);反过来,关掉最后一条开着补抓的归属、或者把订阅整条删掉
@@ -42,11 +45,13 @@ def _eligible(ref: str = 'feed_items.key') -> str:
     人工恢复也以 `released=0` 拒绝。三处各判一遍就会这样,所以元规则那条「口径
     只有一份」在这里不是风格问题。
 
-    `ref` 只有两个取值、全写死在本模块里(`feed_items.key` 给拼进别人 WHERE 的那
-    几段,`fi.key` 给 `held()` 自己那条带别名的 SELECT)—— **不接外部输入**。
+    `ref` 只有两个写死的取值(`feed_items.key` 给拼进别人 WHERE 的那几段和复查
+    写回,`fi.key` 给 `held()` 和复查脚本带别名的 SELECT)—— **不接外部输入**。
     """
-    return ("EXISTS(SELECT 1 FROM subscription_items si JOIN subscriptions s"
-            f" ON s.id=si.subscription_id WHERE si.item_key={ref} AND s.fulltext=1)")
+    item = ref.rsplit('.', 1)[0]
+    return (f"({link_body_sql(item)} AND EXISTS(SELECT 1 FROM subscription_items si"
+            " JOIN subscriptions s ON s.id=si.subscription_id"
+            f" WHERE si.item_key={ref} AND s.fulltext=1 AND {link_body_sql('s')}))")
 
 
 def work_version(row) -> tuple[str, int, str, str, int]:

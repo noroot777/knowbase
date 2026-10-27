@@ -9,6 +9,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from kb.feeds import readable, registry as reg
 from kb.feeds.fetching import FeedError, Gated
+from kb.source_types import permits_link_body
 
 _SUFFIXES = ('.md', '.markdown', '.mdown', '.mkdn')
 _COMPONENT = re.compile(r'[A-Za-z0-9_.-]+\Z')
@@ -122,7 +123,23 @@ def fetch(url: str, *, transport=None, deadline=None, collect_deadline=None) -> 
 
 def enrich(source: dict, entries: list[dict], *, deadline: float,
            collect_deadline: float) -> list[dict]:
-    if source.get('fulltext'):
+    """采集时顺手把能直取的 Markdown 原文换上来 —— **先过来源能力那一道**。
+
+    **这是「拿 `url` 指向的那一页替换本条正文」的第三个入口**,和补抓队列
+    (`fulltext`)、浏览器采集(`kb.browser_capture`)同族,判据只有
+    `permits_link_body()` 这一份(口径见 `kb/source_types.py`)。
+
+    **漏掉它的后果在生产库里实现过一次。** 原先这儿只有下面那道
+    `source['fulltext']` 早退 —— 那不是资格判据,是**分工**:开了补抓的订阅让
+    补抓阶段去取(它带重试、挂起和准入八道),这儿不抢。于是闸门方向恰好是反的:
+    简报按 `docs/decisions/digest.md` 规定 `fulltext` 必须为 0,**正好落在打开的
+    那一侧**,而它的 `url` 指向的是别人家的文章。TLDR AI 里一条指向 GitHub 仓库
+    的简讯因此被整篇 README 顶掉(9242 字,`content_kind` 由 `summary` 变
+    `content`,已导出进 vault),而同一期另外 4 条同样指向 github.com 的没被换 ——
+    差别只是那一刻 `api.github.com` 放不放行(`fetch` 把普通失败吞成 `None`),
+    所以它表现为**间歇性**。存量出路见 `scripts/feed_fulltext_recheck.py`。
+    """
+    if not permits_link_body(source['kind']) or source.get('fulltext'):
         return entries
     candidates = [entry for entry in entries if entry.get('content_kind') != 'post'
                   and target(entry['url']) is not None]
