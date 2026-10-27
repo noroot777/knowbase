@@ -167,6 +167,7 @@
 | 公众号采集、订阅名单、本机绿泡泡库(`collector/`、`kb/collectors/wechat_local.py`) | `collector.md` |
 | X 大V的三条通道、水位、CDP、登录窗口、正文约定与判空(`kb/feeds/x_channels.py`、`x_browser`/`x_timeline_js`/`x_feedgrab`/`x_cdp`/`cdp_attach`/`x_login_window`/`x_body`/`x_post_empty`) | `x-channels.md` |
 | X 长文正文补全、地址识别那一族正则(`kb/feeds/x_article*.py`) | `x-article.md` |
+| YouTube 频道订阅、登录态与 yt-dlp 更新、发现的两条路、排名与处理预算(`kb/youtube/`) | `youtube-intake.md` |
 | 聚合源正文补抓、正文提取器、提取结果与正文版本绑定、「看不出是不是正文」那几条的挂起与人工出口(`kb/feeds/fulltext.py`、`readable.py`、`page_gate.py`、`scripts/feed_held_cli.py`、`intake_api` 的 `held`) | `fulltext.md` |
 | 订阅正文转纯文本、阅读页渲染、来源卡片(`kb/feeds/fetching.py` 的 `plain`、`kb/web/pages.py`) | `feed-plain.md`、`doc-reader.md`、`source-cards.md` |
 | 新订阅只收几天、存量清理(`kb/feeds/history.py`、`scripts/feed_trim_history.py`) | `history-depth.md` |

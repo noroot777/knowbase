@@ -22,7 +22,7 @@ class YouTubeCollector(YouTubeFixture):
         def probe(row, *rest):
             self.calls.append(row['video_id'])
             self.assertEqual(5, len(storage.rows()))
-            self.assertTrue(all(row['heat_rank'] for row in storage.rows()))
+            self.assertTrue(all(row['score_rank'] for row in storage.rows()))
             return {'duration': 600, 'language': 'en'}
 
         with patch.object(discovery, 'fetch', return_value=self.fetched), \

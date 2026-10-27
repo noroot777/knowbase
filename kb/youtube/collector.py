@@ -1,6 +1,8 @@
 import json
+import math
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 
 from kb.collectors import Coverage
 from kb.collectors.feeds import FeedCollector
@@ -9,8 +11,8 @@ from kb.feeds.sync import _claim_write, _save_failure, _within_history
 from kb.maintenance import maintenance_lock
 from kb.pipeline_segments import note_retry_targets
 from kb.pipeline_state import _stage, _state
-from kb.youtube import discovery, media, notes, products, ranking, storage
-from kb.youtube.admission import TEMPORARY, gate
+from kb.youtube import discovery, login, media, notes, products, ranking, storage
+from kb.youtube.admission import TEMPORARY, UNDATED, calibrate, gate
 from kb.youtube.channels import config
 from kb.youtube.settings import of
 
@@ -19,8 +21,18 @@ def stopped():
     return bool(_state.get('stop_requested'))
 
 
+#: 单个频道的发现预算。两条路按 `discovery.DETAIL_SHARE` 分这一份:带登录态逐条解析
+#: 拿大头(单频道半分钟一档),估算列举拿剩下那点。
+DISCOVERY_PER_SOURCE = 90.0
+#: 整轮发现的上限。48 个频道全程带登录态逐条解析、4 路并发约 9 分钟,封在这儿 ——
+#: 剩下的照旧记进 `skipped`,下一轮接着查(按 URL 去重,不会重复入库)。
+DISCOVERY_CEILING = 900.0
+
+
 def process(rows, settings, scope, summary, deadline):
     policy = of(settings)
+    now = datetime.now(timezone.utc)
+    floor = now - timedelta(days=policy['window_days'])
     ready, why = notes.available()
     chosen = ranking.select(rows, policy, scope.force)
     failures = {}
@@ -41,11 +53,43 @@ def process(rows, settings, scope, summary, deadline):
             continue
         try:
             probes += 1
-            metadata = media.probe(row, deadline, stopped, scope.force or row['gate_code'] in TEMPORARY)
-            if decision := gate(metadata, policy):
+            metadata = media.probe(row, settings, deadline, stopped,
+                                   scope.force or row['gate_code'] in TEMPORARY)
+            if decision := gate(metadata, policy, row):
                 storage.update(row['video_id'], state=decision.state, reason=decision.reason,
                                gate_code=decision.code, retry_at=time.time() + decision.retry_seconds)
                 continue
+            # ── 事实日期一到手就闭环:换掉估算值,再用**同一个** `rejection` 重判资格 ──
+            # 排名那一轮是拿估出来的日子排的(后路只有频道页的列表顺序),所以指定日期
+            # 范围、订阅历史下界、未来时间这几道当时判的都是估算值。**这一轮不许只判
+            # 窗口**:审查实测,估 10-27 而实际 10-25 的那条,在 `since=until=10-27` 的
+            # 补抓里一路走到成品,日期还是 10-27。
+            # **`fallback=False` 挡不住这一类** —— 它只拦住这一轮新增估算候选,库里
+            # 上一轮留下的那些照旧会被这一轮挑中。
+            if row['entry'].get('approximate'):
+                calibrated = calibrate(row, metadata)
+                if calibrated is None:
+                    storage.update(row['video_id'], state=UNDATED.state, reason=UNDATED.reason,
+                                   gate_code=UNDATED.code, retry_at=time.time() + UNDATED.retry_seconds)
+                    continue
+                storage.recalibrate(row['video_id'], calibrated)
+                # **重判要对每个归属都来一次**,而且走 `ranking.qualify` 那一份口径 ——
+                # 只重判代表那一个归属的话,新订阅的历史下界会把这条视频对老订阅也一起
+                # 判死(审查实测:老订阅单独判是合格的,结果全局 excluded、下一轮入选 0)。
+                calibrated_row = {**row, 'entry': calibrated}
+                representative, reasons, unknown = ranking.qualify(calibrated_row, policy, scope, now, floor)
+                if representative is None:
+                    # **日期这类判据是「这一轮不要」,不是「永久不要」。** 写成 `excluded`
+                    # 的话,下一轮 `rejection` 那道 `state=='excluded' and not force` 会在
+                    # 看日期之前就拒掉它 —— 用户把回看天数放宽、或换一天补抓,这条视频
+                    # 再也回不来。`filtered` 才是「这一轮没进」:下一轮 `score()` 拿事实
+                    # 日期重新判,该回来就回来。永久排除只由用户的移除动作产生。
+                    # 校准之后 `approximate` 已经摘了,所以这里的拒绝一律判得准、
+                    # `unknown` 必然是空的 —— 两个都取只是不留 IndexError 的口子。
+                    storage.update(row['video_id'], state='filtered', gate_code='window',
+                                   reason=(reasons or unknown)[0], score_rank=0)
+                    continue
+                row = representative
             duration = float(metadata['duration'])
             storage.update(row['video_id'], duration=duration)
             if storage.permanently_excluded(row):
@@ -130,12 +174,43 @@ def collect(scope):
         else:
             pending.append(source)
     pending.sort(key=lambda source: (source['last_attempt'], source['id']))
+    # **登录态不就绪就不开跑。** 这一轮本来会让每个频道各撞一次同样的墙:面板上 48 条
+    # 一模一样的失败、48 条退避,而原因只有一个、还在别处。**不写 last_error、不推退避** ——
+    # 缺的是本机配置,不是这些订阅的毛病,配好之后该立刻能跑,不该先等退避过去。
+    gateway = login.readiness(settings)
+    if not gateway['ready'] and pending:
+        summary['message'] = gateway['message']
+        summary['unconfigured'] = len(pending)
+        _stage('crawl', 'error', 'YouTube · ' + gateway['message'])
+        with reg.db() as connection:
+            connection.execute('INSERT INTO feed_runs(kind,started_at,finished_at,summary) VALUES(?,?,?,?)',
+                               ('youtube', started, reg.now(), json.dumps(summary, ensure_ascii=False)))
+        return summary
     succeeded = []
-    discovery_deadline = time.monotonic() + 90
+    # **发现的预算按主路真实的速度定。** 全程登录态之后每一轮都是逐条解析:单频道半分钟
+    # 一档(实测每条约 4.3 秒,`discovery.DETAIL_LIMIT` 封在 10 条)。预算卡在 90 秒就只有
+    # 头几个频道轮得到,其余静默进 `skipped`(面板上看不出区别)—— 所以按待查频道数算一个
+    # 够用的额度,再用 `DISCOVERY_CEILING` 封顶。
+    per_source = DISCOVERY_PER_SOURCE
+    rounds = math.ceil(len(pending) / 4) if pending else 0
+    discovery_deadline = time.monotonic() + min(DISCOVERY_CEILING, max(90.0, rounds * per_source))
     with ThreadPoolExecutor(max_workers=4, thread_name_prefix='youtube-feed') as pool:
-        while pending and not stopped() and time.monotonic() + 20 <= discovery_deadline:
+        while pending and not stopped():
+            # **第一批无条件放行。** 「剩下的时间够不够再跑一整批」这道闸只能拦后续批次:
+            # 额度正好是 `rounds * per_source` 时,这个判断在第一批就差那几微秒 ——
+            # 结果是一轮一个频道都没查、全进 `skipped`,而面板上只说「部分频道未轮到」
+            # (只有一个待查频道的那一轮必然撞上,实测 checked=0)。
+            if summary['checked'] and time.monotonic() + per_source > discovery_deadline:
+                break
             batch, pending = pending[:4], pending[4:]
-            futures = {pool.submit(discovery.fetch, source): source for source in batch}
+            # 显式日期范围那一轮只禁**估算**那条路(第 2 条);带登录态逐条解析那条拿的是
+            # 真实日期,照旧可以走(见 `discovery.fetch`)。
+            # **每个频道一份自己的 `notes`**:那是「列了几条之后中断」的说明,四个线程
+            # 共写一份的话就说不出是哪个频道没列完。
+            told = {source['id']: [] for source in batch}
+            futures = {pool.submit(discovery.fetch, source, settings, per_source,
+                                   not scope.ranged, told[source['id']]): source
+                       for source in batch}
             for future in as_completed(futures):
                 source = futures[future]
                 try:
@@ -143,6 +218,12 @@ def collect(scope):
                     storage.discover(source, entries)
                     summary['discovered'] += len(entries)
                     succeeded.append(source)
+                    # **「没列完」不是失败,但也不许静默**(口径同 `feeds.sync` 的 `partial`):
+                    # 列到的照旧入库、下一轮按 URL 去重地接着列,可「停在第 7 条」和「整个
+                    # 频道都列完了」在面板上不该长得一模一样。记成 error 更不对 —— 那会显示
+                    # 「连接失败」并让这条订阅进退避重试,而它这一轮明明带回了东西。
+                    for note in told[source['id']]:
+                        summary['partial'].append({'title': source['name'], 'reason': note})
                 except Exception as error:
                     _save_failure(source, error, summary)
                 summary['checked'] += 1
@@ -171,6 +252,21 @@ def collect(scope):
         except Exception as error:
             _save_failure(source, error, summary)
     summary['stopped'] |= stopped()
+    # **同一个原因不要在面板上重复一遍又一遍。** 登录态失效时每个频道都会报同样那句话,
+    # 逐条读完才明白是一个问题 —— 这里归并成一句带频道数的话,逐条明细照旧留在 errors 里。
+    # 按 `AUTH_CODES` 整个集合判,并且**按真正出现的那一档说话** —— 机器人验证、
+    # cookie 读不出来、登录失效这三件事的下一步完全不同,归并不该把它们说成同一句。
+    walled = {}
+    for item in summary['errors']:
+        code = login.classify(item['reason'])
+        if code in login.AUTH_CODES:
+            walled.setdefault(code, []).append(item)
+    for code, items in walled.items():
+        summary['message'] += ('；' if summary['message'] else '') + \
+            f"{len(items)} 个频道卡在同一处：" + login.describe(code, gateway['browser'])
+    if summary['partial']:
+        summary['message'] += ('；' if summary['message'] else '') + \
+            f"{len(summary['partial'])} 个频道没列完（{summary['partial'][0]['reason']}）"
     if pending:
         summary['message'] += '；部分频道未轮到，留待下轮轻量检查'
     with reg.db() as connection:
