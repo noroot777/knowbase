@@ -23,6 +23,10 @@ from contextlib import ExitStack
 from unittest.mock import patch
 
 from kb.collectors import FetchScope
+# 「人点了停止」那一格待在 `pipeline_state`:`collector.stopped()` 现在过
+# `pipeline_flow.halted()`(整轮停止 + 这一类被提前结束,口径只有那一份),所以
+# 它自己不再 import `_state` —— 要模拟停止就写这一格,别找采集器那个模块要。
+from kb import pipeline_state as ps
 from kb.youtube import collector, discovery, storage
 from tests.youtube_fixture import YouTubeFixture
 
@@ -55,7 +59,7 @@ class DiscoveryPacing(YouTubeFixture):
             self.spans.append(span)
             _DWELL_SLEEP(DWELL)
             if stop_at == 'fetch':
-                collector._state['stop_requested'] = True
+                ps._state['stop_requested'] = True
             span[2] = time.monotonic()
             return []
 
@@ -68,7 +72,7 @@ class DiscoveryPacing(YouTubeFixture):
         def beat(seconds):
             self.beats.append(seconds)
             if stop_at == 'beat':
-                collector._state['stop_requested'] = True
+                ps._state['stop_requested'] = True
 
         with ExitStack() as stack:
             stack.enter_context(patch.object(collector, 'DISCOVERY_SPACING', SPACING))
@@ -133,7 +137,7 @@ class DiscoveryPacing(YouTubeFixture):
             with self.subTest(window=window):
                 self.spans.clear()
                 self.beats.clear()
-                collector._state['stop_requested'] = False
+                ps._state['stop_requested'] = False
                 # 上一轮那几个频道停用掉(`isolate`),这一轮换一批编号 —— 否则 pending
                 # 里混着两轮的频道,`skipped` 那条断言就说不清是谁没轮到。
                 self.isolate()
