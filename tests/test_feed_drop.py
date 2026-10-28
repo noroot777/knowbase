@@ -14,7 +14,6 @@ from kb.collectors import CollectorError, item_dropper
 from kb.collectors.feeds import FeedCollector
 from kb.feeds import exclusion, fulltext, registry as reg, sync, translate
 from kb.feeds.fetching import FeedError
-from kb.feeds.grab_store import work_version
 from kb.web import pipeline_api
 from tests.headless import probe_env, requires_headless, run_probe
 from tests.test_feed_fulltext import FullTextCase
@@ -165,7 +164,7 @@ class FeedDropTests(FullTextCase):
         self.collector.drop_item(self.ref(key))
         self.assertFalse(translate._save(key, '标题', '正文', (old['title'], old['body'])))
         self.assertFalse(translate._fail(key, RuntimeError('late'), (old['title'], old['body'])))
-        self.assertFalse(fulltext._save(key, '正文', work_version(old)))
+        self.assertFalse(fulltext._save(key, '正文', fulltext.work_version(old)))
         self.assert_excluded(key)
 
     def export_item(self):

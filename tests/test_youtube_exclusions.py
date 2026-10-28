@@ -52,7 +52,7 @@ class YouTubeExclusions(YouTubeFixture):
                 row = storage.rows()[0]
                 self.assertTrue(row['excluded'])
                 self.assertTrue(row['repair_pending'])
-                self.assertEqual((0, 0), (row['heat_rank'], row['value_rank']))
+                self.assertEqual(0, row['score_rank'])
                 self.assertEqual([], storage.ready(self.source))
 
     def test_permanent_removal_is_independent_of_processing_state_and_retry(self):
@@ -88,10 +88,10 @@ class YouTubeExclusions(YouTubeFixture):
         expected = ranking.score([row for row in rows if not row['excluded']], policy, FetchScope(), now=now)
         actual = ranking.score(rows, policy, FetchScope(force=True), now=now)
         self.assertEqual([ordinary['video_id']], [row['video_id'] for row in actual])
-        self.assertEqual((expected[0]['heat'], expected[0]['value']), (actual[0]['heat'], actual[0]['value']))
+        self.assertEqual(expected[0]['score'], actual[0]['score'])
 
     def test_selection_itself_rejects_removed_rows_even_on_force(self):
-        row = {'excluded': True, 'state': 'candidate', 'retry_at': 0, 'heat_rank': 1, 'value_rank': 1}
+        row = {'excluded': True, 'state': 'candidate', 'retry_at': 0, 'score_rank': 1, 'score': 9.0}
         for force in (False, True):
             self.assertEqual([], ranking.select([row], self.settings()['youtube'], force=force))
 

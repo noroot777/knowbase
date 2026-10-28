@@ -82,6 +82,10 @@ DECLARED: dict[tuple[str, str], tuple[str, ...]] = {
     # 浏览器采集:人在自己的浏览器里打开 `url` 那一页,把正文交回来 —— 同一条通用路
     # 的手动档(准入判据也是 `permits_link_body`)。
     ('kb/browser_capture.py', 'save'): (LINK,),
+    # 「手动补正文」:人把那一页的正文直接粘回来。来路和上面那条**逐字同一条** ——
+    # 同一套准入判据、同一份复位列,只是没有「浏览器交回的网址等于目标网址」那一道
+    # 证据(断言正文属于这篇文章的是人自己)。所以带的也是同一道闸。
+    ('kb/browser_capture.py', 'save_pasted'): (LINK,),
     # 人点「重新抓一次」:拿这一行的 `url` 重抓**它本人**替换库里那一份。
     ('kb/feeds/grab_store.py', 'replace'): (ORIGIN,),
     # X 长文回填:拿推文链接问公开接口,取回**这条推文自己**的长文 —— 和上面那条
@@ -95,6 +99,11 @@ DECLARED: dict[tuple[str, str], tuple[str, ...]] = {
     # `kind='youtube'`,而且那一类的正文另有一道完整性证明(`youtube.products`
     # 的隔离会把任何对不上证明的正文换成占位),所以别人写进去也留不住。
     ('kb/youtube/products.py', 'replace'): (OWN,),
+    # 老库补列那一步给 `life` 种值的触发器:SET 里只有 `life` 一列(那一列是「这一行
+    # 是哪一世」,见 `kb/feeds/schema.py`),正文一个字节都不碰,所以不带任何一道闸。
+    # 它落进这张表只因为那个随机值是插值进去的 —— 而「SET 里有插值」正是这张表要
+    # 盯的形状(哪天有人把 `body` 拼进去,声明就得跟着改)。
+    ('kb/feeds/schema.py', '_migrate'): (DYNAMIC,),
 }
 
 

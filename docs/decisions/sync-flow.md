@@ -28,7 +28,7 @@
   不受理,而且**整轮停止在那一档同样不受理**(`daily_run.request_stop`),所以文案和按钮都不许把人指到「停止整轮」上
   (按钮在生成期间置灰并说「停不下来」)。
 - **采集器里「该停了吗」只有一份口径:`pipeline_flow.halted()`**(整轮停止,或者正在跑的这一类被提前结束)。抓取期的
-  那几处(`feeds/sync.py` 抓取循环与 `should_stop`、`youtube/collector.stopped`)都过它。**导出期的那几处(翻译、正文
+  那几处(`feeds/sync.py` 抓取循环、`feeds/prefetch.py` 两遍整批预取的 `should_stop`、`youtube/collector.stopped`)都过它。**导出期的那几处(翻译、正文
   补抓、`feeds/sync.py` 导出段)照旧只认整轮停止**:提前结束在抓取那一步受理之后,导出根本不会开跑(上一条),那几处
   永远碰不到「被提前结束」这一档。**`cutting()` 还要核一遍这份计划是不是此刻这轮管道的**(owner 等于
   `pipeline_state._state` 的 run id 或 batch,而且管道在跑):日报那一批进了某一类、却还排在别人起的手动同步后面等时,

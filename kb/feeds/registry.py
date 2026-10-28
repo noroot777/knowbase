@@ -363,8 +363,14 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
     try:
         with db() as c:
             if source_id:
+                # **`rev=rev+1`:这条订阅的定义换了一版。** 只增、不复用 —— 它是
+                # 「问题与待办」那张来源执行凭证的身份(见 `kb/feeds/schema.py`
+                # 的 `rev` 和 `kb.intake_diag.actions._source_scope`)。
+                # 不拿 `updated_at` 顶:那一列只记到秒,而且改回原值之后它也只是
+                # 又前进一次,表达不了「这是第几版」。**无论改了哪一格都加**:
+                # 停用、改名、换专用链接都会改变那一轮重试真正会跑的事。
                 c.execute('''UPDATE subscriptions SET name=?,url=?,feed_url=?,mode=?,group_name=?,
-                    enabled=?,fulltext=?,extract=?,updated_at=? WHERE id=?''',
+                    enabled=?,fulltext=?,extract=?,updated_at=?,rev=rev+1 WHERE id=?''',
                     (name,url,feed_url,mode,group,enabled,int(fulltext),int(extract),
                      now(),source_id))
                 if reset:

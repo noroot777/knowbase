@@ -48,6 +48,13 @@
 - **搬代码要逐符号对过原文**(广域回归可能全绿,因为新函数压根没进过执行路径)。
 - **反向验证要定点注入,不能整份换回旧版**(接口变了满屏 ImportError,证明不了行为)。
 
+### 提交
+
+- **改动做完并验证之后立即提交,不等用户另行要求**(与 ash 仓库 `AGENTS.md` 同口径,仓库主人拍板)。
+  **一次提交只装本轮自己负责的改动**,不夹带用户或别的执行器留在工作区里的未提交内容 —— worktree
+  之间共用一个 stash 栈、多个会话并行,夹带进来的东西事后谁都认不回去。留着不提交等于没交付:验收
+  是把任务分支合并到目标分支,没进分支的改动一并丢掉。
+
 ## 用词(硬性)
 
 - **面向人读的中文文案一律写「绿泡泡」,不写「微信」。** 方向由仓库主人拍板,不要改回去,也不要在
@@ -167,10 +174,12 @@
 | 公众号采集、订阅名单、本机绿泡泡库(`collector/`、`kb/collectors/wechat_local.py`) | `collector.md` |
 | X 大V的三条通道、水位、CDP、登录窗口、正文约定与判空(`kb/feeds/x_channels.py`、`x_browser`/`x_timeline_js`/`x_feedgrab`/`x_cdp`/`cdp_attach`/`x_login_window`/`x_body`/`x_post_empty`) | `x-channels.md` |
 | X 长文正文补全、地址识别那一族正则(`kb/feeds/x_article*.py`) | `x-article.md` |
+| YouTube 频道订阅、登录态与 yt-dlp 更新、发现的两条路、排名与处理预算(`kb/youtube/`) | `youtube-intake.md` |
 | 聚合源正文补抓、正文提取器、提取结果与正文版本绑定、「看不出是不是正文」那几条的挂起与人工出口(`kb/feeds/fulltext.py`、`readable.py`、`page_gate.py`、`scripts/feed_held_cli.py`、`intake_api` 的 `held`) | `fulltext.md` |
 | 订阅正文转纯文本、阅读页渲染、来源卡片(`kb/feeds/fetching.py` 的 `plain`、`kb/web/pages.py`) | `feed-plain.md`、`doc-reader.md`、`source-cards.md` |
 | 新订阅只收几天、存量清理(`kb/feeds/history.py`、`scripts/feed_trim_history.py`) | `history-depth.md` |
 | 「重试失败项」那颗按钮的范围、当日账本、逐来源的结果账(`kb/pipeline_retry.py`、`pipeline_daybook.py`、`pipeline_results.py`、`pipeline_state.py`、`kb/feeds/retry_targets.py`、`kb/static/js/pipe_view.js` 的需处理区) | `retry-scope.md` |
+| 「问题与待办」那块面板:全库积压的分档与计数、可撤销的搁置、「立即执行」的射程、X 两类问题的措辞(`kb/intake_diag/`、`kb/web/intake_diag_api.py`、`kb/static/js/diag*.js`) | `intake-diagnostics.md` |
 | 失败明细里那一条怎么点开、怎么「不再抓取」(`kb/pipeline_failures.py`、`collectors.ItemDropping`、`kb/feeds/exclusion.py`、`kb/feeds/paths.py`、`kb/collectors/wechat_documents.py`、`pipe_view.js`) | `failure-drop.md` |
 | 同步的历史运行、一轮的红怎么留档、留几天、恢复时挑哪一轮(`kb/pipeline_state.py`、`pipeline_history.py`、`pipeline_persist.py`、`pipeline_retention.py`、`pipeline_open.py`、`pipe_history.js`) | `pipeline-history.md` |
 | **任何写 kb.db 或 vault 文件的入口**(索引、导出、提取回写、条目化、清理脚本) | `maintenance-lock.md` |

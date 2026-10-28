@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 let tagFilters = [], entityFilters = [];
 
 function switchTab(t) {
-  const regularTabs = ['gallery', 'search', 'ask', 'fav', 'daily', 'subs', 'pipe'];
+  const regularTabs = ['gallery', 'search', 'ask', 'fav', 'daily', 'subs', 'pipe', 'care'];
   // 老深链 #wechat/#social/#rss(来源目录里的模块 id)一律落到「我的订阅」的对应视图
   if (typeof subsCatalog !== 'undefined' && subsCatalog.some(m => m.id === t)) { subsPendingKind = t; t = 'subs'; }
   if (!regularTabs.includes(t)) return;
@@ -21,6 +21,7 @@ function switchTab(t) {
   if (t === 'fav') loadFavPanel();
   if (t === 'search') loadMeta().catch(() => {});
   if (t === 'subs') { const kind = subsPendingKind; subsPendingKind = ''; openSubsPanel(kind); }
+  if (t === 'care') loadCarePanel();
 }
 
 async function loadMeta() {

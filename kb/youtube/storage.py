@@ -10,6 +10,7 @@ SCHEMA = '''CREATE TABLE IF NOT EXISTS youtube_videos (
  video_id TEXT PRIMARY KEY, entry TEXT NOT NULL, views INTEGER NOT NULL DEFAULT 0,
  heat REAL NOT NULL DEFAULT 0, value REAL NOT NULL DEFAULT 0,
  heat_rank INTEGER NOT NULL DEFAULT 0, value_rank INTEGER NOT NULL DEFAULT 0,
+ score REAL NOT NULL DEFAULT 0, score_rank INTEGER NOT NULL DEFAULT 0,
  state TEXT NOT NULL DEFAULT 'candidate', reason TEXT NOT NULL DEFAULT '',
  attempts INTEGER NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
  duration REAL NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '',
@@ -30,8 +31,8 @@ def migrate(connection):
         return
     if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='youtube_candidates'").fetchone():
         connection.execute('''INSERT OR IGNORE INTO youtube_videos
-            (video_id,entry,views,heat,value,heat_rank,value_rank,state,reason,attempts,retry_at,duration,note,last_error,updated_at)
-            SELECT video_id,entry,views,heat,value,heat_rank,value_rank,state,reason,attempts,retry_at,duration,note,
+            (video_id,entry,views,score,score_rank,state,reason,attempts,retry_at,duration,note,last_error,updated_at)
+            SELECT video_id,entry,views,heat,heat_rank,state,reason,attempts,retry_at,duration,note,
             CASE WHEN state='failed' THEN reason ELSE '' END,updated_at FROM youtube_candidates''')
         connection.execute('''INSERT OR IGNORE INTO youtube_video_sources
             SELECT video_id,source_id,source_url,committed FROM youtube_candidates''')
@@ -47,9 +48,16 @@ def initialize(connection):
     columns = {column['name'] for column in connection.execute('PRAGMA table_info(youtube_videos)')}
     for name, definition in (('validation', "TEXT NOT NULL DEFAULT ''"),
                              ('repair_pending', 'INTEGER NOT NULL DEFAULT 0'),
-                             ('gate_code', "TEXT NOT NULL DEFAULT ''")):
+                             ('gate_code', "TEXT NOT NULL DEFAULT ''"),
+                             ('score', 'REAL NOT NULL DEFAULT 0'),
+                             ('score_rank', 'INTEGER NOT NULL DEFAULT 0')):
         if name not in columns:
             connection.execute(f'ALTER TABLE youtube_videos ADD COLUMN {name} {definition}')
+    # 两榜合一之后 `heat`/`value`/`heat_rank`/`value_rank` **停止读写但不 DROP**
+    # (主干迁移只增不减)。补列那一刻把老的热度名次搬进新列:不搬的话存量库在下一轮
+    # 排名跑完之前,面板上整张榜都是「—」,`select` 看到的也全是 0 名。
+    if 'score' not in columns:
+        connection.execute('UPDATE youtube_videos SET score=heat, score_rank=heat_rank')
     migrate(connection)
     connection.execute("UPDATE youtube_videos SET state='deferred',gate_code='legacy',retry_at=0 "
                        "WHERE state='excluded' AND gate_code=''")
@@ -91,10 +99,23 @@ def discover(source, entries):
         for entry in entries:
             if permanently_excluded({'entry': entry}, connection):
                 continue
+            # **估算数据不许覆盖已有的精确数据。** 发现有两条路:RSS 带真实发布时间和播放量,
+            # yt-dlp 的后路只有列表顺序估出来的时间和 views=0(见 `discovery.approximate`)。
+            # 判据待在这条语句自己的 CASE 里 —— 先 SELECT 一次再决定要不要写,中间那一下
+            # 没有锁,而写错的后果是一条已经排好名的候选被降级成「没有播放量」,下一轮
+            # 候选榜上就找不到它了。反过来钉一边:精确数据照旧覆盖估算数据。
+            # **播放量按「这一份是不是估算来源」判,不按正负判**:0 既可能是「不知道」
+            # (后路一律给 0)也可能是「确实没人看」(刚发布的视频),按正负判就让后者
+            # 永远盖不住一个过时的正数 —— 判据跟 entry 那一行同源,口径只有一份。
             connection.execute('''INSERT INTO youtube_videos
                 (video_id,entry,views,updated_at) VALUES(?,?,?,?)
-                ON CONFLICT(video_id) DO UPDATE SET entry=excluded.entry,
-                views=excluded.views,updated_at=excluded.updated_at''',
+                ON CONFLICT(video_id) DO UPDATE SET
+                    entry=CASE WHEN json_extract(excluded.entry,'$.approximate') IS NOT 1
+                                 OR json_extract(youtube_videos.entry,'$.approximate') IS 1
+                               THEN excluded.entry ELSE youtube_videos.entry END,
+                    views=CASE WHEN json_extract(excluded.entry,'$.approximate') IS NOT 1
+                               THEN excluded.views ELSE youtube_videos.views END,
+                    updated_at=excluded.updated_at''',
                 (entry['video_id'], json.dumps(entry, ensure_ascii=False), entry.get('views', 0), reg.now()))
             connection.execute('''INSERT INTO youtube_video_sources(video_id,source_id,source_url)
                 VALUES(?,?,?) ON CONFLICT(video_id,source_id) DO UPDATE SET source_url=excluded.source_url,
@@ -133,8 +154,28 @@ def rows(source_ids=None, connection=None):
     return list(grouped.values())
 
 
+def recalibrate(video_id, entry):
+    """把一条估算候选的 `entry` 换成校准过的那一份(事实日期、真实播放量)。
+
+    **判据待在语句自己的 WHERE 里** —— 只改还标着 `approximate` 的那一条。先 SELECT
+    一次再决定的话,中间那一下没有锁(legacy `isolation_level` 下 SELECT 不开事务),
+    而另一轮可能正好在同一刻校准同一条。**0 行不是失败**:那说明别人已经校准过了,
+    正是想要的末态。
+
+    不走 `update()`:它的白名单是无条件覆盖那一类字段,`entry` 不能那样写。
+    """
+    payload = json.dumps(entry, ensure_ascii=False)
+    views = entry.get('views')
+    with db() as connection:
+        connection.execute("""UPDATE youtube_videos
+            SET entry=?, views=CASE WHEN ?>=0 THEN ? ELSE views END, updated_at=?
+            WHERE video_id=? AND json_extract(entry,'$.approximate') IS 1""",
+            (payload, views if isinstance(views, int) else -1,
+             views if isinstance(views, int) else 0, reg.now(), video_id))
+
+
 def update(video_id, **values):
-    allowed = {'heat', 'value', 'heat_rank', 'value_rank', 'state', 'reason',
+    allowed = {'score', 'score_rank', 'state', 'reason',
                'attempts', 'retry_at', 'duration', 'note', 'last_error', 'validation', 'repair_pending', 'gate_code'}
     if not values or set(values) - allowed:
         raise ValueError('视频处理状态字段不正确')
@@ -169,7 +210,7 @@ def ready(source):
 
 def listing(source_id=None, limit=100):
     candidates = rows([source_id] if source_id is not None else None)
-    candidates.sort(key=lambda row: (min(row['heat_rank'] or 100000, row['value_rank'] or 100000), -row['value']))
+    candidates.sort(key=lambda row: (row['score_rank'] or 100000, -row['score']))
     counts = {}
     for row in candidates:
         counts[row['state']] = counts.get(row['state'], 0) + 1
@@ -177,6 +218,10 @@ def listing(source_id=None, limit=100):
     for row in candidates[:limit]:
         entry = row['entry']
         result.append({key: row[key] for key in ('video_id', 'source_id', 'channel', 'views',
-                      'heat', 'value', 'heat_rank', 'value_rank', 'state', 'reason', 'duration')}
-                      | {key: entry.get(key, '') for key in ('title', 'url', 'published')})
+                      'score', 'score_rank', 'state', 'reason', 'duration')}
+                      | {key: entry.get(key, '') for key in ('title', 'url', 'published')}
+                      # **估出来的那条要带上这面旗。** 后路发现时 `views` 一律写 0
+                      # (列表页读不到播放量),面板不知道这回事就会把「没数据」显示成
+                      # 「0 次观看」—— 那是在替 YouTube 说一句它没说过的话。
+                      | {'approximate': bool(entry.get('approximate'))})
     return {'items': result, 'total': len(candidates), 'counts': counts}

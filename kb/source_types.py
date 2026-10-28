@@ -68,7 +68,7 @@ SOURCE_TYPES = {
     'youtube': SourceType('youtube', 'YouTube', '频道更新先排名，只处理值得读的视频。',
                          ('youtube',), icon='paper', interval_minutes=1440,
                          url_hint='输入 YouTube 的 /channel/UC… 或 /@频道名 主页',
-                         note='先按热度和价值排名，再按数量与时长预算处理；优先复用字幕，'
+                         note='先排出一张候选榜，再按数量与时长预算处理；优先复用字幕，'
                               '需要时仅下载音频转录，英文内容翻译为中文。不分析画面。',
                          adapter='youtube'),
     # 没有 feed 的站点走这条路:解析列表页。独立成一类而不是塞进 rss,是因为

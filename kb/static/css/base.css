@@ -96,7 +96,11 @@ body {
 .confirm-mask { z-index: 80; }
 .modal.confirm { width: min(400px, 92vw); padding: 22px 24px; }
 .modal.confirm h2 { margin-bottom: 8px; }
-.confirm-body { margin-bottom: 2px; }
+/* `confirmBox` 的 body 走 textContent(不吃 HTML),而「问题与待办」那几个确认框
+   的射程声明是服务端给的多行清单(一行一笔钱)。`pre-line` 只保留换行、照旧
+   折叠空白,对现有那些单行 body 一个像素都不动。 */
+.confirm-body { margin-bottom: 2px; white-space: pre-line; }
+.modal.confirm.confirm-wide { width: min(560px, 94vw); }
 .confirm-acts { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
 .confirm-acts button { padding: 8px 16px; font-size: 13.5px; }
 
@@ -107,7 +111,12 @@ body {
   gap: 8px; pointer-events: none;
 }
 .toast {
-  pointer-events: auto; display: flex; align-items: flex-start; gap: 10px;
+  /* **本体不接点击,只有那颗关闭叉接。** 它居中压在页面底部、z 90、报错那一档存活
+     6 秒,而底下常常正是下一步要点的东西:点完「检查登录态」拿到一条红字,紧接着
+     要改旁边的下拉再保存 —— 那几秒里底部中间那块按下去毫无反应,既不报错也没有
+     任何迹象(youtube_probe 的点击命中校验实测抓到:坐标 720,741 上盖着 toast err)。
+     toast 是取代原生 alert 的,不该把 alert 的阻塞性换个样子留下来。 */
+  pointer-events: none; display: flex; align-items: flex-start; gap: 10px;
   width: min(460px, calc(100vw - 32px)); padding: 12px 14px;
   background: var(--card); border: 1px solid var(--line);
   border-left: 4px solid var(--muted); border-radius: 12px;
@@ -128,6 +137,7 @@ body {
   margin-top: 2px; word-break: break-word;
 }
 .toast-x {
+  pointer-events: auto;                 /* 本体放行点击之后,这一颗要自己收回来 */
   background: transparent; color: var(--muted); padding: 0 2px;
   font-size: 12px; line-height: 1.55; border-radius: 6px;
 }

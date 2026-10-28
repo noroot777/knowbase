@@ -134,9 +134,34 @@ class FeedCollector:
         占不到管道 = 这份状态压根没写 = 库里一个字节都没动。而真正改库的那一下
         挪到这里 —— 它和紧跟着的取数在同一个执行体里,中间没有别的写入方。
         """
+        return self._pipeline_intent('translate_retry')
+
+    def _body_retry(self):
+        """这一轮是不是用户在「问题与待办」里点的「立即执行」,他点的是哪几条。
+
+        **和上面那条翻译意图同一个形状、同一个理由**:起跑那一下如果先改库
+        (解挂、把额度还回去)再去占管道,占不到时返回 409 而状态已经落了盘 ——
+        人看到一句「没有开始」,而那几条已经离开了「待人工确认 / 重试已停止」。
+        所以意图只放在 `start_pipeline` 原子写进去的那份 `crawl_filter` 里:
+        **占不到管道 = 这份状态压根没写 = 库里一个字节都没动**;真正改库的那一下
+        挪到这里,和紧跟着的取数在同一个执行体里。
+
+        上一版连 `keys` 都没往下传(只给了 `kind`),于是「立即执行」起跑了一轮
+        导出,而 `queued_sql` 把挂起和额度耗尽这两档排除在外 —— 人选的那几条
+        **一次也没被重试**,页面却说已开始(审查第 1 轮 F02 实测)。
+        """
+        return self._pipeline_intent('fulltext_retry')
+
+    def _pipeline_intent(self, name: str):
+        """这一轮的管道状态里有没有给**本类来源**的这一份点名意图。
+
+        `channel` 那一道不能省:`crawl_filter` 是整条管道共用的一份,而
+        `materialize()` 每一类来源各跑一次 —— 不比对的话,对 RSS 点的那一下会在
+        网页专栏那一轮里再执行一遍。
+        """
         from kb.pipeline_state import get_state
         f = get_state().get('crawl_filter') or {}
-        want = f.get('translate_retry') if isinstance(f, dict) else None
+        want = f.get(name) if isinstance(f, dict) else None
         if not isinstance(want, dict) or want.get('channel') != self.name:
             return None
         return want
@@ -195,7 +220,26 @@ class FeedCollector:
         # (2026-10-14 第 3 轮审查实测)。三道各有自己的射程,见
         # `translate.requeue_failed` 与 `translate.translate_pending`。
         try:
-            fetched = fulltext.fetch_pending(self.name, progress=fetch_progress)
+            # 用户点名的那几条:**先在写事务里按现态解除限制,再让它们排在队首**。
+            # 两步都在这里,理由见 `_body_retry`;插队的理由见
+            # `fulltext.fetch_pending` 的 `keys`(放回队列把额度清成 0,而取数是
+            # 「失败过的优先」—— 不插队的话它们排到队尾,几百条积压下一条都轮不
+            # 到)。这一轮的范围照旧是整类来源、照旧最多 `MAX_ITEMS` 条 ——
+            # 确认框里写的就是这个。
+            body_retry = self._body_retry()
+            named = [str(one) for one in (body_retry or {}).get('keys') or []]
+            if named:
+                # **那一份意图里带的是「这几世的这几条」**:它在人点下去那一刻写进
+                # `crawl_filter`,而这里可能是十几分钟之后 —— 中间这条内容完全可能
+                # 被清理删掉又从同一个链接收回来(key 一个字都没变)。身份一起交给
+                # `reopen`,由它 AND 进自己的 WHERE:对不上就一条都不放回,不许拿
+                # 旧授权去动新一世(第 1 轮自由审查 R2)。
+                lives = (body_retry or {}).get('lives') or {}
+                opened = fulltext.reopen(named, self.name, lives=lives)
+                _log(f"export: 点名放回补抓队列 {opened['released'] + opened['body']} 条"
+                     f"(挂起恢复 {opened['released']} 条、额度归还 {opened['body']} 条)")
+            fetched = fulltext.fetch_pending(self.name, progress=fetch_progress,
+                                             keys=named)
             if note := fulltext.summarize(fetched):
                 _log(f'export: {note}')
             # 摘要一路交给 export,理由同下面翻译那一句:导出是这条链上最后一个报

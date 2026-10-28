@@ -146,11 +146,18 @@
     把挂起做出来的那一轮实测到了 —— 条目一挂起当场进翻译队列,壳被译一遍、按文章导出,人点恢复、正文真补上
     之后 `_save` 把那份译文丢掉重译,**同一条内容买两次模型调用**。**导出那一侧刻意不用它**:挂起的照旧按壳
     导出,和「试满额度降级出队」一个待遇,正文后来补上时 `content_rev`/`extract_stale` 会让它重新导出。
-  - **`release` 挡不住已经在路上的那一轮,这是知情的取舍。** `_fail` 比的是内容身份(`work_version`:hash + rev),
-    而 `release` 不碰内容,所以一个在它之前就发出去的请求回来之后照旧写得进去 —— 它会把 hold 重新写上。要挡住
-    得给「人发起的这一轮」一个不可复用的代次,那是一列新字段加一道新不变量;而它的后果只是「那一条又挂回去
-    了,人再点一次」,不丢任何数据。**第 3 条那个缺陷在挂起语义下也只剩这一个形态**(挂起的条目不会被自动
-    抓,所以不会有第二、第三轮),回归就钉在这个形态上。
+  - **`release` 现在挡得住已经在路上的那一轮:它开一个新的抓取代次。** 原来 `_fail` 比的只有内容身份
+    (hash + rev)和抓取目标,而 `release` 不碰内容,所以一个在它之前就发出去的请求回来之后照旧写得进去 ——
+    它会把 hold 重新写上、还扣掉一次额度,而人看到的是「我明明刚放回队列」。现在 `feed_items.fulltext_gen`
+    是 `work_version` 的第五道,`release` 和 `reopen` 的耗尽那一支各把它加一(口径见
+    `intake-diagnostics.md` 第一节那条「可复原的输入值不能充当一次工作的身份」)。**代次独立于内容修订
+    号**:放回队列不是换内容,`content_rev` 不许动。回归在 `tests/test_fulltext_work_identity.py`
+    (**反过来钉一边**:放回之后那一轮照旧写得回去)。
+  - **`release` / `reopen` 还认「人看着的那一世」**(可选的 `lives`,口径在
+    `kb/intake_diag/warrant.py`):页面上那颗按钮、或者占着管道等了十几分钟的那份点名意图,说的都是
+    **当时**那一条;中间它被清理删掉又从同一个链接收回来时,放回队列这一下会落在新一世上。带了就
+    AND 进 UPDATE 自己的 WHERE,`rowcount==0` 即拒绝;**没带照旧**(CLI 的 `--release <key>` 文档
+    写明按 key 跨来源,那是有意的契约)。
   - **两档都抛,但抛的不是同一个异常**(`FeedError` / `Unconfirmed`)。口径同 `html_problem`:那半句话明确得多,
     而「抛」这条路保证走 `_fail`,失败明细连同「不再抓取」的句柄一起进面板(`sync._export` 的 `fetch_bad`)。
     **`Unconfirmed` 做成 `FeedError` 的子类这件事当前没有可观测后果,别把它当成一道判据** —— `fetch_one` 眼下
@@ -372,8 +379,11 @@
   一次」跑在 HTTP 请求线程里、**不持这一轮同步的维护锁**(`grab.replace`,见 `link-grab.md`)。所以
   `fetch_pending` 按 `grab_store.work_version` 取样(**不取 `body`**;那份口径摆在「库里那一条」
   那个模块里,因为**手动重抓那条链用的是同一份** —— 见 `link-grab.md` 第一节),`_save` / `_fail` 的 WHERE 带那一版的
-  **代次 + 指纹**(`AND content_hash=? AND content_rev=?`),`retire_stale` 带 `AND content_hash=?`。三道判据各答
-  一个问题,别互相代入:
+  **那一版的五道**(`AND content_hash=? AND content_rev=? AND fulltext_url=? AND life=? AND
+  fulltext_gen=?`,口径只有一份:`fulltext_scope.work_version`),`retire_stale` 带 `AND content_hash=?`。
+  后三道是「**可复原的输入值不能充当一次工作的身份**」那条带来的 —— 抓取目标 A→B→A 逐字复原、删掉重收之后
+  摘要和代次一起复原,而 `life`(哪一世)和 `fulltext_gen`(抓取代次)只能往前走(完整形态在
+  `intake-diagnostics.md` 第一节)。下面这几道各答一个问题,别互相代入:
   - **`AND body=?` 不够,它是另一套口径**:替换那条路的版本身份是**整份导出负载**
     (`grab_store._VERSION_FIELDS` —— 标题、正文、作者、发布时间),于是一次**只改标题**的手动重抓换掉了
     `content_hash` 却留着同一份正文,按正文相等判的补抓照旧获得覆盖权(实测:用户重抓到的那一版标题还在、正文
