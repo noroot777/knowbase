@@ -10,7 +10,10 @@
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
@@ -652,6 +655,17 @@ class BatchRevisionTest(HistoryCase):
         self._sub_round("run-p", "")
         self.assertEqual("run-p", pl.result_version(pl.last_result()))
         self.assertEqual("run-p", pipeline_api.pipeline_runs()["runs"][0]["version"])
+
+
+@unittest.skipUnless(shutil.which("node"), "需要 node 执行类型状态归约回归")
+class FlowStateFrontendTests(unittest.TestCase):
+    """前端那一层的归约:失败归不归「已经发生」、跳过只当旁注(`pipe_flow.js`)。"""
+
+    def test_a_failure_stays_visible_in_the_type_summary(self):
+        probe = Path(__file__).with_name("pipe_flow_state_test.mjs")
+        done = subprocess.run([shutil.which("node"), "--test", str(probe)],
+                              capture_output=True, text=True, timeout=60)
+        self.assertEqual(0, done.returncode, done.stdout + done.stderr)
 
 
 if __name__ == "__main__":

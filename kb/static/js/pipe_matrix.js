@@ -45,7 +45,7 @@ function pipeMatrixTip(model, n) {
   const t = model.plan?.times?.[n.key], took = t ? pipeFlowSpan(t.started_at, t.finished_at) : '';
   const st = n.state;
   if (st.state === 'done') return took ? `完成 · ${took}` : '完成';
-  if (st.state === 'issue') return `${st.issues} 步有问题${took ? ' · ' + took : ''}`;
+  if (st.state === 'issue') return `${st.issues} 步有问题${st.skipped ? ' · 其余跳过' : ''}${took ? ' · ' + took : ''}`;
   if (st.state === 'cut') return st.stopped ? '停在这里' : '提前结束';
   if (st.state === 'unknown') return '结果未知';
   if (st.state === 'run') return '正在跑';
