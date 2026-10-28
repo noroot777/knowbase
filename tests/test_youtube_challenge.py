@@ -264,16 +264,52 @@ class SolverShipped(unittest.TestCase):
         self.assertNotIn(toolchain.SOLVER, self.asked[1])
 
     def test_the_panel_hears_which_of_the_two_is_missing(self):
-        """缺脚本和缺运行时让用户做的事不同(点一次更新 / 自己装个 deno),所以分开报。"""
+        """缺脚本和缺运行时让用户做的事不同(点一次更新 / 自己装个 deno),所以分开报。
+
+        **顺带钉住「退出码不是判据」**:不带 URL 的正常探测本身就退 2,按非零判失败
+        会让每一次都报失败。
+        """
         header = ('[debug] Optional libraries: sqlite3-3.53.2, yt_dlp_ejs-0.8.0\n'
                   '[debug] JS runtimes: deno-2.9.0')
         with patch.object(toolchain, '_run', return_value=(2, header)):
-            self.assertEqual({'script': 'yt_dlp_ejs-0.8.0', 'runtime': 'deno-2.9.0'},
-                             toolchain.challenge())
+            self.assertEqual({'script': 'yt_dlp_ejs-0.8.0', 'runtime': 'deno-2.9.0',
+                              'challenge_error': ''}, toolchain.challenge())
         bare = ('[debug] Optional libraries: sqlite3-3.53.2\n'
                 '[debug] JS runtimes: none')
         with patch.object(toolchain, '_run', return_value=(2, bare)):
-            self.assertEqual({'script': '', 'runtime': ''}, toolchain.challenge())
+            self.assertEqual({'script': '', 'runtime': '', 'challenge_error': ''},
+                             toolchain.challenge())
+
+    def test_a_failed_inspection_is_unknown_not_missing(self):
+        """**探测没成 ≠ 确实没装。**
+
+        事故形态(审查在真实页面上实测):`yt-dlp -v` 临时报错、一行抬头都没印的那一轮,
+        面板照旧让人去装 yt-dlp-ejs 和 deno —— 机器上两样都在,真正的检查错误一个字都
+        没显示;让同一个替身恢复抬头、**不装不卸任何东西**,那两句误报就消失了。
+        判据是「那一行抬头印出来了没有」,所以这几种都落未知:探测报错、输出里没有抬头、
+        只印了其中一行。
+        """
+        broken = 'ERROR: temporary capability inspection failure'
+        for label, code, text in (('探测报错', 1, broken), ('超时', 124, '命令超时'),
+                                  ('输出里没有抬头', 0, '[debug] something else')):
+            with self.subTest(label), patch.object(toolchain, '_run', return_value=(code, text)):
+                asked = toolchain.challenge()
+            self.assertIsNone(asked['script'], f'{label}:没问到却说成确实没有')
+            self.assertIsNone(asked['runtime'], label)
+            self.assertTrue(asked['challenge_error'], f'{label}:为什么没问到也得交出去')
+        half = '[debug] JS runtimes: deno-2.9.0'
+        with patch.object(toolchain, '_run', return_value=(2, half)):
+            asked = toolchain.challenge()
+        self.assertIsNone(asked['script'], '只印了一行时,另一项照旧是「没问到」')
+        self.assertEqual('deno-2.9.0', asked['runtime'], '印出来的那一项照旧要认')
+        self.assertTrue(asked['challenge_error'])
+
+    def test_a_missing_tool_is_also_unknown(self):
+        """机器上压根没有 yt-dlp:那是「没问到」,不是「问到了、没装解题脚本」。"""
+        with patch.object(toolchain, 'command', return_value=[]):
+            asked = toolchain.challenge()
+        self.assertEqual((None, None), (asked['script'], asked['runtime']))
+        self.assertIn('yt-dlp', asked['challenge_error'])
 
     def test_the_status_keys_the_panel_renders_are_all_there(self):
         """面板那一行读的就是这几个键 —— 少一个就在页面上显示成「缺」。"""

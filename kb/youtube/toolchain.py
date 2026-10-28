@@ -27,6 +27,9 @@ import threading
 import time
 from pathlib import Path
 
+# 裁字数的口径只有一份(两头都留,见那个函数的说明)。`diagnosis` 只认 stdlib,没有环。
+from kb.youtube.diagnosis import excerpt
+
 PACKAGE = 'yt-dlp'
 #: 和 yt-dlp 一起装的 JS 挑战解题脚本。**YouTube 现在会对一部分请求发一道 JS 挑战**,
 #: 解不开就只剩预览图那几个格式(实测:带着有效登录态也一样)。官方可执行文件自带这份
@@ -145,12 +148,22 @@ def challenge() -> dict:
     **`JS runtimes:` 那一行印的是「启用且找得到」的,不是「机器上装了的」。** 默认只启用
     deno(见 `login.RUNTIME` 那段的一手源码),所以只装了 node 的机器上这一行就是 `none` ——
     那不是读错了,yt-dlp 确实不会用它。面板据此让人装 deno,口径和这里一致。
+
+    **每一项三态,判据是「那一行抬头印出来了没有」,不是退出码。** `UNASKED` = 没问到
+    (没有 yt-dlp、探测自己失败、抬头压根没印);`''` = 问到了、确实没有;非空 = 问到了、
+    就是这个版本。`challenge_error` 是探测本身的失败原话。
+    **不许按退出码判成败**:不带 URL 的正常探测本身就退 2(实测),把非零当失败会让
+    每一次都报失败;而原先把两项初始化成空串、只在读到抬头时覆盖,等于**把「没问到」
+    说成「确实没装」** —— 审查实测:`-v` 临时报错的那一轮,面板照旧让人去装
+    `yt-dlp-ejs` 和 deno(机器上两样都在),真正的检查错误一个字都没显示;
+    让同一个替身恢复抬头、不装不卸任何东西,那两句误报就消失了。
     """
+    found = {'script': UNASKED, 'runtime': UNASKED, 'challenge_error': ''}
     prefix = command()
     if not prefix:
-        return {'script': '', 'runtime': ''}
+        found['challenge_error'] = '没有找到 yt-dlp'
+        return found
     _, text = _run([*prefix, '-v', '--ignore-config'], 60)
-    found = {'script': '', 'runtime': ''}
     for line in text.splitlines():
         body = line.split(']', 1)[-1].strip()
         if _SOLVER_LINE in body:
@@ -161,6 +174,11 @@ def challenge() -> dict:
             # 一个都没有时 yt-dlp 印的是 `JS runtimes: none`。
             runtimes = body.split(_RUNTIME_LINE, 1)[1].strip()
             found['runtime'] = '' if runtimes.lower() in ('', 'none') else runtimes
+    if found['script'] is UNASKED or found['runtime'] is UNASKED:
+        # **抬头没印出来 = 这一项没问到,不是「问到了,确实没有」。** 原文交出去:
+        # 探测自己为什么没成,是人唯一的线索(审查实测的那一轮是 `-v` 报
+        # `ERROR: temporary capability inspection failure` 退 1、一行抬头都没印)。
+        found['challenge_error'] = excerpt(text, 200) or 'yt-dlp 没有印出能力抬头'
     return found
 
 
@@ -204,11 +222,13 @@ def local() -> dict:
     所以这里不碰网络、也不起子进程 —— 查上游版本和查解题能力都是用户点「检查」时
     才做的事(见 `status`)。
 
-    **键要齐**:两样解题能力显式答 `UNASKED`,不是省掉那两个键。少一个键时面板那边
+    **键要齐**:解题能力那几项显式答 `UNASKED`,不是省掉那几个键。少一个键时面板那边
     「没问过」和「问过了没有」长得一模一样(见 `UNASKED` 上面那段实测形态)。
+    `challenge_error` 空着:这一份压根没问,所以没有探测错误可报 —— 「没问过」和
+    「问过了、没问成」在面板上说的话不一样。
     """
     return {'installed': installed_version(), 'origin': origin(),
-            'script': UNASKED, 'runtime': UNASKED}
+            'script': UNASKED, 'runtime': UNASKED, 'challenge_error': ''}
 
 
 def upgrade(timeout: float = 600) -> dict:

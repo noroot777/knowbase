@@ -308,31 +308,43 @@ def limited(text: str) -> bool:
     return any(mark in lowered for mark in _LIMIT)
 
 
-def classify(text: str) -> str:
-    """把 yt-dlp 的失败输出归成一类。
+#: **分档只有这一张表:左边是档,右边是它认的特征串,从上往下第一个中的说了算。**
+#: 顺序就是口径:cookie 读不出来最先判(那一步比登录态更靠前,后面的墙都是它的下游);
+#: 接着是出口被限流(429 连网页都没下下来,它下面那些墙同样是果);其次是机器人验证和
+#: 「这一条没授权」这两档 —— 它们都**不蕴含**未登录;真正指向登录态的那一组再往后;
+#: **挑战排在最末**:上面每一档都是「人要去做一件具体的事」而且都更靠前,429 和机器人
+#: 验证甚至会让挑战这一步根本跑不到。
+#:
+#: **摆成一张表是为了让「有哪几档」这件事只有一份来源**(`VERDICTS`)。原先是一串
+#: `if`,而归并层(`merge`)拿按证据强度排的 `_STRENGTH` **兼着当白名单** —— 加
+#: `js_challenge` 那一轮没人记得同步第二份:同步时明明判出了「挑战没解开」,一过归并
+#: 就变成 `undecided`、完整原文跟着清空,视频失败详情里只剩开头那截普通输出
+#: (审查用真实子进程复现)。**谁都会忘记同步第二份名单,所以不许有第二份。**
+_MARKS = (
+    ('cookie_unreadable', _COOKIE),
+    ('rate_limited', _LIMIT),
+    ('bot_wall', _BOT),
+    ('no_access', _PRIVATE),
+    ('not_logged_in', _WALL),
+    ('js_challenge', _CHALLENGE),
+)
 
-    **顺序就是口径**:cookie 读不出来最先判(那一步比登录态更靠前,后面的墙都是它的
-    下游);接着是出口被限流(429 连网页都没下下来,它下面那些墙同样是果);其次是机器人
-    验证和「这一条没授权」这两档 —— 它们都**不蕴含**未登录;真正指向登录态的只剩最后
-    那一组。一个都不中就是 `unknown`,原文带回去给人看。
+#: `classify` 判得出来的那几档(不含 `unknown`)。**「已经判出来了」的唯一一份名单** ——
+#: 归并层用它当白名单,别处要列全部分档也从它来。
+VERDICTS = tuple(code for code, _ in _MARKS)
+
+
+def classify(text: str) -> str:
+    """把 yt-dlp 的失败输出归成一类。顺序和名单都在 `_MARKS` 那张表上。
+
+    一个都不中就是 `unknown`,原文带回去给人看。
     """
     lowered = str(text or '').lower()
     if not lowered:
         return 'unknown'
-    if any(mark in lowered for mark in _COOKIE):
-        return 'cookie_unreadable'
-    if any(mark in lowered for mark in _LIMIT):
-        return 'rate_limited'
-    if any(mark in lowered for mark in _BOT):
-        return 'bot_wall'
-    if any(mark in lowered for mark in _PRIVATE):
-        return 'no_access'
-    if any(mark in lowered for mark in _WALL):
-        return 'not_logged_in'
-    # **排在最后**:上面那几档都是「人要去做一件具体的事」,而且都比挑战这件事更靠前 ——
-    # 429 和机器人验证甚至会让挑战这一步根本跑不到。它们一个都不中,才轮到这一档。
-    if any(mark in lowered for mark in _CHALLENGE):
-        return 'js_challenge'
+    for code, marks in _MARKS:
+        if any(mark in lowered for mark in marks):
+            return code
     return 'unknown'
 
 
@@ -377,6 +389,12 @@ MESSAGES = {
 #: 用户第一反应正是「是不是没登录」—— 归并那一句话恰恰是用来说清它不是的。
 #: `js_challenge` 也在这里:它同样是「一个出口、一次全中」—— 48 个频道会一字不差地各报
 #: 一遍同一句话,不归并就得逐条读完才明白只有一个原因。
+#: **这是 `VERDICTS` 的一个刻意的子集**(今天只少 `no_access` —— 那一档说的是「这一条内容
+#: 本身不可访问」,逐条各不相同,归并了反而看不出是哪几条)。**不从 `VERDICTS` 派生**:
+#: 新加一档该不该整组归并要人判一次,而不是默默跟上。逼人判的是那条集合级回归
+#: (`tests/test_youtube_login.py` 比的是整个集合),加档时它当场红。
+#: 这一点和归并层不一样:那边**必须**自动跟上 —— 漏在那儿是静默丢掉分档和原文(见 `merge`),
+#: 漏在这儿只是这一档的失败不成组,面板上每一条照旧看得见。
 AUTH_CODES = ('not_logged_in', 'bot_wall', 'cookie_unreadable', 'rate_limited', 'js_challenge')
 
 
@@ -398,8 +416,13 @@ CAUTIONS = {
     'rate_limited': '但 yt-dlp 同时报了 429（请求过于频繁）：这一轮算侥幸过的，隔一段时间再检查一次更有把握。',
     'bot_wall': '但 yt-dlp 同时报了机器人验证：这个出口已经被盯上，下一轮可能就过不去了。',
     'not_logged_in': '但 yt-dlp 同时报了登录态失效：真正用得上它的字幕和音频这一轮没验到。',
-    'js_challenge': '但 yt-dlp 同时报了那道 JS 挑战没解开：这一轮只拿到元数据和字幕，'
-                    '下音频做本地转录那一步会失败。在下面更新一次 yt-dlp 把解题脚本装上，'
+    # **不许说「只拿到元数据和字幕」** —— 这句话也挂在失败路的摘要上(见 `collector.heeded`),
+    # 而那条链很可能一条字幕都没有:审查实测的那一轮是「没有字幕、去下音频、撞上挑战」,
+    # 面板却并列说一句「这一轮只拿到元数据和字幕」。只说得住的那半截:**哪几步需要真实
+    # 格式**。这是表头那条「都不许断言内容已经到手」在这一档上漏掉的那一处。
+    'js_challenge': '但 yt-dlp 同时报了那道 JS 挑战没解开：要真实音视频格式的那几步'
+                    '（下音频做本地转录）过不去；元数据和字幕不需要格式，不受这一道影响。'
+                    '在下面更新一次 yt-dlp 把解题脚本装上，'
                     '机器上没有 deno 的话也要装一个 —— yt-dlp 只默认启用它这一个运行时。',
     UNPINNED: '另外，这一轮没能把 {label} 的 cookie 主库钉在 profile 一级：yt-dlp 会在整个浏览器'
               '目录里挑「最近被写过的那一份 Cookies」，而每个扩展也各有一份同名的 cookie 分区 —— '
@@ -489,6 +512,20 @@ def coded(error) -> str:
 _STRENGTH = ('rate_limited', 'cookie_unreadable', 'bot_wall', 'not_logged_in', 'no_access')
 
 
+def strength(code: str) -> int:
+    """归并时这一档的证据强度(小的赢)。**这儿只排顺序,不决定「算不算判出来了」** ——
+    后者的唯一名单是 `VERDICTS`。
+
+    **没列进 `_STRENGTH` 的已识别档排在最后,照旧穿得过归并。** 两份名单的顺序本来就
+    不一样(`classify` 把 cookie 排第一,这儿把 429 排第一:前者问「这段文本说的是什么」,
+    后者问「这几条里哪一条最能解释这次失败」),所以不能合成一份;但**漏在这一份里顶多
+    是优先级垫底,不许变成「判不出来」**。`js_challenge` 今天正走这条兜底路:它的证据强度
+    确实最弱(理由同 `_MARKS` 里它排最末那一段),所以不另外列一行 —— 这也让兜底是生产
+    路径而不是只有用例跑过的死代码。
+    """
+    return _STRENGTH.index(code) if code in _STRENGTH else len(_STRENGTH)
+
+
 def merge(carrier, errors):
     """把这几条失败里**最有解释力的那一档**抄到 `carrier` 上,再把它交出去。
 
@@ -496,10 +533,13 @@ def merge(carrier, errors):
     一起丢了,上层只能回去拿裁过的文本重新猜(理由见 `coded`)。各条原因的**原话照旧
     都在** `carrier` 自己的消息里,这里挑的只是「对外说哪一档、附哪一份原文」。
     只认 `YOUTUBE` 那一档:别的上游的结论不该被当成 YouTube 的墙。
+
+    **白名单是 `VERDICTS`(判出来了没有),排序是 `strength()`(哪一条更能解释)** ——
+    两件事分开。合着用过一次,后果见 `_MARKS` 上面那段。
     """
     ranked = sorted((error for error in errors
-                     if getattr(error, 'origin', YOUTUBE) == YOUTUBE and coded(error) in _STRENGTH),
-                    key=lambda error: _STRENGTH.index(coded(error)))
+                     if getattr(error, 'origin', YOUTUBE) == YOUTUBE and coded(error) in VERDICTS),
+                    key=lambda error: strength(coded(error)))
     if ranked:
         carrier.code = coded(ranked[0])
         carrier.diagnostic = getattr(ranked[0], 'diagnostic', '')
