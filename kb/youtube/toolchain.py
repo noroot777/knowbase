@@ -135,11 +135,16 @@ _RUNTIME_LINE = 'JS runtimes:'
 
 
 def challenge() -> dict:
-    """解 JS 挑战的两样东西在不在:解题脚本(`yt-dlp-ejs`)和 JS 运行时(deno 这类)。
+    """解 JS 挑战的两样东西在不在:解题脚本(`yt-dlp-ejs`)和 JS 运行时(`login.RUNTIME`)。
 
     **两样缺一样都解不开**,而缺哪一样让用户做的事不同(前者点一次更新,后者得自己装个
     运行时),所以分开报。读的是 `yt-dlp -v` 的调试抬头 —— 它不带 URL 时退 2、但抬头照印,
-    所以这里不看退出码。
+    所以这里不看退出码。**问 yt-dlp 自己认不认,不去猜它的 site-packages**:自备那份和
+    PATH 那份住在不同环境里。
+
+    **`JS runtimes:` 那一行印的是「启用且找得到」的,不是「机器上装了的」。** 默认只启用
+    deno(见 `login.RUNTIME` 那段的一手源码),所以只装了 node 的机器上这一行就是 `none` ——
+    那不是读错了,yt-dlp 确实不会用它。面板据此让人装 deno,口径和这里一致。
     """
     prefix = command()
     if not prefix:
@@ -185,10 +190,25 @@ def outdated(installed: str, latest: str) -> bool:
     return left < right
 
 
+#: 「这一项还没问过」。**和「问过了,确实没有」必须分得开。**
+#: 事故形态(审查在真实页面上实测):`local()` 原先压根不返回 `script` / `runtime` 两个键,
+#: 面板拿 `!info.script` 判缺失 —— 缺席和空串都是假,于是**一打开订阅管理就红字说两样都缺**,
+#: 而那台机器上 `yt_dlp_ejs-0.8.0` 和 `deno-2.9.0` 都在。离开再回来一样,因为那条便宜的
+#: 状态快照每次都这么答。`None` 是显式的「没问」:它不起子进程(`challenge()` 要起一个
+#: `yt-dlp -v`,而这一份是面板每次刷新都读的),所以它答不了,但**必须答出「我答不了」**。
+UNASKED = None
+
+
 def local() -> dict:
     """**便宜的那一半**:只问本地装的是哪一版、从哪儿来。面板每次刷新都读它,
-    所以这里不碰网络 —— 查上游版本是用户点「检查」时才做的事(见 `status`)。"""
-    return {'installed': installed_version(), 'origin': origin()}
+    所以这里不碰网络、也不起子进程 —— 查上游版本和查解题能力都是用户点「检查」时
+    才做的事(见 `status`)。
+
+    **键要齐**:两样解题能力显式答 `UNASKED`,不是省掉那两个键。少一个键时面板那边
+    「没问过」和「问过了没有」长得一模一样(见 `UNASKED` 上面那段实测形态)。
+    """
+    return {'installed': installed_version(), 'origin': origin(),
+            'script': UNASKED, 'runtime': UNASKED}
 
 
 def upgrade(timeout: float = 600) -> dict:

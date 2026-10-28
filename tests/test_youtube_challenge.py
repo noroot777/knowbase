@@ -27,12 +27,13 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kb.youtube import login, media, toolchain
+from kb.youtube import collector, diagnosis, login, media, toolchain
 from tests.youtube_fixture import YouTubeFixture
 
 #: 复刻 yt-dlp 挑 cookie 库的那两行(`_find_files` + `_newest`)。**断言落在这儿**:
@@ -128,7 +129,10 @@ class CookieStorePinned(unittest.TestCase):
         view = login.cookie_view('firefox')
         self.assertEqual(['--cookies-from-browser', 'firefox'], view['args'])
         self.assertFalse(view['pinned'])
-        self.assertEqual('', login.pin_note('firefox'), 'Firefox 没有这个问题,不该惊动用户')
+        with diagnosis.heard() as ledger:
+            login.arguments('firefox')
+        self.assertEqual([], diagnosis.witnessed(ledger, diagnosis.COOKIES),
+                         'Firefox 没有这个问题,不该惊动用户')
 
     def test_a_view_that_cannot_be_built_degrades_and_says_so(self):
         """**搭不起来就如实降级**(Windows 上建符号链接要特权):照旧只交浏览器名,
@@ -138,13 +142,18 @@ class CookieStorePinned(unittest.TestCase):
         with patch('os.symlink', side_effect=OSError('operation not permitted')), \
                 patch('os.link', side_effect=OSError('cross-device link')):
             view = login.cookie_view('chrome')
-            note = login.pin_note('chrome')
+            with diagnosis.heard() as ledger:
+                login.arguments('chrome')
         self.assertEqual(['--cookies-from-browser', 'chrome'], view['args'])
         self.assertFalse(view['pinned'])
         # 两样都试过了,`reason` 带的是最后那一次的原话 —— 要紧的是「为什么没钉住」说出来了。
         self.assertIn('建不了 cookie 视图', view['reason'], '为什么没钉住要说出来')
         self.assertIn('cross-device link', view['reason'], '原话要带上,那是唯一的线索')
-        self.assertIn('未登录身份', note, '面板上要说清这一轮可能是以未登录身份出去的')
+        # **理由要进这一次调用自己的账**,面板和同步都从账上读(见 `CookieSourceRidesWithTheCall`)。
+        said = diagnosis.witnessed(ledger, diagnosis.COOKIES)
+        self.assertTrue(any('cross-device link' in item for item in said), said)
+        self.assertIn('未登录身份', login.cautioned(login.UNPINNED, 'chrome'),
+                      '面板上要说清这一轮可能是以未登录身份出去的')
 
     def test_pinning_never_raises_out_of_the_call_path(self):
         """**它挂在每一次 yt-dlp 调用的前面,一个字都不许往上抛。**
@@ -317,12 +326,13 @@ class MetadataSurvivesTheChallenge(YouTubeFixture):
         这一条红的时候,面板上「检查登录态」会直接报错,而那一轮的 cookie 好着
         (实测:`Found YouTube account cookies`、1843 条)。
         """
-        noise = []
-        metadata = media.probe(self.row, {'youtube': {}}, self.deadline, lambda: False,
-                               force=True, warnings=noise)
+        with diagnosis.heard() as ledger:
+            metadata = media.probe(self.row, {'youtube': {}}, self.deadline, lambda: False, force=True)
         self.assertEqual(600, metadata['duration'], '元数据没回来')
         self.assertEqual(['en'], list(metadata['subtitles']), '字幕清单也该在')
         # **那道挑战照旧要说出来**:退 0 不等于什么都没发生,面板上并列显示那一句。
+        # 原话在 `media.run` 的完成边界就记进账了,所以不押在「这一步返回了什么」上。
+        noise = diagnosis.witnessed(ledger)
         self.assertEqual('js_challenge', login.classify(' | '.join(noise)), noise)
 
     def test_the_audio_download_still_fails_loudly(self):
@@ -338,6 +348,226 @@ class MetadataSurvivesTheChallenge(YouTubeFixture):
         self.assertEqual('js_challenge', login.coded(caught.exception),
                          '真失败那一次的分档也要是挑战这一档,不是「没能归类」')
 
+
+class CookieSourceRidesWithTheCall(YouTubeFixture):
+    """**对一次读取做出的结论,必须跟那一次调用绑在一起。**
+
+    事故形态:面板原先是在检查收尾时再调一次 `cookie_view` 看「现在钉不钉得住」。那是
+    **另一次**准备 —— 刚才那一次因为线程撞车或者权限不足降级了、这一次又建成功,面板就
+    一个字都不说,人看到的是一次干净的失败(或者干净的成功),而它恰恰是以未登录身份出去的。
+    同步那条路更彻底:它压根不调那个事后出口,一个字都没说过。
+
+    所以判据落在**后果**上:那一次降级有没有到达用户 —— 不是「有没有调过某个函数」。
+    """
+
+    #: 一个最小的假 yt-dlp:列频道和取元数据都正常返回。这几条用例验的是 cookie 来源
+    #: 怎么运输,不是工具说了什么,所以它一句噪声都不出。
+    QUIET = ("import json, sys\n"
+             "sys.stdout.write(json.dumps({'id': '12345678901', 'title': 't',\n"
+             "                             'duration': 600, 'view_count': 10,\n"
+             "                             'upload_date': '20261027'}) + '\\n')\n")
+
+    def setUp(self):
+        super().setUp()
+        self.channel()
+        override = patch.object(toolchain, 'command', return_value=[sys.executable, '-c', self.QUIET])
+        override.start()
+        self.addCleanup(override.stop)
+
+    def degraded(self, reason='建不了 cookie 视图（cross-device link）'):
+        """第一次准备降级,**之后每一次都成功** —— 事后重算的那一版在这儿一个字都说不出来。"""
+        pinned = {'args': ['--cookies-from-browser', 'chrome'], 'pinned': True,
+                  'store': '/tmp/Cookies', 'reason': ''}
+        first = {'args': ['--cookies-from-browser', 'chrome'], 'pinned': False,
+                 'store': '/tmp/Cookies', 'reason': reason}
+        answers = [first]
+        return patch.object(login, 'cookie_view',
+                            side_effect=lambda spec: answers.pop(0) if answers else pinned)
+
+    def test_a_degrade_during_the_call_is_not_erased_by_a_later_success(self):
+        """检查这一轮:第一次调用降级了,收尾时再准备一次又成功 —— **那一条照旧要说。**"""
+        self.settings(cookies_browser='chrome')
+        with self.degraded():
+            result = login.check(self.settings())
+        self.assertEqual(True, result['ready'], '这一轮确实取到了元数据,不许说成失败')
+        self.assertEqual('metadata_ok', result['code'], '这一条是并列的警告,不是结论')
+        self.assertEqual(login.UNPINNED, result.get('warning_code'), result)
+        self.assertIn('钉在 profile 一级', result.get('warning', ''))
+        self.assertIn('cross-device link', result.get('detail', ''), '为什么没钉住是唯一的线索')
+
+    def test_a_clean_round_says_nothing_about_pinning(self):
+        """反过来钉一边:钉住了就一个字都不说。
+
+        说了的话每一轮都挂着一句「没钉住」,下次真没钉住时没人会再看它。
+        """
+        self.settings(cookies_browser='chrome')
+        result = login.check(self.settings())
+        self.assertEqual(True, result['ready'])
+        self.assertNotIn('warning', result)
+        self.assertNotIn('warning_code', result)
+
+    def test_a_cookie_warning_and_a_degrade_are_reported_side_by_side(self):
+        """两件事可以同时成立,**不许互相顶掉** —— 下一步完全不一样。
+
+        一个去钥匙串放行,一个换浏览器或点名 profile。只报一件的话另一件那半天白花。
+        """
+        self.settings(cookies_browser='chrome')
+        noisy = ("import json, sys\n"
+                 "sys.stdout.write('WARNING: cannot decrypt v10 cookies: no key found\\n')\n"
+                 + self.QUIET)
+        with patch.object(toolchain, 'command', return_value=[sys.executable, '-c', noisy]), \
+                self.degraded():
+            result = login.check(self.settings())
+        self.assertEqual('cookie_unreadable', result.get('warning_code'),
+                         'yt-dlp 说过的那一档照旧是这次并列警告的档')
+        wording = result.get('warning', '')
+        self.assertIn('钥匙串', wording, '读不出 cookie 那一条不见了')
+        self.assertIn('钉在 profile 一级', wording, '没钉住那一条被顶掉了')
+
+    def test_the_sync_path_hears_it_too(self):
+        """**同步那条路也要说。** 它才是「抓回来的内容到底带没带登录态」的那一轮。
+
+        面板那颗「检查登录态」会提醒,而真正抓东西的同步悄悄用了可能挑错的那一份 ——
+        人看到的是一次正常的同步,而这一轮的产物全是公开内容。
+        """
+        summary = {}
+        with self.degraded(), collector.heeded(summary, ['7']):
+            login.arguments('chrome')
+        self.assertEqual(['7'], summary.get('cautions', {}).get(login.UNPINNED), summary)
+        self.assertIn('钉在 profile 一级', login.cautioned(login.UNPINNED, 'chrome'))
+
+    def test_a_profile_the_user_named_by_path_is_never_called_a_degrade(self):
+        """**他自己点名了一条路径,那是明确选择,不是一次降级。**
+
+        照「没钉住」报的话,每一轮都挂一句让他换浏览器 —— 而他正是为了绕开这件事才点名的。
+        """
+        with diagnosis.heard() as ledger:
+            arguments = login.arguments('chrome:~/somewhere/Profile 1')
+        self.assertEqual(['--cookies-from-browser', 'chrome:~/somewhere/Profile 1'], arguments)
+        self.assertEqual([], diagnosis.witnessed(ledger, diagnosis.COOKIES))
+
+
+class ViewPreparationIsPerCall(unittest.TestCase):
+    """**同一个进程里两个线程同时准备这份视图,谁都不许把谁的中间文件删掉。**
+
+    真实并发入口就是同进程的两个线程:面板那颗「检查登录态」在 FastAPI 的线程里,同步在
+    后台线程里 —— 它们的 pid 一样。临时名只带 pid 时:线程 A 刚建好 `Cookies.<pid>.tmp`,
+    线程 B 进来 `unlink` 掉它,A 的 `os.replace` 撞 FileNotFoundError,`cookie_view` 把它
+    降级成「只交浏览器名」,于是 yt-dlp 又回去在整个浏览器目录里挑最近被写过的那一份 ——
+    **正是这一轮要修的原问题**。
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.source = self.root / 'Cookies'
+        self.source.write_bytes(b'x')
+        self.target = self.root / 'view' / 'Cookies'
+        self.target.parent.mkdir()
+
+    def test_two_threads_preparing_the_view_never_trip_over_each_other(self):
+        """判据是**后果**:两边都钉住了,没有谁被挤成降级。
+
+        `os.replace` 那一步拖慢 30 毫秒,把本来几微秒的窗口撑开 —— 共享临时名时这一条
+        稳定红(其中一个线程报 FileNotFoundError)。
+        """
+        real = os.replace
+        barrier = threading.Barrier(4)
+
+        def slow(source, target):
+            time.sleep(.03)
+            return real(source, target)
+
+        failures = []
+
+        def prepare():
+            barrier.wait()
+            try:
+                login._link(self.source, self.target)
+            except OSError as error:
+                failures.append(repr(error))
+
+        with patch('os.replace', side_effect=slow):
+            threads = [threading.Thread(target=prepare) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(10)
+        self.assertEqual([], failures, '同一个进程里的两个线程把彼此的临时文件删掉了')
+        self.assertTrue(self.target.exists(), '视图里那个链接最后得在')
+
+    def test_the_temporary_name_differs_between_calls(self):
+        """让上面那条不靠时序也成立的不变量:**几次调用不共写一个路径。**
+
+        口径同 `diagnosis.unique`(输出文件也是这么编号的):pid 管跨进程,进程内靠那个
+        共享计数器。只比「有没有带 pid」的话,共享名那一版恒绿。
+        """
+        seen = []
+        real = os.replace
+
+        def remember(source, target):
+            seen.append(str(source))
+            return real(source, target)
+
+        with patch('os.replace', side_effect=remember):
+            login._link(self.source, self.target)
+            login._link(self.source, self.target)
+        self.assertEqual(2, len(set(seen)), f'两次调用用了同一个临时名:{seen}')
+
+
+class CapabilityFieldsAreTriState(unittest.TestCase):
+    """**「没问过」和「问过了,确实没有」必须分得开。**
+
+    事故形态(审查在真实页面上实测):便宜那条状态快照(`toolchain.local`)压根不返回
+    `script` / `runtime` 两个键,面板拿 `!info.script` 判缺失 —— 缺席和空串都是假,于是
+    **一打开订阅管理就红字说两样都缺**,而那台机器上 `yt_dlp_ejs-0.8.0` 和 `deno-2.9.0`
+    都在;离开再回来一样,因为那条快照每次都这么答。
+    """
+
+    def test_the_cheap_snapshot_says_unasked_instead_of_missing(self):
+        """它不起子进程,所以答不了 —— 但**必须答出「我答不了」**。"""
+        with patch.object(toolchain, 'installed_version', return_value='2026.10.27'), \
+                patch.object(toolchain, 'origin', return_value='bundled'), \
+                patch.object(toolchain, '_run') as ran:
+            snapshot = toolchain.local()
+        self.assertEqual(0, ran.call_count, '面板每次刷新都读它,不许起子进程')
+        self.assertIsNone(snapshot['script'], '没问过要说没问过,不是空串')
+        self.assertIsNone(snapshot['runtime'])
+
+    def test_every_capability_key_the_panel_renders_is_answered_by_both(self):
+        """**集合级那一条**:同一个渲染函数读两份状态,所以两份都得答这两个键。
+
+        只问「`local()` 里有没有 script」的话,以后给 `challenge()` 再加一项能力
+        (比方说 ffmpeg 版本)、而 `local()` 忘了跟上,那一项在面板上又会变成「确实没有」
+        —— 同一个类问题换个字段再来一遍。比的是**集合**。
+        """
+        with patch.object(toolchain, 'command', return_value=[]):
+            answered = set(toolchain.challenge())
+        with patch.object(toolchain, 'installed_version', return_value='2026.10.27'), \
+                patch.object(toolchain, 'origin', return_value='bundled'):
+            cheap = set(toolchain.local())
+        self.assertEqual(answered, answered & cheap,
+                         f'这几项能力便宜那条快照没答:{sorted(answered - cheap)}')
+
+    def test_the_panel_only_promises_the_runtime_ytdlp_enables_by_default(self):
+        """**不许把「机器上装了」说成「程序会用」。**
+
+        一手源码:`yt_dlp/options.py` 的 `--js-runtimes` 写着 `default=['deno']`,帮助里
+        也写着 Only "deno" is enabled by default。本机实测:node 和 deno 都装着,
+        `yt-dlp -v` 的抬头只印 `JS runtimes: deno-2.9.0`;显式加一次 `--js-runtimes node`
+        才变成 `deno-2.9.0, node-26.4.0`。所以照「装个 node 就行」说等于让人白装一趟,
+        而面板上照旧提示缺运行时。**我们也不替他启用那三个**:未知开关会让 yt-dlp 当场
+        `no such option` 退出(实测),而自备那份的版本由用户自己点更新决定。
+        """
+        self.assertEqual('deno', login.RUNTIME)
+        for label, wording in (('检查结论', login.MESSAGES['js_challenge']),
+                               ('并列警告', login.CAUTIONS['js_challenge'])):
+            with self.subTest(label):
+                self.assertIn(login.RUNTIME, wording, '要让人装的那一个得点名')
+                for other in ('node', 'bun', 'quickjs'):
+                    self.assertNotIn(other, wording,
+                                     f'{other} 装了也用不上,别写进让人去做的事里')
 
 if __name__ == '__main__':
     unittest.main()

@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 from kb.config import DATA_DIR
-from kb.youtube.diagnosis import excerpt
+from kb.youtube.diagnosis import COOKIES, YOUTUBE, excerpt, heard, record, serial, witnessed
 
 DEFAULT = 'chrome'
 # 顺序决定面板上那张清单的顺序。**每一档的说明都要能单独读懂,不许写「同上」。**
@@ -143,10 +143,9 @@ def cookie_store(spec: str) -> Path | None:
     候选之外** —— 判据是「只看 profile 一级的那两个固定落点」,不是去匹配 `ext` 这种
     会变的目录名。点名了 profile 就只认它那一份。
     """
-    named = profile_of(spec)
-    if named and ('/' in named or '\\' in named or named.startswith('~')):
-        # 用户自己给了一条路径:那是他的明确选择,不替他改。
+    if _explicit(spec):
         return None
+    named = profile_of(spec)
     try:
         root = browser_dir(spec)
         if root is None:
@@ -163,11 +162,25 @@ def cookie_store(spec: str) -> Path | None:
         return None
 
 
+def _explicit(spec: str) -> bool:
+    """用户自己在设置里给了一条 profile 路径吗。**口径只有一份** —— `cookie_store` 据它
+    不替人改,`arguments` 据它不去提醒「没钉住」:那是他的明确选择,不是一次降级。
+    """
+    named = profile_of(spec)
+    return bool(named) and ('/' in named or '\\' in named or named.startswith('~'))
+
+
 def _link(source: Path, target: Path) -> None:
     """把 `target` 原子地指向 `source`。**先建临时名再 `os.replace`** —— 两轮采集同时
     刷这份视图时,直接 unlink 再 symlink 会留下一个「链接不在」的窗口。
     """
-    scratch = target.with_name(f'{target.name}.{os.getpid()}.tmp')
+    #: **临时名要逐调用唯一,光有 pid 不够。** 真实并发是同一个进程里的两个线程(面板那颗
+    #: 「检查登录态」在 FastAPI 的线程里,同步在后台线程里),它们的 pid 一样:线程 A 刚建好
+    #: `Cookies.<pid>.tmp`,线程 B 进来把它 unlink 掉,A 的 `os.replace` 就撞 FileNotFoundError ——
+    #: 而 `cookie_view` 把准备失败降级成「只交浏览器名」,于是 yt-dlp 又回去在整个浏览器目录里
+    #: 挑最近被写过的那一份,**正是这一轮要修的原问题**。序号走 `diagnosis.serial()`:进程内
+    #: 那个计数器只有一份(`media.unique` 给输出文件编号也走它),pid + 序号合起来才唯一。
+    scratch = target.with_name(f'{target.name}.{os.getpid()}.{serial()}.tmp')
     scratch.unlink(missing_ok=True)
     try:
         os.symlink(source, scratch)
@@ -193,6 +206,10 @@ def cookie_view(spec: str) -> dict:
     照旧只交浏览器名,`pinned` 报 False、`reason` 说清为什么 —— 面板那一句提醒靠它。
     """
     spec = validate(spec)
+    if _explicit(spec):
+        # 点名了路径就照他说的走。**这不算降级**,所以 `reason` 空着 —— 它是「要不要提醒」
+        # 的唯一判据(见 `arguments`),给了理由就等于每一轮都去提醒一件他自己选的事。
+        return {'args': ['--cookies-from-browser', spec], 'pinned': False, 'store': '', 'reason': ''}
     store = cookie_store(spec)
     if store is None:
         return {'args': ['--cookies-from-browser', spec], 'pinned': False, 'store': '',
@@ -217,10 +234,20 @@ def cookie_view(spec: str) -> dict:
 def arguments(spec: str) -> list[str]:
     """交给 yt-dlp 的那两个参数。校验过才拼,不把用户输入原样塞进命令。
 
-    **口径只有一份**(`cookie_view`):面板那句提醒和真正发出去的命令读的是同一个函数,
-    否则会出现「面板说钉住了、命令其实没钉」这种对不上的状态。
+    **这一次到底用了哪一份库,就在这一刻记进账**(`diagnosis.record`,`COOKIES` 那条道)。
+    原先是让面板事后再调一次 `cookie_view` 看「现在钉不钉得住」—— 而那是**另一次**准备:
+    刚才那一次因为线程撞车或者权限不足降级了、这一次又建成功,面板就一个字都不说,
+    人看到的是一次干净的失败,而它恰恰是以未登录身份出去的(形态同 `cookie_store`)。
+    **对一次读取做出的结论必须跟那次调用绑在一起,不能由「后来又建成功一次」推出来。**
+    同步那条路同样读这本账(`collector.caution`),所以两个入口的口径也只有一份。
+
+    记的是**降级的理由**,不是文案:说法只有一份,在 `CAUTIONS[UNPINNED]`。
+    `record` 在轮外是空操作(没人开账),所以直接调它的单元测试不受影响。
     """
-    return cookie_view(spec)['args']
+    view = cookie_view(spec)
+    if not view['pinned'] and view['reason'] and browser_of(spec) in _CHROMIUM:
+        record(view['reason'], COOKIES)
+    return view['args']
 
 
 # yt-dlp 失败输出里的分类特征。**宁可归到 unknown,也不要猜一个具体原因。**
@@ -241,20 +268,44 @@ _WALL = ('sign in to view', 'login required', 'account cookies are no longer val
 # 这类词放进来:别处的正常句子也会撞上,而误判成限流会让人白等一个小时。
 _LIMIT = ('http error 429', 'too many requests')
 #: **JS 挑战没解开单独一档。** YouTube 现在会对一部分请求发一道 JS 挑战,yt-dlp 要用
-#: 本地的解题脚本(`yt-dlp-ejs` 这个 Python 包)配一个 JS 运行时(deno / node / bun /
-#: quickjs)去算;两样缺一样,它就只能拿到预览图那几个格式,接着默认的格式选择器一个都
+#: 本地的解题脚本(`yt-dlp-ejs` 这个 Python 包)配一个 JS 运行时去算;两样缺一样,它就只能
+#: 拿到预览图那几个格式,接着默认的格式选择器一个都
 #: 匹配不上。实测复现(cookie 完全正常、`Found YouTube account cookies` 1843 条):
 #: `n challenge solving failed` → `Only images are available for download` →
 #: `Requested format is not available`。**这一档和登录态无关**,照 `unknown` 报的那一版
 #: 让人去反复检查登录,而要做的是在面板上更新一次 yt-dlp(连解题脚本一起装)。
 #: **只认挑战本身那几句话**:光有「格式不可用」不算 —— 那也可能是这条视频真的没有音轨,
 #: 那时让人去装 JS 运行时是帮倒忙(口径同「判不准一律落 unknown」)。
+#: **要让人装的是 deno,不是「deno / node / bun / quickjs 随便一个」。** yt-dlp 支持这四个,
+#: 但 `--js-runtimes` 的默认值就是 `['deno']` 一项(一手源码 `yt_dlp/options.py` 的
+#: `default=['deno']`,帮助里也写着 Only "deno" is enabled by default),**没显式启用的那三个
+#: 它压根不会用**。本机实测:`node` 和 `deno` 都装着,`yt-dlp -v` 的抬头只印
+#: `JS runtimes: deno-2.9.0`;显式加一次 `--js-runtimes node` 才变成 `deno-2.9.0, node-26.4.0`。
+#: 所以照「装个 node 就行」说等于让人白装一趟,而面板上照旧提示缺运行时。
+#: **我们也不替他把那三个启用上**:未知开关会让 yt-dlp 当场 `no such option` 退出
+#: (实测),而自备那份的版本由用户自己点更新决定 —— 为此再探一次「这版认不认这个开关」
+#: 要在每一次调用前面加一道缓存,缓存错了就是**每一条路全断**。代价不对等,所以只说实话。
+RUNTIME = 'deno'
+
 _CHALLENGE = ('challenge solving failed', 'challenge solver', 'only images are available',
               'jsc:', '[jsc]')
 _COOKIE = ('could not find', 'cookies database', 'failed to decrypt', 'unable to decrypt',
            'cannot decrypt', 'no key found', 'unable to open database', 'permission denied',
            'no such file or directory', 'dpapi', 'keyring', 'secretstorage',
            'unsupported browser', 'could not copy')
+
+
+def limited(text: str) -> bool:
+    """这份输出里**出现过**出口限流没有。**和 `classify` 的单一分档是两件事。**
+
+    分档回答的是「这一轮最该跟人说哪一句」,所以 cookie 读不出来排在最前(它是因,
+    墙是果);而「同一份输出里出现过 429」是另一件**独立的事实**,熔断要用它。两件事挤在
+    一个返回值里的后果:同一次输出既报 cookie 解密失败又报 429 时,分档说 cookie、
+    于是限流一笔都没记进本轮,这一轮照旧把剩下的频道查完(审查实测 `checked=2`)。
+    特征串只有一份(`_LIMIT`),`classify` 读的也是它。
+    """
+    lowered = str(text or '').lower()
+    return any(mark in lowered for mark in _LIMIT)
 
 
 def classify(text: str) -> str:
@@ -311,9 +362,9 @@ MESSAGES = {
                  '这不说明登录态有问题，换一条视频或另一个频道再检查一次。',
     'js_challenge': 'YouTube 这一轮发了一道 JS 挑战，yt-dlp 没能解开，所以只拿到了预览图格式。'
                     '这不是登录态的问题（带着有效登录态也会撞上）：yt-dlp 要用本地解题脚本'
-                    '（yt-dlp-ejs）配一个 JS 运行时（deno / node / bun / quickjs）才能算。'
-                    '在下面更新一次 yt-dlp，解题脚本会跟着一起装上；'
-                    '机器上一个 JS 运行时都没有的话，装一个 deno 再试。'
+                    '（yt-dlp-ejs）配一个 JS 运行时才能算。在下面更新一次 yt-dlp，'
+                    '解题脚本会跟着一起装上；运行时要装的是 deno —— '
+                    'yt-dlp 支持好几个，但只有它默认启用，别的装了也不会被用上。'
                     '元数据和字幕不受这一道影响，受影响的是下音频做本地转录那一步。',
     'unknown': 'yt-dlp 报了一个没能归类的错误，原文附在下面。',
 }
@@ -333,21 +384,42 @@ AUTH_CODES = ('not_logged_in', 'bot_wall', 'cookie_unreadable', 'rate_limited', 
 #: 不许复用**:同一个分档在这两处的结论完全不同 —— 那边是「这一轮没成」,这边是
 #: 「成了,但这份成功可能不算数」。拿 `MESSAGES` 顶替等于把一条 cookie 警告升级成
 #: 「登录态无效」,而用户明明刚取到了元数据(审查点名:并列显示证据和未确认状态)。
+#: 「这一轮没能把 cookie 主库钉在 profile 一级」。**不是 `classify` 算出来的档** ——
+#: 它说的是我们自己这一侧准备得怎么样,跟 yt-dlp 说了什么无关,所以永远不会从
+#: `classify` 出来,也不进 `AUTH_CODES`(那几档说的是「登录态本身怎么了」)。
+UNPINNED = 'cookie_unpinned'
+
 CAUTIONS = {
-    'cookie_unreadable': '但 yt-dlp 同时报了读不出 {label} 的 cookie：这一轮很可能是没带登录态'
-                         '取到的公开内容。macOS 去钥匙串放行、Windows 先完全退出浏览器，或换一个 profile，'
+    # **都不许断言「内容已经到手」** —— 同一句话也用在失败路的摘要上(见
+    # `collector.heeded`):警告证明的是「请求发出去了、没带上登录态」,不是产物。
+    'cookie_unreadable': '但 yt-dlp 同时报了读不出 {label} 的 cookie：这一轮很可能根本没带上登录态。'
+                         'macOS 去钥匙串放行、Windows 先完全退出浏览器，或换一个 profile，'
                          '再检查一次。',
     'rate_limited': '但 yt-dlp 同时报了 429（请求过于频繁）：这一轮算侥幸过的，隔一段时间再检查一次更有把握。',
     'bot_wall': '但 yt-dlp 同时报了机器人验证：这个出口已经被盯上，下一轮可能就过不去了。',
     'not_logged_in': '但 yt-dlp 同时报了登录态失效：真正用得上它的字幕和音频这一轮没验到。',
     'js_challenge': '但 yt-dlp 同时报了那道 JS 挑战没解开：这一轮只拿到元数据和字幕，'
                     '下音频做本地转录那一步会失败。在下面更新一次 yt-dlp 把解题脚本装上，'
-                    '机器上没有 deno / node 这类 JS 运行时的话也要装一个。',
+                    '机器上没有 deno 的话也要装一个 —— yt-dlp 只默认启用它这一个运行时。',
+    UNPINNED: '另外，这一轮没能把 {label} 的 cookie 主库钉在 profile 一级：yt-dlp 会在整个浏览器'
+              '目录里挑「最近被写过的那一份 Cookies」，而每个扩展也各有一份同名的 cookie 分区 —— '
+              '挑错时这一轮就是以未登录身份出去的。换一个浏览器，或者在设置里点名 profile'
+              '（例如 chrome:Default）可以绕开。',
 }
 
 
 def describe(code: str, spec: str) -> str:
     return MESSAGES.get(code, MESSAGES['unknown']).format(label=LABELS.get(browser_of(spec), spec))
+
+
+def cautioned(code: str, spec: str) -> str:
+    """「这一轮取到了,但工具同时报了这么一条」的那句话。**不认的档返回空串。**
+
+    空串就是「这条警告不值得在面板上说一句」:`unknown` 那一档什么都证明不了,
+    而 yt-dlp 平时的退路警告(换 player 客户端、通用提取器)每一轮都有好几条 ——
+    一律照搬会把真正要紧的那条 cookie 警告埋掉。口径同 `login.check` 的 `CAUTIONS`。
+    """
+    return CAUTIONS.get(code, '').format(label=LABELS.get(browser_of(spec), spec))
 
 
 def caution(code: str, spec: str) -> str:
@@ -366,15 +438,89 @@ def evidence(error, limit: int = 400) -> str:
     return excerpt(getattr(error, 'diagnostic', '') or str(error), limit)
 
 
+#: 归并之后的结论:**逐条都判过了,一条可用的 YouTube 分档都没有。**
+#: **和 `classify` 算出来的 `unknown` 分开写**:算出来的那种只说明「这一份文本没中任何
+#: 特征」,`coded` 照旧该去看完整诊断;这一档是「别再判了」。今天每个生产方的 `code` 都是
+#: 在和 `diagnostic` 同一份文本上算出来的,所以两种读法恰好一致 —— **这是冗余带**(代价
+#: 就一个常量),别把两个意思合回同一个值:哪天某处的分档改成在另一份文本上算
+#: (`_collect_listing` 的 `code` 取自解析错误、`diagnostic` 取自工具输出,就差一步),
+#: 合着写就会把「回去看完整诊断」那一道一起关掉。这一档只许 `merge` 写。
+UNDECIDED = 'undecided'
+
+
 def coded(error) -> str:
     """从一个异常里取出分档。**口径只有一份,消费方不许各自 `classify(str(error))`。**
 
     带着 `code` 的(`diagnosis.ToolFailure` 在**未裁切**的完整诊断上算过了)直接用它;
     没带的才拿消息现算 —— 异常消息为了给人看已经裁过两头,决定性那一行可能正好在
     被省略的中段(审查实测:长诊断里的 429 这样丢掉,整次失败被判成 bot 墙)。
+
+    **原文里出现过 429 就先说它**(`limited`):429 是「网页根本没下下来」,后面那些墙
+    都是它的下游,而这一轮正是因为它停的 —— 说成别的档会让面板自相矛盾(审查实测:
+    一边说「已经因请求过多停止」,一边说「带上登录态通常能过这一道」,照后一句去重新登录
+    没有用)。这一条也顺带盖住「分档被 cookie 那一档占住」的那一半。
+
+    **这里的每一档说的都是 YouTube**,所以只认 YouTube 那个上游报的异常
+    (`diagnosis.YOUTUBE`)。模型服务和本机工具同样会说 `429`、`permission denied`,
+    按文本一判就成了「YouTube 网页没下下来」「读不出 cookie」—— 状态码相同不能证明请求
+    来自同一个服务(审查实测:模型配额那一轮,面板让用户去换出口)。没标上游的按 YouTube
+    算,理由在 `diagnosis` 那几个常量上面。
     """
+    if getattr(error, 'origin', YOUTUBE) != YOUTUBE:
+        return 'unknown'
+    if getattr(error, 'code', '') == UNDECIDED:
+        # **已经判过、判不出来**(见 `merge` 和 `UNDECIDED`):这里再拿**拼起来的那段
+        # 文本**判一次,就会把别的上游那句 `permission denied` / `429` 当成 YouTube 的墙
+        # —— 丢来源的那条老路换个入口又走回来了。没判过的(`code` 为空、或算出来的
+        # `unknown`)照旧往下走,它们还指望下面那两道。
+        return 'unknown'
+    if limited(getattr(error, 'diagnostic', '') or str(error)):
+        return 'rate_limited'
     code = getattr(error, 'code', '')
     return code if code in MESSAGES else classify(str(error))
+
+
+#: 归并多条失败时的证据强度。**不按到达先后选** —— 先后只是时间,不是证据强度:
+#: 逐条解析先报机器人验证、后路 flat 随后报 429,按先后选就对外说成「带上登录态通常能过」,
+#: 而这一轮正是因为 429 停的(审查实测:`walls={'bot_wall': …}`,摘要自相矛盾)。
+#: **429 在这里排第一**(和 `classify` 里 cookie 优先不同):`classify` 排的是同一份输出里
+#: 几个特征的**因果**,这里排的是几次独立失败里「哪一条解释得了这一轮为什么停」。
+#: 余下几档照 `classify` 的因果序。**`unknown` 不算结论**,一个都不选。
+_STRENGTH = ('rate_limited', 'cookie_unreadable', 'bot_wall', 'not_logged_in', 'no_access')
+
+
+def merge(carrier, errors):
+    """把这几条失败里**最有解释力的那一档**抄到 `carrier` 上,再把它交出去。
+
+    合并多条原因的地方(发现的两条路、字幕的几种语言)原先只留文字 —— 分档和完整诊断
+    一起丢了,上层只能回去拿裁过的文本重新猜(理由见 `coded`)。各条原因的**原话照旧
+    都在** `carrier` 自己的消息里,这里挑的只是「对外说哪一档、附哪一份原文」。
+    只认 `YOUTUBE` 那一档:别的上游的结论不该被当成 YouTube 的墙。
+    """
+    ranked = sorted((error for error in errors
+                     if getattr(error, 'origin', YOUTUBE) == YOUTUBE and coded(error) in _STRENGTH),
+                    key=lambda error: _STRENGTH.index(coded(error)))
+    if ranked:
+        carrier.code = coded(ranked[0])
+        carrier.diagnostic = getattr(ranked[0], 'diagnostic', '')
+        carrier.origin = YOUTUBE
+    elif errors:
+        # **一条都排不上名次时,结论是「判不出来」,不是「没判」。** 留空的话 `coded`
+        # 会拿 `carrier` 那段拼起来的消息重新分类 —— 本机的 `permission denied` 和
+        # 模型服务的 `429` 混在里面,于是又被说成「读不出 cookie」「出口被限流」
+        # (触发例:详细读取本机写盘失败、flat 后路随后普通超时)。
+        # **原话一律不动**:`carrier` 自己的消息里每条原因都在,`evidence` 从那儿取。
+        carrier.code = UNDECIDED
+    if not ranked and errors and all(getattr(error, 'origin', YOUTUBE) != YOUTUBE for error in errors):
+        # **一条 YouTube 的都没有时,输出绝不许默认成 YouTube。** 不标来源的话
+        # `coded` 按 YouTube 算,于是本机那一侧的 `permission denied` 经过这道归并
+        # 又被判回「读不出 cookie」,面板让人去钥匙串放行,而问题在磁盘上(审查实测:
+        # 工具输出目录不可写,直接调用时 origin=local 判得对,过一次归并就错了)。
+        # 混着 YouTube 的那种照旧按默认走:里面确实有一条 YouTube 的失败,
+        # 标成本机会把 cookie 那一档的线索一起丢掉。
+        carrier.origin = getattr(errors[0], 'origin', YOUTUBE)
+        carrier.diagnostic = getattr(errors[0], 'diagnostic', '')
+    return carrier
 
 
 def readiness(settings) -> dict:
@@ -393,49 +539,62 @@ def readiness(settings) -> dict:
                        '文件上看不出 cookie 是否过期，点「检查登录态」才会真连一次。'}
 
 
-def pin_note(spec: str) -> str:
-    """这一轮的 cookie 库钉住了没有。钉住了、或者这个浏览器不需要钉,都返回空串。
-
-    **钉不住要说出来**:那意味着这台机器上随便哪个扩展的 cookie 分区一被写过,这一轮就
-    可能以未登录身份出去,而面板上只看得见下游那道墙(实测形态见 `cookie_store`)。
-    """
-    if browser_of(spec) not in _CHROMIUM:
-        return ''
-    try:
-        view = cookie_view(spec)
-    except ValueError:
-        return ''
-    if view['pinned']:
-        return ''
-    return (f'另外，这一轮没能钉住 {LABELS.get(browser_of(spec), spec)} 的 cookie 主库'
-            f'（{view["reason"]}）：yt-dlp 会在整个浏览器目录里挑「最近被写过的那一份 Cookies」，'
-            '而每个扩展也各有一份同名的 cookie 分区 —— 挑错时这一轮就是以未登录身份出去的。'
-            '换一个浏览器或在设置里点名 profile（例如 chrome:Default）可以绕开。')
-
-
 def check(settings, deadline=None) -> dict:
     """真连一次。两步:先列频道(不需要登录态),再取单条视频元数据(bot 墙在这一步)。
 
-    **结论从一个出口出去**(`_check` 真连、这里统一补上「cookie 库钉住没有」那句):
-    挂在各个 return 上的话,五条返回路里漏一条就是「面板上这一次什么都没说」。
+    **整次检查一本诊断账**(`diagnosis.heard`):每一步的原话在 `media.run` 的完成边界
+    就记下了,所以**哪一步失败都抹不掉前面那一步说过的话** —— 列频道时明说「读不出
+    cookie」、随后 probe 普通超时的那一轮,原先只按后一条异常出结论,面板上只剩
+    「yt-dlp 报了一个没能归类的错误」,先前那条铁证一个字都没有(审查实测)。
     """
-    result = _check(settings, deadline)
-    note = pin_note(result.get('browser', ''))
-    if note:
-        result['warning'] = (result.get('warning', '') + ' ' + note).strip()
+    import time
+
+    from kb.youtube.settings import of
+
+    spec = of(settings)['cookies_browser']
+    with heard() as ledger:
+        return _noticed(_check(settings, deadline, spec), ledger, spec)
+
+
+def _noticed(result: dict, ledger, spec: str) -> dict:
+    """把这一次检查里工具说过的话并列挂在结论旁边。**成功和失败同一个出口。**
+
+    分档照旧在**完整文本**上算(账上那几份一个字都没裁过),然后和结论并列显示:
+    取到了元数据那一轮 `ready` 仍是 `True`、`code` 仍是 `metadata_ok`,只多一条
+    `warning` —— 把它升级成「登录态无效」是另一头的错,人刚刚明明取到了元数据。
+    失败那一轮同理只是**并列**:`code` 还是那次失败自己的档,不许被先前那条警告顶掉
+    (两件事可以同时成立,而「这一步为什么没成」是人要先知道的那一件)。
+    **只认 YouTube 那个上游说的**:本机工具的报错不进这套判据(`diagnosis.witnessed`)。
+    (`heard` / `witnessed` 从 `diagnosis` 直接引进来 —— 那一层不认识 `login`,没有环。)
+    **`detail` 不许盖掉失败自己的原文**:那一份是人唯一的线索,警告另挂一行。
+    """
+    said = witnessed(ledger)
+    flagged = classify(' | '.join(said)) if said else ''
+    wording = caution(flagged, spec)
+    # 这一次**实际用的**是哪一份 cookie 库:从账上读(见 `arguments`),不事后再准备一次
+    # 看「现在钉不钉得住」。同一段里几次调用说的是同一句话,按原话去重、不堆 N 遍。
+    unpinned = list(dict.fromkeys(witnessed(ledger, COOKIES)))
+    if unpinned:
+        # **并列,不互相顶掉。** 两件事可以同时成立,而且下一步不一样(一个去钥匙串放行,
+        # 一个换浏览器或点名 profile)。只有这一条时它就是这次并列警告的档。
+        flagged = flagged if wording else UNPINNED
+        wording = ' '.join(filter(None, [wording, cautioned(UNPINNED, spec)]))
+    if not wording:
+        return result
+    result['warning_code'] = flagged
+    result['warning'] = wording
+    result.setdefault('detail', excerpt(' | '.join([*said, *unpinned]), 400))
     return result
 
 
-def _check(settings, deadline=None) -> dict:
-    """真连那两步本身。**结论由 `check` 统一补齐**,不要在这里面加新的出口。"""
+def _check(settings, deadline, spec) -> dict:
+    """真连那两步本身。**结论由 `check` 统一配上这一次的诊断**,所以这儿只管判这一步。"""
     import time
 
     from kb.feeds import registry as reg
     from kb.youtube import media
     from kb.youtube.channels import VIDEO_ID
-    from kb.youtube.settings import of
 
-    spec = of(settings)['cookies_browser']
     base = readiness(settings)
     if not base['ready']:
         return {**base, 'checked': True}
@@ -444,12 +603,8 @@ def _check(settings, deadline=None) -> dict:
     if not source:
         return {'ready': False, 'code': 'no_channel', 'message': describe('no_channel', spec),
                 'browser': spec, 'checked': True}
-    # **成功那一份也要把工具的警告收上来**(出参,口径见 `media._collect_listing`):
-    # cookie 解密失败只是一条 warning,进程退 0、公开视频照旧列得出来 —— 不收的话这条
-    # 铁证跟着临时输出一起被删,面板上只剩「取到了元数据」(审查实测)。
-    noise = []
     try:
-        listed = media.channel_videos(source, settings, deadline, lambda: False, limit=1, warnings=noise)
+        listed = media.channel_videos(source, settings, deadline, lambda: False, limit=1)
     except Exception as error:
         # 列频道这一步**本来不需要登录态**(实测裸跑可通),所以它失败时有把握的只有两档:
         # 「cookie 读不出来」和「出口撞上机器人验证」—— 两者都和这一步本身对得上。
@@ -465,7 +620,7 @@ def _check(settings, deadline=None) -> dict:
                 'detail': f"频道 {source['name']} 这一轮没有列出任何视频"}
     row = {'video_id': video_id, 'entry': {'url': 'https://www.youtube.com/watch?v=' + video_id}}
     try:
-        media.probe(row, settings, deadline, lambda: False, force=True, warnings=noise)
+        media.probe(row, settings, deadline, lambda: False, force=True)
     except Exception as error:
         code = coded(error)
         return {'ready': False, 'code': code, 'browser': spec, 'checked': True,
@@ -473,15 +628,6 @@ def _check(settings, deadline=None) -> dict:
     # `confirmed` 和 `ready` 是两件事:ready=「这一轮没撞上任何已知故障」,
     # confirmed=「那份登录态被证实有效」。后者我们现在拿不到证据,就如实报 False ——
     # 面板按它显示中性而不是绿色结论。
-    result = {'ready': True, 'confirmed': False, 'code': 'metadata_ok', 'browser': spec,
-              'checked': True, 'message': describe('metadata_ok', spec)}
-    # **取到了东西不等于可以把警告扔掉,但也不等于这一轮失败。** 分档照旧在完整文本上算
-    # (这里的 `noise` 一个字都没裁过),然后和「未被证实」那句话**并列**显示:ready 仍是
-    # True、`code` 仍是 `metadata_ok`,只多一条 `warning`。把它升级成「登录态无效」是另一
-    # 头的错 —— 人刚刚明明取到了元数据。
-    flagged = classify(' | '.join(noise)) if noise else ''
-    if caution(flagged, spec):
-        result['warning_code'] = flagged
-        result['warning'] = caution(flagged, spec)
-        result['detail'] = excerpt(' | '.join(noise), 400)
-    return result
+    # `confirmed` 和 `ready` 是两件事,见上面那段注释;这一份的警告由 `check` 配上。
+    return {'ready': True, 'confirmed': False, 'code': 'metadata_ok', 'browser': spec,
+            'checked': True, 'message': describe('metadata_ok', spec)}

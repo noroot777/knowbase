@@ -31,6 +31,15 @@ class YouTubeFixture(unittest.TestCase):
             override = patch.object(target, attribute, value)
             override.start()
             self.addCleanup(override.stop)
+        # cookie 视图的准备结果**不许跟着这台机器的浏览器走**:`login.arguments` 会把
+        # 「这一轮没钉住」记进诊断账,而账上有没有这一条是一大批用例的判据 —— 不打桩的话
+        # 装了 Chrome 的机器上绿、没装的机器上红,而两边的代码一模一样。
+        # 想验降级那一路的用例自己再打一次桩(`tests/test_youtube_challenge.py`)。
+        pinned = patch.object(login, 'cookie_view', side_effect=lambda spec: {
+            'args': ['--cookies-from-browser', spec], 'pinned': True,
+            'store': str(self.root / 'Cookies'), 'reason': ''})
+        pinned.start()
+        self.addCleanup(pinned.stop)
         old = deepcopy(pipeline_state._state)
         pipeline_state._state.update(running=False, stop_requested=False)
         self.addCleanup(lambda: pipeline_state._state.update(old))

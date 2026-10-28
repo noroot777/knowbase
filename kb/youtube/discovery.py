@@ -29,6 +29,7 @@ from zoneinfo import ZoneInfo
 import feedparser
 
 from kb.feeds.fetching import FeedError, request
+from kb.youtube import login, throttle
 from kb.youtube.channels import CHANNEL_ID, VIDEO_ID, config
 from kb.youtube.settings import of
 
@@ -95,23 +96,54 @@ def fetch(source, settings=None, timeout=90, estimates=True, notes=None):
 
     `notes` 是出参:某条路「列了几条之后中断」的说明会落在里面(见 `media._collect_listing`),
     由 `collector` 转成面板上那句「这个频道没列完」。
+
+    **工具这一次报了一句什么不走出参**:那是 `media.run` 的完成边界记的账
+    (`diagnosis.record`,成功、半截、失败都记),由开账那一段去读(`collector.heeded`)。
+    一层层往上传的那一版只在各自的成功分支上交账,换个失败组合就又漏一次。
+    **它不是失败**:取到的照旧收下,只是并列说一句这一轮可能没带上登录态。
+
+    **第 1 条撞上 429 之后第 2 条压根起不来**:那道闸在请求入口上(`media.ytdlp` 的
+    `throttle.guard`),不在这儿 —— 同一个出口刚说了「请求过于频繁」,换个参数再问一次
+    只是把惩罚加深。它会以一条限流失败的形式落进 `reasons`,所以这里的结构不变。
     """
     budget = max(6.0, float(timeout))
     spec = '' if settings is None else of(settings)['cookies_browser']
     if not spec:
         return rss(source, time.monotonic() + budget)
-    reasons = []
+    reasons, failures = [], []
     try:
         return detailed(source, settings, time.monotonic() + budget * DETAIL_SHARE, notes)
+    except throttle.NotAttempted:
+        # **「没发出去」不许变成「这条路失败了」**:归并成一条 `FeedError` 交出去之后,
+        # 上层只看得见一条普通失败,于是这个频道被记「连接失败」、推半小时退避,而它
+        # 一个毛病都没有(审查实测)。后路也一样会被同一道闸拒掉,不必再试。
+        raise
     except Exception as error:
         reasons.append(f'带登录态逐条解析：{error}')
+        failures.append(error)
     if not estimates:
-        raise FeedError('；'.join(reasons)) from None
+        raise _combined(reasons, failures) from None
     try:
         return approximate(source, settings, time.monotonic() + budget * (1 - DETAIL_SHARE), notes)
+    except throttle.NotAttempted:
+        # 走到这儿说明**第一条路是真发出去并失败的**(它自己没发出去的话上面那一道就抛了),
+        # 那条真实失败说了算 —— 这个频道这一次确实没拿到东西,原文也得留得住。
+        raise _combined(reasons, failures) from None
     except Exception as error:
         reasons.append(f'估算列举：{error}')
-        raise FeedError('；'.join(reasons)) from None
+        failures.append(error)
+        raise _combined(reasons, failures) from None
+
+
+def _combined(reasons, failures):
+    """两条路都没成时交出去的那一条。**分档和完整诊断要跟着走**(`login.merge`)。
+
+    只留文字的话,上层只剩一条裁过的 `FeedError` 可读 —— 它只能回去拿文本重新猜是哪一档,
+    而那正是 `login.coded` 的说明里记着的那次误判。**挑哪一条不按到达先后**:逐条解析先报
+    机器人验证、后路随后报 429 时,按先后挑就对外说成「带上登录态通常能过」,而这一轮正是
+    因为 429 停的(审查实测)。各条原因的原话照旧都在这条异常自己的消息里。
+    """
+    return login.merge(FeedError('；'.join(reasons)), failures)
 
 
 #: 主路一轮往回看几条。**不是把频道历史翻完**:逐条解析实测每条约 4.3 秒,10 条就是
@@ -139,7 +171,8 @@ def detailed(source, settings, deadline, notes=None):
 def approximate(source, settings, deadline, notes=None):
     """后路:yt-dlp flat 列频道。只有 id、标题和时长,发布时间按列表顺序估算。"""
     from kb.youtube import media
-    listed = media.channel_videos(source, settings, deadline, lambda: False, limit=20, notes=notes)
+    listed = media.channel_videos(source, settings, deadline, lambda: False, limit=20,
+                                  notes=notes)
     now = datetime.now(timezone.utc)
     entries = []
     for position, item in enumerate(listed):

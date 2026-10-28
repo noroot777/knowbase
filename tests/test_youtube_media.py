@@ -3,7 +3,7 @@ import sys
 import time
 from unittest.mock import patch
 
-from kb.youtube import media, toolchain
+from kb.youtube import diagnosis, media, toolchain
 from tests.youtube_fixture import YouTubeFixture
 
 
@@ -166,7 +166,10 @@ class YouTubeMedia(YouTubeFixture):
                   'while True:\n'
                   '    sys.stdout.write(line + "\\n")\n'
                   '    sys.stdout.flush()\n')
-        with patch.object(media, '_OUTPUT_CAP', 256 * 1024):
+        # 封顶那个常量住在 `diagnosis`(写进磁盘的那一道边界归它),`media.run` 只是用它。
+        # 打桩要打在**它住的地方**:`media` 里没有这个名字,`patch.object` 直接报
+        # AttributeError —— 不是红在行为上,这一条压根没验过。
+        with patch.object(diagnosis, '_OUTPUT_CAP', 256 * 1024):
             with self.assertRaisesRegex(RuntimeError, '过大'):
                 media.run([sys.executable, '-c', script], self.root / 'flood.log',
                           time.monotonic() + 20, lambda: False)

@@ -322,8 +322,18 @@ function youtubeShowYtdlp(info) {
   // **解 JS 挑战那两样单独说一句。** YouTube 会对一部分请求发一道 JS 挑战,解不开就只
   // 剩预览图格式 —— 元数据和字幕照旧拿得到,下音频做本地转录那一步会失败(实测:带着
   // 有效登录态也一样)。缺脚本和缺运行时让用户做的事不同,所以分开说。
-  if (!info.script) text += ' 还缺 JS 挑战的解题脚本（yt-dlp-ejs），更新一次会一起装上。';
-  if (!info.runtime) text += ' 机器上没有可用的 JS 运行时（deno / node / bun / quickjs），装一个才解得开那道挑战。';
+  // **「没问过」和「问过了没有」是两件事。** 便宜那条状态快照不起子进程、压根没查这两样
+  // (`toolchain.local` 显式答 null),按 `!info.script` 判缺失的话缺席和空串都是假 ——
+  // 一打开订阅管理就红字说两样都缺,而机器上明明都装着(审查在真实页面上实测,离开再
+  // 回来一样)。没问就照实说没问。
+  const asked = [info.script, info.runtime].every((value) => value !== null && value !== undefined);
+  if (!asked) text += ' 解那道 JS 挑战要的脚本和运行时，点一次「检查登录态」才会查。';
+  else {
+    if (!info.script) text += ' 还缺 JS 挑战的解题脚本（yt-dlp-ejs），更新一次会一起装上。';
+    // **要装的是 deno,不是「四个里随便一个」**:yt-dlp 默认只启用 deno,只装了 node 的
+    // 机器上这一行照旧是缺(口径见 `login.RUNTIME` 那段一手源码与实测)。
+    if (!info.runtime) text += ' 机器上没有 deno，装一个才解得开那道挑战 —— yt-dlp 只默认启用它这一个运行时。';
+  }
   // **版本旧不是「抓不到」的原因。** 实测新旧两版撞的是同一道登录墙,所以这里只报版本,
   // 不把它写成一条待修的故障 —— 否则用户会以为更新一下登录墙就过了。
   line.textContent = text;
