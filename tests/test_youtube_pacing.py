@@ -166,6 +166,8 @@ class DiscoveryPacing(YouTubeFixture):
         sources = [self.channel(number) for number in (1, 2)]
         entries = {sources[0]['id']: [self.entry(1)], sources[1]['id']: [self.entry(2)]}
 
+        # `heard` 是「取成功了、但工具报了一句」那个出参(见 `discovery.fetch`);
+        # 这条用例不验它,但签名要收得下 —— 收不下的话红出来的是 TypeError,看着像节流坏了。
         def fetch(source, settings, budget, approximate, told):
             if source['id'] == sources[1]['id']:
                 told.append('只列到 1 条就中断了：预算到点')
