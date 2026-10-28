@@ -80,6 +80,10 @@ COOKIES = 'cookies'
 #: 这一层只管运输(谁报的、完整原文、给人看那一份怎么裁)。
 
 
+#: 摘要在展示文本里最多占这么大一份,余下全归权威诊断(理由见 `shown`)。
+_CONTEXT = 0.34
+
+
 def shown(error, limit=800) -> str:
     """一次失败**落库或上屏**时那份给人看的文本。**整个 youtube 包只有这一个出口。**
 
@@ -105,11 +109,25 @@ def shown(error, limit=800) -> str:
     python 执行失败；WARNING: ordinary download context …」)。判据落在
     **重新读库那一份里有没有那一行**,不是「异常对象上有没有」。
 
+    **两份各有自己的预算,整句不许合起来裁一次。** 合着裁的那一版后果是:多次失败把摘要
+    堆到 600 字以上时,1000 字的视频行前半全被摘要占掉,**诊断开头那一行落进省略的中段**
+    —— 而分档恰恰是它定的。审查实测:人工字幕失败、自动字幕 en 失败、en-orig 报
+    `HTTP Error 429`(在诊断开头)、后面跟着长重试上下文和末尾的机器人验证,
+    `code` 是 `rate_limited`、`walls` 也是它,而页面上那一行只有普通上下文和
+    `Sign in to confirm you are not a bot` —— **把「请求过多」显示成了「机器人验证」**,
+    照它的提示去重新登录没有用。所以诊断自己也要两头都留:决定性那一行在头还是在尾,
+    不是我们能预先知道的(429 在头、格式不可用在尾,两种都实测过)。
+
+    **预算先给诊断。** 它是「为什么是这一档」的原文,摘要只是上下文 —— 摘要那一份还很
+    容易因为 carrier 里嵌过诊断片段而重复占用,给它封顶就把这份浪费也封住了。
+
     空消息退回类名:数据库那两列不许留空,否则面板上那行字只剩一个状态词。
     """
     diagnostic = getattr(error, 'diagnostic', '')
-    told = (getattr(error, 'summary', '') or str(error)) if diagnostic else str(error)
-    return excerpt(f'{told}；{diagnostic}'.strip('；'), limit) or type(error).__name__
+    if not diagnostic:
+        return excerpt(str(error), limit) or type(error).__name__
+    said = excerpt(getattr(error, 'summary', '') or str(error), max(1, int(limit * _CONTEXT)))
+    return f'{said}；{excerpt(diagnostic, limit - len(said) - 1)}'.strip('；') or type(error).__name__
 
 
 #: 同进程内给输出文件编号。跨进程靠 pid,进程内靠这个 —— 两者合起来才唯一。

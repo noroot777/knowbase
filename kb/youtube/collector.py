@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from kb.collectors import Coverage
 from kb.collectors.feeds import FeedCollector
 from kb.feeds import registry as reg
-from kb.feeds.sync import _claim_write, _save_failure, _within_history
+from kb.feeds.sync import FAILURE_CAP, _claim_write, _save_failure, _within_history
 from kb.maintenance import maintenance_lock
 from kb.pipeline_segments import note_retry_targets
 from kb.pipeline_state import _stage, _state
@@ -31,6 +31,31 @@ DISCOVERY_SPACING = 1.0
 #: 一轮覆盖不到一半 —— 翻到 1800 秒按实测能覆盖 ~40 个。剩下的照旧记进 `skipped`,
 #: 下一轮接着查(`pending` 按 `last_attempt` 排序,轮着来;按 URL 去重,不会重复入库)。
 DISCOVERY_CEILING = 1800.0
+
+
+class _Told(RuntimeError):
+    """交给主干那个共用出口之前,**把展示文本按统一口径定下来**。
+
+    `_save_failure` 自己 `str(error)[:FAILURE_CAP]`,那一刀**从头裁**;而
+    `discovery.merge` 的消息是两份各约 800 字的工具摘要拼起来的、轻松超过那道上限 ——
+    审查实测:详细路径报超时、后路 flat 末尾报 `challenge solver` 和
+    `Requested format is not available`,分档和完整诊断都对(`js_challenge`),写进库的
+    频道 `last_error` 恰好 1200 字、决定性那两行一个字都没留下,面板上展开「查看失败原因」
+    看到的只有先前那次超时和后路开头的普通上下文。**上一轮说那一刀「只是冗余带」是错的**。
+
+    **主干那一侧不动**:它服务所有来源,而 `diagnostic` 这个约定今天只有 YouTube 有
+    (主干不认识任何具体来源)。所以转换放在这条适配边界上 —— 过了 `shown` 之后文本
+    一定不长于那道上限,主干那一刀就真的只剩冗余带了。
+
+    `_save_failure` 还会读 `unavailable` / `notice`(「这几条取不到」那条提示走它),
+    **原样转过去**:换一个异常对象把它们丢掉,那条提示就从面板上消失了。
+    """
+
+    def __init__(self, error):
+        super().__init__(diagnosis.shown(error, FAILURE_CAP))
+        for name in ('unavailable', 'notice'):
+            if hasattr(error, name):
+                setattr(self, name, getattr(error, name))
 
 
 def wall(summary, source_ids, error):
@@ -369,7 +394,7 @@ def _round(scope):
             break
         except Exception as error:
             wall(summary, [source['id']], error)
-            _save_failure(source, error, summary)
+            _save_failure(source, _Told(error), summary)
             throttle.caught(error)
         summary['checked'] += 1
         _stage('crawl', 'running', f"YouTube · 轻量检查 {summary['checked']}/{len(sources)} 个频道")
@@ -417,14 +442,14 @@ def _round(scope):
                 summary['repointed'] += 1
                 continue
             if source['id'] in failures:
-                _save_failure(source, RuntimeError('；'.join(failures[source['id']])), summary)
+                _save_failure(source, _Told(RuntimeError('；'.join(failures[source['id']]))), summary)
             elif outstanding:
                 summary['deferred'] += 1
             else:
                 summary['succeeded_ids'].append(str(source['id']))
         except Exception as error:
             wall(summary, [source['id']], error)
-            _save_failure(source, error, summary)
+            _save_failure(source, _Told(error), summary)
             throttle.caught(error)
     summary['stopped'] |= stopped()
     # **同一个原因不要在面板上重复一遍又一遍。** 登录态失效时每个频道都会报同样那句话,

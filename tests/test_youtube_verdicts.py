@@ -22,18 +22,24 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from kb.youtube import collector, login, media, storage
+from kb.feeds import registry as reg
+from kb.feeds.sync import FAILURE_CAP, _save_failure
+from kb.youtube import collector, discovery, login, media, storage
 from kb.youtube.diagnosis import LOCAL, MODEL, YOUTUBE, ToolFailure
 from tests.youtube_fixture import YouTubeFixture
 
 #: 落库那两列的名字。**凡是往它们写字的调用都算一个失败展示出口。**
 TOLD = ('reason', 'last_error')
 
-#: 那一轮真实输出的形状:决定性的一行在**尾部**,前面一长串普通上下文。
-#: 原文丢掉之后面板上留下的恰恰只有开头那截。
-NOISE = ('WARNING: [youtube] player client fallback\n' * 20 +
-         'WARNING: [youtube] [jsc] challenge solver script was skipped\n'
-         'ERROR: Requested format is not available')
+#: 决定性那一行**在头还是在尾,不是我们能预先知道的**:429 是「网页根本没下下来」、
+#: 印在最前面;格式不可用是工具最后一句话、在尾部。两种都实测过,所以诊断**两头都要钉** ——
+#: 只钉尾部的那一版,摘要一长就把诊断开头挤进省略的中段,而分档恰恰是开头那一行定的。
+#: 这个头部判据刻意不用 429:`coded` 认限流那一道在分档之前,写 429 会让下面每一档都变成
+#: `rate_limited`,整个集合级循环当场空转。429 那一幕由 `AnEarlyLineIsNotSqueezedOut` 原样复现。
+HEAD = 'ERROR: nsig extraction failed; Some formats may be missing'
+TAIL = 'ERROR: Requested format is not available'
+NOISE = (HEAD + '\n' + 'WARNING: [youtube] player client fallback\n' * 20 +
+         'WARNING: [youtube] [jsc] challenge solver script was skipped\n' + TAIL)
 
 
 def failure(code, diagnostic=NOISE, origin=YOUTUBE):
@@ -45,6 +51,13 @@ def failure(code, diagnostic=NOISE, origin=YOUTUBE):
 TRIED = '没有可用字幕，且本地语音转录这一步随后也失败了'
 
 
+#: 判出档那一次失败的**阶段摘要**。真实的那一份就是这种长度(「自动字幕 en-orig 下载失败：
+#: 第几次、哪条轨道、哪个客户端」),所以 `media` 把它裁到 300 字时**裁不到诊断**——
+#: carrier 里于是一个字的诊断都没有。摘要写短了的话 300 字正好够伸进诊断开头,
+#: 下面「诊断开头也要在」那条断言就会被摘要那一路顺带满足,**变成恒绿**。
+STAGE = '自动字幕 en-orig 下载失败：' * 20
+
+
 def carried(code, diagnostic=NOISE):
     """`media` 合并多条原因时交出来的那个 carrier,**按它的原样造**:两条原因。
 
@@ -52,7 +65,8 @@ def carried(code, diagnostic=NOISE):
     消息里**每条原因都被裁到 300 字**(`media` 那两处 `str(error)[:300]`)—— 摘要本来
     就该这样,所以末端既不能拿它当完整证据,**也不能把它整个扔掉**。
     """
-    broken = [ValueError(TRIED), failure(code, diagnostic)]
+    broken = [ValueError(TRIED), ValueError('；'.join(['人工字幕失败' * 20, '自动字幕 en 失败' * 20])),
+              ToolFailure(STAGE, diagnostic, code, YOUTUBE)]
     return login.merge(RuntimeError('；'.join(str(error)[:300] for error in broken)), broken)
 
 
@@ -180,15 +194,18 @@ class TheVideoRowKeepsTheRealReason(YouTubeFixture):
         for code in login.VERDICTS:
             with self.subTest(code=code):
                 error = carried(code)
-                self.assertNotIn('Requested format is not available', str(error),
-                                 '摘要里本来就没有尾部那一行,否则这条用例什么都没验')
+                for mark in (HEAD, TAIL):
+                    self.assertNotIn(mark, str(error),
+                                     '摘要里本来就没有诊断那两行,否则这条用例什么都没验')
                 self.assertNotIn(TRIED, error.diagnostic,
                                  '诊断里本来就没有这句话,否则下面那条断言什么都没验')
                 storage.failed(storage.rows()[0], error)
                 item = self.listed()
                 self.assertEqual('failed', item['state'])
-                self.assertIn('Requested format is not available', item['reason'],
-                              '页面上那一行又只剩开头那截普通工具输出了')
+                self.assertIn(TAIL, item['reason'], '页面上那一行又只剩开头那截普通工具输出了')
+                # **诊断的开头也要在。** 摘要堆长之后,合起来裁一次就把它挤进省略的中段
+                # —— 而分档常常正是开头那一行定的(429 那一幕)。
+                self.assertIn(HEAD, item['reason'], '诊断开头那一行被摘要挤掉了')
                 # **另一半:摘要不许被权威诊断顶掉。** 「这一轮试了哪几步、最后停在哪」
                 # 只有它记得 —— 只给诊断的话,「先前那条原因不许被顶掉」当场破
                 # (`tests/test_youtube_diagnosis.py` 在订阅那一侧钉着同一件事)。
@@ -240,6 +257,90 @@ class TheVideoRowKeepsTheRealReason(YouTubeFixture):
         self.assertEqual('ValueError', self.listed()['reason'], '空消息要退回类名')
 
 
+class AnEarlyLineIsNotSqueezedOut(YouTubeFixture):
+    """**审查实测那一幕原样复现**:决定性那一行印在诊断**开头**。
+
+    人工字幕失败 → 自动字幕 en 失败 → en-orig 报 `HTTP Error 429`、后面跟着长重试上下文
+    和末尾的机器人验证。`code` 和 `walls` 都是 `rate_limited`,而页面上那一行只有普通上下文
+    和 `Sign in to confirm you are not a bot` —— **把「请求过多」显示成了「机器人验证」**,
+    照它的提示去重新登录没有用。判据落在页面拿到的那一份里。
+    """
+
+    LIMIT = 'ERROR: HTTP Error 429: Too Many Requests'
+    BOT = 'ERROR: Sign in to confirm you are not a bot'
+
+    def setUp(self):
+        super().setUp()
+        self.source = self.channel()
+        storage.discover(self.source, [self.entry(1)])
+
+    def test_the_line_that_decided_the_verdict_reaches_the_page(self):
+        diagnostic = (self.LIMIT + '\n' + 'WARNING: [youtube] retrying player client\n' * 30 + self.BOT)
+        broken = [ValueError('人工字幕失败' * 20), ValueError('自动字幕 en 失败' * 20),
+                  ToolFailure(STAGE, diagnostic, 'rate_limited', YOUTUBE)]
+        error = login.merge(RuntimeError('；'.join(str(item)[:300] for item in broken)), broken)
+        self.assertEqual('rate_limited', login.coded(error), '这一幕的前提是分档判对了')
+        self.assertNotIn('429', str(error), 'carrier 里本来就没有它,否则这条用例什么都没验')
+        storage.failed(storage.rows()[0], error)
+        told = self.client.get('/api/intake/youtube/ranking').json()['items'][0]['reason']
+        self.assertIn('429', told, '「请求过多」又被显示成了「机器人验证」')
+        self.assertIn(self.BOT, told, '次级错误照旧要留着,它是上下文')
+        # 订阅失败明细那一处同样的预算更紧,一起钉。
+        self.assertIn('429', login.evidence(error, 500), '失败明细里也丢了')
+
+
+class TheChannelExitGoesThroughTheSameContract(YouTubeFixture):
+    """**频道那一侧的末端**:它交给主干那个共用出口,不许绕开统一口径。
+
+    审查实测:详细路径报超时、后路 flat 末尾报 `challenge solver` 和
+    `Requested format is not available`,分档和完整诊断都对(`js_challenge`),而写进库的
+    `last_error` 恰好 1200 字、决定性那两行一个字都没留下 —— 主干那一刀是**从头裁**,
+    而 `discovery.merge` 的消息是两份各约 800 字的摘要拼起来的、轻松超过它。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.source = reg.subscription('youtube', self.channel()['id'])
+        self.summary = {'errors': [], 'failed_ids': []}
+
+    def merged(self):
+        """`discovery.merge` 的原样:两条原因、各自的完整消息拼进 carrier。"""
+        slow = ToolFailure('逐条解析失败', 'WARNING: ordinary context\n' * 30 + 'ERROR: timed out', '', YOUTUBE)
+        wall = failure('js_challenge')
+        return login.merge(discovery.FeedError('；'.join([str(slow), str(wall)])), [slow, wall])
+
+    def test_the_decisive_line_survives_the_shared_exit(self):
+        error = self.merged()
+        self.assertEqual('js_challenge', login.coded(error), '这一幕的前提是分档判对了')
+        self.assertGreater(len('；'.join([str(error)])), FAILURE_CAP,
+                           '原消息要真的超过那道上限,否则这条用例什么都没验')
+        self.assertNotIn(TAIL, str(error)[:FAILURE_CAP], '从头裁本来就会丢掉它')
+        # **机制本身也要钉。** 上面那条端到端断言在这个形状上还有第二条满足路径:
+        # `discovery.merge` 的消息尾部本来就带着诊断的尾巴,两头都留的摘要那一半会把它
+        # 带回来 —— 所以它证得了「用户看得到」,证不了「那一刀真成了冗余带」。
+        # 这一条直接问那件事:交过去的文本必须已经压到主干那道上限之内。
+        handed = collector._Told(error)
+        self.assertLessEqual(len(str(handed)), FAILURE_CAP, '主干那一刀还会从头裁一次')
+        _save_failure(self.source, handed, self.summary)
+        stored = reg.subscription('youtube', self.source['id'])['last_error']
+        self.assertIn(TAIL, stored, '频道失败详情里又只剩先前那次超时了')
+        self.assertIn(TAIL, self.summary['errors'][0]['reason'], '同步汇总那一份也丢了')
+        self.assertLessEqual(len(stored), FAILURE_CAP, '主干那一刀只许是冗余带')
+
+    def test_the_conversion_never_drops_the_unavailable_notice(self):
+        """反过来钉一边:**「这几条取不到」那条提示不许被转换丢掉。**
+
+        换一个异常对象去交付时最容易顺手丢的就是这类附加属性 —— 丢了之后那条提示
+        从面板上整条消失,而它跟失败原文是两件事。
+        """
+        error = self.merged()
+        error.unavailable = ['视频 A', '视频 B']
+        error.notice = '有 2 条视频已经取不到了'
+        _save_failure(self.source, collector._Told(error), self.summary)
+        self.assertEqual([{'title': self.source['name'], 'reason': '有 2 条视频已经取不到了',
+                           'count': 2, 'items': ['视频 A', '视频 B']}], self.summary['notices'])
+
+
 class NoFailureExitTruncatesOnItsOwn(unittest.TestCase):
     """**结构级那一条:裁字只许发生在统一提取器里。**
 
@@ -265,6 +366,26 @@ class NoFailureExitTruncatesOnItsOwn(unittest.TestCase):
                            for inner in ast.walk(keyword.value)):
                         sliced.append(f'{path.name}:{keyword.value.lineno} {keyword.arg}=')
         self.assertEqual([], sliced, '这些末端自己裁了一刀,权威诊断在它们那儿变回了摘要')
+
+    def test_every_handoff_to_the_shared_exit_fixes_the_text_first(self):
+        """**包外那个共用出口也要全覆盖。** 上面那条只扫得到本包里的关键字实参。
+
+        `_save_failure` 住在主干、自己从头裁一刀,所以 YouTube 这一侧每一个交付点都必须
+        先过 `_Told`(它把文本压到 `FAILURE_CAP` 之内)。漏一个就是那一条频道失败的
+        决定性原文静默消失 —— 而分档、`walls`、同步汇总全都正常。
+        """
+        raw = []
+        for path in sorted(Path(login.__file__).parent.glob('*.py')):
+            for node in ast.walk(ast.parse(path.read_text(encoding='utf-8'))):
+                if not (isinstance(node, ast.Call) and getattr(node.func, 'id', '') == '_save_failure'):
+                    continue
+                handed = node.args[1] if len(node.args) > 1 else None
+                if not (isinstance(handed, ast.Call) and getattr(handed.func, 'id', '') == '_Told'):
+                    raw.append(f'{path.name}:{node.lineno}')
+        self.assertEqual([], raw, '这些交付点把原始异常直接交给了主干那一刀')
+        self.assertGreater(len([1 for line in Path(collector.__file__).read_text(encoding='utf-8')
+                                .splitlines() if '_save_failure(' in line and '_Told(' in line]), 2,
+                           '一个交付点都没扫到,上面那条断言恒绿')
 
 
 if __name__ == '__main__':
