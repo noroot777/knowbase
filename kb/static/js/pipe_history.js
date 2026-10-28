@@ -29,11 +29,14 @@ let pipeHistoryWanted = false;
 // `pipeHasFailure`)—— 自己再数一遍的话,列表上写「已完成」而点进去是两个红。
 // **数的是整个业务轮次**(`pipeRoundSteps`,管道阶段 + 「生成日报」),同概况那张卡。
 function pipeRunSummary(run) {
-  const { planned, stages, generating } = pipeRoundSteps(run, pipeRoundPlan(run));
+  const { plan, live } = pipeRoundPlan(run);
+  const { planned, stages, generating } = pipeRoundSteps(run, plan, live);
   if (generating) return { status: 'running', text: '正在生成日报' };
   const failed = planned.filter(k => pipeHasFailure(stages[k])).length;
   if (failed) return { status: 'error', text: `${failed} 个步骤需处理` };
   if (run.stopped || stages.generate?.status === 'stopped') return { status: 'stopped', text: '已停止' };
+  // 没有结论的那一步(`pipeFlowGenerate` 的 unknown)不许被下面那句「已完成」吞掉
+  if (planned.some(k => stages[k]?.status === 'unknown')) return { status: 'unknown', text: '结果未知' };
   const skipped = planned.filter(k => stages[k]?.status === 'skipped').length;
   if (skipped) return { status: 'skipped', text: `${skipped} 个步骤已跳过` };
   return { status: 'ok', text: '已完成' };

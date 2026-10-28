@@ -87,30 +87,34 @@ function pipeFlowModel(s, viewing) {
 }
 
 /** 「生成日报」那一步此刻的结论。它不是管道阶段、卡片里没有它;这份计划里没有它就是 null。 */
-function pipeFlowGenerate(plan) {
+function pipeFlowGenerate(plan, live) {
   if (!plan || !(plan.nodes || []).some(n => n.key === 'daily')) return null;
   if (plan.running === 'daily') return { status: 'running', detail: '正在生成日报' };
   const r = plan.results?.daily;
   // 跳过那一档日报那边按「停下」收尾(交进来的是 stopped),这里按人点的那一下说
   if ((plan.skips || []).includes('daily') && (plan.done || []).includes('daily')) return { status: 'skipped', detail: r?.detail || '本次跳过' };
-  if (!r) return { status: '', detail: '' };
+  // **计划已经不在后端手里了还没有结论,就是不知道,不是「还没轮到」。** 日报那边不管
+  // 停在哪一步都会交一份结论(`daily_run` 收尾那一笔),所以一份收了尾的记录里缺它,
+  // 只能是这份记录拍在结论之前、或者那一笔没落下 —— 两种都不许推成「已完成」
+  if (!r) return live ? { status: '', detail: '' } : { status: 'unknown', detail: '这一轮没留下日报生成的结论' };
   return { status: { done: 'ok', failed: 'error', stopped: 'stopped' }[r.status] || r.status || '', detail: r.detail || '' };
 }
 
 /** 这一轮**整个业务上**计划了哪几步、各是什么结论:管道那几个阶段 + 「生成日报」。
  *  概况那几个数、页头、历史那一行都按它数 —— 只数管道阶段的话,日报还在生成、或者
  *  生成失败时,这一轮照样写「已完成」(管道那会儿早就空了)。`generate` 结论还没落下
- *  (空串)就既不算成也不算败。 */
-function pipeRoundSteps(record, plan) {
+ *  (空串)就既不算成也不算败;计划已经收了尾还没有结论,念「结果未知」(`live` 那一档)。 */
+function pipeRoundSteps(record, plan, live) {
   const planned = pipePlannedStages(record), stages = { ...(record.stages || {}) };
-  const gen = pipeFlowGenerate(plan);
+  const gen = pipeFlowGenerate(plan, live);
   if (gen) { planned.push('generate'); stages.generate = gen; }
   return { planned, stages, generating: gen?.status === 'running' };
 }
 
 /** 一条留档该配哪份计划:是此刻屏幕上那一轮(`pipeIsCurrent`)就认活的那一份,否则认它自己记着的。 */
 function pipeRoundPlan(run) {
-  return (pipeIsCurrent(run) && pipeFlowLive(pipeSnapshot)) || pipeFlowTrusted(run);
+  const live = pipeIsCurrent(run) && pipeFlowLive(pipeSnapshot);
+  return { plan: live || pipeFlowTrusted(run), live: !!live };
 }
 
 /** 这一类的第 `key` 步该念什么(状态 / 说明 / 失败明细)。没有证据就是空的。 */
@@ -123,7 +127,7 @@ function pipeFlowStep(model, node, key) {
 }
 
 function pipeFlowStepOwn(model, node, key) {
-  if (key === 'generate') return pipeFlowGenerate(model.plan) || { status: '', detail: '' };
+  if (key === 'generate') return pipeFlowGenerate(model.plan, model.live) || { status: '', detail: '' };
   if (node.kind === 'src') {
     const cell = model.results?.[key]?.[node.channel];
     if (cell && typeof cell === 'object') return cell;
@@ -154,7 +158,9 @@ function pipeFlowState(model, node) {
     const times = f.times?.[node.key], done = (f.done || []).includes(node.key);
     if (f.running === node.key) return out('run');
     if ((f.skips || []).includes(node.key) && (done || !times)) return out('skip');
-    if (!times && !done) return model.live ? out('wait') : out('skip', { halt: true });
+    // 没进过门的也可能是「不知道」:日报那一类不管停在哪都会交结论,收了尾的记录里缺它
+    // (`pipeFlowGenerate` 念成 unknown)就不是「没跑」—— 这一句要先于下面那句「没跑」
+    if (!times && !done && !steps.includes('unknown')) return model.live ? out('wait') : out('skip', { halt: true });
     if (issues) return out('issue', { cut: !!f.cuts?.[node.key] });
     if (steps.includes('unknown')) return out('unknown');
     if (f.cuts?.[node.key] || steps.includes('skip')) return out('cut', { stopped: !f.cuts?.[node.key] });

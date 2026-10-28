@@ -101,7 +101,8 @@
 .pipe-history-row[data-status=error] .pipe-history-result { color: var(--danger); }
 .pipe-history-row[data-status=ok] .pipe-history-result { color: var(--ok); }
 .pipe-history-row[data-status=running] .pipe-history-result { color: var(--brand); }
-.pipe-history-row[data-status=stopped] .pipe-history-result, .pipe-history-row[data-status=skipped] .pipe-history-result { color: var(--warn); }
+.pipe-history-row[data-status=stopped] .pipe-history-result, .pipe-history-row[data-status=skipped] .pipe-history-result,
+.pipe-history-row[data-status=unknown] .pipe-history-result { color: var(--warn); }
 .pipe-history-go { font-size: 12px; color: var(--muted); text-align: right; opacity: 0; }
 .pipe-history-row:hover .pipe-history-go, .pipe-history-row.on .pipe-history-go { opacity: 1; }
 .pipe-history-row.on .pipe-history-go { color: var(--brand-deep); }

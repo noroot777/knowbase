@@ -208,7 +208,7 @@ function renderPipeState(s) {
   }
   // **整轮的那几个数按整个业务轮次数**(`pipeRoundSteps`:管道阶段 + 「生成日报」)。
   // 只数管道阶段的话,日报还在生成、或者生成失败时,标题和进度照样是「日报已完成」。
-  const round = pipeRoundSteps(result, pipeFlowModelNow?.plan), generating = !viewing && round.generating;
+  const round = pipeRoundSteps(result, pipeFlowModelNow?.plan, !!pipeFlowModelNow?.live), generating = !viewing && round.generating;
   const genFailed = pipeHasFailure(round.stages.generate);
   const values = round.planned.map(k => round.stages[k] || {}), failed = values.filter(pipeHasFailure).length;
   // **这一轮自己那几个红**:整张卡转不转红、「看第一个」往哪跳、问题区写不写

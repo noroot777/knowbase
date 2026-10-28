@@ -18,6 +18,7 @@ from fastapi import HTTPException
 from kb import daily_run
 from kb import daily_state
 from kb import pipeline as pl
+from kb import pipeline_batch as pb
 from kb import pipeline_failures as pf
 from kb import pipeline_flow as flow
 from kb import pipeline_persist
@@ -442,6 +443,80 @@ class PlanRestoreTest(HistoryCase):
         self.assertEqual("run-g", got["run_id"])
         self.assertNotEqual("run-g", (got.get("flow") or {}).get("run"))
         self.assertNotIn("flow", ps.run_payload())
+
+
+class BatchRevisionTest(HistoryCase):
+    """出报的结论在最后一个子轮**之后**才发布,身份却没变:版本要跟着变,两边一起。
+
+    后果落在两个端点的回包上(状态的 `result_version`、历史首行的 `version`)—— 前端
+    就是拿这两个数判「历史那份缓存要不要重取」、「这一行是不是屏幕上那一轮」的。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(pb._remember_aggregate, None)
+        self.addCleanup(pb.close_batch)
+
+    def _sub_round(self, run_id, batch):
+        self.reset(run_id)
+        ps._state["batch"] = batch
+        ps.mark_open(ps._state)
+        with patch.object(pl, "_run_crawl", side_effect=lambda f: ps._stage("crawl", "ok", "检查 1/1")), \
+                patch.object(pl, "_run_export", side_effect=lambda f: ps._stage("export", "ok", "已保存 1 条")):
+            pl._run_pipeline(["crawl", "export"])
+
+    def _versions(self):
+        status = pipeline_api.pipeline_status(source=False)
+        runs = pipeline_api.pipeline_runs()
+        return status["result_version"], runs
+
+    def test_the_report_verdict_moves_both_versions_together(self):
+        batch = pb.open_batch("daily")
+        self._sub_round("run-d", batch)
+        before, runs = self._versions()
+        key = runs["runs"][0]["key"]
+        self.assertTrue(pb.batch_note("日报生成失败: Claude 503", batch))
+        after, runs = self._versions()
+        self.assertNotEqual(before, after, "结论更新了,状态那份版本却没动:前端认不出要重取历史")
+        first = runs["runs"][0]
+        self.assertEqual(after, first["version"])
+        self.assertEqual(after, runs["version"])
+        self.assertTrue(first["is_current"])
+        self.assertTrue(any("Claude 503" in line for line in first["log"]), "历史首行还是出报之前那一份")
+        # 反过来钉一边:选中这一行的键是身份,结论更新了它不许变
+        self.assertEqual(key, first["key"])
+        self.assertEqual("run-d", first["run_id"])
+
+    def test_versions_still_line_up_after_a_restart(self):
+        batch = pb.open_batch("daily")
+        self._sub_round("run-d", batch)
+        pb.batch_note("日报已生成:12 条素材", batch)
+        pb.close_batch()
+        want, _ = self._versions()
+        self.restart()
+        ps._state.pop("revision", None)                # 新进程的 `_state` 里压根没有这一格
+        got, runs = self._versions()
+        self.assertEqual(want, got, "重启后状态那份版本少了修订号")
+        self.assertEqual(got, runs["runs"][0]["version"])
+
+    def test_the_next_round_does_not_inherit_the_revision(self):
+        """反过来钉一边:恢复进内存的修订号是上一批的,下一轮(别的身份)不许带着它。"""
+        batch = pb.open_batch("daily")
+        self._sub_round("run-d", batch)
+        pb.batch_note("日报已生成:12 条素材", batch)
+        pb.close_batch()
+        self.restart()
+        ps.get_state()
+        self.assertEqual("run-d", (ps._state.get("revision") or {}).get("run"))
+        self._sub_round("run-e", "")
+        self.assertNotIn("revision", ps.run_payload())
+        self.assertEqual("run-e", pl.result_version(pl.last_result()))
+
+    def test_a_plain_round_has_no_revision(self):
+        """反过来钉一边:不在批次里的一轮,版本照旧就是它的身份。"""
+        self._sub_round("run-p", "")
+        self.assertEqual("run-p", pl.result_version(pl.last_result()))
+        self.assertEqual("run-p", pipeline_api.pipeline_runs()["runs"][0]["version"])
 
 
 if __name__ == "__main__":

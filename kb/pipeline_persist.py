@@ -22,6 +22,7 @@ from copy import deepcopy
 from pathlib import Path
 
 from kb.pipeline_payload import own_flow as _own_flow
+from kb.pipeline_payload import own_revision as _own_revision
 
 
 def _loads_json(raw):
@@ -190,6 +191,14 @@ def result_version(run: dict) -> str:
     而收尾时间又相同的旧记录,版本就会撞 —— 拿它证明「这两份副本是同一轮」的后果是
     旧那一轮被当成最新、还报「完整」。要证明同一轮用 `same_round`。
     """
+    rev = _own_revision(run).get("revision")
+    # **同一轮的结论更新了,版本也要跟着变**(批次出报之后那一次发布,见
+    # `own_revision`)。不带的话状态和历史各自的版本都不动,前端那份缓存永远追不上。
+    return f'{_identity_version(run)}#r{rev["n"]}' if rev else _identity_version(run)
+
+
+def _identity_version(run: dict) -> str:
+    """`result_version` 去掉修订号那一截:只随「是哪一轮」变,不随结论更新变。"""
     return str(run.get("run_id") or run.get("finished_at") or "") or "none"
 
 
@@ -545,6 +554,8 @@ def run_record(state: dict) -> dict:
         # 跑了多久),翻历史时面板靠它画节点。**只认身份对得上的那一份**:进程内
         # 那一格是上一轮留下的、或者是别人那份计划时,存进来就是张冠李戴。
         **_own_flow(state),
+        # 结果的修订号(`own_revision`):历史这一行的版本要和状态那份一起变
+        **_own_revision(state),
         "log": list(state["log"]),
     }
 
@@ -653,7 +664,8 @@ def row_key(run: dict, taken: set) -> str:
     一个字段的话,一边的降级口径就会变成另一边的 bug。
     """
     seq = _seq_of(run)
-    base = f'seq-{seq}' if seq else result_version(run)
+    # 退回的是**身份**那一截(不带修订号):同一行结论更新之后,选中它的那个键不许变
+    base = f'seq-{seq}' if seq else _identity_version(run)
     key, n = base, 1
     while key in taken:
         n += 1

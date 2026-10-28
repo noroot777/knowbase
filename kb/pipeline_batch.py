@@ -138,6 +138,10 @@ _batch_notes: list[str] = []
 # 同步。**只在 `open_batch` 里设,`close_batch` 里清** —— 留着的话下一批会继承上
 # 一批的身份,而那正是「分不出是谁起的」换一个方向犯一遍。
 _batch_kind = ""
+# 这一批**发布到第几版**(`_publish_merged` 每进一次加一)。身份在出报前后是同一个,
+# 结论却变了,前端要靠它知道「同一轮、该重取了」(`pipeline_payload.own_revision`)。
+# 跟 `_batch_kind` 一样只在 `open_batch` / `close_batch` 里清。
+_batch_rev = 0
 
 
 def _remember_batch_note(note: str) -> None:
@@ -212,11 +216,11 @@ def open_batch(kind: str = "") -> str:
     于是今天第二次抓取被并进第一次,面板上永远写着「第 1 次」。
     """
     global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_seq
-    global _batch_kind
+    global _batch_kind, _batch_rev
     with ps._lock:
         _batch_seq += 1
         _batch_id, _batch_runs = f"batch-{ps._RUN_EPOCH}-{_batch_seq}", []
-        _batch_issue, _batch_notes, _batch_kind = "", [], kind
+        _batch_issue, _batch_notes, _batch_kind, _batch_rev = "", [], kind, 0
         return _batch_id
 
 
@@ -226,10 +230,10 @@ def close_batch() -> str:
     盘上那份已经在最后一个子轮收尾时写全了,这里不再写 —— 所以**提早返回、
     甚至中途崩掉都不会少东西**。
     """
-    global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_kind
+    global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_kind, _batch_rev
     with ps._lock:
         issue, _batch_id, _batch_runs = _batch_issue, "", []
-        _batch_issue, _batch_notes, _batch_kind = "", [], ""
+        _batch_issue, _batch_notes, _batch_kind, _batch_rev = "", [], "", 0
         return issue
 
 
@@ -344,7 +348,10 @@ def _publish_merged(*, archive: bool) -> Exception | None:
     **口径只有这一份**:哪一批有资格发布、合成什么、谁当权威、覆盖了哪几轮。两个
     调用方(子轮收尾、批次事件)在这几件事上分裂一次就等于一边把整批的失败写丢了。
     """
-    global _batch_issue
+    global _batch_issue, _batch_rev
+    # **每一次发布都是新的一版**,被拒、写盘炸了也一样:那两档照样会补历史那一行、
+    # 改内存里那份汇总,版本不动的话前端那份缓存就认不出它变过。
+    _batch_rev += 1
     try:
         _publish_right(_batch_round_ids())
     except PublishRefused as e:
@@ -387,7 +394,7 @@ def _publish_merged(*, archive: bool) -> Exception | None:
 
 
 def _merged() -> dict:
-    """整批合并那一份(`_merge_runs`),外加这一批的类型计划(`pipeline_flow`)。
+    """整批合并那一份(`_merge_runs`),外加这一批的类型计划(`pipeline_flow`)和修订号。
 
     计划是这一批几轮共用的那一份,而且比任何一轮管道活得久(「生成日报」那一类
     根本不是管道里的阶段),所以取**活的那一份**,不取子轮收尾时的快照。身份写成
@@ -398,6 +405,9 @@ def _merged() -> dict:
     told = flow.record(_batch_id)
     if told:
         merged["flow"] = {"run": merged.get("run_id", ""), **told}
+    # 修订号同样写成合并结果的身份(`own_revision` 只认对得上的那一份)
+    if _batch_rev:
+        merged["revision"] = {"run": merged.get("run_id", ""), "n": _batch_rev}
     return merged
 
 

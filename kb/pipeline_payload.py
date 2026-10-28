@@ -49,6 +49,8 @@ def run_payload(state: dict) -> dict:
         # 契约走**:只进历史那一份的话,重启之后最新那一轮的类型耗时就没了,而点历史
         # 里标着「最新」的那一行回到的正是这一份(`docs/decisions/sync-flow.md`)。
         **own_flow(state),
+        # 这一批的结果发布到第几版(`own_revision`)。合并那一份才有,子轮自己没有。
+        **own_revision(state),
         "log": list(state["log"]),
     }
 
@@ -63,3 +65,24 @@ def own_flow(state: dict) -> dict:
     if isinstance(told, dict) and told.get("run") and told.get("run") == state.get("run_id"):
         return {"flow": deepcopy(told)}
     return {}
+
+
+def own_revision(state: dict) -> dict:
+    """这一轮结果的**业务修订号**(`{"revision": {"run", "n"}}`),不是它的就是 `{}`。
+
+    一批日报的身份(合并结果的 `run_id`)在出报前后是同一个,而出报的结论是在最后一个
+    子轮收尾**之后**才发布的(`pipeline_batch.batch_note`)。光凭身份,前端分不出「同
+    一轮、结论更新了」,历史那份缓存就一直停在出报之前的样子 —— 「生成日报」那一步
+    没有结论、整行照样写「已完成」。所以批次每发布一次就进一版,`result_version`
+    带上它,状态和历史两边一起变。
+
+    **只认身份对得上的那一份**(口径同 `own_flow`):恢复进内存的那一格会一直留到被
+    覆盖,而下一轮的 run id 不同,带着它就是把上一批的版本号安到别人头上。
+    """
+    rev = state.get("revision")
+    if not isinstance(rev, dict) or not rev.get("run") or rev.get("run") != state.get("run_id"):
+        return {}
+    n = rev.get("n")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        return {}
+    return {"revision": {"run": rev["run"], "n": n}}

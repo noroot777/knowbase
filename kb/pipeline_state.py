@@ -461,9 +461,10 @@ def _restore_once() -> None:
         # 来源也算成欠着 —— 状态文件里明明写着 `results.crawl.wechat_local=ok`,
         # 恢复后自己把这份事实扔了,点一次重试又把公众号抓一遍(第 4 轮审查 R2
         # 实测 `restored.results=<字段缺失>`、`retry_wechat=['wechat_local']`)。
-        # 类型计划(`flow`)同一档:缺了它,重启后最新那一轮的类型耗时就没了。
+        # 类型计划(`flow`)同一档:缺了它,重启后最新那一轮的类型耗时就没了。修订号
+        # (`revision`)也是:缺了它,重启后状态的版本比历史那一行少一截,永远对不齐。
         for key in ("stages", "crawl_filter", "export_filter", "crawl_retry",
-                    "results", "flow"):
+                    "results", "flow", "revision"):
             got = pick.get(key)
             # 取历史那份时 `export_filter` / `crawl_retry` 本来就没有:**留空而不是
             # 沿用上一轮的**,那两个字段错一个就是静默不抓。存量记录没有 `results`
