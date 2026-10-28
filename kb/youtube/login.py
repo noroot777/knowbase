@@ -27,6 +27,7 @@ import re
 import sys
 from pathlib import Path
 
+from kb.config import DATA_DIR
 from kb.youtube.diagnosis import excerpt
 
 DEFAULT = 'chrome'
@@ -95,9 +96,131 @@ def installed(spec: str) -> bool:
     return any((_HOME / relative).is_dir() for relative in roots)
 
 
+#: Chromium 系浏览器里,**每个扩展还有自己的一份 cookie 分区**,文件名也叫 `Cookies`,
+#: 摆在 `<profile>/Storage/ext/<扩展 id>/<序号>/` 下面(Chrome 130+)。
+_PARTITION = 'Storage'
+#: 现代 Chromium 把主库挪进了 `<profile>/Network/`,旧布局还在 `<profile>/` 下。两种都认。
+_STORE = ('Network/Cookies', 'Cookies')
+
+
+#: 走 Chromium 那套 cookie 布局的浏览器 —— **只有它们有扩展分区这个问题**。
+#: Firefox 的 cookie 全在一个 `cookies.sqlite` 里,Safari 是 `Cookies.binarycookies`,
+#: 两者都没有「同名文件挑最新那一份」这回事,所以也不需要钉。
+_CHROMIUM = ('chrome', 'edge', 'brave', 'chromium', 'vivaldi')
+
+
+def browser_dir(spec: str) -> Path | None:
+    """这个浏览器的用户数据目录。**和 yt-dlp 自己算出来的那一份必须是同一个**,
+    因为 Windows 上的解密密钥要从它下面的 `Local State` 里取。"""
+    for relative in _ROOTS.get(browser_of(spec), {}).get(platform_key(), []):
+        candidate = _HOME / relative
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def profile_of(spec: str) -> str:
+    """规格串里点名的 profile;没点名就是空串(由 `cookie_store` 挑最近用过的那个)。"""
+    text = str(spec or '').strip()
+    return text.split(':', 1)[1].strip() if ':' in text else ''
+
+
+def cookie_store(spec: str) -> Path | None:
+    """这一轮该用哪一份 cookie 库。**只在 profile 一级找,不往下钻。**
+
+    yt-dlp 自己的做法是 `max(os.walk(浏览器目录) 里所有叫 Cookies 的文件, key=mtime)`
+    (`yt_dlp/cookies.py` 的 `_find_files` / `_newest`),本意是「多个 profile 就用最近
+    用过的那个」。但 Chrome 130+ 把**每个扩展的 cookie 分区**也命名为 `Cookies` 放在
+    `<profile>/Storage/ext/<id>/<n>/` 下,于是哪个扩展刚活动过,它就被当成「最近用过的
+    profile」—— 实测本机:主库 `Default/Cookies` 983 KB、19:33:24,内置扩展那份
+    `Default/Storage/ext/glic/.../Cookies` 32 KB、19:32:09,两者只差 75 秒,同一分钟里
+    跑两次 yt-dlp 一次读到 1843 条(`Found YouTube account cookies`)、一次只读到 30 条
+    (当场撞 `Sign in to confirm you're not a bot`)。
+    **这就是「明明登录着、却时好时坏」的根因**:那一轮根本是以未登录身份出去的,而面板
+    上只看得见下游那道墙,于是人被送去反复登录。
+
+    所以这里保留 yt-dlp 的本意(按 mtime 挑最近用过的 profile),只把**扩展分区排除在
+    候选之外** —— 判据是「只看 profile 一级的那两个固定落点」,不是去匹配 `ext` 这种
+    会变的目录名。点名了 profile 就只认它那一份。
+    """
+    named = profile_of(spec)
+    if named and ('/' in named or '\\' in named or named.startswith('~')):
+        # 用户自己给了一条路径:那是他的明确选择,不替他改。
+        return None
+    try:
+        root = browser_dir(spec)
+        if root is None:
+            return None
+        profiles = [root / named] if named else \
+            [item for item in root.iterdir() if item.is_dir() and item.name != _PARTITION]
+        found = [path for profile in profiles for name in _STORE
+                 if (path := profile / name).is_file()]
+        return max(found, key=lambda path: path.stat().st_mtime, default=None)
+    except OSError:
+        # 这一层只是「挑哪一份」。读不动就当挑不出来,由调用方降级成只交浏览器名 ——
+        # **它挂在每一次 yt-dlp 调用的前面,一个字都不许往上抛。** 守卫从 `browser_dir`
+        # 那一步就罩上:`Path.is_dir()` 只替常见的那几个 errno 兜底,别的照旧往外抛。
+        return None
+
+
+def _link(source: Path, target: Path) -> None:
+    """把 `target` 原子地指向 `source`。**先建临时名再 `os.replace`** —— 两轮采集同时
+    刷这份视图时,直接 unlink 再 symlink 会留下一个「链接不在」的窗口。
+    """
+    scratch = target.with_name(f'{target.name}.{os.getpid()}.tmp')
+    scratch.unlink(missing_ok=True)
+    try:
+        os.symlink(source, scratch)
+    except (OSError, NotImplementedError):
+        # Windows 上建符号链接要特权(口径同 `docs/decisions/windows-entry.md`);
+        # 同卷的硬链接不要,所以退一步试它。两样都不行就由调用方降级。
+        os.link(source, scratch)
+    os.replace(scratch, target)
+
+
+def cookie_view(spec: str) -> dict:
+    """给 yt-dlp 的 cookie 来源。**我们仍然不碰 cookie 本身** —— 只是把「用哪一份库」
+    从「谁最后被写过」改成「哪个 profile 最后被用过」。
+
+    做法是在数据目录下搭一份**只有两个链接**的视图:`Local State` 和
+    `<profile>/Cookies` 各指向浏览器里那一份真文件,然后把这个视图的 profile 路径交给
+    `--cookies-from-browser`。yt-dlp 在视图里走一遍 `os.walk` 只会看到那一个 `Cookies`,
+    扩展分区压根不在里面;`Local State` 之所以要一起链上,是因为 Windows 的解密密钥从
+    `视图根/Local State` 读(`yt_dlp/cookies.py` 的 `get_cookie_decryptor`),而视图根
+    正是 profile 路径的上一级。**一个字节都不复制,也不读它们的内容。**
+
+    搭不起来(建不了链接、找不到主库、Firefox/Safari 这类另一套布局)就**如实降级**:
+    照旧只交浏览器名,`pinned` 报 False、`reason` 说清为什么 —— 面板那一句提醒靠它。
+    """
+    spec = validate(spec)
+    store = cookie_store(spec)
+    if store is None:
+        return {'args': ['--cookies-from-browser', spec], 'pinned': False, 'store': '',
+                'reason': '没在这个浏览器的 profile 一级找到 cookie 主库'}
+    # 主库在 `<profile>/Network/Cookies` 还是 `<profile>/Cookies`,profile 目录都往上数一级到它。
+    source = store.parent.parent if store.parent.name == 'Network' else store.parent
+    view = DATA_DIR / 'youtube' / 'cookie-view' / browser_of(spec)
+    profile = view / source.name
+    try:
+        profile.mkdir(parents=True, exist_ok=True)
+        _link(store, profile / 'Cookies')
+        state = source.parent / 'Local State'
+        if state.is_file():
+            _link(state, view / 'Local State')
+    except OSError as error:
+        return {'args': ['--cookies-from-browser', spec], 'pinned': False, 'store': str(store),
+                'reason': f'建不了 cookie 视图（{error}）'}
+    return {'args': ['--cookies-from-browser', f'{browser_of(spec)}:{profile}'],
+            'pinned': True, 'store': str(store), 'reason': ''}
+
+
 def arguments(spec: str) -> list[str]:
-    """交给 yt-dlp 的那两个参数。校验过才拼,不把用户输入原样塞进命令。"""
-    return ['--cookies-from-browser', validate(spec)]
+    """交给 yt-dlp 的那两个参数。校验过才拼,不把用户输入原样塞进命令。
+
+    **口径只有一份**(`cookie_view`):面板那句提醒和真正发出去的命令读的是同一个函数,
+    否则会出现「面板说钉住了、命令其实没钉」这种对不上的状态。
+    """
+    return cookie_view(spec)['args']
 
 
 # yt-dlp 失败输出里的分类特征。**宁可归到 unknown,也不要猜一个具体原因。**
@@ -117,6 +240,17 @@ _WALL = ('sign in to view', 'login required', 'account cookies are no longer val
 # 通常能过」是错的,他本来就带着 cookie。**只认这两个精确特征**,不要把「rate」「limit」
 # 这类词放进来:别处的正常句子也会撞上,而误判成限流会让人白等一个小时。
 _LIMIT = ('http error 429', 'too many requests')
+#: **JS 挑战没解开单独一档。** YouTube 现在会对一部分请求发一道 JS 挑战,yt-dlp 要用
+#: 本地的解题脚本(`yt-dlp-ejs` 这个 Python 包)配一个 JS 运行时(deno / node / bun /
+#: quickjs)去算;两样缺一样,它就只能拿到预览图那几个格式,接着默认的格式选择器一个都
+#: 匹配不上。实测复现(cookie 完全正常、`Found YouTube account cookies` 1843 条):
+#: `n challenge solving failed` → `Only images are available for download` →
+#: `Requested format is not available`。**这一档和登录态无关**,照 `unknown` 报的那一版
+#: 让人去反复检查登录,而要做的是在面板上更新一次 yt-dlp(连解题脚本一起装)。
+#: **只认挑战本身那几句话**:光有「格式不可用」不算 —— 那也可能是这条视频真的没有音轨,
+#: 那时让人去装 JS 运行时是帮倒忙(口径同「判不准一律落 unknown」)。
+_CHALLENGE = ('challenge solving failed', 'challenge solver', 'only images are available',
+              'jsc:', '[jsc]')
 _COOKIE = ('could not find', 'cookies database', 'failed to decrypt', 'unable to decrypt',
            'cannot decrypt', 'no key found', 'unable to open database', 'permission denied',
            'no such file or directory', 'dpapi', 'keyring', 'secretstorage',
@@ -144,6 +278,10 @@ def classify(text: str) -> str:
         return 'no_access'
     if any(mark in lowered for mark in _WALL):
         return 'not_logged_in'
+    # **排在最后**:上面那几档都是「人要去做一件具体的事」,而且都比挑战这件事更靠前 ——
+    # 429 和机器人验证甚至会让挑战这一步根本跑不到。它们一个都不中,才轮到这一档。
+    if any(mark in lowered for mark in _CHALLENGE):
+        return 'js_challenge'
     return 'unknown'
 
 
@@ -171,6 +309,12 @@ MESSAGES = {
                 '换出口或等一段时间才有用。',
     'no_access': '取到的那条视频本身不可访问（私有、会员专属或已下架）。'
                  '这不说明登录态有问题，换一条视频或另一个频道再检查一次。',
+    'js_challenge': 'YouTube 这一轮发了一道 JS 挑战，yt-dlp 没能解开，所以只拿到了预览图格式。'
+                    '这不是登录态的问题（带着有效登录态也会撞上）：yt-dlp 要用本地解题脚本'
+                    '（yt-dlp-ejs）配一个 JS 运行时（deno / node / bun / quickjs）才能算。'
+                    '在下面更新一次 yt-dlp，解题脚本会跟着一起装上；'
+                    '机器上一个 JS 运行时都没有的话，装一个 deno 再试。'
+                    '元数据和字幕不受这一道影响，受影响的是下音频做本地转录那一步。',
     'unknown': 'yt-dlp 报了一个没能归类的错误，原文附在下面。',
 }
 
@@ -180,7 +324,9 @@ MESSAGES = {
 #: 等于让最常见的那一类退回逐条重复(48 行同一句话)。
 #: `rate_limited` 严格说不是登录态问题,但它和这几档同一个形态:一个出口、一次全中,而且
 #: 用户第一反应正是「是不是没登录」—— 归并那一句话恰恰是用来说清它不是的。
-AUTH_CODES = ('not_logged_in', 'bot_wall', 'cookie_unreadable', 'rate_limited')
+#: `js_challenge` 也在这里:它同样是「一个出口、一次全中」—— 48 个频道会一字不差地各报
+#: 一遍同一句话,不归并就得逐条读完才明白只有一个原因。
+AUTH_CODES = ('not_logged_in', 'bot_wall', 'cookie_unreadable', 'rate_limited', 'js_challenge')
 
 
 #: 「这一轮确实取到了东西,但工具同时报了这么一条」的说法。**和 `MESSAGES` 分开写,
@@ -194,6 +340,9 @@ CAUTIONS = {
     'rate_limited': '但 yt-dlp 同时报了 429（请求过于频繁）：这一轮算侥幸过的，隔一段时间再检查一次更有把握。',
     'bot_wall': '但 yt-dlp 同时报了机器人验证：这个出口已经被盯上，下一轮可能就过不去了。',
     'not_logged_in': '但 yt-dlp 同时报了登录态失效：真正用得上它的字幕和音频这一轮没验到。',
+    'js_challenge': '但 yt-dlp 同时报了那道 JS 挑战没解开：这一轮只拿到元数据和字幕，'
+                    '下音频做本地转录那一步会失败。在下面更新一次 yt-dlp 把解题脚本装上，'
+                    '机器上没有 deno / node 这类 JS 运行时的话也要装一个。',
 }
 
 
@@ -244,8 +393,41 @@ def readiness(settings) -> dict:
                        '文件上看不出 cookie 是否过期，点「检查登录态」才会真连一次。'}
 
 
+def pin_note(spec: str) -> str:
+    """这一轮的 cookie 库钉住了没有。钉住了、或者这个浏览器不需要钉,都返回空串。
+
+    **钉不住要说出来**:那意味着这台机器上随便哪个扩展的 cookie 分区一被写过,这一轮就
+    可能以未登录身份出去,而面板上只看得见下游那道墙(实测形态见 `cookie_store`)。
+    """
+    if browser_of(spec) not in _CHROMIUM:
+        return ''
+    try:
+        view = cookie_view(spec)
+    except ValueError:
+        return ''
+    if view['pinned']:
+        return ''
+    return (f'另外，这一轮没能钉住 {LABELS.get(browser_of(spec), spec)} 的 cookie 主库'
+            f'（{view["reason"]}）：yt-dlp 会在整个浏览器目录里挑「最近被写过的那一份 Cookies」，'
+            '而每个扩展也各有一份同名的 cookie 分区 —— 挑错时这一轮就是以未登录身份出去的。'
+            '换一个浏览器或在设置里点名 profile（例如 chrome:Default）可以绕开。')
+
+
 def check(settings, deadline=None) -> dict:
-    """真连一次。两步:先列频道(不需要登录态),再取单条视频元数据(bot 墙在这一步)。"""
+    """真连一次。两步:先列频道(不需要登录态),再取单条视频元数据(bot 墙在这一步)。
+
+    **结论从一个出口出去**(`_check` 真连、这里统一补上「cookie 库钉住没有」那句):
+    挂在各个 return 上的话,五条返回路里漏一条就是「面板上这一次什么都没说」。
+    """
+    result = _check(settings, deadline)
+    note = pin_note(result.get('browser', ''))
+    if note:
+        result['warning'] = (result.get('warning', '') + ' ' + note).strip()
+    return result
+
+
+def _check(settings, deadline=None) -> dict:
+    """真连那两步本身。**结论由 `check` 统一补齐**,不要在这里面加新的出口。"""
     import time
 
     from kb.feeds import registry as reg

@@ -273,7 +273,7 @@ def run(arguments, output, deadline, stopped, partial=False):
     return scratch
 
 
-def ytdlp(arguments, output, deadline, stopped, spec='', playlist=False, partial=False):
+def ytdlp(arguments, output, deadline, stopped, spec='', playlist=False, partial=False, downloads=False):
     """跑一次 yt-dlp。
 
     **命令前缀走 `toolchain.command()`**(自备那份优先):用户在面板上更新过之后就该用上新版,
@@ -293,6 +293,17 @@ def ytdlp(arguments, output, deadline, stopped, spec='', playlist=False, partial
             '--socket-timeout', '15', '--retries', '1', '--extractor-retries', '1']
     if not playlist:
         base.append('--no-playlist')
+    if not downloads:
+        # **不下载的那几条路不许因为「没有可下载的格式」整条失败**(`--ignore-no-formats-error`)。
+        # 真机形态(实测复现):YouTube 发了 JS 挑战,yt-dlp 没有本地解题脚本 → 只剩
+        # 预览图那几个格式 → 默认的格式选择器一个都没匹配上 → `Requested format is not
+        # available` 当场抛错。元数据、列频道、字幕这三条**压根不需要任何格式**,却跟着
+        # 一起失败:连「检查登录态」都报错,而那一轮的 cookie 其实好着
+        # (`Found YouTube account cookies`,1843 条)。带上这个开关之后同一次调用退 0、
+        # 元数据照旧完整,那两句话降级成 warning 留在输出里 —— 分档照旧看得见
+        # (`login.classify` 的 `js_challenge`),面板上并列说出来。
+        # **下音频那一步不带它**:那里「没有可用格式」是真失败,不是可以往下走的警告。
+        base.append('--ignore-no-formats-error')
     return run([*prefix, *base, *(login.arguments(spec) if spec else []), *arguments],
                output, deadline, stopped, partial=partial)
 
@@ -612,7 +623,7 @@ def asr(row, metadata, settings, deadline, stopped):
         ytdlp(['-f', 'bestaudio[abr<=160]/bestaudio', '--max-filesize', '100M',
                '-o', str(directory / 'audio.%(ext)s'), row['entry']['url']],
               directory / 'audio-download.log', deadline, stopped,
-              spec=of(settings)['cookies_browser']).unlink(missing_ok=True)
+              spec=of(settings)['cookies_browser'], downloads=True).unlink(missing_ok=True)
         audio_files = [path for path in directory.glob('audio.*')
                        if path.suffix in ('.m4a', '.webm', '.opus', '.mp3', '.ogg', '.wav', '.aac', '.flac')]
     if not audio_files:

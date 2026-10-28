@@ -9,13 +9,57 @@
   `login.validate` 一份）。**我们自己不碰加密 cookie**：只把浏览器名交给 yt-dlp，由它去读、去解密；
   不读 cookie 文件、不解析、不落盘、不记日志，错误原文里只取分类用的特征串。**不打开、不接管、
   不激活浏览器窗口**，也不做任何写操作。访问受限仍必须留下可重试错误。
-- **失败分四档，分不清就都不说**（口径只有 `login.classify` 一份，顺序即优先级）：
+- **交给 yt-dlp 的那份 cookie 库要钉死在 profile 一级，不许被扩展分区顶掉**
+  （`login.cookie_store` / `cookie_view`）。yt-dlp 自己的做法是在整个浏览器目录里
+  `max(所有叫 Cookies 的文件, key=mtime)`（`yt_dlp/cookies.py` 的 `_find_files` + `_newest`），
+  本意是「多个 profile 就用最近用过的那个」。但 Chrome 130+ 把**每个扩展的 cookie 分区**也命名为
+  `Cookies`，摆在 `<profile>/Storage/ext/<扩展 id>/<序号>/` 下 —— 哪个扩展刚活动过，它就被当成
+  「最近用过的 profile」。**实测本机**：主库 `Default/Cookies` 983 KB、19:33:24，内置扩展那份
+  32 KB、19:32:09，**只差 75 秒**；同一分钟里跑两次同一条命令，一次读到 1843 条并打出
+  `Found YouTube account cookies`，一次只读到 30 条、当场撞 `Sign in to confirm you're not a bot`。
+  **这就是「明明登录着却时好时坏」的根因**：那一轮根本是以未登录身份出去的，而面板上只看得见下游
+  那道墙，于是人被一次次送去重新登录。做法是在数据目录下搭一份**只有两个链接**的视图
+  （`<profile>/Cookies` 和视图根的 `Local State` 各指向浏览器里那一份真文件），把视图的 profile
+  路径交给 `--cookies-from-browser` —— yt-dlp 在视图里走一遍 `os.walk` 只看得见那一个 `Cookies`。
+  **我们仍然不碰 cookie 本身**：一个字节都不复制、不读内容，改的只是「用哪一份库」。
+  `Local State` 必须一起链上：Windows 的解密密钥从**视图根**取（`get_cookie_decryptor`）。
+  几条反过来的边：**yt-dlp 的本意要留着**（多 profile 时照旧挑最近用过的那个，写死 `Default` 会把
+  一个早就不用、而且没登录的 profile 交出去）；**点名了 profile 就只认它那一份**；
+  **Firefox / Safari 不钉**（单文件存储，没有同名分区这回事）；**搭不起来就如实降级**（Windows 上
+  建符号链接要特权，退一步试硬链接，两样都不行就照旧只交浏览器名，并在面板上说清这一轮没钉住 ——
+  悄悄退回去等于让人继续猜）；**挑选这一步的任何 `OSError` 都不许外溢**（它挂在每一次 yt-dlp 调用
+  的前面；`Path.is_dir()` 只替常见的那几个 errno 兜底，别的照旧往外抛）。
+  回归 `tests/test_youtube_challenge.py`——**判据是「yt-dlp 按它自己的算法会读到哪一份库」**，
+  用例里复刻了它那两行；只断言我们那个函数的返回值，等于把被测逻辑抄一遍。
+- **JS 挑战的解题脚本随 yt-dlp 一起装，而且不走 `--remote-components`**
+  （`toolchain.SOLVER` / `challenge()`）。YouTube 现在会对一部分请求发一道 JS 挑战，yt-dlp 要用本地
+  解题脚本（`yt-dlp-ejs`）配一个 JS 运行时（deno / node / bun / quickjs）去算；官方可执行文件自带
+  那份脚本，**pip 装的那份不带**，所以我们自备的环境要显式带上它。实测形态（cookie 完全正常、
+  `Found YouTube account cookies` 1843 条）：`n challenge solving failed` →
+  `Only images are available for download` → 默认格式选择器一个都没匹配上 →
+  `Requested format is not available` **当场抛错**，连「检查登录态」都报错。装上脚本之后同一条命令
+  打出 `Using challenge solver lib script v0.8.0 (source: python package)`、退 0、45 个格式里 8 个
+  是纯音频。**不开 `--remote-components`**：那个开关让 yt-dlp 在抓取时从 GitHub/npm 现拉脚本，等于
+  把一段每轮都要联网取、而且没版本锚的代码放进采集路径；本地 pip 包同一条渠道、跟 yt-dlp 一起更新，
+  也能离线跑。几条跟着的边：**解题脚本装不上不许连 yt-dlp 一起不装**（它只影响下音频那一步，元数据、
+  列频道、字幕照旧能跑；一起失败的话用户连版本都更新不了，而他点那颗按钮多半正是因为抓不到东西）；
+  **缺脚本和缺运行时分开报**（前者点一次更新，后者得自己装个 deno，让用户做的事完全不同），读的是
+  `yt-dlp -v` 的调试抬头（`Optional libraries:` / `JS runtimes:`，它不带 URL 时退 2、抬头照印，所以
+  不看退出码）—— **问 yt-dlp 自己认不认，不去猜它的 site-packages**：自备那份和 PATH 那份住在不同
+  环境里。
+- **不下载的那几条路不许因为「没有可下载的格式」整条失败**（`media.ytdlp` 的
+  `--ignore-no-formats-error`）。元数据、列频道、字幕**压根不需要任何格式**，却跟着格式选择一起
+  失败。带上这个开关之后，同一次调用退 0、元数据照旧完整，那两句话降级成 warning 留在输出里
+  （`yt_dlp/YoutubeDL.py` 里 `formats_to_download` 为空时就是这两条分支）——分档照旧看得见，面板上
+  并列说出来。**下音频那一步不带它**：那里「没有可用格式」是真失败，带上之后 yt-dlp 会退 0、却一个
+  音频文件都没下下来，我们只好报一句「未取得音频」，真正的原因就此丢掉，人照着去查磁盘和 ffmpeg。
+- **失败分六档，分不清就都不说**（口径只有 `login.classify` 一份，顺序即优先级）：
   `cookie_unreadable`（读不出 cookie —— 去授权钥匙串 / 退出浏览器 / 换 profile）、
   `bot_wall`（出口撞机器人验证 —— **出口 IP 级，带登录态通常能过，换 yt-dlp 版本无效**）、
   `no_access`（这一条内容本身不可访问 —— 私有、会员专属、已下架）、
   `not_logged_in`（真的没登录或登录态失效 —— 去那个浏览器里登录一次）、
   `rate_limited`（出口被限流 —— 等一段时间、把一轮的量调小或换出口）。
-  五档让用户做的事完全不同，混成一句「登录失败」会让人反复去登录而问题在另一头；判不准一律落
+  每一档让用户做的事完全不同，混成一句「登录失败」会让人反复去登录而问题在另一头；判不准一律落
   `unknown` 并原样交出 yt-dlp 那句话 —— 猜一个具体原因比承认不知道更坏。
   **cookie 那一档优先于一切墙**（它是因，墙是果），而 yt-dlp 把「解不开 cookie」只报成一条
   **warning**（`cannot decrypt v10 cookies: no key found`），所以 `--no-warnings` 不许加回去，
@@ -26,7 +70,11 @@
   `Sign in to confirm you're not a bot` —— 两句话一起回来时照 bot 那一档说「带上登录态通常能过」
   是错的，他本来就带着 cookie，照着做只会再登一次。**特征只认 `http error 429` 和
   `too many requests` 两串**，别把「rate」「limit」这类词放进来：误判成限流会让人白等一个小时。
-  归并同因失败按 `login.AUTH_CODES`（前四档）整组判，**不是只看 `not_logged_in`** —— 实测最常撞
+  还有一档是 `js_challenge`（那道 JS 挑战没解开 —— 见上面那条，**排在所有墙的后面**：上面那几档都是
+  人要去做一件具体的事，而且都比挑战更靠前，429 和机器人验证甚至会让挑战这一步根本跑不到）。
+  **它只认挑战自己那几句话**：光有「格式不可用」不算 —— 那也可能是这条视频真的没有音轨，那时让人去
+  装 JS 运行时是帮倒忙，所以照旧落 `unknown` 原样交出原文。
+  归并同因失败按 `login.AUTH_CODES`（除 `no_access` 外那几档）整组判，**不是只看 `not_logged_in`** —— 实测最常撞
   的恰恰是机器人验证和出口限流那两档；不同档不许并成一句。`rate_limited` 严格说不是登录态问题，
   但它和那几档同一个形态（一个出口、一次全中），而用户第一反应正是「是不是没登录」—— 归并那一句
   话恰恰是用来说清它不是的。
@@ -351,7 +399,8 @@ Whisper 英文专用模型不能用于其他语言或不明语言；缺工具、
   登录态与工具链那几档在 `tests/test_youtube_login.py`，发现的两条路、预算切分和日期闭环在
   `tests/test_youtube_fallback.py`，「未知不等于不合格」那道不变量在 `tests/test_youtube_unverified.py`，
   面板（异常态、代次、显示区归属的两道判据与结束即松开、资料名、轻提示不挡操作）在
-  `tests/youtube_probe.mjs`。
+  `tests/youtube_probe.mjs`，cookie 钉死与 JS 挑战那两条在 `tests/test_youtube_challenge.py`
+  （工具链自己那条线在 `tests/test_youtube_toolchain.py`）。
 - 验证不使用真实浏览器登录态、生产 vault、真实媒体下载或付费模型调用。
 - 界面验证先尝试 Chrome 扩展具名会话，但后台创建参数被拒绝（`Capability is not available: visibility`），
   无法保证不激活标签，因此使用独立无头浏览器与临时 profile；没有连接用户 Chrome 的 CDP 或复用已有标签。

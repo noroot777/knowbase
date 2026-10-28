@@ -28,6 +28,13 @@ import time
 from pathlib import Path
 
 PACKAGE = 'yt-dlp'
+#: 和 yt-dlp 一起装的 JS 挑战解题脚本。**YouTube 现在会对一部分请求发一道 JS 挑战**,
+#: 解不开就只剩预览图那几个格式(实测:带着有效登录态也一样)。官方可执行文件自带这份
+#: 脚本,pip 装的那份不带 —— 所以我们自备的环境要显式带上它。
+#: **不走 `--remote-components`**:那个开关让 yt-dlp 在抓取时从 GitHub/npm 现拉脚本,
+#: 等于把一段每轮都要联网取、而且没版本锚的代码放进采集路径;本地 pip 包同一条渠道、
+#: 跟 yt-dlp 一起更新,也能离线跑。
+SOLVER = 'yt-dlp-ejs'
 _PYPI = 'https://pypi.org/pypi/yt-dlp/json'
 # 同时点两次更新会让两个 pip 装同一个 venv。单进程内一把锁就够(管道也跑在这个进程里)。
 _INSTALL = threading.Lock()
@@ -121,6 +128,37 @@ def installed_version() -> str:
     return _version_of(command())
 
 
+#: `yt-dlp -v` 抬头里那两行。**问的是 yt-dlp 自己认不认**,不是我们去猜它的 site-packages:
+#: 自备那份和 PATH 那份住在不同环境里,而「装了没有」只有它自己说得准。
+_SOLVER_LINE = 'Optional libraries:'
+_RUNTIME_LINE = 'JS runtimes:'
+
+
+def challenge() -> dict:
+    """解 JS 挑战的两样东西在不在:解题脚本(`yt-dlp-ejs`)和 JS 运行时(deno 这类)。
+
+    **两样缺一样都解不开**,而缺哪一样让用户做的事不同(前者点一次更新,后者得自己装个
+    运行时),所以分开报。读的是 `yt-dlp -v` 的调试抬头 —— 它不带 URL 时退 2、但抬头照印,
+    所以这里不看退出码。
+    """
+    prefix = command()
+    if not prefix:
+        return {'script': '', 'runtime': ''}
+    _, text = _run([*prefix, '-v', '--ignore-config'], 60)
+    found = {'script': '', 'runtime': ''}
+    for line in text.splitlines():
+        body = line.split(']', 1)[-1].strip()
+        if _SOLVER_LINE in body:
+            libraries = body.split(_SOLVER_LINE, 1)[1]
+            found['script'] = next((item.strip() for item in libraries.split(',')
+                                    if 'yt_dlp_ejs' in item or 'yt-dlp-ejs' in item), '')
+        elif _RUNTIME_LINE in body:
+            # 一个都没有时 yt-dlp 印的是 `JS runtimes: none`。
+            runtimes = body.split(_RUNTIME_LINE, 1)[1].strip()
+            found['runtime'] = '' if runtimes.lower() in ('', 'none') else runtimes
+    return found
+
+
 def latest_version(deadline: float | None = None) -> str:
     """问 PyPI 最新版。走项目自己那套请求(含公网校验),不另开一条出口。"""
     from kb.feeds.fetching import request
@@ -199,9 +237,15 @@ def _install_now(timeout: float) -> dict:
         if not python.is_file():
             raise RuntimeError('yt-dlp 运行环境不完整，缺少 python 可执行文件')
         code, text = _run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check',
-                           PACKAGE], timeout=timeout)
+                           PACKAGE, SOLVER], timeout=timeout)
         if code:
-            raise RuntimeError(f'安装 yt-dlp 失败：{text[-400:]}')
+            # **解题脚本装不上不许连 yt-dlp 一起不装。** 它只影响「下音频」那一步,而
+            # 元数据、列频道、字幕照旧能跑;一起失败的话,用户连版本都更新不了,而他点这颗
+            # 按钮多半正是因为抓不到东西。退一步只装 yt-dlp,缺了什么由 `status()` 如实报。
+            code, text = _run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check',
+                               PACKAGE], timeout=timeout)
+            if code:
+                raise RuntimeError(f'安装 yt-dlp 失败：{text[-400:]}')
         if not _version_of([str(_entry(target))]):
             raise RuntimeError('装完之后这一份 yt-dlp 跑不出版本号，已经丢掉它；'
                                '原来那份没有动过，仍然可用')
@@ -244,7 +288,7 @@ def status(deadline: float | None = None) -> dict:
     """给面板用的一份状态。**查不到上游版本不是故障**,只是少报一行。"""
     installed = installed_version()
     result = {'installed': installed, 'origin': origin(), 'latest': '',
-              'outdated': False, 'latest_error': ''}
+              'outdated': False, 'latest_error': '', **challenge()}
     if not installed:
         return result
     try:
