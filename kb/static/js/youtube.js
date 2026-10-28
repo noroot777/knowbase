@@ -291,10 +291,14 @@ function youtubeFillBrowsers(browsers, saved) {
 function youtubeShowLogin(login) {
   const line = $('youtube-login'), detail = $('youtube-login-detail');
   if (!line) return;
-  line.textContent = login.message || '登录态状态未知。';
+  // **「取到了元数据」和「同时报了一条警告」要并列说,不是二选一。** cookie 解密失败只是
+  // 一条 warning:这一轮确实取到了公开视频,所以不许报成「登录态无效」(人刚取到东西,
+  // 那句话当场变谎话);但也不许只说前半句 —— 那条警告恰恰是「这一轮没带上登录态」的
+  // 唯一证据,扔了之后面板上一切正常(审查实测)。
+  line.textContent = [login.message || '登录态状态未知。', login.warning || ''].filter(Boolean).join(' ');
   // 没就绪的那几档要一眼看得出来,不能和普通说明长一个样。
   const bad = login.ready === false;
-  line.setAttribute('role', bad ? 'alert' : 'status');
+  line.setAttribute('role', bad || login.warning ? 'alert' : 'status');
   line.classList.toggle('field-err', bad);
   line.classList.toggle('hint', !bad);
   if (detail) detail.textContent = login.detail ? 'yt-dlp 原文：' + login.detail : '';
@@ -361,9 +365,13 @@ async function youtubeCheckLogin() {
     }
     // ready 不等于被证实(取元数据这一步公开视频也过得去),所以这里有三档文案,
     // 绿色只留给真的拿到证据那一天。
-    toast(login.ready ? (login.confirmed ? '登录态有效' : '工具链和出口通；登录态仍未被证实')
+    // ready 不等于被证实,带着警告的 ready 更不等于 —— 那句话要出现在这一下里,
+    // 否则人只看 toast 就以为这一轮干净过了。
+    toast(login.ready ? (login.warning ? '取到了元数据，但工具同时报了一条警告'
+                                       : (login.confirmed ? '登录态有效' : '工具链和出口通；登录态仍未被证实'))
                       : (login.message || '登录态检查未通过'),
-          {type: login.ready ? (login.confirmed ? 'ok' : 'info') : 'err'});
+          {type: login.ready && !login.warning ? (login.confirmed ? 'ok' : 'info') : 'err',
+           detail: login.warning || ''});
   } catch (error) {
     if (!youtubeOwns(token) || !youtubeMaySay(token, 'login')) return;
     $('youtube-login').textContent = '检查没能完成：' + error.message;

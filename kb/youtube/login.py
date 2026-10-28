@@ -27,6 +27,8 @@ import re
 import sys
 from pathlib import Path
 
+from kb.youtube.diagnosis import excerpt
+
 DEFAULT = 'chrome'
 # 顺序决定面板上那张清单的顺序。**每一档的说明都要能单独读懂,不许写「同上」。**
 BROWSERS = ('chrome', 'edge', 'brave', 'chromium', 'vivaldi', 'firefox', 'safari')
@@ -109,6 +111,12 @@ _BOT = ('sign in to confirm', 'confirm you', 'not a bot')
 _PRIVATE = ('this video is private', 'private video', 'members-only', 'join this channel')
 _WALL = ('sign in to view', 'login required', 'account cookies are no longer valid',
          'cookies are no longer valid', 'please sign in')
+# **出口被限流单独一档,而且排在机器人验证前面。** 429 是「网页根本没下下来」,后面那些墙
+# 都是它的下游:实测这一轮里 YouTube 先回 429,yt-dlp 换别的 player 客户端再试,最后报出
+# 「Sign in to confirm you're not a bot」—— 两句话一起出现时,照 bot 那一档说「带上登录态
+# 通常能过」是错的,他本来就带着 cookie。**只认这两个精确特征**,不要把「rate」「limit」
+# 这类词放进来:别处的正常句子也会撞上,而误判成限流会让人白等一个小时。
+_LIMIT = ('http error 429', 'too many requests')
 _COOKIE = ('could not find', 'cookies database', 'failed to decrypt', 'unable to decrypt',
            'cannot decrypt', 'no key found', 'unable to open database', 'permission denied',
            'no such file or directory', 'dpapi', 'keyring', 'secretstorage',
@@ -119,14 +127,17 @@ def classify(text: str) -> str:
     """把 yt-dlp 的失败输出归成一类。
 
     **顺序就是口径**:cookie 读不出来最先判(那一步比登录态更靠前,后面的墙都是它的
-    下游);其次是机器人验证和「这一条没授权」这两档 —— 它们都**不蕴含**未登录;
-    真正指向登录态的只剩最后那一组。一个都不中就是 `unknown`,原文带回去给人看。
+    下游);接着是出口被限流(429 连网页都没下下来,它下面那些墙同样是果);其次是机器人
+    验证和「这一条没授权」这两档 —— 它们都**不蕴含**未登录;真正指向登录态的只剩最后
+    那一组。一个都不中就是 `unknown`,原文带回去给人看。
     """
     lowered = str(text or '').lower()
     if not lowered:
         return 'unknown'
     if any(mark in lowered for mark in _COOKIE):
         return 'cookie_unreadable'
+    if any(mark in lowered for mark in _LIMIT):
+        return 'rate_limited'
     if any(mark in lowered for mark in _BOT):
         return 'bot_wall'
     if any(mark in lowered for mark in _PRIVATE):
@@ -151,6 +162,10 @@ MESSAGES = {
                          'Windows 上新版浏览器需要先完全退出浏览器再试；也可能该换一个 profile。',
     'not_logged_in': '{label} 里没有登录 YouTube，或那份登录态已经失效。'
                      '在 {label} 里打开 youtube.com 登录一次，再回来检查。',
+    'rate_limited': 'YouTube 对本机出口返回了 429（请求过于频繁），网页根本没下下来，'
+                    '所以这一轮看不出登录态。这不是登录的问题：一轮里逐条解析很多视频最容易'
+                    '撞上它。等一段时间再检查，或把一轮的频道数和处理条数调小；换出口也有用，'
+                    '换 yt-dlp 版本没用。',
     'bot_wall': 'YouTube 要求验证本机出口不是机器人。带上登录态通常能过这一道；'
                 '已经登录还是这样的话，多半是这个出口 IP 被限了 —— 实测换 yt-dlp 版本没用，'
                 '换出口或等一段时间才有用。',
@@ -160,14 +175,57 @@ MESSAGES = {
 }
 
 
-#: 「这一条失败和登录态那一摊有关」的全部档位。**归并同因失败时按这个集合判,
-#: 不是只看 `not_logged_in`** —— 实测最常撞的恰恰是机器人验证那一档,只认一个档
+#: 「同一处卡住、会在每个频道上一字不差重复一遍」的那几档。**归并同因失败时按这个集合判,
+#: 不是只看 `not_logged_in`** —— 实测最常撞的恰恰是机器人验证和出口限流那两档,只认一个档
 #: 等于让最常见的那一类退回逐条重复(48 行同一句话)。
-AUTH_CODES = ('not_logged_in', 'bot_wall', 'cookie_unreadable')
+#: `rate_limited` 严格说不是登录态问题,但它和这几档同一个形态:一个出口、一次全中,而且
+#: 用户第一反应正是「是不是没登录」—— 归并那一句话恰恰是用来说清它不是的。
+AUTH_CODES = ('not_logged_in', 'bot_wall', 'cookie_unreadable', 'rate_limited')
+
+
+#: 「这一轮确实取到了东西,但工具同时报了这么一条」的说法。**和 `MESSAGES` 分开写,
+#: 不许复用**:同一个分档在这两处的结论完全不同 —— 那边是「这一轮没成」,这边是
+#: 「成了,但这份成功可能不算数」。拿 `MESSAGES` 顶替等于把一条 cookie 警告升级成
+#: 「登录态无效」,而用户明明刚取到了元数据(审查点名:并列显示证据和未确认状态)。
+CAUTIONS = {
+    'cookie_unreadable': '但 yt-dlp 同时报了读不出 {label} 的 cookie：这一轮很可能是没带登录态'
+                         '取到的公开内容。macOS 去钥匙串放行、Windows 先完全退出浏览器，或换一个 profile，'
+                         '再检查一次。',
+    'rate_limited': '但 yt-dlp 同时报了 429（请求过于频繁）：这一轮算侥幸过的，隔一段时间再检查一次更有把握。',
+    'bot_wall': '但 yt-dlp 同时报了机器人验证：这个出口已经被盯上，下一轮可能就过不去了。',
+    'not_logged_in': '但 yt-dlp 同时报了登录态失效：真正用得上它的字幕和音频这一轮没验到。',
+}
 
 
 def describe(code: str, spec: str) -> str:
     return MESSAGES.get(code, MESSAGES['unknown']).format(label=LABELS.get(browser_of(spec), spec))
+
+
+def caution(code: str, spec: str) -> str:
+    """成功那一份结论旁边要并列的那句话。没有对应说法就返回空字符串(面板按空不显示)。"""
+    wording = CAUTIONS.get(code, '')
+    return wording.format(label=LABELS.get(browser_of(spec), spec)) if wording else ''
+
+
+def evidence(error, limit: int = 400) -> str:
+    """给人看的那份「yt-dlp 原文」。**两头都留**(见 `diagnosis.excerpt`)。
+
+    优先用异常自带的完整诊断,没有才退到消息本身 —— 原先取 `str(error)[:400]`,
+    而最终那句错误在尾部,从开头一裁就看不见了(审查实测:429 在头、机器人验证在尾,
+    面板上两条都没显示)。
+    """
+    return excerpt(getattr(error, 'diagnostic', '') or str(error), limit)
+
+
+def coded(error) -> str:
+    """从一个异常里取出分档。**口径只有一份,消费方不许各自 `classify(str(error))`。**
+
+    带着 `code` 的(`diagnosis.ToolFailure` 在**未裁切**的完整诊断上算过了)直接用它;
+    没带的才拿消息现算 —— 异常消息为了给人看已经裁过两头,决定性那一行可能正好在
+    被省略的中段(审查实测:长诊断里的 429 这样丢掉,整次失败被判成 bot 墙)。
+    """
+    code = getattr(error, 'code', '')
+    return code if code in MESSAGES else classify(str(error))
 
 
 def readiness(settings) -> dict:
@@ -204,16 +262,20 @@ def check(settings, deadline=None) -> dict:
     if not source:
         return {'ready': False, 'code': 'no_channel', 'message': describe('no_channel', spec),
                 'browser': spec, 'checked': True}
+    # **成功那一份也要把工具的警告收上来**(出参,口径见 `media._collect_listing`):
+    # cookie 解密失败只是一条 warning,进程退 0、公开视频照旧列得出来 —— 不收的话这条
+    # 铁证跟着临时输出一起被删,面板上只剩「取到了元数据」(审查实测)。
+    noise = []
     try:
-        listed = media.channel_videos(source, settings, deadline, lambda: False, limit=1)
+        listed = media.channel_videos(source, settings, deadline, lambda: False, limit=1, warnings=noise)
     except Exception as error:
         # 列频道这一步**本来不需要登录态**(实测裸跑可通),所以它失败时有把握的只有两档:
         # 「cookie 读不出来」和「出口撞上机器人验证」—— 两者都和这一步本身对得上。
         # 其余一律算连不上,不拿它冒充「没登录」:那会把人送去反复登录,而问题在另一头。
-        code = classify(str(error))
-        code = code if code in ('cookie_unreadable', 'bot_wall') else 'unreachable'
+        code = coded(error)
+        code = code if code in ('cookie_unreadable', 'bot_wall', 'rate_limited') else 'unreachable'
         return {'ready': False, 'code': code, 'browser': spec, 'checked': True,
-                'message': describe(code, spec), 'detail': str(error)[:400]}
+                'message': describe(code, spec), 'detail': evidence(error)}
     video_id = next((item['video_id'] for item in listed if VIDEO_ID.fullmatch(item['video_id'])), '')
     if not video_id:
         return {'ready': False, 'code': 'unreachable', 'browser': spec, 'checked': True,
@@ -221,13 +283,23 @@ def check(settings, deadline=None) -> dict:
                 'detail': f"频道 {source['name']} 这一轮没有列出任何视频"}
     row = {'video_id': video_id, 'entry': {'url': 'https://www.youtube.com/watch?v=' + video_id}}
     try:
-        media.probe(row, settings, deadline, lambda: False, force=True)
+        media.probe(row, settings, deadline, lambda: False, force=True, warnings=noise)
     except Exception as error:
-        code = classify(str(error))
+        code = coded(error)
         return {'ready': False, 'code': code, 'browser': spec, 'checked': True,
-                'message': describe(code, spec), 'detail': str(error)[:400]}
+                'message': describe(code, spec), 'detail': evidence(error)}
     # `confirmed` 和 `ready` 是两件事:ready=「这一轮没撞上任何已知故障」,
     # confirmed=「那份登录态被证实有效」。后者我们现在拿不到证据,就如实报 False ——
     # 面板按它显示中性而不是绿色结论。
-    return {'ready': True, 'confirmed': False, 'code': 'metadata_ok', 'browser': spec,
-            'checked': True, 'message': describe('metadata_ok', spec)}
+    result = {'ready': True, 'confirmed': False, 'code': 'metadata_ok', 'browser': spec,
+              'checked': True, 'message': describe('metadata_ok', spec)}
+    # **取到了东西不等于可以把警告扔掉,但也不等于这一轮失败。** 分档照旧在完整文本上算
+    # (这里的 `noise` 一个字都没裁过),然后和「未被证实」那句话**并列**显示:ready 仍是
+    # True、`code` 仍是 `metadata_ok`,只多一条 `warning`。把它升级成「登录态无效」是另一
+    # 头的错 —— 人刚刚明明取到了元数据。
+    flagged = classify(' | '.join(noise)) if noise else ''
+    if caution(flagged, spec):
+        result['warning_code'] = flagged
+        result['warning'] = caution(flagged, spec)
+        result['detail'] = excerpt(' | '.join(noise), 400)
+    return result

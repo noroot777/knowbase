@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR, VIDEOS_ROOT
 from kb.youtube import login, toolchain, transcripts
+from kb.youtube.diagnosis import ToolFailure, excerpt
 from kb.youtube.channels import VIDEO_ID
 from kb.youtube.settings import model_path, of, tools
 
@@ -74,13 +75,18 @@ def _written(path):
         return False
 
 
-def diagnostics(output, limit=800):
+def diagnostics(output):
     """从工具输出里挑出能给人看、也能给 `login.classify` 看的那几行:**只要非 JSON 行**。
 
     两个理由钉在一起:①警告和错误都在非 JSON 行里 —— cookie 解密失败就是其中一条
     (`cannot decrypt v10 cookies: no key found`),`login` 要靠它把「cookie 读不出来」
     和「没登录」分开;②JSON 那一行可能带着 `cookies` 字段,它一个字都不该进异常消息
     或日志 —— 我们对外承诺的是不落盘、不记日志。
+
+    **这里一个字都不裁。** 分类要看完整文本,裁字数只许发生在展示那一端
+    (`diagnosis.excerpt`)—— 原先按尾部留 800 字,把开头那行 429 裁掉了,于是限流被判成
+    bot 墙(审查实测)。文件本身已被 `_pump` 按 8 MiB 封顶,整份读进来不是新增的内存风险
+    (原先也是整份 `read_text` 之后才裁)。
     """
     try:
         text = output.read_text(encoding='utf-8', errors='replace')
@@ -88,7 +94,7 @@ def diagnostics(output, limit=800):
         return ''
     lines = [line.strip() for line in text.splitlines()
              if line.strip() and not line.lstrip().startswith(('{', '['))]
-    return ' | '.join(lines)[-limit:]
+    return ' | '.join(lines)
 
 
 def scrub(value):
@@ -247,7 +253,10 @@ def run(arguments, output, deadline, stopped, partial=False):
             if state['failure'] is not None:
                 raise RuntimeError(f'写不了工具输出：{state["failure"]}') from None
             if process.returncode:
-                raise RuntimeError(f'{arguments[0]} 执行失败：{diagnostics(scratch)}')
+                # **分档在这儿就算完**,算的是完整诊断;异常消息只是给人看的摘要。
+                # 这是唯一一处能看见未裁切原文的地方 —— 往上走的每一层都在裁。
+                noise = diagnostics(scratch)
+                raise ToolFailure(f'{arguments[0]} 执行失败', noise, login.classify(noise))
         finally:
             terminate(process)
             pump.join(5)
@@ -298,7 +307,7 @@ def _cap(limit):
     return str(max(1, min(50, int(limit))))
 
 
-def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes):
+def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes, warnings=None):
     """列频道共用的「按条目收」适配层。**两条列表路都走这一份。**
 
     **契约和单视频那三条不一样**:yt-dlp 非零退出、或者预算在第 7 条上到点时,已经整行
@@ -306,26 +315,35 @@ def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes
     面板上那句「这个频道没列完」。一条合法条目都没有才算这次真失败,那时把命令自己的
     原话放在最前面:它是人唯一的线索,也是 `login.classify` 分档用的那份原文。
 
-    **`notes` 是出参,不是开关**:不传就只是没人收这句说明,收不收都不改变「条目照旧
-    收下」这件事 —— 否则哪天漏传一次,丢数据就又回来了。
+    **`notes` 和 `warnings` 都是出参,不是开关**:不传就只是没人收,收不收都不改变
+    「条目照旧收下」这件事 —— 否则哪天漏传一次,丢数据就又回来了。
+
+    **跑成功了也要把警告交出去**(`warnings`)。cookie 解密失败在 yt-dlp 那边只是一条
+    warning:进程照旧退 0、公开视频照旧列得出来,于是「读不出 cookie」这条铁证跟着这份
+    临时输出一起被删掉,面板上只剩一句「取到了元数据」(审查实测)。这份输出是它唯一的
+    落点,读它只有这一个时机。
     """
     reason = ''
     try:
         output = ytdlp(arguments, path, deadline, stopped, spec=spec, playlist=True, partial=True)
     except PartialOutput as broken:
         output, reason = broken.path, broken.reason
+    noise = diagnostics(output)
     try:
         entries = parse(output, url)
     except Exception as error:
-        raise RuntimeError('；'.join(part for part in (reason, str(error)) if part)) from None
+        raise ToolFailure('；'.join(part for part in (reason, str(error)) if part),
+                          noise, login.coded(error)) from None
     finally:
         output.unlink(missing_ok=True)
     if reason and notes is not None:
         notes.append(f'只列到 {len(entries)} 条就中断了：{reason}')
+    if noise and warnings is not None:
+        warnings.append(noise)
     return entries
 
 
-def channel_videos(source, settings, deadline, stopped, limit=20, notes=None):
+def channel_videos(source, settings, deadline, stopped, limit=20, notes=None, warnings=None):
     """用 yt-dlp 列一个频道最近的视频。**只走 `--flat-playlist`。**
 
     实测:flat 列一个频道 1.4~30 秒(端侧抖动很大)。**它和 `detailed_videos` 的差别只有
@@ -341,10 +359,11 @@ def channel_videos(source, settings, deadline, stopped, limit=20, notes=None):
     url = _channel_url(source)
     return _collect_listing(['--flat-playlist', '--playlist-end', _cap(limit), '--dump-json', url],
                             DATA_DIR / 'youtube' / 'channels' / f"{int(source['id'])}.jsonl",
-                            of(settings)['cookies_browser'], deadline, stopped, _listed, url, notes)
+                            of(settings)['cookies_browser'], deadline, stopped, _listed, url, notes,
+                            warnings)
 
 
-def detailed_videos(source, settings, deadline, stopped, limit=10, notes=None):
+def detailed_videos(source, settings, deadline, stopped, limit=10, notes=None, warnings=None):
     """列一个频道最近的视频,**带登录态逐条解析** —— 拿回真实发布时间和播放量。
 
     和 `channel_videos` 同一个地址、同一把 cookie,差别只有一个:**不带 `--flat-playlist`**。
@@ -366,7 +385,8 @@ def detailed_videos(source, settings, deadline, stopped, limit=10, notes=None):
     url = _channel_url(source)
     return _collect_listing(['--skip-download', '--dump-json', '--playlist-end', _cap(limit), url],
                             DATA_DIR / 'youtube' / 'channels' / f"detail-{int(source['id'])}.jsonl",
-                            of(settings)['cookies_browser'], deadline, stopped, _detailed, url, notes)
+                            of(settings)['cookies_browser'], deadline, stopped, _detailed, url, notes,
+                            warnings)
 
 
 def _detailed(output, url):
@@ -407,8 +427,8 @@ def _detailed(output, url):
                         'duration': duration if isinstance(duration, (int, float)) else None,
                         'url': 'https://www.youtube.com/watch?v=' + video_id})
     if not entries:
-        raise RuntimeError(f'yt-dlp 没有从 {url} 解析出带发布时间的视频；'
-                           f'{diagnostics(output)}'.rstrip('；'))
+        noise = diagnostics(output)
+        raise ToolFailure(f'yt-dlp 没有从 {url} 解析出带发布时间的视频', noise, login.classify(noise))
     return entries
 
 
@@ -435,7 +455,8 @@ def _listed(output, url):
     if not entries:
         # **工具的原话要带上**:`login.classify` 靠它分「cookie 读不出来」和「没登录」,
         # 面板上的「yt-dlp 原文」那一行也是它。只报「没列出任何视频」等于把唯一的线索扔了。
-        raise RuntimeError(f'yt-dlp 没有从 {url} 列出任何视频；{diagnostics(output)}'.rstrip('；'))
+        noise = diagnostics(output)
+        raise ToolFailure(f'yt-dlp 没有从 {url} 列出任何视频', noise, login.classify(noise))
     return entries
 
 
@@ -453,7 +474,11 @@ def fresh_metadata(path, video_id):
     return cached
 
 
-def probe(row, settings, deadline, stopped, force=False):
+def probe(row, settings, deadline, stopped, force=False, warnings=None):
+    """取一条视频的元数据。`warnings` 是出参,口径同 `_collect_listing`:**跑成功了也要
+    把警告交出去**(cookie 解密失败只是一条 warning,进程照旧退 0)。命中缓存时不填 ——
+    那一次压根没起过进程,凭空报一条警告等于拿旧证据冒充这一轮的事实。
+    """
     directory = cache_dir(row['video_id'])
     cached = None if force else fresh_metadata(directory / 'metadata.json', row['video_id'])
     if cached:
@@ -466,14 +491,17 @@ def probe(row, settings, deadline, stopped, force=False):
     output = ytdlp(['--skip-download', '--dump-single-json', row['entry']['url']],
                    directory / 'probe.log', deadline, stopped,
                    spec=of(settings)['cookies_browser'])
+    noise = diagnostics(output)
     try:
         payload = _single(output)
         if not isinstance(payload, dict) or payload.get('id') != row['video_id']:
-            raise RuntimeError('元数据的视频 ID 与候选不一致')
+            raise ToolFailure('元数据的视频 ID 与候选不一致', noise, login.classify(noise))
         # **凭据不许落盘。** yt-dlp 会把匹配上的 cookie 串放进 `info_dict['cookies']`,
         # 它的 `sanitize_info` 不移除那个键 —— 原样缓存等于把登录凭据写进数据目录。
         payload = scrub(payload)
         save_json(directory / 'metadata.json', payload)
+        if noise and warnings is not None:
+            warnings.append(noise)
         return payload
     finally:
         output.unlink(missing_ok=True)
@@ -489,7 +517,8 @@ def _single(output):
                 return json.loads(line)
             except ValueError:
                 continue
-    raise RuntimeError(f'YouTube 元数据无效，未开始下载或转录；{diagnostics(output)}'.rstrip('；'))
+    noise = diagnostics(output)
+    raise ToolFailure('YouTube 元数据无效，未开始下载或转录', noise, login.classify(noise))
 
 
 def tracks(metadata, automatic=False):
