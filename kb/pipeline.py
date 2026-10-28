@@ -22,6 +22,7 @@ from kb.fetch_rounds import NoEvidence
 from kb.collectors import active_collector
 from kb.pipeline_retry import retry_failed_plan, start_retry_failed, today_failed
 from kb import pipeline_flow as flow
+from kb.pipeline_history import history_rev
 from kb.pipeline_sources import run_sources
 from kb.pipeline_stages import (
     _extract_pass,
@@ -90,6 +91,7 @@ __all__ = [
     "close_batch",
     "history_keep_days",
     "load_history",
+    "history_rev",
     "last_result",
     "load_last_run",
     "batch_note",

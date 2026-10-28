@@ -74,6 +74,9 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     # 和「已经追平」,两种处理都错过一档(忙着重查 / 永远不补)。
     # 跑着的时候报的是**正在跑这一轮**的版本,附属数据本来就该等它收尾。
     state["result_version"] = pl.result_version(state if state["running"] else (latest or {}))
+    # 历史清单**整份**的版本(`history_rev`):非首行被原位改过(被接替的那批日报补上
+    # 结论)时上面那个版本不动,前端靠它知道那份缓存该重取了。
+    state["history_rev"] = pl.history_rev()
     # **今天还欠着的那几步**(当日账本那一份口径,见 `pipeline_retry.today_failed`)。
     # 面板那颗「重试失败项」原来只看「最近一轮有没有红」,而今天早些时候那几笔在
     # 一轮全绿收尾之后就不在最近那一轮里了 —— 按钮藏掉,用户连点的机会都没有。
@@ -88,7 +91,7 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     # 此刻那份「按类型排的计划」(跳过名单、走到哪一类、谁被提前结束)。**读不出来就
     # 不给**:那张卡片会退回按阶段推出来的只读节点,不该为它把整个状态接口带挂。
     try:
-        live = flow.status()
+        live = flow.live(state)
         if live:
             # 日报那一批的停止记在日报那一侧,管道那一格读不到(两轮之间管道空着)
             live["stopping"] = flow.stopping(live["kind"])
@@ -125,6 +128,10 @@ def pipeline_runs():
     # `error` 如实带上最近一次留档失败的异常类型 —— 留档是旁路,它失败不该声张成
     # 同步失败(那一轮的结论照旧发布),但也不许静默:只看页面的话,「历史里没有这
     # 一轮」和「这一轮还没跑过」长得一模一样。
+    # 清单的指纹(`history_rev`)在读清单**之前**取:读的间隙里又写了一次的话,回包带的是
+    # 旧指纹,前端下一次轮询看到它变了就会再取 —— 方向安全。读完再取就可能拿新指纹给一份
+    # 旧清单盖章。
+    rev = pl.history_rev()
     runs = pl.load_history()
     # **每条记录附两个字段,它们是两个不同的契约。**
     # `version`:这一轮的完成版本,前端拿首条那个判「清单是不是最新那一轮的」——
@@ -166,7 +173,8 @@ def pipeline_runs():
     # 话,改了这边而面板照旧念旧数字 —— 而那句话正是用户判断「我还查不查得到前天那一
     # 轮」的唯一依据。
     return {"runs": runs, "error": pl.persist_error(),
-            "version": pl.result_version(first), "keep_days": pl.history_keep_days()}
+            "version": pl.result_version(first), "history_rev": rev,
+            "keep_days": pl.history_keep_days()}
 
 
 class ChannelScope(BaseModel):
@@ -352,7 +360,7 @@ def pipeline_flow_request(body: FlowRequest):
     ok, why = flow.request(body.owner, body.node, body.action)
     if not ok:
         raise HTTPException(409, why)
-    return {"ok": True, "flow": flow.status()}
+    return {"ok": True, "flow": flow.record(body.owner) or None}
 
 
 @router.post("/api/pipeline/retry-failed")

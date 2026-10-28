@@ -215,11 +215,11 @@ async function loadPipeHistory() {
     // `pipeVersion`(服务端那一份口径 `result_version`)。
     // **还没有快照(首次进页面)时这一道短路** —— 那一档由状态侧兜住:状态回包一到
     // `pipeFreshCheck` 就看出这一块落后、按退避补读。两边都不许单独拆掉。
-    const runKey = pipeVersion(pipeSnapshot);
+    const runKey = pipeHistoryVersion(pipeSnapshot);
     pipeHistoryRequest = pipeJson('/api/pipeline/runs');
     try {
       const data = await pipeHistoryRequest;
-      if (runKey && runKey !== pipeVersion(pipeSnapshot)) { pipeHistoryWanted = true; continue; }
+      if (runKey && runKey !== pipeHistoryVersion(pipeSnapshot)) { pipeHistoryWanted = true; continue; }
       pipeHistory = Array.isArray(data.runs) ? data.runs : [];
       pipeKeepDays = Number.isFinite(data.keep_days) && data.keep_days > 0 ? data.keep_days : 0;
       // 后端那边留档失败了没有 —— 和「这一屏取到没取到」是两件事
@@ -242,8 +242,9 @@ async function loadPipeHistory() {
       // 版本由**后端**给(和状态端点同一个 `result_version`),不在这里从清单首条
       // 自己拼 —— 自己拼的那份在「清单是空的」和「旧记录没有 run_id」两档上是空串,
       // 而空串会被当成已追平。
+      // 清单指纹一并带上(`pipeHistoryVersionOf`,和状态那一侧同一种拼法)。
       pipeFreshOk('history', pipeFreshNote ? pipeFreshDesired('history')
-                                           : (data.version || ''));
+                                           : pipeHistoryVersionOf(data.version, data.history_rev));
     } catch (e) {
       // 读不到**不在这里**无限重试(循环开头已经把那一笔欠账清了,这里也不置回去)
       // —— 但缺口要如实留着:交给 `pipe_fresh.js`,由后续状态轮询按退避补读,面板上

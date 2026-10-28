@@ -31,6 +31,11 @@ let pipePendingEpoch = 0;
 // 恒非空(没跑过就是 "none"),也兼容升级前没有 run_id 的旧记录。
 // 快照还是 null 时才是空串 —— 那是「还没有任何回包」,确实不该拿来比。
 const pipeVersion = s => (s && s.result_version) || '';
+// **历史清单那一块对的是另一个凭据**:最新那一轮的版本 + 整份清单的指纹(`history_rev`)。
+// 被另一轮接替的那批日报是原位补上结论的,最新那一轮没变、清单却变了 —— 只比前者,那份
+// 缓存就一直停在出报之前。回包那一侧拼法相同(`pipeHistoryVersionOf`),两边才比得上。
+const pipeHistoryVersionOf = (version, rev) => version ? `${version}|${rev || ''}` : '';
+const pipeHistoryVersion = s => pipeHistoryVersionOf(pipeVersion(s), s && s.history_rev);
 
 async function pipeJson(path, options = {}, timeout = 15000) {
   const controller = new AbortController();
@@ -126,7 +131,8 @@ async function refreshPipe(withPending = false) {
       //
       // `doneRun` 在跑的时候是空串,那时 applied 也会被清成空 —— 跑完才有得对齐,
       // 中途不该扫文件(`refreshPipePending` 自己那道 running 守卫是同一个意思)。
-      pipeFreshCheck(doneRun, { history: loadPipeHistory, pending: refreshPipePending });
+      pipeFreshCheck({ history: s.running ? '' : pipeHistoryVersion(s), pending: doneRun },
+                     { history: loadPipeHistory, pending: refreshPipePending });
     } catch (e) {
       if (version !== pipeStatusVersion) return;
       pipeConnected = false;

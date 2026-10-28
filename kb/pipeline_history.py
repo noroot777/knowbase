@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 
 from kb.pipeline_persist import (
@@ -160,3 +161,25 @@ def load_history() -> list[dict]:
     展示,报错不如少显示几行。
     """
     return _history_runs(_load_json(_history_file()))
+
+
+def history_rev() -> str:
+    """历史文件**这一版**的指纹:内容换过一次,它就换一个值。只用来比相等,不比先后。
+
+    「历史那份缓存还是不是新的」原来只靠首行的版本判,而一批日报被另一轮接替之后,
+    它的结论是**原位**改进自己那一行的(`update_history_round`)—— 首行没变,前端那份
+    缓存一直停在出报之前,点开那一行找不到失败原因,刷新整页才出来。所以清单这一层
+    另给一个凭据,哪一行变了都算。
+
+    取文件自己的元数据(inode + 修改时刻纳秒 + 大小):写入一律走原子替换
+    (`_write_atomic`),每写一次都是一个新文件,而且换哪个写入口、跨不跨重启都不用
+    另外记账。文件还没有是一个确定的版本(`none`);读不出元数据也给一个固定值 ——
+    两个端点同样读不出时它们照旧相等,不会凭空造出一个永远追不平的缺口。
+    """
+    try:
+        st = os.stat(_history_file())
+    except FileNotFoundError:
+        return "none"
+    except OSError:
+        return "unreadable"
+    return f"{st.st_ino}-{st.st_mtime_ns}-{st.st_size}"

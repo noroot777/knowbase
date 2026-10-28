@@ -80,11 +80,13 @@ function pipeFreshMiss(key, reason) {
   renderPipeFresh();
 }
 
-// 状态轮询每读到一次都调:记下要对齐哪一轮,落后的按退避补一次。
-function pipeFreshCheck(run, loaders) {
+// 状态轮询每读到一次都调:记下要对齐哪一版,落后的按退避补一次。`targets` 是每一块
+// **各自**的目标(历史清单比待处理数多一截清单指纹,见 `pipeHistoryVersion`);给一个
+// 字符串就是各块同一个目标。
+function pipeFreshCheck(targets, loaders) {
   pipeFreshTick++;
-  const target = run || '';
   for (const key of Object.keys(loaders)) {
+    const target = (targets && typeof targets === 'object' ? targets[key] : targets) || '';
     const s = pipeFreshSlot(key);
     // **目标一换,预算重新给**(理由见抬头 ③)。
     if (s.desired !== target) Object.assign(s, { desired: target, tries: 0, due: 0, reason: '' });

@@ -37,12 +37,16 @@ def _plan(channels=("a", "b"), stages=("crawl", "export", "index", "extract")):
     """直接摆一份手动同步的计划(不走 `begin`:它要去解析真采集器)。"""
     with patch.object(flow, "_labels", return_value={}):
         nodes = flow.source_nodes(channels, stages) + flow.group_nodes(stages)
-    flow._plan = flow._new(OWNER, "sync", nodes)
+    flow._plans[OWNER] = flow._new(OWNER, "sync", nodes)
+
+
+def _mine() -> dict:
+    return flow._plans[OWNER]
 
 
 class _Base(unittest.TestCase):
     def setUp(self):
-        flow._plan = None
+        flow._plans.clear()
         # 此刻在跑的就是 OWNER 那一轮(提前结束只落在它自己的采集器上,见 `cutting`)
         state = patch.dict(ps._state, {"stop_requested": False, "running": True,
                                        "run_id": OWNER, "batch": "",
@@ -56,7 +60,7 @@ class _Base(unittest.TestCase):
         restored = patch.object(ps, "_restored", ps._restored)
         restored.start()
         self.addCleanup(restored.stop)
-        self.addCleanup(setattr, flow, "_plan", None)
+        self.addCleanup(flow._plans.clear)
         results.clear()
         self.addCleanup(results.clear)
         self.addCleanup(pipeline_segments.clear_segments)
@@ -82,7 +86,7 @@ class FlowRequestTest(_Base):
         self.assertIn("结束本类型", why)
         # 别人那份计划(或者页面上开着的是上一轮)一律不受理,计划一个字不动
         self.assertEqual((False, flow.STALE), flow.request("run-0", "src:b", "skip"))
-        self.assertEqual([], flow._plan["skips"])
+        self.assertEqual([], _mine()["skips"])
 
     def test_cut_only_while_running_and_not_on_last_step(self):
         _plan()
@@ -112,7 +116,7 @@ class FlowRequestTest(_Base):
         _plan()
         ps._state["stop_requested"] = True
         self.assertFalse(flow.request(OWNER, "src:b", "skip")[0])
-        self.assertEqual([], flow._plan["skips"])
+        self.assertEqual([], _mine()["skips"])
 
 
 class AdvanceTest(_Base):
@@ -123,14 +127,14 @@ class AdvanceTest(_Base):
         self.assertTrue(flow.advance(OWNER, "src:a", "crawl"))
         flow.request(OWNER, "src:a", "cut")
         self.assertFalse(flow.advance(OWNER, "src:a", "export"))
-        self.assertNotIn("export", flow._plan["times"]["src:a"]["steps"])
+        self.assertNotIn("export", _mine()["times"]["src:a"]["steps"])
 
     def test_without_cut_steps_switch_and_close_the_previous_one(self):
         _plan()
         flow.enter(OWNER, "src:a")
         self.assertTrue(flow.advance(OWNER, "src:a", "crawl"))
         self.assertTrue(flow.advance(OWNER, "src:a", "export"))
-        steps = flow._plan["times"]["src:a"]["steps"]
+        steps = _mine()["times"]["src:a"]["steps"]
         self.assertTrue(steps["crawl"][1], "上一步换走时要收尾")
         self.assertEqual("", steps["export"][1])
 
@@ -158,15 +162,18 @@ class BeginTest(_Base):
         with patch.object(flow, "_labels", return_value={}):
             flow.open_daily("batch-1", ["a"], library=False)
         self.assertEqual("batch-1", flow.begin("r1", "batch-1", ["crawl"], None))
-        # 两轮日报之间挤进来的手动同步:不给计划,也不许冲掉日报那一份
-        self.assertEqual("", flow.begin("r2", "", ["crawl"], None))
-        self.assertEqual("batch-1", flow._plan["owner"])
-        # 日报那一份不在了,手动同步照常拿自己的计划
-        flow.end("batch-1")
+        flow.request("batch-1", "src:a", "skip")
+        # 两轮日报之间挤进来的手动同步:拿它自己那一份,日报那一份(连同跳过名单)原样留着
         with patch("kb.pipeline_stages.crawl_channels", return_value=[SCOPES[0]]), \
                 patch.object(flow, "_labels", return_value={}):
-            self.assertEqual("r3", flow.begin("r3", "", ["crawl", "export"], None))
-        self.assertEqual(["src:a"], [n["key"] for n in flow._plan["nodes"]])
+            self.assertEqual("r2", flow.begin("r2", "", ["crawl", "export"], None))
+        self.assertEqual(["src:a"], flow._plans["batch-1"]["skips"])
+        self.assertEqual(["src:a"], [n["key"] for n in flow._plans["r2"]["nodes"]])
+        self.assertTrue(flow.enter("r2", "src:a"), "日报那一份的跳过不许拦住别人那一轮")
+        # 手动那一轮收尾只收它自己那一份
+        flow.end("r2")
+        self.assertIn("batch-1", flow._plans)
+        self.assertNotIn("r2", flow._plans)
 
 
 class RunSourcesTest(_Base):
@@ -233,6 +240,31 @@ class RunSourcesTest(_Base):
         self.assertEqual([("export", "a", "skipped", srcs.CUT)], settled)
         self.assertEqual(1, len(ended))
         self.assertFalse(flow.halted())
+
+    def test_a_daily_batch_opening_mid_round_does_not_void_an_accepted_cut(self):
+        """手动同步正在抓、刚受理了「结束本类型」,这时定时日报开张建它自己的计划:
+        那一下照样兑现 —— 这个来源的导出不跑、采集器照样读到「该停了」。
+
+        原来全局只有一格计划,日报一开张就把它换掉,手动那一轮回头再问时找不到自己的
+        计划,被当成「本来就不受控」放行,导出照跑。
+        """
+        _plan()
+        seen = []
+
+        def cut_then_daily(channel):
+            if channel == "a":
+                self.assertEqual((True, ""), flow.request(OWNER, "src:a", "cut"))
+                with patch.object(flow, "_labels", return_value={}):
+                    flow.open_daily("batch-9", ["a", "b"], library=False)
+                seen.append(flow.halted())
+        calls, settled, _, _ = self._run(on_crawl=cut_then_daily)
+        self.assertEqual([True], seen, "日报开张后,采集器读不到这一轮已经受理的提前结束")
+        self.assertNotIn(("export", "a"), calls)
+        self.assertEqual([("export", "a", "skipped", srcs.CUT)], settled)
+        # 反过来钉一边:另一个来源照常跑完,日报那一份计划完好、没沾上这一轮的请求
+        self.assertEqual([("crawl", "a"), ("crawl", "b"), ("export", "b")], calls)
+        self.assertEqual({}, flow._plans["batch-9"]["cuts"])
+        self.assertEqual([], flow._plans["batch-9"]["done"])
 
     def test_stop_settles_the_rest_as_stopped(self):
         _plan()
@@ -355,6 +387,32 @@ class CuttingOwnerTest(_Base):
         self.assertFalse(flow.halted(), "没有管道在跑就没有谁可停")
 
 
+class LiveTest(_Base):
+    """面板此刻画哪一份:跑着画这一轮自己的,空着画日报那一批的。"""
+
+    def setUp(self):
+        super().setUp()
+        _plan()
+        with patch.object(flow, "_labels", return_value={}):
+            flow.open_daily("batch-1", ["a"], library=False)
+
+    def test_running_round_gets_its_own_plan(self):
+        self.assertEqual(OWNER, flow.live(ps._state)["owner"])
+        # 这一轮属于日报那一批时画日报那一份
+        ps._state.update(run_id="r-x", batch="batch-1")
+        self.assertEqual("batch-1", flow.live(ps._state)["owner"])
+
+    def test_a_round_without_a_plan_is_not_shown_someone_elses(self):
+        ps._state.update(run_id="r-none", batch="")
+        self.assertIsNone(flow.live(ps._state))
+
+    def test_idle_shows_the_daily_batch(self):
+        ps._state["running"] = False
+        self.assertEqual("batch-1", flow.live(ps._state)["owner"])
+        flow.end("batch-1")
+        self.assertIsNone(flow.live(ps._state), "手动那一份不在空闲时冒出来")
+
+
 class _Collector:
     label = channel_label = "A 来源"
 
@@ -408,7 +466,7 @@ class PlanRestoreTest(HistoryCase):
     """类型计划跟着状态文件那份终态走:重启之后最新那一轮的各类耗时还在。"""
 
     def tearDown(self):
-        flow._plan = None
+        flow._plans.clear()
         super().tearDown()
 
     def _run(self, run_id, plan):
@@ -416,7 +474,7 @@ class PlanRestoreTest(HistoryCase):
         ps.mark_open(ps._state)
         if plan:
             with patch.object(flow, "_labels", return_value={}):
-                flow._plan = flow._new(run_id, "sync", flow.source_nodes(["a"], ["crawl", "export"]))
+                flow._plans[run_id] = flow._new(run_id, "sync", flow.source_nodes(["a"], ["crawl", "export"]))
         with patch.object(pl, "crawl_channels", return_value=[SCOPES[0]]), \
                 patch.object(pl, "_run_crawl", side_effect=lambda f: ps._stage("crawl", "ok", "检查 1/1")), \
                 patch.object(pl, "_run_export", side_effect=lambda f: ps._stage("export", "ok", "已保存 1 条")):
@@ -511,6 +569,30 @@ class BatchRevisionTest(HistoryCase):
         self._sub_round("run-e", "")
         self.assertNotIn("revision", ps.run_payload())
         self.assertEqual("run-e", pl.result_version(pl.last_result()))
+
+    def test_a_superseded_batch_still_moves_the_history_fingerprint(self):
+        """日报在出报时被另一轮手动同步接替:最新那一轮没变,它自己那一行原位补上结论。
+
+        前端拿「最新那一轮的版本」判不出这一行变了,所以清单整份另有一个指纹
+        (`history_rev`),状态和历史两个端点各带一份、取值一致。
+        """
+        batch = pb.open_batch("daily")
+        self._sub_round("run-d", batch)
+        self._sub_round("run-m", "")
+        version, runs = self._versions()
+        status_rev = pipeline_api.pipeline_status(source=False)["history_rev"]
+        self.assertEqual(status_rev, runs["history_rev"])
+        self.assertEqual(status_rev, pipeline_api.pipeline_status(source=False)["history_rev"],
+                         "没写过历史,指纹不许自己变(否则前端一直补读)")
+        self.assertTrue(pb.batch_note("日报生成失败: Claude 503", batch))
+        after, runs = self._versions()
+        self.assertEqual("run-m", after, "前提:最新那一轮还是手动那一轮")
+        self.assertEqual(version, after)
+        moved = pipeline_api.pipeline_status(source=False)["history_rev"]
+        self.assertNotEqual(status_rev, moved, "非首行原位改了,清单指纹却没动")
+        self.assertEqual(moved, runs["history_rev"])
+        row = next(r for r in runs["runs"] if r["run_id"] == "run-d")
+        self.assertTrue(any("Claude 503" in line for line in row["log"]))
 
     def test_a_plain_round_has_no_revision(self):
         """反过来钉一边:不在批次里的一轮,版本照旧就是它的身份。"""
