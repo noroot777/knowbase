@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 from kb.config import DATA_DIR
-from kb.youtube.diagnosis import COOKIES, YOUTUBE, excerpt, heard, record, serial, witnessed
+from kb.youtube.diagnosis import COOKIES, YOUTUBE, excerpt, heard, record, serial, shown, witnessed
 
 DEFAULT = 'chrome'
 # 顺序决定面板上那张清单的顺序。**每一档的说明都要能单独读懂,不许写「同上」。**
@@ -452,13 +452,13 @@ def caution(code: str, spec: str) -> str:
 
 
 def evidence(error, limit: int = 400) -> str:
-    """给人看的那份「yt-dlp 原文」。**两头都留**(见 `diagnosis.excerpt`)。
+    """给人看的那份「yt-dlp 原文」,限长按**订阅失败明细**那一处的习惯。
 
-    优先用异常自带的完整诊断,没有才退到消息本身 —— 原先取 `str(error)[:400]`,
-    而最终那句错误在尾部,从开头一裁就看不见了(审查实测:429 在头、机器人验证在尾,
-    面板上两条都没显示)。
+    **实现只有一份,在 `diagnosis.shown`** —— 这儿留个名字是因为调用方都这么叫它。
+    原先这儿自己算一遍、`storage.failed` 又自己算一遍(`str(error)[:1000]`),于是
+    频道那一侧保住了原文、视频行那一侧丢了(审查实测,见 `shown` 的 docstring)。
     """
-    return excerpt(getattr(error, 'diagnostic', '') or str(error), limit)
+    return shown(error, limit)
 
 
 #: 归并之后的结论:**逐条都判过了,一条可用的 YouTube 分档都没有。**

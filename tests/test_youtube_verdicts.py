@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""**一个已经判出来的分档,穿过公共归并层之后还得是它。**
+"""**一个已经判出来的分档,穿过公共归并层、落进库里、再读回页面之后还得是它。**
 
 事故形态(审查用真实子进程复现):`login.classify` 认得出 `js_challenge`,但归并层
 (`login.merge`)原先拿按**证据强度**排的 `_STRENGTH` 兼着当**白名单** —— 新加一档时
@@ -9,14 +9,25 @@
 
 所以这一份的判据是**集合**:`login.VERDICTS` 里每一档都要穿得过去。只补 `js_challenge`
 那一条触发路径等于等下一档再来一遍 —— 排序名单不许兼任白名单,因为谁都会忘记同步第二份。
+
+**这条链有两段,两段都要钉。** 内存里归并对了之后,它还要落进 `youtube_videos` 再被
+读回候选排名 —— 而那个末端原先自己 `str(error)[:1000]`,把权威诊断换回了被裁过的摘要:
+分档、`collector.wall`、同步汇总全都对,**页面上那一行仍然只有开头那截普通工具输出**
+(审查用真实子进程 + 真实库 + 真实页面复现)。所以下半段的判据一律落在
+**重新读库、经真实接口拿回来的那一份**里,不落在异常对象上。
 """
+import ast
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from kb.youtube import collector, login, media
+from kb.youtube import collector, login, media, storage
 from kb.youtube.diagnosis import LOCAL, MODEL, YOUTUBE, ToolFailure
 from tests.youtube_fixture import YouTubeFixture
+
+#: 落库那两列的名字。**凡是往它们写字的调用都算一个失败展示出口。**
+TOLD = ('reason', 'last_error')
 
 #: 那一轮真实输出的形状:决定性的一行在**尾部**,前面一长串普通上下文。
 #: 原文丢掉之后面板上留下的恰恰只有开头那截。
@@ -27,6 +38,22 @@ NOISE = ('WARNING: [youtube] player client fallback\n' * 20 +
 
 def failure(code, diagnostic=NOISE, origin=YOUTUBE):
     return ToolFailure('yt-dlp 执行失败', diagnostic, code, origin)
+
+
+#: 字幕那一步失败时留在**摘要**里的那句话。权威诊断里没有它 —— 它是「这一轮试了哪几步、
+#: 最后停在哪」,只有摘要还记得前面那几次(`media` 把每条原因裁到 300 字拼起来)。
+TRIED = '没有可用字幕，且本地语音转录这一步随后也失败了'
+
+
+def carried(code, diagnostic=NOISE):
+    """`media` 合并多条原因时交出来的那个 carrier,**按它的原样造**:两条原因。
+
+    第一条只在摘要里留下一句话(没有分档、没有诊断),第二条才是判出档的那次工具失败。
+    消息里**每条原因都被裁到 300 字**(`media` 那两处 `str(error)[:300]`)—— 摘要本来
+    就该这样,所以末端既不能拿它当完整证据,**也不能把它整个扔掉**。
+    """
+    broken = [ValueError(TRIED), failure(code, diagnostic)]
+    return login.merge(RuntimeError('；'.join(str(error)[:300] for error in broken)), broken)
 
 
 class VerdictsSurviveTheMerge(unittest.TestCase):
@@ -128,6 +155,116 @@ class AChallengeReachesTheFailureDetail(YouTubeFixture):
         summary = {}
         collector.wall(summary, ['1'], raised)
         self.assertEqual(['1'], summary.get('walls', {}).get('js_challenge'), summary)
+
+
+class TheVideoRowKeepsTheRealReason(YouTubeFixture):
+    """**下半段:落库再读回页面。** 判据一律在重新读出来的那一份里。"""
+
+    def setUp(self):
+        super().setUp()
+        self.source = self.channel()
+        storage.discover(self.source, [self.entry(1)])
+
+    def listed(self):
+        """页面真正拿到的那一份:走真实接口,不读异常对象、也不直接读表。"""
+        response = self.client.get('/api/intake/youtube/ranking')
+        self.assertEqual(200, response.status_code, response.text)
+        return response.json()['items'][0]
+
+    def test_every_verdict_reaches_the_video_row(self):
+        """**集合级那一条:`VERDICTS` 里每一档的决定性原文都要到得了视频行。**
+
+        只钉 `js_challenge` 那一条触发路径等于把同一个缺陷留给下一档 —— 这个末端
+        丢的不是某一档,是「权威诊断」这件事本身。
+        """
+        for code in login.VERDICTS:
+            with self.subTest(code=code):
+                error = carried(code)
+                self.assertNotIn('Requested format is not available', str(error),
+                                 '摘要里本来就没有尾部那一行,否则这条用例什么都没验')
+                self.assertNotIn(TRIED, error.diagnostic,
+                                 '诊断里本来就没有这句话,否则下面那条断言什么都没验')
+                storage.failed(storage.rows()[0], error)
+                item = self.listed()
+                self.assertEqual('failed', item['state'])
+                self.assertIn('Requested format is not available', item['reason'],
+                              '页面上那一行又只剩开头那截普通工具输出了')
+                # **另一半:摘要不许被权威诊断顶掉。** 「这一轮试了哪几步、最后停在哪」
+                # 只有它记得 —— 只给诊断的话,「先前那条原因不许被顶掉」当场破
+                # (`tests/test_youtube_diagnosis.py` 在订阅那一侧钉着同一件事)。
+                self.assertIn(TRIED, item['reason'], '前面那几步的原因被顶掉了')
+
+    def test_the_whole_chain_from_the_real_call_site_ends_up_on_the_page(self):
+        """**真实调用点一路到页面**:没有字幕 → 去下音频 → 撞上那道挑战。
+
+        `media.obtain` 归并 → `collector.wall` 记账 → `storage.failed` 落库 →
+        真实 ranking 接口读回来。中间任何一段把权威诊断换成摘要,这里就红。
+        """
+        row = {'video_id': f'{1:011d}', 'entry': self.entry(1)}
+        with patch.object(media, 'captions', return_value=None), \
+                patch.object(media, 'asr', side_effect=failure('js_challenge')):
+            with self.assertRaises(Exception) as caught:
+                media.obtain(row, {'id': row['video_id'], 'duration': 600, 'language': 'en'},
+                             {'youtube': {}}, time.monotonic() + 5, lambda: False)
+        storage.failed(storage.rows()[0], caught.exception)
+        item = self.listed()
+        self.assertIn('Requested format is not available', item['reason'], item['reason'])
+        self.assertIn('challenge solver', item['reason'], '那道挑战也得看得见')
+        # 这一轮**只有一条原因**:字幕是干干净净地回了空(不是失败),所以没有「前面那几步」
+        # 要保。两条原因并存那一半由上面那条集合级用例和 `tests/test_youtube_diagnosis.py`
+        # 的真实同步钉 —— 在这儿顺手加一句就成了对这个场景的错断言。
+
+    def test_the_same_line_is_never_printed_twice(self):
+        """**同一句话不许在面板上印两遍。**
+
+        这是「摘要自己留一份」那一步的判据(`ToolFailure.summary`):异常消息本身是
+        「摘要 + 裁过的诊断」拼出来的,拿它去和未裁的诊断再拼一次,决定性那一行就出现两次,
+        还白占掉一半字数预算 —— 真正该省略的中段反而被挤掉了。
+        """
+        short = failure('js_challenge', 'WARNING: [jsc] challenge solver skipped\n'
+                                        'ERROR: Requested format is not available')
+        storage.failed(storage.rows()[0], short)
+        told = self.listed()['reason']
+        self.assertIn('yt-dlp 执行失败', told, '摘要那一截没了')
+        self.assertEqual(1, told.count('Requested format is not available'), told)
+
+    def test_a_plain_short_failure_is_not_mangled(self):
+        """反过来钉一边:**没有完整诊断、本来就短的那种,原话照旧一字不动。**
+
+        提取器只在超长时两头留中间省,短消息不许被它改样子;空消息退回类名,
+        否则面板上那一行只剩一个状态词。
+        """
+        storage.failed(storage.rows()[0], RuntimeError('字幕语言不对'))
+        self.assertEqual('字幕语言不对', self.listed()['reason'])
+        storage.failed(storage.rows()[0], ValueError(''))
+        self.assertEqual('ValueError', self.listed()['reason'], '空消息要退回类名')
+
+
+class NoFailureExitTruncatesOnItsOwn(unittest.TestCase):
+    """**结构级那一条:裁字只许发生在统一提取器里。**
+
+    上一条钉的是今天这一个末端的后果。这一条钉的是「以后新开一个末端」——
+    谁再写一次 `reason=str(error)[:N]`,这里当场红,不必等下一轮审查拿真实页面复现。
+    判据是**有没有自己裁一刀**,不是「有没有调某个函数」:摘要和权威诊断的区别在
+    「裁没裁过」,而末端把上限从 300 调到 1000、1200 都补不回尾部那一行。
+    """
+
+    def test_nothing_slices_the_text_it_writes_to_those_two_columns(self):
+        ours = sorted(Path(login.__file__).parent.glob('*.py'))
+        self.assertGreater(len(ours), 5, '一个文件都没扫到,下面全是空转')
+        sliced = []
+        for path in ours:
+            tree = ast.parse(path.read_text(encoding='utf-8'))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                for keyword in node.keywords:
+                    if keyword.arg not in TOLD:
+                        continue
+                    if any(isinstance(inner, ast.Subscript) and isinstance(inner.slice, ast.Slice)
+                           for inner in ast.walk(keyword.value)):
+                        sliced.append(f'{path.name}:{keyword.value.lineno} {keyword.arg}=')
+        self.assertEqual([], sliced, '这些末端自己裁了一刀,权威诊断在它们那儿变回了摘要')
 
 
 if __name__ == '__main__':
