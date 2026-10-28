@@ -241,14 +241,22 @@ def halted() -> bool:
     return bool(ps._state.get("stop_requested")) or cutting()
 
 
-def stopping(kind: str) -> bool:
-    """这一份计划所在的那一轮已经被要求停止了(日报那一批另认日报自己的停止)。"""
-    if ps._state.get("stop_requested"):
+def stopping(owner: str, kind: str) -> bool:
+    """`owner` 那份计划所在的那一轮已经被要求停止了(日报那一批另认日报自己的停止)。
+
+    **只认归属相符的停止标记**(口径同 `cutting`):计划按 owner 各存一份之后,日报那一份
+    还开着、另一轮手动同步被要求停止时,日报还没轮到的那几类照样可以跳过 / 撤回 —— 只看
+    全局那一格的话,它们会被一句「已经请求停止这一轮了」挡回去,面板上也挂着一份不属于
+    它的「正在停止」。
+    """
+    state = ps._state
+    if owner and state.get("stop_requested") and owner in (
+            state.get("run_id") or None, state.get("batch") or None):
         return True
     if kind != "daily":
         return False
     from kb.daily_state import _state as daily      # 延迟:日报那边整条链很重
-    return bool(daily.get("stop_requested"))
+    return bool(daily.get("stop_requested")) and daily.get("batch") == owner
 
 
 def _cut_step(plan: dict, node: dict) -> tuple[str, str]:
@@ -284,7 +292,7 @@ def request(owner: str, key: str, action: str) -> tuple[bool, str]:
         if action not in ("skip", "unskip", "cut"):
             return False, f"不认识的操作:{action}"
     # 停止那一道读的是别处的状态,放到锁外问(问完再进锁核一遍其余条件)。
-    if stopping(kind):
+    if stopping(owner, kind):
         return False, "已经请求停止这一轮了"
     with _lock:
         # 锁外那一问的间隙里这份计划可能已经收尾了:按 owner 重新取,不沿用上面那份

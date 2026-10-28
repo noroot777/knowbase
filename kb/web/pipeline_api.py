@@ -77,6 +77,11 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     # 历史清单**整份**的版本(`history_rev`):非首行被原位改过(被接替的那批日报补上
     # 结论)时上面那个版本不动,前端靠它知道那份缓存该重取了。
     state["history_rev"] = pl.history_rev()
+    # **历史清单要对齐的那一轮**:最新那一轮**已经收尾的**终态(`last_result`,跑着的时候
+    # 它是上一轮)。上面那个 `result_version` 跑着时报的是正在跑这一轮,它还不在历史里,
+    # 前端拿它当历史的目标就只能在跑着时整个放弃对齐 —— 另一轮同步跑得久,被它接替的那批
+    # 日报补上的失败原因就一直进不了页面。
+    state["settled_version"] = pl.result_version(latest or {})
     # **今天还欠着的那几步**(当日账本那一份口径,见 `pipeline_retry.today_failed`)。
     # 面板那颗「重试失败项」原来只看「最近一轮有没有红」,而今天早些时候那几笔在
     # 一轮全绿收尾之后就不在最近那一轮里了 —— 按钮藏掉,用户连点的机会都没有。
@@ -94,7 +99,7 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
         live = flow.live(state)
         if live:
             # 日报那一批的停止记在日报那一侧,管道那一格读不到(两轮之间管道空着)
-            live["stopping"] = flow.stopping(live["kind"])
+            live["stopping"] = flow.stopping(live["owner"], live["kind"])
         state["flow_live"] = live
     except Exception:                                  # noqa: BLE001 - 见上
         state["flow_live"] = None

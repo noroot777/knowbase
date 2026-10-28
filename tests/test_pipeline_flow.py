@@ -387,6 +387,34 @@ class CuttingOwnerTest(_Base):
         self.assertFalse(flow.halted(), "没有管道在跑就没有谁可停")
 
 
+class StoppingOwnerTest(_Base):
+    """「这一轮已经要停了」只认归属相符的那一份停止标记。"""
+
+    def setUp(self):
+        super().setUp()
+        with patch.object(flow, "_labels", return_value={}):
+            flow.open_daily("batch-1", ["a", "b"], library=False)
+        daily = patch.dict(daily_state._state, {"stop_requested": False, "batch": "batch-1"})
+        daily.start()
+        self.addCleanup(daily.stop)
+
+    def test_another_rounds_stop_does_not_block_the_daily_plan(self):
+        ps._state.update(run_id="manual-9", batch="", stop_requested=True)
+        self.assertEqual((True, ""), flow.request("batch-1", "src:b", "skip"))
+        self.assertFalse(flow.stopping("batch-1", "daily"))
+
+    def test_its_own_stop_still_refuses(self):
+        """反过来钉一边:这一批自己那一轮管道被要求停止、或者日报这一批被要求停止,照旧不受理。"""
+        ps._state.update(run_id="r-x", batch="batch-1", stop_requested=True)
+        self.assertFalse(flow.request("batch-1", "src:b", "skip")[0])
+        ps._state["stop_requested"] = False
+        daily_state._state["stop_requested"] = True
+        self.assertFalse(flow.request("batch-1", "src:b", "skip")[0])
+        # 别的批次的日报停止不算这一批的
+        daily_state._state["batch"] = "batch-0"
+        self.assertEqual((True, ""), flow.request("batch-1", "src:b", "skip"))
+
+
 class LiveTest(_Base):
     """面板此刻画哪一份:跑着画这一轮自己的,空着画日报那一批的。"""
 
@@ -593,6 +621,31 @@ class BatchRevisionTest(HistoryCase):
         self.assertEqual(moved, runs["history_rev"])
         row = next(r for r in runs["runs"] if r["run_id"] == "run-d")
         self.assertTrue(any("Claude 503" in line for line in row["log"]))
+
+    def test_history_stays_alignable_while_another_round_runs(self):
+        """另一轮正在跑时,状态照样给出历史清单该对齐的那一版,而且和历史端点拼得上。
+
+        跑着时 `result_version` 说的是正在跑这一轮(它还不在历史里);前端要是拿它当历史的
+        目标,只能在跑着时整个放弃对齐 —— 被接替的那批日报补上的失败原因就进不了页面。
+        """
+        batch = pb.open_batch("daily")
+        self._sub_round("run-d", batch)
+        self.reset("run-live")                         # 另一轮正在跑(running=True)
+        ps._state["batch"] = ""
+
+        def pair():
+            status = pipeline_api.pipeline_status(source=False)
+            runs = pipeline_api.pipeline_runs()
+            self.assertTrue(status["running"])
+            self.assertEqual("run-live", status["result_version"])
+            return ((status["settled_version"], status["history_rev"]),
+                    (runs["version"], runs["history_rev"]))
+        before, listed = pair()
+        self.assertEqual(listed, before)
+        self.assertTrue(pb.batch_note("日报生成失败: Claude 503", batch))
+        after, listed = pair()
+        self.assertNotEqual(before, after, "跑着的时候历史变了,状态给的目标却没动")
+        self.assertEqual(listed, after)
 
     def test_a_plain_round_has_no_revision(self):
         """反过来钉一边:不在批次里的一轮,版本照旧就是它的身份。"""
