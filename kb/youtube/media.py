@@ -1,9 +1,10 @@
-import itertools
+import contextlib
 import json
 import os
 import re
 import signal
 import subprocess
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -12,8 +13,9 @@ from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR, VIDEOS_ROOT
-from kb.youtube import login, toolchain, transcripts
-from kb.youtube.diagnosis import ToolFailure, excerpt
+from kb.youtube import login, throttle, toolchain, transcripts
+from kb.youtube.diagnosis import (LOCAL, YOUTUBE, ToolFailure, diagnostics, excerpt, on_disk, pump_output,
+                                   record, redact, scrub, serial, unique, written)
 from kb.youtube.channels import VIDEO_ID
 from kb.youtube.settings import model_path, of, tools
 
@@ -37,162 +39,38 @@ class PartialOutput(RuntimeError):
     半截结果比没有更坏。所以这个契约只加在列表适配层,`run()` 的默认语义一个字不动。
 
     `path` 的删除责任在捕获方 —— 和 `run()` 成功返回时同一个约定。
+
+    **把原来那条异常也带着**(`cause`):只留一句话的话,来源(`origin`)和完整诊断跟着
+    就地丢了 —— 写盘失败、配额用尽这些**本机**错误先转成半截输出,列表里再没有合法条目,
+    外层包一层 `ToolFailure` 之后由 `login.merge` 归并,最后按文本猜成「读不出 cookie」。
     """
 
-    def __init__(self, path, reason):
+    def __init__(self, path, reason, cause=None):
         super().__init__(reason)
         self.path = path
         self.reason = reason
-
-
-#: 同进程内给输出文件编号。跨进程靠 pid,进程内靠这个 —— 两者合起来才唯一。
-_SERIAL = itertools.count()
-
-#: 落盘和报错之前要剔掉的键。yt-dlp 在媒体 URL 有匹配 cookie 时会把 cookie 串
-#: 放进 `info_dict['cookies']`,`sanitize_info` 不移除它。
-_SECRET = re.compile(r'cookie|authorization|password|token', re.I)
-
-
-def unique(output):
-    """这一次调用自己的输出文件。**几次调用不许共写一个路径。**
-
-    面板上的「检查登录态」和同步是两个并发入口(`login.check` 也走 `probe` 和
-    `channel_videos`),共写时后一次的 `open('wb')` 截断会把前一次读到一半的 JSON
-    变成半截 —— 报出来是「YouTube 元数据无效」,而那条视频一点问题都没有,随后还要
-    白等一次退避(审查用两个真实子进程复现)。按单个 HTTP 路由加锁挡不住这个:
-    竞争发生在文件上,不在路由里。
-    """
-    output.parent.mkdir(parents=True, exist_ok=True)
-    return output.with_name(f'{output.name}.{os.getpid()}.{next(_SERIAL)}')
-
-
-def _written(path):
-    """这份输出里到底有没有字节。**读不到就按没有算** —— 「有没有落下东西」这件事
-    拿不准时宁可当没有,拿半截去冒充结果比重列一次贵得多。"""
-    try:
-        return path.stat().st_size > 0
-    except OSError:
-        return False
-
-
-def diagnostics(output):
-    """从工具输出里挑出能给人看、也能给 `login.classify` 看的那几行:**只要非 JSON 行**。
-
-    两个理由钉在一起:①警告和错误都在非 JSON 行里 —— cookie 解密失败就是其中一条
-    (`cannot decrypt v10 cookies: no key found`),`login` 要靠它把「cookie 读不出来」
-    和「没登录」分开;②JSON 那一行可能带着 `cookies` 字段,它一个字都不该进异常消息
-    或日志 —— 我们对外承诺的是不落盘、不记日志。
-
-    **这里一个字都不裁。** 分类要看完整文本,裁字数只许发生在展示那一端
-    (`diagnosis.excerpt`)—— 原先按尾部留 800 字,把开头那行 429 裁掉了,于是限流被判成
-    bot 墙(审查实测)。文件本身已被 `_pump` 按 8 MiB 封顶,整份读进来不是新增的内存风险
-    (原先也是整份 `read_text` 之后才裁)。
-    """
-    try:
-        text = output.read_text(encoding='utf-8', errors='replace')
-    except OSError:
-        return ''
-    lines = [line.strip() for line in text.splitlines()
-             if line.strip() and not line.lstrip().startswith(('{', '['))]
-    return ' | '.join(lines)
-
-
-def scrub(value):
-    """递归剔掉可能带着凭据的键,落盘和返回之前都过一次。"""
-    if isinstance(value, dict):
-        return {key: scrub(item) for key, item in value.items() if not _SECRET.search(str(key))}
-    if isinstance(value, list):
-        return [scrub(item) for item in value]
-    return value
-
-
-#: 非 JSON 行上的凭据:只遮**值**,不遮那句话。
-#: **不许按「这行里出现了 cookie 字样」整行遮掉** —— yt-dlp 把「解不开 cookie」报成
-#: `WARNING: cannot decrypt v10 cookies: no key found`,整行遮掉之后 `login.classify`
-#: 就再也分不出「读不出 cookie」和「没登录」,面板上那行「yt-dlp 原文」也空了
-#: (第一版就这么写的,实测把这条唯一线索擦掉了)。
-_SECRET_VALUE = re.compile(r'((?:set-)?cookies?|authorization|password|token)'
-                           r'(["\']?\s*[:=]\s*)(.+)$', re.I)
-
-
-def _hide(match):
-    """像凭据的值才遮,而且**从它开始遮到行尾** —— cookie 头是 `k=v; k=v; …`,
-    只遮第一段等于把后面几段原样留在磁盘上。判据看第一段:长,或者是个 `k=v`。
-    「no key found」这种人话两条都不沾,留着。"""
-    head = match[3].split(';')[0].split(',')[0].strip()
-    looks_secret = len(head) >= 24 or ('=' in head and len(head) >= 8)
-    return match[1] + match[2] + ('[已遮蔽]' if looks_secret else match[3])
-
-
-#: 单行上限。一份完整 info JSON 几十 KB 很正常,超过这个的不是元数据,整行遮掉。
-_LINE_CAP = 4 * 1024 * 1024
-#: 一次调用的输出总上限。
-_OUTPUT_CAP = 8 * 1024 * 1024
-
-
-def redact(line: bytes) -> bytes:
-    """**一行输出在写进文件之前**就把凭据抹掉。
-
-    JSON 行解析出来过一次 `scrub()` 再写回去;解析不了的按特征串整行遮掉。
-    """
-    if len(line) > _LINE_CAP:
-        return b'[\xe8\xbf\x87\xe9\x95\xbf\xe7\x9a\x84\xe8\xbe\x93\xe5\x87\xba\xe5\xb7\xb2\xe9\x81\xae\xe8\x94\xbd]\n'
-    text = line.decode('utf-8', errors='replace')
-    stripped = text.strip()
-    if stripped.startswith(('{', '[')):
-        try:
-            return (json.dumps(scrub(json.loads(stripped)), ensure_ascii=False) + '\n').encode('utf-8')
-        except ValueError:
-            pass
-    return _SECRET_VALUE.sub(_hide, text).encode('utf-8')
-
-
-def _pump(stream, path, state):
-    """把子进程输出边读边脱敏地写进 `path`。
-
-    **这是凭据进磁盘的唯一边界。** 原来是把子进程的 stdout 直接重定向到文件、等它跑完
-    再解析和 `scrub()`:那份原始 JSON 在执行期间就躺在数据目录里(审查实测读到了,权限
-    还是 0644),而**强杀服务或断电根本不会执行 Python 的 finally**,文件就一直留着。
-    「最终缓存里没有 cookies」不等于「cookies 没落过盘」—— 所以脱敏必须发生在写之前。
-    文件本身按 0600 创建:诊断日志和凭据同源,不该是全机可读。
-    """
-    try:
-        with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'wb') as log:
-            for raw in stream:
-                data = redact(raw)
-                state['bytes'] += len(data)
-                if state['bytes'] > _OUTPUT_CAP:
-                    state['oversize'] = True
-                    return
-                log.write(data)
-                log.flush()
-    except (OSError, ValueError) as error:
-        state['failure'] = error
-    finally:
-        state['done'] = True
-        try:
-            stream.close()
-        except OSError:
-            pass
+        self.cause = cause
 
 
 def cache_dir(video_id):
     if not VIDEO_ID.fullmatch(video_id):
         raise ValueError('视频 ID 不正确')
     path = DATA_DIR / 'youtube' / video_id
-    path.mkdir(parents=True, exist_ok=True)
+    with on_disk('建不了视频缓存目录'):
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
 def save_json(path, payload):
     # 临时名也要带 pid 和序号:固定的 `.tmp` 在两份结果同时提交时会互相替换,
     # 还会被对方的 `unlink` 删掉 —— 原子替换保护的是读者,保护不了彼此。
-    temporary = path.with_name(f'{path.name}.{os.getpid()}.{next(_SERIAL)}.tmp')
+    temporary = path.with_name(f'{path.name}.{os.getpid()}.{serial()}.tmp')
     try:
-        temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
-        os.replace(temporary, path)
+        with on_disk(f'写不了 {path.name}'):
+            temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding='utf-8')
+            os.replace(temporary, path)
     finally:
-        temporary.unlink(missing_ok=True)
+        heed(temporary)
 
 
 def read_json(path):
@@ -216,7 +94,7 @@ def terminate(process):
     process.wait()
 
 
-def run(arguments, output, deadline, stopped, partial=False):
+def run(arguments, output, deadline, stopped, partial=False, origin=YOUTUBE):
     """跑一条命令,输出落在**这一次调用自己的**文件上(见 `unique`),返回那个文件。
 
     **唯一化在这里做,不在各个调用方那里做** —— 口径只有一份:所有子进程输出都经过
@@ -225,20 +103,40 @@ def run(arguments, output, deadline, stopped, partial=False):
 
     `partial=True` 只给**列表路**用:失败时不删输出,改抛 `PartialOutput` 把它交出去,
     由调用方按条目收(见那个类的说明)。默认语义不动 —— 单视频那三条路要的是全有全无。
+
+    `origin` 是**这条命令朝谁发的请求**:默认 YouTube,本机工具(ffmpeg、whisper-cli)
+    必须显式传 `LOCAL` —— 它们的报错一个字都不该进 `login.classify`(理由见 `diagnosis`
+    那几个常量,`throttle.witness` 也记着这条)。
+
+    **「这次输出里有没有限流」在这儿记一次,进程一跑完就记,退 0 也记**(下面那个
+    `finally`)。挂在各个调用方那里的话必然漏:字幕和音频拿到产物之后直接把日志删了 ——
+    而 429 很多时候只是一条警告(进程退 0、字幕也是完整的),于是那一次挨的罚谁都不知道,
+    紧接着又去探下一条视频(审查实测:第一次字幕 429 之后还发起了两次新的读取)。
     """
     if stopped() or time.monotonic() >= deadline:
         raise Interrupted('已停止或本轮视频处理时间预算用尽')
-    scratch = unique(output)
-    state = {'bytes': 0, 'oversize': False, 'done': False, 'failure': None}
+    try:
+        scratch = unique(output)
+    except OSError as error:
+        # 建目录是**本机**的事。不标上游的话 `permission denied` 会被判成「读不出 cookie」,
+        # 面板让人去钥匙串放行,而问题在磁盘上(口径见 `diagnosis` 那几个常量)。
+        raise ToolFailure(f'建不了工具输出目录：{error}', '', '', LOCAL) from None
+    state = {'bytes': 0, 'oversize': False, 'done': False, 'failure': None,
+             'noise': '', 'code': ''}
     try:
         try:
             process = subprocess.Popen(arguments, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                        start_new_session=os.name != 'nt')
         except FileNotFoundError:
             raise RuntimeError(f'缺少命令 {arguments[0]}，请先安装对应工具') from None
-        # **输出先过一道脱敏再落盘**(`_pump`):直接重定向到文件的话,原始 info JSON
+        except OSError as error:
+            # 工具在、但起不来(没有执行权限、被系统策略拦下)。**这是本机的事** ——
+            # 不标来源的话 `login.coded` 按 YouTube 算,`permission denied` 落进
+            # cookie 那一档,面板让人去钥匙串放行。口径同 `llm_request` 那一道。
+            raise ToolFailure(f'起不了 {arguments[0]}：{error}', '', '', LOCAL) from None
+        # **输出先过一道脱敏再落盘**(`pump_output`):直接重定向到文件的话,原始 info JSON
         # 在执行期间就带着 cookie 躺在磁盘上,之后再 scrub 已经晚了。
-        pump = threading.Thread(target=_pump, args=(process.stdout, scratch, state), daemon=True)
+        pump = threading.Thread(target=pump_output, args=(process.stdout, scratch, state), daemon=True)
         pump.start()
         try:
             while process.poll() is None:
@@ -251,24 +149,34 @@ def run(arguments, output, deadline, stopped, partial=False):
             if state['oversize']:
                 raise RuntimeError('工具输出异常过大，已停止本次处理')
             if state['failure'] is not None:
-                raise RuntimeError(f'写不了工具输出：{state["failure"]}') from None
-            if process.returncode:
-                # **分档在这儿就算完**,算的是完整诊断;异常消息只是给人看的摘要。
-                # 这是唯一一处能看见未裁切原文的地方 —— 往上走的每一层都在裁。
-                noise = diagnostics(scratch)
-                raise ToolFailure(f'{arguments[0]} 执行失败', noise, login.classify(noise))
+                raise ToolFailure(f'写不了工具输出：{state["failure"]}', '', '', LOCAL) from None
         finally:
             terminate(process)
             pump.join(5)
+            # **这一次的完整诊断在这儿读一次、记一次**:成功、半截、失败都过这一道
+            # (`throttle.witness`)。这是整条链上唯一一处能看见未裁切原文的地方,
+            # 也是所有 yt-dlp 请求**共用的完成边界**;往上走的每一层都在裁。
+            # 原文**不分上游都要读**:ffmpeg 转码为什么失败,人得在面板上看得见。
+            # 分档和「记这一笔罚」才按上游门控,那道门在 `throttle.witness` 里面。
+            state['noise'] = diagnostics(scratch)
+            state['code'] = throttle.witness(state['noise'], origin)
+            # **这一次的原话也在这儿交账**(`diagnosis.record`,成功、半截、失败都交)。
+            # 挂在各个调用方的成功分支上必然漏:解析抛了、写盘失败了、下一阶段抛了,
+            # 已经读到的那句 cookie 警告就整段蒸发(审查三轮各实测到一种组合)。
+            # **这里只记事实,要不要说、说给谁听由开账那一段决定**(`diagnosis.heard`)。
+            record(state['noise'], origin)
+        if process.returncode:
+            # **分档在这儿就算完**,算的是完整诊断;异常消息只是给人看的摘要。
+            raise ToolFailure(f'{arguments[0]} 执行失败', state['noise'], state['code'], origin)
     except Exception as error:
         # **列表路要的是「已经整行印出来的那几条」,不是进程的退出码**(见 `PartialOutput`)。
         # 按了停止那一下例外:那时不许拿半截结果去固化这一轮的末态。
-        if partial and not stopped() and _written(scratch):
-            raise PartialOutput(scratch, str(error)) from None
-        scratch.unlink(missing_ok=True)
+        if partial and not stopped() and written(scratch):
+            raise PartialOutput(scratch, str(error), error) from None
+        heed(scratch)
         raise
     except BaseException:
-        scratch.unlink(missing_ok=True)
+        heed(scratch)
         raise
     return scratch
 
@@ -282,6 +190,10 @@ def ytdlp(arguments, output, deadline, stopped, spec='', playlist=False, partial
     **`playlist=True` 才不带 `--no-playlist`**:列频道那条路要的恰恰是播放列表展开,
     而单视频的三条路(元数据、字幕、音频)都必须钉住只处理这一条,不能被频道页带偏。
     """
+    # **这一轮已经撞上 429 的话,到这儿就结束,一个进程都不起**(`throttle.guard`)。
+    # 这道闸待在请求入口而不是某个 `except` 里:后路 flat、probe、字幕的下一种语言、
+    # 音频下载都从这儿过,挂在循环上的话每加一条路径就得记得再挡一次(审查实测漏了三处)。
+    throttle.guard()
     prefix = toolchain.command()
     if not prefix:
         raise RuntimeError('缺少命令 yt-dlp，请在「我的订阅 → YouTube」里更新一次，或自行安装后重启服务')
@@ -307,7 +219,7 @@ def _cap(limit):
     return str(max(1, min(50, int(limit))))
 
 
-def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes, warnings=None):
+def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes):
     """列频道共用的「按条目收」适配层。**两条列表路都走这一份。**
 
     **契约和单视频那三条不一样**:yt-dlp 非零退出、或者预算在第 7 条上到点时,已经整行
@@ -315,35 +227,41 @@ def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes
     面板上那句「这个频道没列完」。一条合法条目都没有才算这次真失败,那时把命令自己的
     原话放在最前面:它是人唯一的线索,也是 `login.classify` 分档用的那份原文。
 
-    **`notes` 和 `warnings` 都是出参,不是开关**:不传就只是没人收,收不收都不改变
-    「条目照旧收下」这件事 —— 否则哪天漏传一次,丢数据就又回来了。
+    **`notes` 是出参,不是开关**:不传就只是没人收,收不收都不改变「条目照旧收下」
+    这件事 —— 否则哪天漏传一次,丢数据就又回来了。
 
-    **跑成功了也要把警告交出去**(`warnings`)。cookie 解密失败在 yt-dlp 那边只是一条
-    warning:进程照旧退 0、公开视频照旧列得出来,于是「读不出 cookie」这条铁证跟着这份
-    临时输出一起被删掉,面板上只剩一句「取到了元数据」(审查实测)。这份输出是它唯一的
-    落点,读它只有这一个时机。
+    **工具这一次报了什么不在这儿交账**:那是 `run` 的完成边界记的(`diagnosis.record`)。
+    原先在这儿、而且排在 `parse` 之后 —— 条目里有个非法日期把解析抛了,已经读到的那句
+    cookie 警告就一个字都到不了结果。
     """
-    reason = ''
+    reason, cause = '', None
     try:
         output = ytdlp(arguments, path, deadline, stopped, spec=spec, playlist=True, partial=True)
     except PartialOutput as broken:
-        output, reason = broken.path, broken.reason
+        output, reason, cause = broken.path, broken.reason, broken.cause
+    # 这一份原文还要再分一次档给下面那几抛用。**记那一笔罚不靠这儿** —— 正路是
+    # `run` 的完成边界(成功、半截、失败都过),这儿只是冗余带:`trip` 第一笔说了算,
+    # 多调一次不会算成两笔。
     noise = diagnostics(output)
+    throttle.witness(noise)
     try:
         entries = parse(output, url)
     except Exception as error:
-        raise ToolFailure('；'.join(part for part in (reason, str(error)) if part),
-                          noise, login.coded(error)) from None
+        # **半截输出底下那条真实失败说了算**(`PartialOutput.cause`):它带着上游和在完整
+        # 诊断上算好的分档,而这儿看得见的只是「没有可解析的条目」。丢掉它的话,本机写盘
+        # 失败经过这一抛就成了 YouTube 的失败,再过一次归并又按文本猜成「读不出 cookie」,
+        # 面板让人去钥匙串放行(而该做的是腾磁盘)。没有半截输出的照旧按解析错误算。
+        raise ToolFailure('；'.join(part for part in (reason, str(error)) if part), noise,
+                          login.coded(cause if cause is not None else error),
+                          getattr(cause, 'origin', YOUTUBE)) from None
     finally:
-        output.unlink(missing_ok=True)
+        heed(output)
     if reason and notes is not None:
         notes.append(f'只列到 {len(entries)} 条就中断了：{reason}')
-    if noise and warnings is not None:
-        warnings.append(noise)
     return entries
 
 
-def channel_videos(source, settings, deadline, stopped, limit=20, notes=None, warnings=None):
+def channel_videos(source, settings, deadline, stopped, limit=20, notes=None):
     """用 yt-dlp 列一个频道最近的视频。**只走 `--flat-playlist`。**
 
     实测:flat 列一个频道 1.4~30 秒(端侧抖动很大)。**它和 `detailed_videos` 的差别只有
@@ -359,11 +277,10 @@ def channel_videos(source, settings, deadline, stopped, limit=20, notes=None, wa
     url = _channel_url(source)
     return _collect_listing(['--flat-playlist', '--playlist-end', _cap(limit), '--dump-json', url],
                             DATA_DIR / 'youtube' / 'channels' / f"{int(source['id'])}.jsonl",
-                            of(settings)['cookies_browser'], deadline, stopped, _listed, url, notes,
-                            warnings)
+                            of(settings)['cookies_browser'], deadline, stopped, _listed, url, notes)
 
 
-def detailed_videos(source, settings, deadline, stopped, limit=10, notes=None, warnings=None):
+def detailed_videos(source, settings, deadline, stopped, limit=10, notes=None):
     """列一个频道最近的视频,**带登录态逐条解析** —— 拿回真实发布时间和播放量。
 
     和 `channel_videos` 同一个地址、同一把 cookie,差别只有一个:**不带 `--flat-playlist`**。
@@ -378,15 +295,14 @@ def detailed_videos(source, settings, deadline, stopped, limit=10, notes=None, w
 
     **拿到的是真实日期,所以条目上不打 `approximate`**:指定日期补抓那一轮也能用它。
 
-    `--dump-json` 每条视频印一行 JSON,正好落在 `_pump` 的 `redact()` 那道边界上
+    `--dump-json` 每条视频印一行 JSON,正好落在 `pump_output` 的 `redact()` 那道边界上
     (JSON 行会过 `scrub()`,凭据键当场摘掉)。**一条私有视频或者预算到点不许连坐**:
     已经整行印出来的照旧收下(契约在 `_collect_listing`)。
     """
     url = _channel_url(source)
     return _collect_listing(['--skip-download', '--dump-json', '--playlist-end', _cap(limit), url],
                             DATA_DIR / 'youtube' / 'channels' / f"detail-{int(source['id'])}.jsonl",
-                            of(settings)['cookies_browser'], deadline, stopped, _detailed, url, notes,
-                            warnings)
+                            of(settings)['cookies_browser'], deadline, stopped, _detailed, url, notes)
 
 
 def _detailed(output, url):
@@ -428,7 +344,8 @@ def _detailed(output, url):
                         'url': 'https://www.youtube.com/watch?v=' + video_id})
     if not entries:
         noise = diagnostics(output)
-        raise ToolFailure(f'yt-dlp 没有从 {url} 解析出带发布时间的视频', noise, login.classify(noise))
+        raise ToolFailure(f'yt-dlp 没有从 {url} 解析出带发布时间的视频', noise,
+                          throttle.witness(noise))
     return entries
 
 
@@ -456,7 +373,7 @@ def _listed(output, url):
         # **工具的原话要带上**:`login.classify` 靠它分「cookie 读不出来」和「没登录」,
         # 面板上的「yt-dlp 原文」那一行也是它。只报「没列出任何视频」等于把唯一的线索扔了。
         noise = diagnostics(output)
-        raise ToolFailure(f'yt-dlp 没有从 {url} 列出任何视频', noise, login.classify(noise))
+        raise ToolFailure(f'yt-dlp 没有从 {url} 列出任何视频', noise, throttle.witness(noise))
     return entries
 
 
@@ -474,10 +391,13 @@ def fresh_metadata(path, video_id):
     return cached
 
 
-def probe(row, settings, deadline, stopped, force=False, warnings=None):
-    """取一条视频的元数据。`warnings` 是出参,口径同 `_collect_listing`:**跑成功了也要
-    把警告交出去**(cookie 解密失败只是一条 warning,进程照旧退 0)。命中缓存时不填 ——
-    那一次压根没起过进程,凭空报一条警告等于拿旧证据冒充这一轮的事实。
+def probe(row, settings, deadline, stopped, force=False):
+    """取一条视频的元数据。
+
+    **工具这一次报了什么由 `run` 的完成边界交账**(`diagnosis.record`):原先在这儿交、
+    而且排在写缓存之后 —— 写盘一失败,已经读到的那句 cookie 警告就到不了结果。
+    命中缓存那一次压根没起过进程,所以那本账里一个字都没有 —— 凭空报一条警告等于拿旧
+    证据冒充这一轮的事实,这件事现在由「没起过进程就没有记录」自然保证。
     """
     directory = cache_dir(row['video_id'])
     cached = None if force else fresh_metadata(directory / 'metadata.json', row['video_id'])
@@ -491,20 +411,21 @@ def probe(row, settings, deadline, stopped, force=False, warnings=None):
     output = ytdlp(['--skip-download', '--dump-single-json', row['entry']['url']],
                    directory / 'probe.log', deadline, stopped,
                    spec=of(settings)['cookies_browser'])
+    # 分档在这儿算出来给下面那几抛用。**「这一次撞上限流没有」已经由 `run` 的完成边界
+    # 记过了**(取成功也可能带着 429 警告,而后面还有字幕和音频两个请求要发)。
     noise = diagnostics(output)
+    code = throttle.witness(noise)
     try:
         payload = _single(output)
         if not isinstance(payload, dict) or payload.get('id') != row['video_id']:
-            raise ToolFailure('元数据的视频 ID 与候选不一致', noise, login.classify(noise))
+            raise ToolFailure('元数据的视频 ID 与候选不一致', noise, code)
         # **凭据不许落盘。** yt-dlp 会把匹配上的 cookie 串放进 `info_dict['cookies']`,
         # 它的 `sanitize_info` 不移除那个键 —— 原样缓存等于把登录凭据写进数据目录。
         payload = scrub(payload)
         save_json(directory / 'metadata.json', payload)
-        if noise and warnings is not None:
-            warnings.append(noise)
         return payload
     finally:
-        output.unlink(missing_ok=True)
+        heed(output)
 
 
 def _single(output):
@@ -518,7 +439,7 @@ def _single(output):
             except ValueError:
                 continue
     noise = diagnostics(output)
-    raise ToolFailure('YouTube 元数据无效，未开始下载或转录', noise, login.classify(noise))
+    raise ToolFailure('YouTube 元数据无效，未开始下载或转录', noise, throttle.witness(noise))
 
 
 def tracks(metadata, automatic=False):
@@ -554,22 +475,46 @@ def local_transcript(video_id, duration):
     return None
 
 
+def heed(log):
+    """这一次的日志用完就删 —— **临时文件的清理只走这一个出口**。
+
+    **证据不在这儿** —— 它在 `run` 的完成边界已经交过账了(`diagnosis.record`),所以删
+    得掉也不怕;原先是在这儿读、在这儿交,而那只在拿到产物的那条路上会执行。
+
+    删不掉是**本机**的毛病,所以标 `LOCAL`(`on_disk`):裸 `OSError` 的 `permission
+    denied` 正在 `login._COOKIE` 的特征串里,不标来源就会被当成「读不出浏览器的
+    cookie」,面板让人去钥匙串放行,而该做的是腾磁盘或改权限。
+
+    **但已经有异常在飞时只闭嘴**(`sys.exc_info()`):清理挂在 `finally` 和 `except`
+    上,那时正在抛的那条才是人要看的原因,拿「删不掉某个日志」顶掉它等于把线索换成
+    一条噪声 —— 口径同 `obtain`「后面这一步只许追加、不许抹掉」。临时名带 pid 和序号
+    (`unique`),留在盘上也不会和谁撞。
+    """
+    if sys.exc_info()[1] is not None:
+        with contextlib.suppress(OSError):
+            log.unlink(missing_ok=True)
+        return
+    with on_disk(f'删不掉 {log.name}'):
+        log.unlink(missing_ok=True)
+
+
 def captions(row, metadata, settings, automatic, deadline, stopped):
     languages = tracks(metadata, automatic)
     if not languages:
         return None
-    failures = []
+    failures, broken = [], []
     for position, language in enumerate(languages):
         directory = cache_dir(row['video_id']) / (('automatic' if automatic else 'uploaded') + f'-{position}')
-        directory.mkdir(exist_ok=True)
-        for stale in directory.glob('captions.*'):
-            stale.unlink()
+        with on_disk('清不出字幕缓存目录'):
+            directory.mkdir(exist_ok=True)
+            for stale in directory.glob('captions.*'):
+                stale.unlink()
         try:
-            ytdlp(['--skip-download', '--write-auto-subs' if automatic else '--write-subs',
-                   '--sub-langs', language, '--sub-format', 'json3/vtt',
-                   '-o', str(directory / 'captions.%(ext)s'), row['entry']['url']],
-                  directory / 'download.log', deadline, stopped,
-                  spec=of(settings)['cookies_browser']).unlink(missing_ok=True)
+            heed(ytdlp(['--skip-download', '--write-auto-subs' if automatic else '--write-subs',
+                        '--sub-langs', language, '--sub-format', 'json3/vtt',
+                        '-o', str(directory / 'captions.%(ext)s'), row['entry']['url']],
+                       directory / 'download.log', deadline, stopped,
+                       spec=of(settings)['cookies_browser']))
             for path in sorted(directory.glob('captions.*')):
                 if path.suffix not in ('.json3', '.vtt'):
                     continue
@@ -580,9 +525,27 @@ def captions(row, metadata, settings, automatic, deadline, stopped):
             failures.append('工具未生成预期的字幕文件')
         except Interrupted:
             raise
+        except throttle.NotAttempted:
+            # **被拒绝的那一次不是「这种语言没字幕」** —— 归并进去的话,它和真实失败
+            # 混成一条普通 `RuntimeError` 交出去,上层再也认不出「压根没发请求」,
+            # 于是这条视频被记失败、推退避(审查实测)。换别的语言也一样会被拒。
+            # **但前面已经有真发出去的失败时,那条说了算**(见 `throttle.NotAttempted`):
+            # 这条视频确实没拿到字幕,不许说成「没轮到」。
+            if not broken:
+                raise
+            break
         except (ValueError, OSError, RuntimeError, TypeError, AttributeError) as error:
+            # **一种语言坏了不许连坐其余几种。** 这一档收下失败、接着试下一种 ——
+            # 删掉它的那一版让 en 的 JSON 一坏就整个循环退出,而 zh 的完整字幕就在那儿
+            # (审查实测:只起了 en 那一次子进程,视频记成「没有可用字幕」并推了退避,
+            # 独立对照读取证明 zh 是能解析出整段内容的)。**人工和自动两类共用这个循环**,
+            # 所以漏的不是某一类。
             failures.append(str(error))
-    raise RuntimeError('；'.join(failures))
+            broken.append(error)
+    # **分档要跟着合并后那一条走**(`login.merge`,按证据强度挑、不按到达先后):
+    # 只留文字的话,某种语言撞上的 429 到了外层就只是一句话 —— 上层既分不出档,
+    # 也不知道这一轮该收手了。
+    raise login.merge(RuntimeError('；'.join(failures)), broken)
 
 
 def asr(row, metadata, settings, deadline, stopped):
@@ -595,6 +558,10 @@ def asr(row, metadata, settings, deadline, stopped):
             return {'origin': 'local_asr', 'language': metadata.get('language') or '', 'segments': segments}
         except (ValueError, OSError, TypeError):
             pass
+    # **本轮已经撞上 429 的话,这里不许再往下走。** 往下第一句是「ASR 已关闭/缺工具」——
+    # 那句话会把限流这件事盖掉(原始 429 再也传不到外层,而外层正要靠它决定收不收手)。
+    # 上面那段本地已有的 whisper.json 照旧可以用:它一个请求都不发。
+    throttle.guard()
     status = tools(settings)
     if not status['asr_enabled']:
         raise RuntimeError('没有可用字幕，且本地语音转录已关闭')
@@ -609,23 +576,23 @@ def asr(row, metadata, settings, deadline, stopped):
     audio_files = [path for path in directory.glob('audio.*')
                    if path.suffix in ('.m4a', '.webm', '.opus', '.mp3', '.ogg', '.wav', '.aac', '.flac')]
     if not audio_files:
-        ytdlp(['-f', 'bestaudio[abr<=160]/bestaudio', '--max-filesize', '100M',
-               '-o', str(directory / 'audio.%(ext)s'), row['entry']['url']],
-              directory / 'audio-download.log', deadline, stopped,
-              spec=of(settings)['cookies_browser']).unlink(missing_ok=True)
+        heed(ytdlp(['-f', 'bestaudio[abr<=160]/bestaudio', '--max-filesize', '100M',
+                    '-o', str(directory / 'audio.%(ext)s'), row['entry']['url']],
+                   directory / 'audio-download.log', deadline, stopped,
+                   spec=of(settings)['cookies_browser']))
         audio_files = [path for path in directory.glob('audio.*')
                        if path.suffix in ('.m4a', '.webm', '.opus', '.mp3', '.ogg', '.wav', '.aac', '.flac')]
     if not audio_files:
         raise RuntimeError('未取得音频，不能运行本地语音转录')
     wave = directory / 'speech.wav'
-    # 这两条不读日志,只看产物;返回的那一份(带 pid 和序号)用完就删。
-    run(['ffmpeg', '-nostdin', '-y', '-i', str(audio_files[0]), '-vn', '-ar', '16000',
-         '-ac', '1', '-acodec', 'pcm_s16le', str(wave)],
-        directory / 'ffmpeg.log', deadline, stopped).unlink(missing_ok=True)
+    # 这两条不读日志,只看产物;返回的那一份(带 pid 和序号)用完就删(`heed`)。
+    heed(run(['ffmpeg', '-nostdin', '-y', '-i', str(audio_files[0]), '-vn', '-ar', '16000',
+              '-ac', '1', '-acodec', 'pcm_s16le', str(wave)],
+             directory / 'ffmpeg.log', deadline, stopped, origin=LOCAL))
     output = directory / 'whisper'
-    run(['whisper-cli', '-m', str(model), '-f', str(wave), '-l', language, '-oj', '-ojf',
-         '-of', str(output), '-np', '-t', str(of(settings)['asr_threads'])],
-        directory / 'asr.log', deadline, stopped).unlink(missing_ok=True)
+    heed(run(['whisper-cli', '-m', str(model), '-f', str(wave), '-l', language, '-oj', '-ojf',
+              '-of', str(output), '-np', '-t', str(of(settings)['asr_threads'])],
+             directory / 'asr.log', deadline, stopped, origin=LOCAL))
     segments = transcripts.validate(transcripts.parse(output.with_suffix('.json').read_text(encoding='utf-8'), '.json'),
                                    float(metadata['duration']))
     return {'origin': 'local_asr', 'language': language, 'segments': segments}
@@ -643,7 +610,7 @@ def obtain(row, metadata, settings, deadline, stopped):
         except (KeyError, ValueError, TypeError):
             pass
     payload = local_transcript(row['video_id'], float(metadata['duration']))
-    errors = []
+    errors, broken = [], []
     for automatic in (False, True):
         if payload:
             break
@@ -651,15 +618,42 @@ def obtain(row, metadata, settings, deadline, stopped):
             payload = captions(row, metadata, settings, automatic, deadline, stopped)
         except Interrupted:
             raise
+        except throttle.NotAttempted:
+            # 口径同 `captions` 里那一道:人工字幕被拒,自动字幕也一样会被拒,
+            # 吞下来接着往下走等于把「没发请求」变成「这条视频失败了」;
+            # 而前面已经有真实失败时,那条说了算。
+            if not broken:
+                raise
+            break
         except (ValueError, OSError, RuntimeError, TypeError, AttributeError) as error:
             errors.append(str(error)[:300])
+            broken.append(error)
     if errors or not payload:
-        (directory / 'metadata.json').unlink(missing_ok=True)
+        heed(directory / 'metadata.json')
     if not payload:
-        payload = asr(row, metadata, settings, deadline, stopped)
+        try:
+            payload = asr(row, metadata, settings, deadline, stopped)
+        except Interrupted:
+            raise
+        except throttle.NotAttempted:
+            # 本机转录这一步也被拒了。字幕那几次**真发出去并失败**的话,按它们交账:
+            # 分档和完整诊断跟着走(`login.merge`),面板上说的还是那条真实原因。
+            if not broken:
+                raise
+            raise login.merge(RuntimeError('；'.join(errors)), broken) from None
+        except (ValueError, OSError, RuntimeError, TypeError, AttributeError) as error:
+            # **后面这一步失败只许往后追加原因,不许把前面那几条抹掉。** 只抛自己那一条
+            # 的话,字幕那几次真实失败(读不出 cookie、机器人验证)连同它们的分档和完整
+            # 诊断一起被顶掉,面板上只剩一句「没有可用字幕,且本地语音转录已关闭」——
+            # 人照着它去开转录,而根因是这一轮没带上登录态(审查实测)。
+            # **这一档罩住本机转录的所有普通失败**:关着、缺工具、模型语言不对、
+            # ffmpeg/whisper 失败、取不到音频,不是只有「关着」那一种。
+            errors.append(str(error)[:300])
+            broken.append(error)
+            raise login.merge(RuntimeError('；'.join(errors)), broken) from None
     payload.update(video_id=row['video_id'], caption_warnings=errors)
     save_json(directory / 'transcript.json', payload)
     for path in [directory / 'speech.wav', *directory.glob('audio.*')]:
         if path.is_file():
-            path.unlink(missing_ok=True)
+            heed(path)
     return payload

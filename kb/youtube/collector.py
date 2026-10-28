@@ -1,3 +1,4 @@
+import contextlib
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -9,7 +10,7 @@ from kb.feeds.sync import _claim_write, _save_failure, _within_history
 from kb.maintenance import maintenance_lock
 from kb.pipeline_segments import note_retry_targets
 from kb.pipeline_state import _stage, _state
-from kb.youtube import discovery, login, media, notes, products, ranking, storage
+from kb.youtube import diagnosis, discovery, login, media, notes, products, ranking, storage, throttle
 from kb.youtube.admission import TEMPORARY, UNDATED, calibrate, gate
 from kb.youtube.channels import config
 from kb.youtube.settings import of
@@ -46,6 +47,45 @@ def wall(summary, source_ids, error):
         known.extend(str(source_id) for source_id in source_ids)
 
 
+def caution(summary, source_ids, ledger):
+    """这一段里工具报过的那些话:记在账上,由收尾归并成一句话。
+
+    **只认 YouTube 那个上游说的**(`diagnosis.witnessed`):ffmpeg、whisper-cli 的输出
+    和登录态一点关系都没有,它们那句 `permission denied` 进了这套判据就成了「读不出
+    浏览器的 cookie」,面板让人去钥匙串放行而问题在磁盘上。
+
+    **不是失败**:取到的条目照旧收下、照旧出成品,只是并列说一句这一轮可能没带上登录态
+    (口径同 `login.check` 的 `CAUTIONS` —— 那边是「成了,但这份成功可能不算数」)。
+    升级成失败的话,一条 cookie 警告就能让这个频道颗粒无收,而它明明带回了东西。
+    **按分档归并、不逐条堆原文**:同一个出口一次全中,逐条堆等于同一句话印 N 遍
+    (口径同 `wall`)。认不出的档一个字都不说(见 `login.cautioned`)。
+    """
+    for noise in diagnosis.witnessed(ledger):
+        code = login.classify(noise)
+        if code in login.CAUTIONS:
+            known = summary.setdefault('cautions', {}).setdefault(code, [])
+            known.extend(str(source_id) for source_id in source_ids)
+
+
+@contextlib.contextmanager
+def heeded(summary, source_ids):
+    """这一步开一本诊断账,**不管它最后成没成,账上有的都要交**(`finally`)。
+
+    **「这条诊断有没有发生」不能由「后面那个产物成没成」推断。** 两头各错过一次:
+    交账押在正常返回上时,解析不过、校验不过、转录失败、落库失败都能让它整段蒸发;
+    而**记账**押在各个调用方自己的成功分支上时(列表 parse 之后、probe 写完缓存之后、
+    字幕拿到产物之后),工具明明报了话、这一次却压根没记下来 —— 同一个漏法换个组合
+    就又回来(审查三轮各实测到一种:面板上只剩「没有可用字幕」或者「一个没能归类的
+    错误」,`cautions` 空、`last_notice` 也空,而根因是这一轮没带上登录态)。
+    所以**记在 `media.run` 的完成边界上**(`diagnosis.record`),这儿只负责开账和交账。
+    """
+    with diagnosis.heard() as ledger:
+        try:
+            yield ledger
+        finally:
+            caution(summary, source_ids, ledger)
+
+
 def discovery_budget(count):
     """这一轮发现的总额度。**歇的那几拍要算进去,不是只算频道自己的时间。**
 
@@ -58,6 +98,11 @@ def discovery_budget(count):
 
 
 def process(rows, settings, scope, summary, deadline):
+    """排名之后那一段:逐条探元数据、取字幕、出中文成品。
+
+    **要在一轮里调它**(`throttle.opened`,`collect` 已经开好):「这一轮撞没撞上限流」
+    是本轮共享的账,轮外调用拿不到那本账 —— 那时它只是没有熔断,不是熔断失效。
+    """
     policy = of(settings)
     now = datetime.now(timezone.utc)
     floor = now - timedelta(days=policy['window_days'])
@@ -76,13 +121,28 @@ def process(rows, settings, scope, summary, deadline):
             for pending in chosen[position:]:
                 storage.update(pending['video_id'], state='deferred', reason=summary['message'])
             break
+        if notice := throttle.notice():
+            # **这一轮已经有上游说了「请求过多」,就不要再探下一条。** 判据是本轮共享的
+            # 熔断账(`throttle`),不是「刚才那个 except 看到了什么」—— 发现阶段撞上的那一次
+            # 压根不经过这里:审查实测,频道 2 的 429 之后照旧去 probe 频道 1 的视频,
+            # 把一条本来正常的视频也带成 `failed` 和退避。
+            # **剩下的一律 `deferred`**:它们没毛病,只是没轮到,下一轮照旧回得来。
+            summary['message'] = notice
+            for pending in chosen[position:]:
+                storage.update(pending['video_id'], state='deferred', reason=notice)
+            break
         if not ready or attempts >= policy['max_videos'] or probes >= policy['max_videos'] * 3:
             storage.update(row['video_id'], state='deferred', reason=why or '本轮数量预算已用完，留待下轮')
             continue
         try:
             probes += 1
-            metadata = media.probe(row, settings, deadline, stopped,
-                                   scope.force or row['gate_code'] in TEMPORARY)
+            # 取成功时工具报的那一句也要收上来(账本,见 `caution`)——「元数据取到了」和
+            # 「这一轮可能没带上登录态」可以同时成立。**一步一本账、出了这一步就交账**
+            # (`heeded` 的 `finally`):一本账跨两步的话同一条警告会被后面那一步再记一遍
+            # (归并按频道去重,但档数不去重)。
+            with heeded(summary, row.get('eligible_sources', [row['source_id']])):
+                metadata = media.probe(row, settings, deadline, stopped,
+                                       scope.force or row['gate_code'] in TEMPORARY)
             if decision := gate(metadata, policy, row):
                 storage.update(row['video_id'], state=decision.state, reason=decision.reason,
                                gate_code=decision.code, retry_at=time.time() + decision.retry_seconds)
@@ -129,7 +189,9 @@ def process(rows, settings, scope, summary, deadline):
             attempts += 1
             storage.update(row['video_id'], state='processing', gate_code='', reason='正在读取字幕或音频，随后翻译为中文')
             _stage('crawl', 'running', f"YouTube · 处理 {attempts}/{policy['max_videos']} · {row['entry']['title']}")
-            transcript = media.obtain(row, metadata, settings, deadline, stopped)
+            # 字幕和音频**才真正用得上登录态**,所以这两步报的警告也要收上来(见 `caution`)。
+            with heeded(summary, row.get('eligible_sources', [row['source_id']])):
+                transcript = media.obtain(row, metadata, settings, deadline, stopped)
             if storage.permanently_excluded(row):
                 continue
             entry = notes.build(row, transcript, deadline, stopped)
@@ -143,15 +205,37 @@ def process(rows, settings, scope, summary, deadline):
             summary['message'] = str(error)
             summary['stopped'] = stopped()
             break
+        except throttle.NotAttempted as error:
+            # **「这一次没发出去」不是这条视频的失败。** 不记 attempts、不推退避、不进
+            # 「重试失败项」:元数据多半已经取到了,只是后面那个请求被本轮熔断挡住
+            # (审查实测:页面上那条候选显示「处理失败,待重试」、频道显示「连接失败」,
+            # 而 `last_error` 自己写着「没有再发起新的请求」,两边都各推了半小时退避)。
+            # 当前这条连同剩下的一律 `deferred` —— 它们没毛病,下一轮照旧回得来。
+            notice = throttle.notice(getattr(error, 'origin', None)) or str(error)
+            summary['message'] = notice
+            for deferred in chosen[position:]:
+                storage.update(deferred['video_id'], state='deferred', reason=notice)
+            break
         except Exception as error:
             storage.failed(row, error)
             affected = row.get('eligible_sources', [row['source_id']])
             wall(summary, affected, error)
+            # 刚接住的这一条自己说是限流的话,先记进本轮再往下走(`throttle.caught` 是
+            # 冗余带,正路在请求入口那两道闸上)。剩下的候选由循环头那一道收尾 ——
+            # **收手这件事只有一个判据**,不在两处各写一遍。
+            throttle.caught(error)
             for source_id in affected:
                 # 展示用的那一份**两头都留**(`login.evidence`),别从一头裁。
                 failures.setdefault(source_id, []).append(login.evidence(error, 500))
+    # 撞在**最后一条**候选上时循环头没有下一次,那句话就得在这儿补上(没有别的东西可延后了)。
+    if not summary['message']:
+        summary['message'] = throttle.notice()
     if not ready and chosen:
-        summary['message'] = '已完成轻量排名；入选视频待配置翻译和内容笔记模型：' + why
+        # **这句话不许盖掉已经写下的那条**:两件事可以同时成立,而「这一轮为什么停的」是
+        # 人要先知道的那一件(审查实测:撞上 429 的那一轮 message 只剩「待配置模型」,面板上
+        # 既看不出限流、`walls` 也是空的,看着像只差个模型配置)。并列着说,按因果排序。
+        summary['message'] += ('；' if summary['message'] else '') + \
+            '已完成轻量排名；入选视频待配置翻译和内容笔记模型：' + why
         summary['unconfigured'] = len({row['source_id'] for row in chosen})
     summary['admitted'] = attempts
     summary['video_minutes'] = round(spent / 60, 1)
@@ -187,13 +271,19 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
 
 
 def collect(scope):
+    """一轮 YouTube 同步。**熔断账的生命周期就是这一轮**(见 `throttle` 的模块说明)。"""
+    with throttle.opened():
+        return _round(scope)
+
+
+def _round(scope):
     started = reg.now()
     sources = [source for source in reg.subscriptions('youtube')
                if source['enabled'] and reg.in_scope(source, scope.targets)]
     settings = reg.get_settings('youtube')
     summary = {'sources': len(sources), 'checked': 0, 'added': 0, 'deferred': 0,
                'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
-               'errors': [], 'partial': [], 'notices': [], 'repointed': 0,
+               'errors': [], 'partial': [], 'notices': [], 'repointed': 0, 'cautions': {},
                'stopped': False, 'failed_ids': [], 'succeeded_ids': [],
                'discovered': 0, 'ranked': 0, 'processed': 0, 'walls': {}}
     pending = []
@@ -253,7 +343,8 @@ def collect(scope):
         # 就说不出是哪个频道没列完。
         told = []
         try:
-            entries = discovery.fetch(source, settings, per_source, not scope.ranged, told)
+            with heeded(summary, [source['id']]):
+                entries = discovery.fetch(source, settings, per_source, not scope.ranged, told)
             storage.discover(source, entries)
             summary['discovered'] += len(entries)
             succeeded.append(source)
@@ -263,16 +354,51 @@ def collect(scope):
             # 「连接失败」并让这条订阅进退避重试,而它这一轮明明带回了东西。
             for note in told:
                 summary['partial'].append({'title': source['name'], 'reason': note})
+        except throttle.NotAttempted:
+            # 口径同处理阶段那一道:这个频道**一次请求都没发出去**,不记失败、不推退避。
+            # 它算「没轮到」—— 退回 `pending`,由下面那句「还有 N 个频道未轮到」收口,
+            # 下一轮照旧回得来。记成失败的那一版把一条好订阅推进了半小时退避(审查实测)。
+            pending = [source, *pending]
+            break
         except Exception as error:
             wall(summary, [source['id']], error)
             _save_failure(source, error, summary)
+            throttle.caught(error)
         summary['checked'] += 1
         _stage('crawl', 'running', f"YouTube · 轻量检查 {summary['checked']}/{len(sources)} 个频道")
+        # **撞上 429 就当场收手这一轮。** 限的是**出口**不是这个频道:接着查下去的话,
+        # 剩下的频道每一个都再去撞一次同样的墙 —— 惩罚被这一轮自己加深、拖长,面板上
+        # 多出几十条不是它们自己毛病的失败,它们还一起进了退避(下一轮想试都试不了)。
+        # **判据是本轮的熔断账,不是这个 `except` 看到了什么**:审查实测两种漏法都走的是
+        # 成功分支 —— 后路 flat 补上来的那一轮、以及先印出一条正常视频再 429 的那一轮,
+        # 限流都只剩一句被丢弃的说明文字,而 `walls` 是空的。
+        # **没轮到的那些一个字都不写**(口径同登录态不就绪那一道):它们没失败,只是
+        # 没轮到,照旧进 `skipped`、下一轮接着查。撞上的那一个照常记失败和退避 ——
+        # 它这一次确实没拿到东西,原文也得留得住。
+        if throttle.tripped(throttle.YOUTUBE):
+            break
     summary['skipped'] += len(pending)
     rows = storage.rows([source['id'] for source in succeeded])
     ranked = ranking.score(rows, of(settings), scope)
     summary['ranked'] = len(ranked)
     failures = process(ranked, settings, scope, summary, time.monotonic() + of(settings)['run_seconds'])
+    # **「取到了,但…」和「卡住了」分开说**:前者这一轮确实带回了东西,后者没有。
+    # 混成一句会把一条 cookie 警告说得像整个频道失败了(口径见 `caution`)。
+    # **要在落库之前归并**:订阅那条提醒(`last_notice`)取的就是这一刻的 `message`,
+    # 放到后面去拼等于面板上那行字永远少了这一句(而它正是唯一的展示落点)。
+    # **这句话不许自称「取到了内容」** —— 同一条警告在失败路上照样要说(见 `heeded`),
+    # 而那时内容恰恰没拿到。只说得住的那半截:请求确实发出去了。
+    # **同一个频道的同一档不说两遍**:那条警告已经成了这个频道的失败结论(`walls`)时,
+    # 再并列说一句「但工具同时报了…」等于同一件事印两遍(口径同 `wall` 的归并)。
+    # 账上那一份照旧留着(`summary['cautions']` 是事实,不是文案)。
+    for code, ids in summary.get('cautions', {}).items():
+        # 变量名别叫 `pending` —— 外面那个「还没轮到的频道」正叫这个名字,一赋值就把
+        # 收尾那句「撞上 429 后提前收手，还有 N 个频道未轮到」整段吃掉(回归当场红)。
+        unsaid = {str(source_id) for source_id in ids} - set(summary.get('walls', {}).get(code, []))
+        if not unsaid:
+            continue
+        summary['message'] += ('；' if summary['message'] else '') + \
+            f"{len(unsaid)} 个频道这一轮发出过请求，" + login.cautioned(code, gateway['browser'])
     for source in succeeded:
         outstanding = any(not row['excluded'] and (row['last_error'] or row['state'] in ('deferred', 'processing'))
                           for row in storage.rows([source['id']]))
@@ -292,6 +418,7 @@ def collect(scope):
         except Exception as error:
             wall(summary, [source['id']], error)
             _save_failure(source, error, summary)
+            throttle.caught(error)
     summary['stopped'] |= stopped()
     # **同一个原因不要在面板上重复一遍又一遍。** 登录态失效时每个频道都会报同样那句话,
     # 逐条读完才明白是一个问题 —— 这里归并成一句带频道数的话,逐条明细照旧留在 errors 里。
@@ -304,7 +431,12 @@ def collect(scope):
         summary['message'] += ('；' if summary['message'] else '') + \
             f"{len(summary['partial'])} 个频道没列完（{summary['partial'][0]['reason']}）"
     if pending:
-        summary['message'] += '；部分频道未轮到，留待下轮轻量检查'
+        # 按熔断账判,不按 `walls` 判:后路补上来的那一轮和部分成功那一轮都没有异常落进
+        # `walls`,而这一轮确实是撞上 429 之后提前收的手 —— 照 `walls` 判会说成「还有 N 个
+        # 频道未轮到」,听起来像预算用完了。
+        summary['message'] += ('；撞上 429 后这一轮提前收手，' if throttle.tripped(throttle.YOUTUBE)
+                               else '；') + \
+            f'还有 {len(pending)} 个频道未轮到，留待下轮轻量检查'
     with reg.db() as connection:
         connection.execute('INSERT INTO feed_runs(kind,started_at,finished_at,summary) VALUES(?,?,?,?)',
                            ('youtube', started, reg.now(), json.dumps(summary, ensure_ascii=False)))
