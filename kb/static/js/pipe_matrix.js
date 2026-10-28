@@ -41,25 +41,26 @@ function pipeMatrixCols(rows) {
   return [...src, ...PIPE_MATRIX_ORDER.filter(k => groups.has(k)).map(k => groups.get(k))];
 }
 
+// 一格里也是两件事各说一遍(口径同轨道副标题 `pipeFlowSub`):走到哪了 + 有没有红
 function pipeMatrixTip(model, n) {
   const t = model.plan?.times?.[n.key], took = t ? pipeFlowSpan(t.started_at, t.finished_at) : '';
-  const st = n.state;
-  if (st.state === 'done') return took ? `完成 · ${took}` : '完成';
-  if (st.state === 'issue') return `${st.issues} 步有问题${st.skipped ? ' · 其余跳过' : ''}${took ? ' · ' + took : ''}`;
-  if (st.state === 'cut') return st.stopped ? '停在这里' : '提前结束';
-  if (st.state === 'unknown') return '结果未知';
-  if (st.state === 'run') return '正在跑';
-  if (st.state === 'wait') return '等待';
-  return st.halt ? '没跑' : '本次跳过';
+  const st = n.state, bad = pipeFlowBad(st);
+  if (st.state === 'done') return pipeFlowJoin(bad || '完成', took);
+  if (st.state === 'cut') return pipeFlowJoin(bad, st.stopped ? '停在这里' : '提前结束');
+  if (st.state === 'unknown') return pipeFlowJoin(bad, '结果未知');
+  if (st.state === 'run') return pipeFlowJoin(bad, '正在跑');
+  if (st.state === 'wait') return pipeFlowJoin(bad, '等待');
+  return pipeFlowJoin(bad, st.halt ? '没跑' : bad ? '其余跳过' : '本次跳过');
 }
 
 function pipeMatrixCells(model) {
   return pipeMatrixColsNow.map(col => {
     const i = model.nodes.findIndex(x => x.key === col.key), n = model.nodes[i];
     if (!n) return `<span class="pipe-matrix-c" title="这一轮没选${esc(col.label)}"><span class="pipe-matrix-dot none"></span></span>`;
-    const glyph = ['run', 'wait'].includes(n.state.state) ? '' : pipeFlowDot(n, i);
+    // 还没轮到 / 正在跑的那一格本来是空的 —— 但已经有红就得念出来
+    const glyph = ['run', 'wait'].includes(n.state.state) && !n.state.issues ? '' : pipeFlowDot(n, i);
     return `<span class="pipe-matrix-c" data-node="${esc(n.key)}" title="${esc(col.label)} · ${esc(pipeMatrixTip(model, n))}">`
-      + `<span class="pipe-matrix-dot" data-s="${n.state.state}">${glyph}</span></span>`;
+      + `<span class="pipe-matrix-dot" data-s="${n.state.state}"${n.state.issues ? ' data-issues' : ''}>${glyph}</span></span>`;
   }).join('');
 }
 
@@ -115,14 +116,16 @@ function renderPipeMatrixFrame() {
 }
 
 // 同一类连着几轮卡在同一处:不像偶发,在表底下点出来。从最新那一轮往下数,碰到一轮
-// 这一类好好跑完就断;没选它、跳过、提前结束、还没轮到的那几轮不算数,也不算断。
+// 这一类**好好跑完**(跑到头又没有红)就断;没选它、跳过、提前结束、还没轮到又没有
+// 红的那几轮不算数,也不算断。**数的是红本身,不是「这一轮念的是哪个状态」** ——
+// 红了之后又跳过余下几步的那几轮照样算一次(生命周期与红正交,见 `pipeFlowState`)。
 function pipeMatrixRepeats(rows) {
   return pipeMatrixColsNow.flatMap(col => {
     const hit = [];
     for (const { model } of rows) {
       const n = model.nodes.find(x => x.key === col.key);
-      if (!n || !['done', 'issue'].includes(n.state.state)) continue;
-      if (n.state.state === 'done') break;
+      if (!n) continue;
+      if (!n.state.issues) { if (n.state.state === 'done') break; continue; }
       hit.push(pipeMatrixWhy(model, n));
     }
     if (hit.length < 2) return [];

@@ -154,16 +154,18 @@ function pipeFlowState(model, node) {
   const f = model.plan, steps = node.steps.map(k => pipeFlowStepState(pipeFlowStep(model, node, k)));
   const issues = steps.filter(x => x === 'issue').length;
   const out = (state, extra = {}) => ({ state, issues, ...extra });
+  // **`state` 只答「走到哪了」,`issues` 答「有没有出问题」,两样正交、谁也不许代表谁。**
+  // 生命周期一律按计划推(running / times / done / skips),失败只是跟着的一枚标记:
+  //   · 拿失败当生命周期 → 还没轮到的一类因为并行那一步红了就念「已完成」,「本次跳过」
+  //     那颗按钮当场消失、后面那一类也找不着它(它仍要执行);
+  //   · 拿生命周期盖失败 → 跳过余下几步把已经发生的红抹掉,轨道、详情、历史格一致念
+  //     「本次跳过」,红一个字都看不见。
+  // 归约只有这一层,轨道点/副标题、详情头、历史格、连续失败归约都读它:四处都要把两件事
+  // 各说一遍,**不许在消费方给某个按钮补特例**(硬约束见 docs/decisions/sync-flow.md)。
   if (f) {
     const times = f.times?.[node.key], done = (f.done || []).includes(node.key);
-    // **已经发生的失败一律先说,「余下的跳过」只是跟着的一枚旁注。** 两件事正交:跳过是操作
-    // 意图,失败是已经发生的事实,把事实让给意图就是静默丢结论(典型形态:存量提取 503 之后
-    // 又跳过了余下几步,轨道、详情、历史格一致念「本次跳过」,红一个字都看不见)。归约只有
-    // 这一层,轨道点/副标题、详情头、历史格与连续失败归约都读它,改之前先读 sync-flow.md
-    const skipped = (f.skips || []).includes(node.key) && (done || !times);
     if (f.running === node.key) return out('run');
-    if (issues) return out('issue', { cut: !!f.cuts?.[node.key], skipped });
-    if (skipped) return out('skip');
+    if ((f.skips || []).includes(node.key) && (done || !times)) return out('skip');
     // 没进过门的也可能是「不知道」:日报那一类不管停在哪都会交结论,收了尾的记录里缺它
     // (`pipeFlowGenerate` 念成 unknown)就不是「没跑」—— 这一句要先于下面那句「没跑」
     if (!times && !done && !steps.includes('unknown')) return model.live ? out('wait') : out('skip', { halt: true });
@@ -174,7 +176,6 @@ function pipeFlowState(model, node) {
     return out('done');
   }
   if (steps.includes('run')) return out('run');
-  if (issues) return out('issue');
   if (steps.includes('unknown')) return out('unknown');
   if (steps.every(x => x === 'wait')) return model.record.running ? out('wait') : out('skip', { halt: true });
   if (steps.every(x => x === 'skip')) return out('skip', { halt: !!model.record.stopped });
@@ -193,37 +194,43 @@ function pipeFlowSpan(start, end) {
 }
 const pipeFlowHm = stamp => String(stamp || '').slice(11, 16);
 
+/** 「N 步有问题」那半句:有红就念,跟走到哪一步无关。 */
+function pipeFlowBad(st) { return st.issues ? `${st.issues} 步有问题` : ''; }
+const pipeFlowJoin = (...xs) => xs.filter(Boolean).join(' · ');
+
 function pipeFlowSub(model, node) {
-  const t = model.plan?.times?.[node.key], st = node.state;
-  if (st.state === 'run') return model.stopping ? '收尾中' : t ? `运行中 ${pipeFlowSpan(t.started_at)}` : '运行中';
-  if (st.state === 'done') return t ? pipeFlowSpan(t.started_at, t.finished_at) || '已完成' : '已完成';
-  if (st.state === 'issue') return `${st.issues} 步有问题${st.skipped ? ' · 其余跳过' : ''}`;
-  if (st.state === 'cut') return st.stopped ? '停在这里' : '提前结束';
-  if (st.state === 'skip') return st.halt ? '没跑' : '本次跳过';
-  if (st.state === 'unknown') return '结果未知';
-  return model.stopping ? '停止后不跑' : '等待';
+  const t = model.plan?.times?.[node.key], st = node.state, bad = pipeFlowBad(st);
+  if (st.state === 'run') return pipeFlowJoin(bad, model.stopping ? '收尾中' : t ? `运行中 ${pipeFlowSpan(t.started_at)}` : '运行中');
+  if (st.state === 'done') return bad || (t ? pipeFlowSpan(t.started_at, t.finished_at) || '已完成' : '已完成');
+  if (st.state === 'cut') return pipeFlowJoin(bad, st.stopped ? '停在这里' : '提前结束');
+  // 带着红的跳过念「其余跳过」:跳掉的只是还没做的那几步
+  if (st.state === 'skip') return pipeFlowJoin(bad, st.halt ? '没跑' : bad ? '其余跳过' : '本次跳过');
+  if (st.state === 'unknown') return pipeFlowJoin(bad, '结果未知');
+  return pipeFlowJoin(bad, model.stopping ? '停止后不跑' : '等待');
 }
 
 function pipeFlowDot(node, i) {
   const st = node.state.state;
+  // 正在跑的那个点是脉冲,里面不填字;其余只要有红就念红的条数
+  if (st === 'run') return '';
+  if (node.state.issues) return String(node.state.issues);
   if (st === 'done') return icon('check');
-  if (st === 'issue') return String(node.state.issues);
   if (st === 'cut') return PIPE_FLOW_SQUARE;
   if (st === 'skip') return PIPE_FLOW_DASH;
   if (st === 'unknown') return '?';
-  return st === 'run' ? '' : String(i + 1);
+  return String(i + 1);
 }
 
 function pipeFlowDefault(model) {
   const pick = fn => model.nodes.find(fn)?.key;
-  return pick(n => n.state.state === 'run')
-    || pick(n => ['issue', 'unknown', 'cut'].includes(n.state.state)) || model.nodes[0]?.key || '';
+  return pick(n => n.state.state === 'run') || pick(n => n.state.issues)
+    || pick(n => ['unknown', 'cut'].includes(n.state.state)) || model.nodes[0]?.key || '';
 }
 
 /** 「看第一个」那颗按钮:把选中挪到这一步所在的那一类(问题最先出现的那一类)。 */
 function pipeFlowSelectStage(stage) {
   const model = pipeFlowModelNow;
-  const hit = model?.nodes.find(n => n.steps.includes(stage) && n.state.state === 'issue')
+  const hit = model?.nodes.find(n => n.steps.includes(stage) && n.state.issues)
     || model?.nodes.find(n => n.steps.includes(stage));
   if (!hit) return;
   pipeFlowSel = hit.key; pipeFlowPinned = true;
@@ -264,12 +271,13 @@ function renderPipeFlowRail(model) {
   const gHtml = N < 3 ? '' : (nSrc ? `<span style="grid-column:span ${nSrc}">来源 · <b>${nSrc}</b> 类，逐个跑</span>` : '')
     + (N > nSrc ? `<span style="grid-column:span ${N - nSrc}">全库 · <b>${N - nSrc}</b> 段${nSrc ? '，来源都跑完之后' : ''}</span>` : '');
   if (groups.innerHTML !== gHtml) groups.innerHTML = gHtml;
-  const reached = ['done', 'issue', 'unknown', 'cut', 'run'];
+  // 「线走到哪了」只认生命周期 —— 还没轮到的一类哪怕已经有红,线也不许越过它
+  const reached = ['done', 'unknown', 'cut', 'run'];
   const front = model.nodes.reduce((m, n, i) => reached.includes(n.state.state) ? i : m, -1);
   const html = model.nodes.map((n, i) => {
     const cls = [i > 0 && i <= front ? 'pl' : '', i < front ? 'pr' : ''].join(' ').trim();
     const on = n.key === pipeFlowSel;
-    return `<button type="button" class="pipe-flow-node${cls ? ' ' + cls : ''}" role="tab" data-node="${esc(n.key)}" data-s="${n.state.state}" aria-selected="${on}" tabindex="${on ? 0 : -1}">`
+    return `<button type="button" class="pipe-flow-node${cls ? ' ' + cls : ''}" role="tab" data-node="${esc(n.key)}" data-s="${n.state.state}"${n.state.issues ? ' data-issues' : ''} aria-selected="${on}" tabindex="${on ? 0 : -1}">`
       + `<span class="pipe-flow-dot">${pipeFlowDot(n, i)}</span><span class="pipe-flow-nm">${esc(n.label)}</span>`
       + `<span class="pipe-flow-sub">${esc(pipeFlowSub(model, n))}</span></button>`;
   }).join('');
@@ -302,44 +310,40 @@ function renderPipeFlowHead(model, node) {
   const st = node.state, t = model.plan?.times?.[node.key];
   const at = model.nodes.indexOf(node);
   const next = model.nodes.slice(at + 1).find(n => n.state.state === 'wait');
-  // 「排在谁后面」问的是前面还有谁真要跑:带着红的那一类也可能余下几步跳过了(state 念
-  // issue),它照样不该被当成前一个要跑的
-  const before = model.nodes.slice(0, at).reverse().find(n => n.state.state !== 'skip' && !n.state.skipped);
+  const before = model.nodes.slice(0, at).reverse().find(n => n.state.state !== 'skip');
   const can = model.live && !model.stopping && pipeConnected && !pipeAction;
+  // 标签 = 生命周期那一句 + 「N 步有问题」那一句。**两句各说各的**:哪一句都不许代表另一句
+  // (有红不等于跑完了,跑完了也不等于没红),有红时整枚标签转红。动作和下一类照旧只认生
+  // 命周期 —— 还没轮到的一类哪怕已经有红,「本次跳过」那颗按钮照给
+  const bad = pipeFlowBad(st);
+  const tagged = (cls, text) => `<span class="pipe-flow-tag ${bad ? 'err' : cls}">${esc(pipeFlowJoin(bad, text))}</span>`;
   let tag, facts, act = '', note = '';
   if (st.state === 'run') {
-    tag = `<span class="pipe-flow-tag run">${model.stopping ? '收尾中' : '执行中'}</span>`;
+    tag = tagged('run', model.stopping ? '收尾中' : '执行中');
     facts = t ? `${esc(pipeFlowHm(t.started_at))} 开始 · 已运行 <b>${esc(pipeFlowSpan(t.started_at))}</b>` : '正在跑';
     if (can && pipeFlowCuttable(model, node)) act = `<button type="button" class="ghost" data-flow="cut">结束${esc(node.label)}${next ? `，开始${esc(next.label)}` : ''} ${arrow('right')}</button>`;
     else if (model.live && !model.stopping) note = node.kind === 'daily' ? '日报已经开始生成，没法中途结束，整轮也停不下来（模型已经在出稿）；做完会接着往下走。' : '';
   } else if (st.state === 'wait') {
-    tag = `<span class="pipe-flow-tag mut">${model.stopping ? '停止后不跑' : '等待'}</span>`;
+    tag = tagged('mut', model.stopping ? '停止后不跑' : '等待');
     facts = model.stopping ? '整轮停止之后不会轮到它' : before ? `排在 ${esc(before.label)} 后面，轮到它会自动开始` : '轮到它会自动开始';
     if (can) act = '<button type="button" class="ghost" data-flow="skip">本次跳过</button>';
     if (!model.stopping) note = PIPE_FLOW_SKIP_WHY[node.kind] || '';
   } else if (st.state === 'skip') {
-    tag = `<span class="pipe-flow-tag mut">${st.halt ? '没跑' : '本次跳过'}</span>`;
+    tag = tagged('mut', st.halt ? '没跑' : bad ? '其余本次跳过' : '本次跳过');
     const undo = model.live && !(model.plan.done || []).includes(node.key);
-    facts = undo ? '轮到它之前都可以改回来' : st.halt ? (model.record.stopped ? '整轮停止了，没轮到它' : '这一轮没轮到它') : '这一轮按你的选择跳过了';
+    facts = undo ? (bad ? '余下这几步按你的选择跳过，轮到它之前都可以改回来' : '轮到它之前都可以改回来')
+      : st.halt ? (model.record.stopped ? '整轮停止了，没轮到它' : '这一轮没轮到它')
+        : bad ? '余下这几步按你的选择跳过了，已经发生的结果照实留着' : '这一轮按你的选择跳过了';
     if (undo && can) act = '<button type="button" class="ghost" data-flow="unskip">恢复执行</button>';
     if (undo) note = PIPE_FLOW_SKIP_WHY[node.kind] || '';
   } else {
-    tag = st.state === 'cut' ? `<span class="pipe-flow-tag warn">${st.stopped ? '停在这里' : '提前结束'}</span>`
-      : st.issues ? `<span class="pipe-flow-tag err">${st.skipped ? '' : '已完成 · '}${st.issues} 步有问题${st.skipped ? ' · 其余本次跳过' : ''}</span>`
-      : st.state === 'unknown' ? '<span class="pipe-flow-tag warn">结果未知</span>'
-      : '<span class="pipe-flow-tag ok">已完成 · 没有问题</span>';
+    tag = st.state === 'cut' ? tagged('warn', st.stopped ? '停在这里' : '提前结束')
+      : st.state === 'unknown' ? tagged('warn', '结果未知')
+        : bad ? tagged('ok', '已完成') : '<span class="pipe-flow-tag ok">已完成 · 没有问题</span>';
     facts = t ? `${esc(pipeFlowHm(t.started_at))} – ${esc(pipeFlowHm(t.finished_at))} · 耗时 <b>${esc(pipeFlowSpan(t.started_at, t.finished_at))}</b>` : '';
     const cut = model.plan?.cuts?.[node.key];
     if (cut) note = `你在「${STAGE_META[cut.step]?.name || cut.step}」时结束了${node.label}。已经抓到的内容留在库里，没做完的下次同步会接着做。`;
     else if (st.state === 'unknown') note = '这一轮没留下这一类自己的结果，成没成说不准；下面那几步和运行日志里有当时的记录。';
-    // 失败归约成 issue 之后这一类不再走上面那条 skip 分支:那枚「其余跳过」的旁注和「恢复
-    // 执行」要在这里补回来,别让已经发生的红把还能改回来的那件事一起带走
-    if (st.skipped) {
-      const undo = model.live && !(model.plan.done || []).includes(node.key);
-      facts = facts || (undo ? '余下这几步按你的选择跳过，轮到它之前都可以改回来' : '余下这几步按你的选择跳过了');
-      note = undo ? (PIPE_FLOW_SKIP_WHY[node.kind] || '') : '已经发生的结果照实留着，跳过的那几步下次同步会接着做。';
-      if (undo && can) act = '<button type="button" class="ghost" data-flow="unskip">恢复执行</button>';
-    }
   }
   const only = model.nodes.length === 1 && node.kind === 'src' ? `${facts ? ' · ' : ''}本次只同步这一类` : '';
   const html = `<div><h3>${esc(node.label)} ${tag}</h3><p>${facts}${only}</p></div><div class="pipe-flow-act">${act}</div>`;

@@ -445,6 +445,29 @@ def _new_extract_stats() -> dict:
             "blocked": ""}
 
 
+def _extract_touched(stats: dict) -> int:
+    """这一遍**经手过**几篇(成、败、空、无字、作废各算一篇)。
+
+    「0 篇」在 `_finish_extract_stage` 里的含义是「没有待提取的文档」,所以这个
+    计数只有一份口径,别在别处另数一遍。队列压根没读出来(`blocked`)不在这里
+    答 —— 那一档下一篇都没看到,见上面那段注释。
+    """
+    return (stats["ok"] + len(stats["failed_paths"]) + len(stats["empty_paths"])
+            + len(stats["no_text_paths"]) + len(stats["stale_paths"]))
+
+
+def extract_told(stats: dict) -> bool:
+    """这一遍有没有**已经发生的事实**:队列没读出来,或者真经手过文档。
+
+    判据跟 `_finish_extract_stage` 同源 —— 它会念出一句不是「没有待提取的文档」
+    的结论,就说明有事实。编排层据此决定「这一类被跳过了,这一步的结论还要不要
+    收」(`pipeline._skip_step`):**问的不是「做过几篇活」而是「留下过什么」**,
+    两者混用就会把队列读取失败那一档(一篇都没看到、却已经红了)判成「什么也
+    没发生」,收尾一句「本次跳过」把红盖掉。
+    """
+    return bool(stats.get("blocked")) or _extract_touched(stats) > 0
+
+
 def _finish_extract_stage(stats: dict) -> None:
     # **排在所有计数之前**:队列没读出来时那几个计数全是 0,而 0 在下面那句里
     # 的含义是「没有待提取的文档」—— 两种完全相反的情况长得一模一样。
@@ -458,7 +481,7 @@ def _finish_extract_stage(stats: dict) -> None:
     empty = len(stats["empty_paths"])
     no_text = len(stats["no_text_paths"])
     stale = len(stats["stale_paths"])
-    if ok + failed + empty + no_text + stale == 0:
+    if _extract_touched(stats) == 0:
         _stage("extract", "ok", "没有待提取的文档")
         return
     detail = f"成功 {ok},失败 {failed}"

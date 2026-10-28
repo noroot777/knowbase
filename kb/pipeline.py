@@ -35,6 +35,7 @@ from kb.pipeline_stages import (
     _run_projects,
     _run_wiki,
     crawl_channels,
+    extract_told,
     run_scopes,
     source_pending,
     source_status,
@@ -148,11 +149,11 @@ def _sources(stages: list[str], crawl_filter: dict | None, owner: str) -> None:
     if not flow.enter(owner, node):
         for s in flow.SOURCE_STEPS:
             if s in stages:
-                _stage(s, "skipped", SKIPPED)
+                _settle_skipped(s, SKIPPED)
         return
     try:
         if "crawl" in stages and not flow.advance(owner, node, "crawl"):
-            _stage("crawl", "skipped", CUT_REST)
+            _settle_skipped("crawl", CUT_REST)
         elif "crawl" in stages:
             try:
                 _run_crawl(crawl_filter)
@@ -170,7 +171,7 @@ def _sources(stages: list[str], crawl_filter: dict | None, owner: str) -> None:
             if flow.advance(owner, node, "export"):
                 _run_export(crawl_filter)
             else:
-                _stage("export", "skipped", CUT_EXPORT)
+                _settle_skipped("export", CUT_EXPORT)
     finally:
         flow.leave(owner, node)
 
@@ -258,7 +259,13 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None,
 
 
 def _pre_worked(stats: dict) -> bool:
-    """存量那一遍有没有真做过事(提取成了、失败了、或者判出了空正文)。"""
+    """存量那一遍有没有真做过事(提取成了、失败了、或者判出了空正文)。
+
+    **只答「做过几篇活」,专给上面那句「存量已提取 N 篇,等索引后做增量」用** ——
+    那是一句进度展示,队列压根没读出来(`blocked`)时**必须判 False**,不然这句
+    pending 会把 `_extract_pass` 已经发布的那条 error 当场盖掉。
+    「有没有已经发生的事实」是另一个问题,问 `extract_told`,两者不许混用。
+    """
     return stats["ok"] + len(stats["failed_paths"]) + len(stats["empty_paths"]) \
         + len(stats["no_text_paths"]) > 0
 
@@ -270,15 +277,31 @@ def _group_of(stage: str) -> str:
 def _skip_step(stage: str, pre_thread, ex_stats: dict, why: str) -> None:
     """这一类被跳过 / 提前结束了,它的这一步不跑。
 
-    **提取那一步例外**:存量那一遍是抓取期间并行跑的,早已真做了事 —— 它的结论
-    要照实收进卡片(`_finish_extract_stage`),不能一句「没跑」把它盖掉。跳过只是
-    不再做增量那一遍。
+    **提取那一步例外**:存量那一遍是抓取期间并行跑的,早已留下了结论 —— 要照实
+    收进卡片(`_finish_extract_stage`),不能一句「没跑」把它盖掉。跳过只是不再做
+    增量那一遍。判据是 `extract_told`(「留下过什么」)而不是 `_pre_worked`
+    (「做过几篇活」):队列压根没读出来那一档一篇都没经手、却已经红了。
     """
     if stage == "extract" and pre_thread:
         pre_thread.join()
-        if _pre_worked(ex_stats):
+        if extract_told(ex_stats):
             _finish_extract_stage(ex_stats)
             return
+    _settle_skipped(stage, why)
+
+
+def _settle_skipped(stage: str, why: str) -> None:
+    """这一步没跑,照实写一句「跳过」—— **但已经发布过的红不许被它盖掉**。
+
+    跳过 / 提前结束是**意图**,只管还没做的那部分;已经发生的失败是**事实**,
+    两件事正交,拿意图改写事实就是静默丢结论:页面上只剩「已跳过」,那条红只在
+    日志里(审查实测:抓取期间先点「入库处理 本次跳过」,随后存量提取那边队列
+    读失败发布了 error,收尾把它刷成 skipped,历史那一轮也只剩「已跳过」)。
+    这道守卫是**整个编排层**的兜底,不是给提取那一步开的特例 —— 阶段卡片每轮
+    起跑时重置(`start_pipeline` 那份 `stages`),所以这里看到的红只会是这一轮的。
+    """
+    if (_state["stages"].get(stage) or {}).get("status") == "error":
+        return
     _stage(stage, "skipped", why)
 
 
