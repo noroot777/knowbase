@@ -1,7 +1,5 @@
 import json
-import math
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 
 from kb.collectors import Coverage
@@ -24,9 +22,39 @@ def stopped():
 #: 单个频道的发现预算。两条路按 `discovery.DETAIL_SHARE` 分这一份:带登录态逐条解析
 #: 拿大头(单频道半分钟一档),估算列举拿剩下那点。
 DISCOVERY_PER_SOURCE = 90.0
-#: 整轮发现的上限。48 个频道全程带登录态逐条解析、4 路并发约 9 分钟,封在这儿 ——
-#: 剩下的照旧记进 `skipped`,下一轮接着查(按 URL 去重,不会重复入库)。
-DISCOVERY_CEILING = 900.0
+#: **两个频道之间歇这么久。借的是 daily-report 的参数**
+#: (`fetch_yt_channels_v2.py` 的 `time.sleep(1)  # Rate limit`):那份每天跑 48 个频道、
+#: 每个频道逐条解析 20 条,从没撞过 429。
+DISCOVERY_SPACING = 1.0
+#: 整轮发现的上限。**串行之后同样的 900 秒只够 ~20 个频道**(实测单频道 10 条约 43 秒),
+#: 一轮覆盖不到一半 —— 翻到 1800 秒按实测能覆盖 ~40 个。剩下的照旧记进 `skipped`,
+#: 下一轮接着查(`pending` 按 `last_attempt` 排序,轮着来;按 URL 去重,不会重复入库)。
+DISCOVERY_CEILING = 1800.0
+
+
+def wall(summary, source_ids, error):
+    """把这次失败的分档记在账上。**分类只在拿着异常对象的这一刻做一次。**
+
+    原先是事后拿 `summary['errors']` 里的文本重新 `classify` 一遍 —— 而那份文本一路被裁过
+    三道(`process` 的 500、`_save_failure` 的 1200、异常消息自己的摘要),决定性那一行很可能
+    已经不在里面了(审查实测:长诊断里的 429 这样丢掉,整批失败被归并成「机器人验证」,
+    照它的提示去重新登录没有用)。`login.coded` 优先用 `ToolFailure` 在完整诊断上算好的那份。
+    """
+    code = login.coded(error)
+    if code in login.AUTH_CODES:
+        known = summary.setdefault('walls', {}).setdefault(code, [])
+        known.extend(str(source_id) for source_id in source_ids)
+
+
+def discovery_budget(count):
+    """这一轮发现的总额度。**歇的那几拍要算进去,不是只算频道自己的时间。**
+
+    不算的话额度正好卡在 `count * DISCOVERY_PER_SOURCE` 上,而真实耗时还要多出
+    `(count - 1)` 拍 —— 于是每一轮固定有最后几个频道被那道闸拦掉、静默进 `skipped`,
+    而它们本该轮得到。`max(90.0, ...)` 是只有一两个频道那一轮的地板,
+    `DISCOVERY_CEILING` 是上限(超出的下一轮接着查)。
+    """
+    return min(DISCOVERY_CEILING, max(90.0, count * (DISCOVERY_PER_SOURCE + DISCOVERY_SPACING)))
 
 
 def process(rows, settings, scope, summary, deadline):
@@ -117,8 +145,11 @@ def process(rows, settings, scope, summary, deadline):
             break
         except Exception as error:
             storage.failed(row, error)
-            for source_id in row.get('eligible_sources', [row['source_id']]):
-                failures.setdefault(source_id, []).append(str(error)[:500])
+            affected = row.get('eligible_sources', [row['source_id']])
+            wall(summary, affected, error)
+            for source_id in affected:
+                # 展示用的那一份**两头都留**(`login.evidence`),别从一头裁。
+                failures.setdefault(source_id, []).append(login.evidence(error, 500))
     if not ready and chosen:
         summary['message'] = '已完成轻量排名；入选视频待配置翻译和内容笔记模型：' + why
         summary['unconfigured'] = len({row['source_id'] for row in chosen})
@@ -164,7 +195,7 @@ def collect(scope):
                'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
                'errors': [], 'partial': [], 'notices': [], 'repointed': 0,
                'stopped': False, 'failed_ids': [], 'succeeded_ids': [],
-               'discovered': 0, 'ranked': 0, 'processed': 0}
+               'discovered': 0, 'ranked': 0, 'processed': 0, 'walls': {}}
     pending = []
     for source in sources:
         if source['retry_at'] > time.time() and not scope.force:
@@ -187,47 +218,56 @@ def collect(scope):
                                ('youtube', started, reg.now(), json.dumps(summary, ensure_ascii=False)))
         return summary
     succeeded = []
+    # **一个频道一个频道地查,两个之间歇一拍 —— 不许并发。** 这条是撞过 429 之后按
+    # daily-report 改的:它那份 `fetch_yt_channels.py` 起先也是 8 路并发(拿 RSS 地址),
+    # 后来整个换成 `fetch_yt_channels_v2.py` 的串行 + `time.sleep(1)  # Rate limit`,
+    # 自此每天 48 个频道、每个逐条解析 20 条都跑得通。我们这边原先 4 路并发、频道之间
+    # 不歇,量比它小却撞上了 429 —— YouTube 限的是**出口的瞬时请求速率**,不是一天的总量,
+    # 所以快不起来的地方只能用等来换。**不要为了快改回并发**:429 的报错落在登录态检查上
+    # (见 `login.classify` 的 `rate_limited`),从面板上看像是「没登录」,追起来要绕一大圈。
+    #
     # **发现的预算按主路真实的速度定。** 全程登录态之后每一轮都是逐条解析:单频道半分钟
     # 一档(实测每条约 4.3 秒,`discovery.DETAIL_LIMIT` 封在 10 条)。预算卡在 90 秒就只有
     # 头几个频道轮得到,其余静默进 `skipped`(面板上看不出区别)—— 所以按待查频道数算一个
-    # 够用的额度,再用 `DISCOVERY_CEILING` 封顶。
+    # 够用的额度(连歇的那几拍一起算进去),再用 `DISCOVERY_CEILING` 封顶。
     per_source = DISCOVERY_PER_SOURCE
-    rounds = math.ceil(len(pending) / 4) if pending else 0
-    discovery_deadline = time.monotonic() + min(DISCOVERY_CEILING, max(90.0, rounds * per_source))
-    with ThreadPoolExecutor(max_workers=4, thread_name_prefix='youtube-feed') as pool:
-        while pending and not stopped():
-            # **第一批无条件放行。** 「剩下的时间够不够再跑一整批」这道闸只能拦后续批次:
-            # 额度正好是 `rounds * per_source` 时,这个判断在第一批就差那几微秒 ——
-            # 结果是一轮一个频道都没查、全进 `skipped`,而面板上只说「部分频道未轮到」
-            # (只有一个待查频道的那一轮必然撞上,实测 checked=0)。
-            if summary['checked'] and time.monotonic() + per_source > discovery_deadline:
+    discovery_deadline = time.monotonic() + discovery_budget(len(pending))
+    while pending and not stopped():
+        # **第一个频道无条件放行。** 「剩下的时间够不够再查一个」这道闸只能拦后续的:
+        # 额度正好是 `len(pending) * (per_source + spacing)` 时,这个判断在第一个上就差
+        # 那几微秒 —— 结果是一轮一个频道都没查、全进 `skipped`,而面板上只说「部分频道
+        # 未轮到」(只有一个待查频道的那一轮必然撞上,实测 checked=0)。
+        if summary['checked'] and time.monotonic() + per_source > discovery_deadline:
+            break
+        if summary['checked']:
+            # **歇在下一个频道之前,不是查完就歇** —— 否则最后一个频道后面那一拍纯属白等,
+            # 而它正好压在「还来不来得及处理」那条预算上。歇完再看一眼停止请求:人点了
+            # 停止还接着查下一个频道,那一下就等于没响应。
+            time.sleep(DISCOVERY_SPACING)
+            if stopped():
                 break
-            batch, pending = pending[:4], pending[4:]
-            # 显式日期范围那一轮只禁**估算**那条路(第 2 条);带登录态逐条解析那条拿的是
-            # 真实日期,照旧可以走(见 `discovery.fetch`)。
-            # **每个频道一份自己的 `notes`**:那是「列了几条之后中断」的说明,四个线程
-            # 共写一份的话就说不出是哪个频道没列完。
-            told = {source['id']: [] for source in batch}
-            futures = {pool.submit(discovery.fetch, source, settings, per_source,
-                                   not scope.ranged, told[source['id']]): source
-                       for source in batch}
-            for future in as_completed(futures):
-                source = futures[future]
-                try:
-                    entries = future.result()
-                    storage.discover(source, entries)
-                    summary['discovered'] += len(entries)
-                    succeeded.append(source)
-                    # **「没列完」不是失败,但也不许静默**(口径同 `feeds.sync` 的 `partial`):
-                    # 列到的照旧入库、下一轮按 URL 去重地接着列,可「停在第 7 条」和「整个
-                    # 频道都列完了」在面板上不该长得一模一样。记成 error 更不对 —— 那会显示
-                    # 「连接失败」并让这条订阅进退避重试,而它这一轮明明带回了东西。
-                    for note in told[source['id']]:
-                        summary['partial'].append({'title': source['name'], 'reason': note})
-                except Exception as error:
-                    _save_failure(source, error, summary)
-                summary['checked'] += 1
-                _stage('crawl', 'running', f"YouTube · 轻量检查 {summary['checked']}/{len(sources)} 个频道")
+        source, pending = pending[0], pending[1:]
+        # 显式日期范围那一轮只禁**估算**那条路(第 2 条);带登录态逐条解析那条拿的是
+        # 真实日期,照旧可以走(见 `discovery.fetch`)。
+        # **每个频道一份自己的 `notes`**:那是「列了几条之后中断」的说明,共写一份的话
+        # 就说不出是哪个频道没列完。
+        told = []
+        try:
+            entries = discovery.fetch(source, settings, per_source, not scope.ranged, told)
+            storage.discover(source, entries)
+            summary['discovered'] += len(entries)
+            succeeded.append(source)
+            # **「没列完」不是失败,但也不许静默**(口径同 `feeds.sync` 的 `partial`):
+            # 列到的照旧入库、下一轮按 URL 去重地接着列,可「停在第 7 条」和「整个
+            # 频道都列完了」在面板上不该长得一模一样。记成 error 更不对 —— 那会显示
+            # 「连接失败」并让这条订阅进退避重试,而它这一轮明明带回了东西。
+            for note in told:
+                summary['partial'].append({'title': source['name'], 'reason': note})
+        except Exception as error:
+            wall(summary, [source['id']], error)
+            _save_failure(source, error, summary)
+        summary['checked'] += 1
+        _stage('crawl', 'running', f"YouTube · 轻量检查 {summary['checked']}/{len(sources)} 个频道")
     summary['skipped'] += len(pending)
     rows = storage.rows([source['id'] for source in succeeded])
     ranked = ranking.score(rows, of(settings), scope)
@@ -250,20 +290,16 @@ def collect(scope):
             else:
                 summary['succeeded_ids'].append(str(source['id']))
         except Exception as error:
+            wall(summary, [source['id']], error)
             _save_failure(source, error, summary)
     summary['stopped'] |= stopped()
     # **同一个原因不要在面板上重复一遍又一遍。** 登录态失效时每个频道都会报同样那句话,
     # 逐条读完才明白是一个问题 —— 这里归并成一句带频道数的话,逐条明细照旧留在 errors 里。
     # 按 `AUTH_CODES` 整个集合判,并且**按真正出现的那一档说话** —— 机器人验证、
     # cookie 读不出来、登录失效这三件事的下一步完全不同,归并不该把它们说成同一句。
-    walled = {}
-    for item in summary['errors']:
-        code = login.classify(item['reason'])
-        if code in login.AUTH_CODES:
-            walled.setdefault(code, []).append(item)
-    for code, items in walled.items():
+    for code, ids in summary.get('walls', {}).items():
         summary['message'] += ('；' if summary['message'] else '') + \
-            f"{len(items)} 个频道卡在同一处：" + login.describe(code, gateway['browser'])
+            f"{len(set(ids))} 个频道卡在同一处：" + login.describe(code, gateway['browser'])
     if summary['partial']:
         summary['message'] += ('；' if summary['message'] else '') + \
             f"{len(summary['partial'])} 个频道没列完（{summary['partial'][0]['reason']}）"

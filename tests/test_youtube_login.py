@@ -62,9 +62,33 @@ class Classification(unittest.TestCase):
         # 真正指向登录态的只剩这一组。
         self.assertEqual('not_logged_in', login.classify('Account cookies are no longer valid'))
         self.assertEqual('not_logged_in', login.classify('ERROR: Please sign in to view this video'))
-        # 三档都算「跟登录态那一摊有关」,归并同因失败时按整个集合判。
-        self.assertEqual({'not_logged_in', 'bot_wall', 'cookie_unreadable'}, set(login.AUTH_CODES))
+        # 四档都是「一个出口、一次全中」,归并同因失败时按整个集合判。
+        self.assertEqual({'not_logged_in', 'bot_wall', 'cookie_unreadable', 'rate_limited'},
+                         set(login.AUTH_CODES))
         self.assertNotIn('no_access', login.AUTH_CODES, '单条没授权不是这一摊的事')
+
+    def test_a_throttled_exit_is_not_a_bot_wall_and_not_a_login_problem(self):
+        """**429 要排在机器人验证前面。** 真机形态(用户截图):YouTube 先回 429,yt-dlp 换
+        别的 player 客户端再试,最后报出「Sign in to confirm you're not a bot」。两句话一起
+        回来时照 bot 那一档说「带上登录态通常能过」是错的 —— 他本来就带着 cookie,照着做
+        只会再登一次,而该做的是等一段时间或把一轮的量调小。
+
+        反过来钉两边:单独的 bot 那句照旧是 `bot_wall`(没有 429 就不是限流);cookie 读不出来
+        照旧压过 429(它更靠前、而且是本机就能解决的那一头)。
+        """
+        throttled = ('YouTube 元数据无效，未开始下载或转录；WARNING: [youtube] Unable to '
+                     'download webpage: HTTP Error 429: Too Many Requests (caused by <HTTPError 429>)')
+        self.assertEqual('rate_limited', login.classify(throttled))
+        self.assertEqual('rate_limited', login.classify(
+            throttled + " | ERROR: [youtube] abc: Sign in to confirm you're not a bot."))
+        self.assertEqual('bot_wall', login.classify(
+            "ERROR: [youtube] abc: Sign in to confirm you're not a bot."))
+        self.assertEqual('cookie_unreadable', login.classify(
+            'WARNING: cannot decrypt v10 cookies: no key found | HTTP Error 429: Too Many Requests'))
+        # 版本旧那条警告每次都在,不许把它拖成「限流」之外的别的结论。
+        self.assertEqual('rate_limited', login.classify(
+            'WARNING: Your yt-dlp version (2026.06.09) is older than 90 days! | '
+            'WARNING: [youtube] Unable to download webpage: HTTP Error 429: Too Many Requests'))
 
     def test_unfamiliar_and_empty_output_admit_ignorance(self):
         """**判不准一律 unknown。** 猜一个具体原因比承认不知道更坏:用户会照着那条错的做。"""
@@ -75,7 +99,7 @@ class Classification(unittest.TestCase):
     def test_every_message_stands_alone_and_differs(self):
         """每一档的说明都要能单独读懂。**比值,不比有无。**"""
         codes = ('metadata_ok', 'yt_dlp_missing', 'no_browser', 'no_channel', 'unreachable',
-                 'cookie_unreadable', 'not_logged_in', 'bot_wall', 'no_access', 'unknown')
+                 'cookie_unreadable', 'not_logged_in', 'bot_wall', 'rate_limited', 'no_access', 'unknown')
         self.assertEqual(set(codes), set(login.MESSAGES), '有档位没有自己的说明,或多了一档没人用')
         spoken = [login.describe(code, 'chrome') for code in codes]
         self.assertEqual(len(spoken), len(set(spoken)), '有两档说的是同一句话')
@@ -135,9 +159,14 @@ class TwoStepCheck(YouTubeFixture):
                                probing={'return_value': {}})
         cookie = self.run_check(listing={'side_effect': RuntimeError('could not find chrome cookies database')},
                                 probing={'return_value': {}})
+        # 429 在这一步同样判得准:它说的是出口被限,和「要不要登录」无关,
+        # 所以不该被兜底成笼统的「连不上」—— 那句话会把人支去查网络。
+        throttled = self.run_check(listing={'side_effect': RuntimeError('HTTP Error 429: Too Many Requests')},
+                                   probing={'return_value': {}})
         self.assertEqual('unreachable', plain['code'])
         self.assertEqual('cookie_unreadable', cookie['code'])
-        for result in (plain, cookie):
+        self.assertEqual('rate_limited', throttled['code'])
+        for result in (plain, cookie, throttled):
             self.assertFalse(result['ready'])
             self.assertNotEqual('not_logged_in', result['code'])
 
@@ -156,6 +185,12 @@ class TwoStepCheck(YouTubeFixture):
         self.assertEqual('not_logged_in', stale['code'])
         # 单条视频本身不可访问,也不是登录态的问题 —— 第一个启用频道的最新一条恰好
         # 是会员专属,就会把整个账号判成未登录。
+        limited = self.run_check(
+            listing={'return_value': listed},
+            probing={'side_effect': RuntimeError(
+                "HTTP Error 429: Too Many Requests | Sign in to confirm you're not a bot")})
+        self.assertEqual('rate_limited', limited['code'], '限流被说成 bot 墙,人就去白登一次')
+        self.assertIn('429', limited['detail'])
         locked = self.run_check(listing={'return_value': listed},
                                 probing={'side_effect': RuntimeError('This video is private')})
         self.assertEqual('no_access', locked['code'])
