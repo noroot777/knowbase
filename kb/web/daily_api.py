@@ -199,9 +199,14 @@ def run(body: RunRequest | None = None):
     return {'ok': True}
 
 
+class StopRequest(BaseModel):
+    """`batch` = 点停止那一刻页面上那一批(同步中心那份计划的 owner)。空串 = 不核对。"""
+    batch: str = ''
+
+
 @router.post('/stop')
-def stop():
-    accepted, detail = daily_run.request_stop()
+def stop(body: StopRequest | None = None):
+    accepted, detail = daily_run.request_stop(body.batch if body else '')
     if not accepted:
         # 没在跑、或者已经进了生成阶段(那一档停不了,原因照搬 daily_run 的说明)
         raise HTTPException(409, detail)

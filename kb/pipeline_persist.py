@@ -21,6 +21,8 @@ import uuid
 from copy import deepcopy
 from pathlib import Path
 
+from kb.pipeline_payload import own_flow as _own_flow
+
 
 def _loads_json(raw):
     """解析一段 JSON 文本,**读不出来一律 `None`,而且兜住所有异常**。
@@ -539,6 +541,10 @@ def run_record(state: dict) -> dict:
         # 入口恢复而丢失(第 4 轮审查 R2)。它跟 `export_filter` / `crawl_retry`
         # 不同,那两份是「只有最新那一轮才有意义」的派生范围,这一份是**事实**。
         "results": deepcopy(state.get("results") or {}),
+        # 这一轮按类型排的那条线(`pipeline_flow`:跳过了谁、提前结束了谁、每一类
+        # 跑了多久),翻历史时面板靠它画节点。**只认身份对得上的那一份**:进程内
+        # 那一格是上一轮留下的、或者是别人那份计划时,存进来就是张冠李戴。
+        **_own_flow(state),
         "log": list(state["log"]),
     }
 

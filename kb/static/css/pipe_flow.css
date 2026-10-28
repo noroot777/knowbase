@@ -1,0 +1,140 @@
+/* 同步中心:概况卡里那条「按类型排的线」+ 下面那张历史运行表。
+   色值一律走 base.css 的 token;脉冲动画在 prefers-reduced-motion 下关掉。 */
+
+/* 有了那条线,进度条就是同一件事的第二种说法:藏起来(元素留着,计数口径照旧) */
+.pipe-overview:has(#pipe-flow:not([hidden])) .pipe-progress-track { display: none; }
+.pipe-flow[hidden], .pipe-flow-why[hidden], .pipe-stage[hidden] { display: none; }
+.pipe-flow { margin-top: 20px; }
+
+/* ── 轨道:一条横线串一排节点 ── */
+.pipe-flow-groups, .pipe-flow-rail { display: grid; grid-template-columns: repeat(var(--n, 1), minmax(0, 1fr)); }
+.pipe-flow-groups { margin-bottom: 6px; }
+.pipe-flow-groups:empty { display: none; }
+.pipe-flow-groups span { font-size: 11.5px; color: var(--muted); text-align: center; border-bottom: 1px solid var(--line-soft); margin: 0 14px; padding-bottom: 4px; }
+.pipe-flow-groups b { font-family: var(--font-mono); font-weight: 500; }
+.pipe-flow-node { position: relative; display: flex; flex-direction: column; align-items: center; gap: 5px;
+  padding: 4px 4px 9px; min-height: 0; background: none; border: 0; border-radius: 10px; text-align: center;
+  color: var(--ink); cursor: pointer; white-space: normal; }
+.pipe-flow-node:hover:not([aria-selected="true"]) { background: var(--paper); }
+.pipe-flow-node:hover .pipe-flow-dot { box-shadow: 0 0 0 4px var(--brand-tint); }
+.pipe-flow-node:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+/* 左半截连上一个,右半截连下一个;走过去的那段转绿 */
+.pipe-flow-node::before, .pipe-flow-node::after { content: ""; position: absolute; top: 17px; height: 2px; background: var(--line); }
+.pipe-flow-node::before { left: 0; right: calc(50% + 15px); }
+.pipe-flow-node::after { left: calc(50% + 15px); right: 0; }
+.pipe-flow-node:first-child::before, .pipe-flow-node:last-child::after { display: none; }
+.pipe-flow-node.pl::before, .pipe-flow-node.pr::after { background: var(--brand); }
+.pipe-flow-dot { position: relative; z-index: 1; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--card); border: 2px solid var(--line); color: var(--muted); font: 600 12px var(--font-mono); transition: box-shadow .15s; }
+.pipe-flow-dot .icon { width: 14px; height: 14px; stroke-width: 2.4; }
+.pipe-flow-nm { font-size: 13.5px; font-weight: 600; line-height: 1.35; }
+.pipe-flow-sub { font: 11.5px/1.3 var(--font-mono); color: var(--muted); white-space: nowrap; }
+.pipe-flow-node[data-s=done] .pipe-flow-dot { background: var(--brand); border-color: var(--brand); color: var(--card); }
+.pipe-flow-node[data-s=issue] .pipe-flow-dot { border-color: var(--danger); color: var(--danger); background: var(--warn-soft); }
+.pipe-flow-node[data-s=issue] .pipe-flow-sub { color: var(--danger); }
+.pipe-flow-node[data-s=run] .pipe-flow-dot { border-color: var(--brand); }
+.pipe-flow-node[data-s=run] .pipe-flow-dot::after { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--brand); animation: pipe-flow-pulse 1.4s ease-in-out infinite; }
+.pipe-flow-node[data-s=run] .pipe-flow-sub { color: var(--brand); }
+.pipe-flow-node[data-s=cut] .pipe-flow-dot { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
+.pipe-flow-node[data-s=cut] .pipe-flow-sub { color: var(--warn); }
+.pipe-flow-node[data-s=unknown] .pipe-flow-dot { border-color: var(--warn); border-style: dashed; color: var(--warn); }
+.pipe-flow-node[data-s=unknown] .pipe-flow-sub { color: var(--warn); }
+.pipe-flow-node[data-s=skip] .pipe-flow-dot { border-style: dashed; }
+.pipe-flow-node[data-s=skip] .pipe-flow-nm { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
+.pipe-flow-node[aria-selected="true"] { background: var(--brand-tint); }
+.pipe-flow-node[aria-selected="true"] .pipe-flow-nm { color: var(--brand-deep); }
+@keyframes pipe-flow-pulse { 0%, 100% { transform: scale(.7); opacity: .55; } 50% { transform: scale(1); opacity: 1; } }
+
+/* ── 选中那一类的详情:上沿一个小尖角指回轨道上那个节点 ── */
+.pipe-flow-detail { position: relative; margin-top: 10px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px 4px; }
+.pipe-flow-notch { position: absolute; top: -8px; left: 24px; width: 14px; height: 14px; background: var(--paper);
+  border-left: 1px solid var(--line); border-top: 1px solid var(--line); transform: rotate(45deg); transition: left .18s; }
+.pipe-flow-dhead { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.pipe-flow-dhead h3 { font-size: 16px; font-weight: 650; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.pipe-flow-dhead p { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.pipe-flow-dhead p b { font: 500 12.5px var(--font-mono); color: var(--ink-2); }
+.pipe-flow-act { display: flex; gap: 8px; flex-shrink: 0; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.pipe-flow-tag { font-size: 12px; font-weight: 600; }
+.pipe-flow-tag.ok { color: var(--ok); } .pipe-flow-tag.run { color: var(--brand); } .pipe-flow-tag.err { color: var(--danger); }
+.pipe-flow-tag.warn { color: var(--warn); } .pipe-flow-tag.mut { color: var(--muted); }
+.pipe-flow-why { margin: 10px 0 0; padding: 9px 12px; border-left: 3px solid var(--warn); background: var(--card); font-size: 13px; color: var(--ink-2); border-radius: 0 8px 8px 0; }
+
+/* 这一类的那几步:阶段行挪进来之后换成紧凑的一档(行本身的结构和明细不变) */
+.pipe-flow-detail .pipe-stage { grid-template-columns: 24px minmax(0, 1fr) auto; gap: 12px; padding: 11px 0; background: none; border-bottom: 1px solid var(--line-soft); }
+.pipe-flow-detail #pipe-stages .pipe-stage:not([hidden]):last-of-type, .pipe-flow-detail #pipe-flow-extra .pipe-stage { border-bottom: none; }
+.pipe-flow-detail .pipe-stage-number { width: 24px; height: 24px; font-size: 11.5px; margin-top: 1px; }
+.pipe-flow-detail .pipe-stage h3 { font-size: 14.5px; line-height: 1.6; display: inline; }
+.pipe-flow-detail .pipe-stage-desc { display: inline; margin-left: 8px; }
+.pipe-flow-detail .pipe-stage-detail { margin-top: 2px; color: var(--ink-2); }
+.pipe-flow-detail .pipe-stage[data-status=ok] .pipe-stage-number { background: var(--brand-soft); color: var(--brand-deep); }
+.pipe-flow-detail .pipe-stage[data-status=skipped] .pipe-stage-number,
+.pipe-flow-detail .pipe-stage[data-status=stopped] .pipe-stage-number,
+.pipe-flow-detail .pipe-stage[data-status=pending] .pipe-stage-number,
+.pipe-flow-detail .pipe-stage[data-status=""] .pipe-stage-number { background: var(--card); border: 1px dashed var(--line); }
+.pipe-flow-detail .pipe-stage[data-status=skipped] h3, .pipe-flow-detail .pipe-stage[data-status=stopped] h3,
+.pipe-flow-detail .pipe-stage[data-status=pending] h3 { color: var(--muted); font-weight: 500; }
+.pipe-flow-detail .pipe-stage[data-status=error] .pipe-stage-detail { color: var(--danger); }
+.pipe-flow-detail .pipe-stage-status { text-align: right; padding-top: 3px; }
+.pipe-flow-detail .pipe-stage-status span { display: block; font: 400 12px var(--font-mono); color: var(--muted); margin-top: 3px; }
+
+/* ── 历史运行:一行一轮,一列一类 ── */
+.pipe-matrix { margin-bottom: 16px; }
+.pipe-matrix-g, .pipe-matrix-h, .pipe-matrix .pipe-history-row { display: grid; grid-template-columns: var(--cols); column-gap: 4px; align-items: center; padding: 0 20px; }
+.pipe-matrix-g { padding-top: 12px; }
+.pipe-matrix-g span { font-size: 11.5px; color: var(--muted); text-align: center; border-bottom: 1px solid var(--line-soft); margin: 0 10px; padding-bottom: 4px; }
+.pipe-matrix-g span:empty { border: 0; }
+.pipe-matrix-h { padding-top: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line); font-size: 12px; line-height: 1.35; color: var(--muted); }
+.pipe-matrix-h .c { text-align: center; overflow-wrap: anywhere; }
+.pipe-matrix-h .rep { color: var(--danger); font-weight: 600; }
+.pipe-matrix .pipe-history-row { width: 100%; min-height: 44px; border: 0; border-bottom: 1px solid var(--line-soft); border-radius: 0;
+  background: none; text-align: left; font-size: 13px; line-height: 1.4; color: var(--ink); cursor: pointer; white-space: normal; }
+.pipe-matrix #pipe-history-list .pipe-history-row:last-child { border-bottom: 0; }
+.pipe-matrix .pipe-history-row:hover { background: var(--paper); }
+.pipe-matrix .pipe-history-row.on { background: var(--brand-tint); box-shadow: inset 3px 0 0 var(--brand); }
+.pipe-matrix .pipe-history-row:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.pipe-history-when { font: 12.5px var(--font-mono); color: var(--ink-2); white-space: nowrap; }
+.pipe-history-kind { color: var(--ink-2); }
+/* 「作用在哪」只给读屏和探针(行的 title 里也有一份):表里那一排格子已经说了是哪几类 */
+.pipe-history-where { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.pipe-history-dur { font: 12px var(--font-mono); color: var(--muted); padding-left: 10px; white-space: nowrap; }
+.pipe-history-result { font-size: 12.5px; font-weight: 600; color: var(--muted); white-space: nowrap; }
+.pipe-history-row[data-status=error] .pipe-history-result { color: var(--danger); }
+.pipe-history-row[data-status=ok] .pipe-history-result { color: var(--ok); }
+.pipe-history-row[data-status=running] .pipe-history-result { color: var(--brand); }
+.pipe-history-row[data-status=stopped] .pipe-history-result, .pipe-history-row[data-status=skipped] .pipe-history-result { color: var(--warn); }
+.pipe-history-go { font-size: 12px; color: var(--muted); text-align: right; opacity: 0; }
+.pipe-history-row:hover .pipe-history-go, .pipe-history-row.on .pipe-history-go { opacity: 1; }
+.pipe-history-row.on .pipe-history-go { color: var(--brand-deep); }
+/* 「最新」那一枚:挑一轮和回到最新在同一处 */
+.pipe-history-row.latest .pipe-history-when::after { content: "最新"; margin-left: 6px;
+  font: 10.5px var(--font-body); color: var(--brand-deep); background: var(--brand-soft); border-radius: 4px; padding: 1px 5px; vertical-align: 1px; }
+.pipe-history-empty { padding: 18px 20px; font-size: 13px; color: var(--muted); }
+/* 格子里的小圆点跟轨道上的节点同一套样子,只是缩小 */
+.pipe-matrix-c { display: grid; place-items: center; align-self: stretch; }
+.pipe-matrix-dot { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; border: 1.5px solid var(--line);
+  background: var(--card); color: var(--muted); font: 600 10.5px var(--font-mono); }
+.pipe-matrix-dot svg { width: 10px; height: 10px; }
+.pipe-matrix-dot[data-s=done] { background: var(--brand); border-color: var(--brand); color: var(--card); }
+.pipe-matrix-dot[data-s=issue] { border-color: var(--danger); color: var(--danger); background: var(--warn-soft); }
+.pipe-matrix-dot[data-s=cut] { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
+.pipe-matrix-dot[data-s=unknown] { border-color: var(--warn); border-style: dashed; color: var(--warn); }
+.pipe-matrix-dot[data-s=skip] { border-style: dashed; }
+.pipe-matrix-dot[data-s=run] { border-color: var(--brand); }
+.pipe-matrix-dot[data-s=run]::after { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--brand); animation: pipe-flow-pulse 1.4s ease-in-out infinite; }
+.pipe-matrix-dot.none { width: 5px; height: 5px; border: 0; background: var(--line); }
+.pipe-matrix-note { display: flex; align-items: center; gap: 12px; padding: 10px 20px; border-top: 1px solid var(--line); background: var(--paper); font-size: 13px; color: var(--ink-2); }
+.pipe-matrix-note + .pipe-matrix-note { border-top-color: var(--line-soft); }
+.pipe-matrix-note b { color: var(--danger); }
+
+@media (prefers-reduced-motion: reduce) {
+  .pipe-flow-node[data-s=run] .pipe-flow-dot::after, .pipe-matrix-dot[data-s=run]::after { animation: none; }
+  .pipe-flow-notch { transition: none; }
+}
+/* 窄屏:轨道横向滚,表格横向滚(列是类型,挤成一行一个字没法看) */
+@media (max-width: 760px) {
+  .pipe-flow-track { overflow-x: auto; }
+  .pipe-flow-rail, .pipe-flow-groups { min-width: calc(var(--n, 1) * 92px); }
+  .pipe-flow-dhead { flex-direction: column; }
+  .pipe-matrix { overflow-x: auto; }
+  .pipe-matrix-g, .pipe-matrix-h, .pipe-matrix .pipe-history-row { min-width: 720px; }
+}

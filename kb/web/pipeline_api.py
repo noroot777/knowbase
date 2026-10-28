@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from kb import pipeline as pl
+from kb import pipeline_flow as flow
 from kb import run_trigger
 from kb.collectors import (
     CollectorError,
@@ -84,9 +85,29 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     # 待处理数要扫文件,只有显式要求且空闲时才算
     if pending and not state["running"]:
         state["pending"] = pl.pending_counts(_channel(channel)) if channel else pl.pending_counts()
+    # 此刻那份「按类型排的计划」(跳过名单、走到哪一类、谁被提前结束)。**读不出来就
+    # 不给**:那张卡片会退回按阶段推出来的只读节点,不该为它把整个状态接口带挂。
+    try:
+        live = flow.status()
+        if live:
+            # 日报那一批的停止记在日报那一侧,管道那一格读不到(两轮之间管道空着)
+            live["stopping"] = flow.stopping(live["kind"])
+        state["flow_live"] = live
+    except Exception:                                  # noqa: BLE001 - 见上
+        state["flow_live"] = None
+    # 跑着的时候 `results` 是开跑时清零的那一格(收尾才写回),而那条线上每个来源的
+    # 成败要从逐来源那一份结果账里读 —— 跑着时给此刻的账。**只读、读不出来就算了**。
+    if state["running"]:
+        try:
+            from kb import pipeline_results
+            state["results"] = pipeline_results.snapshot()
+        except Exception:                              # noqa: BLE001 - 见上
+            pass
     # 用户已经在明细里处理掉的那几条不再送出去(见 `kb.pipeline_failures`)。
     # **过滤待在出口这一处**:那几份运行记录(内存、整批汇总、两份落盘)一个字节
     # 都不动,否则「两份落盘是同一个业务结果的两个投影」这条不变量就撕开了。
+    # **回包拼完了才过滤**:上面那份实时结果账是后挂上去的,先过滤再挂的话,刚处理
+    # 掉的那几条在「点开这一类」时原样回来(结果账里那一格没过过这道滤)。
     pl.strip_failure_state(state)
     return state
 
@@ -296,11 +317,42 @@ def pipeline_run(body: PipelineRunRequest | None = None):
     return {"ok": True}
 
 
+class StopRequest(BaseModel):
+    """`run_id` = 点停止那一刻页面上那一轮。空串 = 停此刻在跑的那一轮(不带请求体的老调用)。"""
+
+    run_id: str = ""
+
+
 @router.post("/api/pipeline/stop")
-def pipeline_stop():
-    if not pl.request_stop():
+def pipeline_stop(body: StopRequest | None = None):
+    """**停的是页面上确认过的那一轮**:确认框开着的时候那一轮可能已经收尾、下一轮接上了,
+    带着身份来的就在停止那把锁里核一遍(`pipeline_state.request_stop`),对不上不停。"""
+    run_id = body.run_id if body else ""
+    if not pl.request_stop(run_id):
+        if run_id and pl.get_state().get("running"):
+            raise HTTPException(409, flow.STALE)
         raise HTTPException(409, "当前没有正在执行的同步")
     return {"ok": True, "detail": "当前执行中的阶段结束后停止，已完成的结果会保留"}
+
+
+class FlowRequest(BaseModel):
+    """同步中心类型节点上的那颗按钮。`owner` 原样回传 `flow_live.owner`。"""
+
+    owner: str
+    node: str
+    action: str
+
+
+@router.post("/api/pipeline/flow")
+def pipeline_flow_request(body: FlowRequest):
+    """本次跳过 / 撤回跳过 / 结束本类型。不受理就 409 带原因(面板原样 toast)。
+
+    owner 对不上就不受理:页面开着的那份可能是上一轮的计划,点下去不能落到这一轮头上。
+    """
+    ok, why = flow.request(body.owner, body.node, body.action)
+    if not ok:
+        raise HTTPException(409, why)
+    return {"ok": True, "flow": flow.status()}
 
 
 @router.post("/api/pipeline/retry-failed")

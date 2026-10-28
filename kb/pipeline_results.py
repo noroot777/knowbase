@@ -187,6 +187,23 @@ def channel_run(stage: str, channel: str, collector, requested):
         _current.pop(stage, None)
 
 
+def failed(stage: str, channel: str, requested, detail: str) -> None:
+    """这个来源这一步**连门都没进去**(采集器取不到、建账那一下就炸了):给它记一格失败。
+
+    **缺这一格不是「没消息就是好消息」**:几个来源合在一张卡片上时,同步中心按类型看
+    这个来源念的是它自己那一格,没有就无从说起 —— 而它明明失败了。红记在这一轮点名的
+    范围上(取不到采集器就归一不了稳定 id,原样留着;空 = 整条来源),**覆盖范围一律
+    记零**:一个目标都没跑成,不许拿它去清任何旧账。已经有自己那一格的不动(那一格是
+    执行时交回来的事实,比这里的推断准)。
+    """
+    owned = _cells.setdefault(stage, {})
+    if isinstance(owned.get(channel), dict):
+        return
+    owned[channel] = {'planned': [str(t) for t in (requested or [])], 'covered': [],
+                      'whole': False, 'reported': False,
+                      'status': 'error', 'detail': detail}
+
+
 def cover(stage: str, report) -> None:
     """采集器交回来的**执行事实**:这一轮在当前这个来源上真跑成了哪几个目标。
 

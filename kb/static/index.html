@@ -17,6 +17,7 @@
 <link rel="stylesheet" href="/static/css/workspace.css">
 <link rel="stylesheet" href="/static/css/navigation.css">
 <link rel="stylesheet" href="/static/css/pipeline.css">
+<link rel="stylesheet" href="/static/css/pipe_flow.css">
 <link rel="stylesheet" href="/static/css/sources.css">
 <link rel="stylesheet" href="/static/css/youtube.css">
 <link rel="stylesheet" href="/static/css/source_reader.css">
@@ -241,6 +242,10 @@
     <div id="pipe-viewing" class="pipe-viewing" hidden role="status"><span id="pipe-viewing-text"></span><button class="ghost" onclick="exitPipeHistory()">回到最新</button></div>
     <div class="pipe-overview-main"><div><span class="pipe-section-label" id="pipe-state-label">当前状态</span><h2 id="pipe-state-title" role="status" tabindex="-1">正在读取同步状态</h2><p id="pipe-running-channel"></p><p id="pipe-run-scope"></p><p id="pipe-persist-issue" class="field-err" role="status" hidden></p></div><div class="pipe-run-metrics"><b id="pipe-progress-label">—</b><span id="pipe-elapsed"></span></div></div>
     <div class="pipe-progress-track" aria-hidden="true"><span id="pipe-progress-fill"></span></div>
+    <!-- 这一轮按「类型」排的那条线,点一类在下面看它那几步(`pipe_flow.js`)。阶段行
+         `#pipe-stages` 挪进了详情里:失败明细、「不再抓取」都还挂在那几行上。 -->
+    <div id="pipe-flow" class="pipe-flow" hidden><div class="pipe-flow-track" id="pipe-flow-track"><div class="pipe-flow-groups" id="pipe-flow-groups"></div><div class="pipe-flow-rail" id="pipe-flow-rail" role="tablist" aria-label="本轮要跑的类型"></div></div>
+      <div class="pipe-flow-detail" id="pipe-flow-detail" role="tabpanel"><span class="pipe-flow-notch" id="pipe-flow-notch"></span><div class="pipe-flow-dhead" id="pipe-flow-dhead"></div><p class="pipe-flow-why" id="pipe-flow-why" hidden></p><div id="pipe-stages" aria-label="同步阶段"></div><div id="pipe-flow-extra"></div></div></div>
     <div class="pipe-overview-footer"><span id="pipe-state-hint">同步在后台执行，切换页面不会中断。</span><button class="ghost" id="pipe-stop" onclick="stopPipe()" hidden>本阶段结束后停止</button></div>
     <div id="pipe-issues" class="pipe-issues" hidden role="status">
       <div class="pipe-issues-head"><b id="pipe-issues-title"></b><span class="pipe-issues-act"><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-retry-help" hidden>重试失败项</button><button class="text-button" id="pipe-issues-jump" onclick="jumpToFirstIssue()" hidden>看第一个<i data-arrow="down"></i></button></span></div>
@@ -253,18 +258,17 @@
       </details>
     </div>
   </section>
-  <div class="pipe-workbench">
-    <section class="pipe-stage-panel"><div class="pipe-section-heading"><h2>同步步骤</h2><span id="pipe-stage-note">每一步都有结果</span></div><div id="pipe-stages" aria-label="同步阶段"></div></section>
-    <!-- 轮次列和它改写的东西并排,而且钉住:点一行会按那一轮重渲染上面整张卡和左边
-         整列步骤,原来它在页尾 y≥1047、被改写的那块在 y=84,点下去什么都看不见。
-         `#pipe-history-live` 是**列表外面**的一行(正在跑的那一轮不在留档里),这样
-         `#pipe-history-list` 里仍然只有留档那几行,nth-child 的位置不被挤掉。 -->
-    <section class="pipe-history-panel" aria-label="历史运行">
-      <div class="pipe-section-heading"><h2>历史运行</h2><span id="pipe-history-note"></span></div>
-      <div id="pipe-history-live"></div>
-      <div id="pipe-history-list"><p class="pipe-history-empty">正在读取历史记录…</p></div>
-    </section>
-  </div>
+  <!-- 历史运行:一行一轮,列就是上面那排类型(`pipe_matrix.js`),同一列往下看就知道
+       这一类是不是天天出问题。点一行,上面那张卡按那一轮重渲染。
+       `#pipe-history-live` 是**列表外面**的一行(正在跑的那一轮不在留档里),这样
+       `#pipe-history-list` 里仍然只有留档那几行,nth-child 的位置不被挤掉。 -->
+  <section class="pipe-history-panel pipe-matrix" aria-label="历史运行">
+    <div class="pipe-section-heading"><h2>历史运行</h2><span id="pipe-history-note"></span></div>
+    <div id="pipe-history-head"></div>
+    <div id="pipe-history-live"></div>
+    <div id="pipe-history-list"><p class="pipe-history-empty">正在读取历史记录…</p></div>
+    <div id="pipe-history-repeats"></div>
+  </section>
   <!-- 日志默认收起:它是出事才看的东西,常驻一块 440px 深色块会把整页的视觉重心
        占住。运行起来时自动展开一次,**按轮次身份记**(`pipe_view.js` 的
        `pipeLogOpenedFor`:记成布尔的话翻一趟历史就会被当成新起了一轮)。 -->
@@ -649,6 +653,8 @@
 <script src="/static/js/pipe_fresh.js"></script>
 <!-- pipe_history.js 排在 pipe_view.js 之前:`pipeViewing` 是 let,渲染要读它 -->
 <script src="/static/js/pipe_history.js"></script>
+<script src="/static/js/pipe_matrix.js"></script>
+<script src="/static/js/pipe_flow.js"></script>
 <script src="/static/js/pipe_view.js"></script>
 <!-- pipe_stages.js 排在 pipe_setup.js 之前:`PIPE_STAGE_DEFS` 是 const,const 有 TDZ -->
 <script src="/static/js/pipe_stages.js"></script>

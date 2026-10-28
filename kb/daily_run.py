@@ -22,6 +22,7 @@ import uuid
 from datetime import datetime, timedelta
 
 from kb import daily
+from kb import pipeline_flow as flow
 from kb import run_trigger
 from kb.config import (DATA_DIR, ScheduleUnreadable, announce_config_issue,
                        config_clock, config_day, config_flag, config_names, config_stamp,
@@ -54,6 +55,8 @@ DIGEST_STAGES = ['index', 'extract']
 # 入库那一段在成绩单上的身份。它不属于任何一个来源,所以 channel 留空 ——
 # `_sync_issues`、日报正文那几行、面板横幅都只读 label,不认通道 id。
 DIGEST_LABEL = '入库处理（索引与提取）'
+# 用户在同步中心那条线上点了「本次跳过」的那一项(口径同 `pipeline_flow.enter`)。
+SKIPPED = '本次跳过'
 # 抓取那一段的时间预算。超了就请求管道停下、跳过剩余通道,拿已有内容出日报
 # ——"今天的日报没出来"比"日报少了两个来源"严重得多。
 SYNC_BUDGET = int(os.environ.get('KB_DAILY_SYNC_BUDGET', str(3 * 3600)))
@@ -309,6 +312,7 @@ def _finish_schedule(day: str, retry: bool) -> None:
 STOP_IDLE = '当前没有正在运行的日报任务'
 STOP_GENERATING = ('日报正在生成,这一阶段不能中途停止:模型已经在出稿,'
                    '这一轮会照常保存(需要的话生成完可以删掉这一份)')
+STOP_STALE = '这一轮日报已经结束或换了一轮,刷新一下再看'
 STOP_OK = '当前阶段结束后停止,这一轮不生成日报;已同步的内容会保留'
 # 日报的结论已经落下(出了/失败了/被停了),还在跑的只有出报之后那一段整理。这时候
 # 说「这一轮不生成日报」是句假话 —— 口径同 R1:后面那一段不许改写已经确定的结果,
@@ -316,8 +320,11 @@ STOP_OK = '当前阶段结束后停止,这一轮不生成日报;已同步的内�
 STOP_TAIL = '正在整理的那一段结束后停止;日报这一轮的结果不受影响'
 
 
-def request_stop() -> tuple[bool, str]:
+def request_stop(batch: str = '') -> tuple[bool, str]:
     """停下这一轮日报:剩下的通道不同步了,**日报也不生成**。
+
+    `batch` 非空 = 只停这一批(同步中心确认框开着时,那一批可能已经收尾、下一批接上
+    了)。核对和落笔在同一把锁里,对不上就不停。
 
     返回 `(受理了没有, 说明)`。两种不受理:没有在跑的日报;已经进了生成阶段
     ——那时候模型钱已经花出去了,`daily.generate()` 自己把文件写完才返回,
@@ -331,6 +338,8 @@ def request_stop() -> tuple[bool, str]:
     with _lock:
         if not _state['running']:
             return False, STOP_IDLE
+        if batch and _state.get('batch') != batch:
+            return False, STOP_STALE
         # 这个判断和 `_run` 里"进入生成阶段"那一步共用 `_lock`,所以两者严格
         # 二选一:要么停止先落下、生成整段跳过,要么生成已经开跑、停止被拒。
         if _state['phase'] == 'generate':
@@ -370,7 +379,13 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
             # 「已经收尾的这几轮合起来」,进程在任何一刻退出都不会把前几轮的抓取
             # 失败和失败名单弄丢。**不能事后补**:子轮收尾和下一句之间进程就可能
             # 没了。`'daily'` 是这一批的身份(见模块开头)。
-            batch = pl.open_batch('daily')
+            batch = _state['batch'] = pl.open_batch('daily')
+            # 这一批按类型排的那条线(同步中心那张卡片上的节点),跳过 / 提前结束都落在
+            # 它上面。**它建不起来不许拦住日报**:只是这一批点不了跳过。
+            try:
+                flow.open_daily(batch, channels, _library_on())
+            except Exception as e:                   # noqa: BLE001 - 见上
+                _log(f'这一批没有类型计划(跳过 / 提前结束不可用):{e}')
             for channel in channels:
                 if _halting():
                     _state['channels'].append(
@@ -379,11 +394,19 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                          'detail': '已停止,未同步' if _state['stop_requested']
                                    else '超出时间预算,未同步'})
                     continue
-                _state['channels'].append(
-                    _sync_round(FETCH_STAGES,
-                                run_trigger.apply_force({'channel': channel}, trigger),
-                                labels.get(channel, channel), budget_end, channel,
-                                batch=batch))
+                if not flow.enter(batch, flow.source_key(channel)):
+                    _state['channels'].append(
+                        {'channel': channel, 'label': labels.get(channel, channel),
+                         'status': 'skipped', 'detail': SKIPPED})
+                    continue
+                try:
+                    _state['channels'].append(
+                        _sync_round(FETCH_STAGES,
+                                    run_trigger.apply_force({'channel': channel}, trigger),
+                                    labels.get(channel, channel), budget_end, channel,
+                                    batch=batch))
+                finally:
+                    flow.leave(batch, flow.source_key(channel))
             # 入库那一段:等所有通道都抓完才跑,跑一次 —— 这时待索引的文件和
             # 待提取的队列都最全。**用户按了停止才跳过**:接下来本来就不出报了。
             # 超预算照跑(见 DIGEST_BUDGET),所以这里不能用 `_halting()`。
@@ -391,11 +414,18 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                 _state['channels'].append(
                     {'channel': '', 'label': DIGEST_LABEL, 'status': 'skipped',
                      'detail': '已停止,未入库'})
+            elif not flow.enter(batch, 'ingest'):
+                _state['channels'].append(
+                    {'channel': '', 'label': DIGEST_LABEL, 'status': 'skipped',
+                     'detail': SKIPPED})
             else:
-                _state['channels'].append(_sync_round(
-                    DIGEST_STAGES, None, DIGEST_LABEL,
-                    max(budget_end, time.monotonic() + DIGEST_BUDGET),
-                    halted=lambda: bool(_state['stop_requested']), batch=batch))
+                try:
+                    _state['channels'].append(_sync_round(
+                        DIGEST_STAGES, None, DIGEST_LABEL,
+                        max(budget_end, time.monotonic() + DIGEST_BUDGET),
+                        halted=lambda: bool(_state['stop_requested']), batch=batch))
+                finally:
+                    flow.leave(batch, 'ingest')
             # **批次不在这里关了**:出报之后那一段必须进同一个批次(为什么,见
             # `kb.daily_library`)。关它的地方挪到了 `finally`。
         # 用户按的停止到此为止:接着生成等于把一份"同步到一半"的日报当成功交出去,
@@ -408,6 +438,12 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
             if _state['stop_requested']:
                 _set('stopped', '已按请求停止,这一轮没有生成日报')
                 return
+            # 「生成日报」那一类被跳过:**同停止一档**收尾(不出报、不置 retry),
+            # 判据和进门同在这把锁里,理由同上面那道停止检查。
+            if batch and not flow.enter(batch, 'daily'):
+                _set('stopped', '按请求跳过了生成日报,这一轮只同步')
+                return
+            flow.advance(batch, 'daily', 'generate')
             _set('generate', '正在生成日报')
         # 窗口的截止时刻要在**同步跑完之后**才定下来(没显式指定时 generate 自己
         # 取 now):日报覆盖的是"到生成这一刻为止",同步花掉的那几小时里产出的
@@ -454,10 +490,23 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
         # 被挡住的话面板从此卡在「正在生成」、调度器再也受理不了下一轮 —— 而
         # 日报本身可能早就出来了。库整理不比"把资格还回去"更重要。
         try:
+            flow.leave(batch, 'daily', {'status': _state['phase'],
+                                        'detail': _state['detail']})
             library_tail(batch, _sync_round,
                          _state['detail'] or '日报这一轮没有留下结论')
         finally:
+            # 批次在 `library_tail` 里已经关过、发布过(带着这份计划);到这儿才作废它。
+            flow.end(batch)
             _release_round(sched_day, retry)
+
+
+def _library_on() -> bool:
+    """出报之后那一段这一批跑不跑(只为排节点)。读不出设置按不跑 —— 口径同
+    `daily_library.library_round`:那一档它自己会记一条「读不出,没整理」。"""
+    try:
+        return bool(load_settings()['library'])
+    except ScheduleUnreadable:
+        return False
 
 
 def _release_round(sched_day: str, retry: bool) -> None:

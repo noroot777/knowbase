@@ -275,32 +275,40 @@ def strip(run, keys: set[str] | None = None) -> int:
         keys = dropped_keys()
     if not keys or not isinstance(run, dict):
         return 0
+    # **两处都带明细**:阶段卡片(各来源合在一起的那一份),和结果账里逐来源那几格
+    # (同步中心按类型看某一个来源时念的是它那一格)。只过卡片的话,删掉的那条在
+    # 「点开这一类」时又回来了。
+    # **返回值只数卡片那一处**:它答的是「这一份结果里少了几条明细」,同一条在结果账
+    # 里还有一份副本,两处都数就成了两条。
+    results = run.get("results")
+    for owned in results.values() if isinstance(results, dict) else []:
+        for cell in owned.values() if isinstance(owned, dict) else []:
+            if isinstance(cell, dict):
+                _strip_entry(cell, keys)
     stages = run.get("stages")
-    if not isinstance(stages, dict):
+    return sum(_strip_entry(st, keys) for st in stages.values()
+               if isinstance(st, dict)) if isinstance(stages, dict) else 0
+
+
+def _strip_entry(stage: dict, keys: set[str]) -> int:
+    items = stage.get("failures")
+    if not isinstance(items, list):
         return 0
-    gone = 0
-    for stage in stages.values():
-        if not isinstance(stage, dict):
-            continue
-        items = stage.get("failures")
-        if not isinstance(items, list):
-            continue
-        kept = [f for f in items if _item_keys(f).isdisjoint(keys)]
-        n = len(items) - len(kept)
-        if not n:
-            continue
-        gone += n
-        stage["failures"] = kept
-        total = stage.get("failures_total")
-        if isinstance(total, int):
-            # 截断过的那一档:总数减掉这一次剔掉的,但不许掉到清单长度以下
-            # (那会让面板念出一个比它正在显示的条数还小的总数)。
-            total = max(len(kept), total - n)
-            if total > len(kept):
-                stage["failures_total"] = total
-            else:
-                stage.pop("failures_total", None)
-    return gone
+    kept = [f for f in items if _item_keys(f).isdisjoint(keys)]
+    n = len(items) - len(kept)
+    if not n:
+        return 0
+    stage["failures"] = kept
+    total = stage.get("failures_total")
+    if isinstance(total, int):
+        # 截断过的那一档:总数减掉这一次剔掉的,但不许掉到清单长度以下
+        # (那会让面板念出一个比它正在显示的条数还小的总数)。
+        total = max(len(kept), total - n)
+        if total > len(kept):
+            stage["failures_total"] = total
+        else:
+            stage.pop("failures_total", None)
+    return n
 
 
 def strip_state(state) -> None:

@@ -13,7 +13,9 @@ let pipeKeepDays = 0;
 // 点它屏幕不换、那一轮的 503 读不到(第 2 轮审查在页面上实点出来的)。
 let pipeHistoryRunState = null;
 function pipeHistorySig() {
-  return `${pipeRunning() ? 1 : 0}|${pipeVersion(typeof pipeSnapshot === 'undefined' ? null : pipeSnapshot)}`;
+  // 日报生成那一段管道空着、版本也不变,而最新那一行要从「已完成」换成「正在生成日报」
+  const gen = typeof pipeSnapshot !== 'undefined' && pipeFlowLive(pipeSnapshot)?.running === 'daily';
+  return `${pipeRunning() ? 1 : 0}${gen ? 'g' : ''}|${pipeVersion(typeof pipeSnapshot === 'undefined' ? null : pipeSnapshot)}`;
 }
 // 「还欠一次历史刷新」。在途那次请求只能回答它开跑那一刻的事实,而「又跑完一轮」
 // 这件事**一轮只说一次**(`refreshPipe` 的 wasRunning / newResult 两个分支)——
@@ -25,11 +27,13 @@ let pipeHistoryWanted = false;
 
 // 「这一轮结果怎么一句话说」。**判据复用阶段卡片那两个**(`pipePlannedStages` /
 // `pipeHasFailure`)—— 自己再数一遍的话,列表上写「已完成」而点进去是两个红。
+// **数的是整个业务轮次**(`pipeRoundSteps`,管道阶段 + 「生成日报」),同概况那张卡。
 function pipeRunSummary(run) {
-  const planned = pipePlannedStages(run), stages = run.stages || {};
+  const { planned, stages, generating } = pipeRoundSteps(run, pipeRoundPlan(run));
+  if (generating) return { status: 'running', text: '正在生成日报' };
   const failed = planned.filter(k => pipeHasFailure(stages[k])).length;
   if (failed) return { status: 'error', text: `${failed} 个步骤需处理` };
-  if (run.stopped) return { status: 'stopped', text: '已停止' };
+  if (run.stopped || stages.generate?.status === 'stopped') return { status: 'stopped', text: '已停止' };
   const skipped = planned.filter(k => stages[k]?.status === 'skipped').length;
   if (skipped) return { status: 'skipped', text: `${skipped} 个步骤已跳过` };
   return { status: 'ok', text: '已完成' };
@@ -64,6 +68,8 @@ function pipeHistoryNote(n) {
 
 function renderPipeHistory() {
   const list = $('pipe-history-list'), note = $('pipe-history-note');
+  // 表头和「连着几轮」那几句先画:列的集合是这一屏所有行一起算的(`pipe_matrix.js`)
+  renderPipeMatrixFrame();
   renderPipeHistoryLive();
   if (!pipeHistory.length) {
     list.innerHTML = '<p class="pipe-history-empty">还没有跑完过一轮。同步结束后这里会按轮次留档。</p>';
@@ -121,13 +127,10 @@ function pipeHistoryRow(run) {
     // 身份走 `data-run` 读、**不拼进 onclick**:`esc` 把引号转成实体,而属性值里的
     // 实体会在解析时还原 —— 拼进去的话一个带引号的身份就把那句 JS 拆了。这一行
     // 其余几个字段也都来自落盘文件,一处放松就是一个注入口。
+    // 一行里面画什么在 `pipe_matrix.js`(一列一类);点在某一格上会顺手选中那一类。
     return `<button type="button" class="pipe-history-row${chosen ? ' on' : ''}${latest ? ' latest' : ''}"
       data-status="${esc(sum.status)}" data-run="${esc(run.key)}" aria-current="${chosen ? 'true' : 'false'}"
-      onclick="pickPipeRun(this.dataset.run)">
-      <span class="pipe-history-r1"><span class="pipe-history-when">${esc(pipeRunWhen(run))}</span>
-      <span class="pipe-history-result">${esc(sum.text)}</span></span>
-      <span class="pipe-history-r2"><span class="pipe-history-kind">${esc(pipeRunLabel(run))}</span>
-      · <span class="pipe-history-where">${esc(pipeRunWhere(run))}</span></span></button>`;
+      title="${esc(pipeRunWhere(run))}" onclick="pipeMatrixPick(event, this)">${pipeMatrixRowFor(run, chosen)}</button>`;
   }
 }
 
@@ -179,14 +182,12 @@ function renderPipeHistoryLive() {
   const run = pipeSnapshot || {};
   // **按开工时刻念。** `pipeRunWhen` 先看 `finished_at`,而跑着的这一轮还没有 —— 真要
   // 落进那条回退的话,念出来的会是上一轮的收尾时刻,那一行就在冒充另一轮。
-  const when = pipeRunWhen({ started_at: run.started_at });
   const on = !pipeViewing;
+  // 这一轮多出了留档里没有的一类:表头那组列跟着换,整张表重画(它会再回到这里)
+  if (pipeMatrixStale()) return renderPipeHistory();
   const html = `<button type="button" class="pipe-history-row latest${on ? ' on' : ''}"
-      data-status="running" aria-current="${on ? 'true' : 'false'}" onclick="exitPipeHistory()">
-      <span class="pipe-history-r1"><span class="pipe-history-when">${esc(when)}</span>
-      <span class="pipe-history-result">正在运行</span></span>
-      <span class="pipe-history-r2"><span class="pipe-history-kind">${esc(pipeRunLabel(run))}</span>
-      · <span class="pipe-history-where">${esc(pipeRunWhere(run))}</span></span></button>`;
+      data-status="running" aria-current="${on ? 'true' : 'false'}" title="${esc(pipeRunWhere(run))}"
+      onclick="pipeMatrixPick(event, this)">${pipeMatrixLiveFor(run, on)}</button>`;
   if (host.innerHTML !== html) host.innerHTML = html;
 }
 

@@ -263,9 +263,15 @@ function renderPipeButtons() {
     || (typeof pipeViewing !== 'undefined' && !!pipeViewing)
     || (typeof pipeRestoreGap !== 'undefined' && !!pipeRestoreGap);
   $('pipe-retry').textContent = pipeAction === 'retry' ? '正在启动重试…' : '重试失败项';
-  $('pipe-stop').hidden = !running || !pipeSnapshot?.stop_supported;
-  $('pipe-stop').disabled = !pipeConnected || !!pipeAction || !!pipeSnapshot?.stop_requested;
-  $('pipe-stop').textContent = pipeAction === 'stop' || pipeSnapshot?.stop_requested ? '等待当前阶段结束…' : '本阶段结束后停止';
+  // 翻着留档那一轮时不给:那张卡讲的不是此刻,停的却是此刻这一轮
+  $('pipe-stop').hidden = !(running || pipeDailyLive()) || !pipeSnapshot?.stop_supported
+    || (typeof pipeViewing !== 'undefined' && !!pipeViewing);
+  const stopping = !!pipeSnapshot?.stop_requested || !!pipeSnapshot?.flow_live?.stopping;
+  // 日报已经开始生成:那一档后端不受理停止(`daily_run.request_stop`),按钮先说清楚
+  const generating = pipeFlowLive(pipeSnapshot)?.running === 'daily';
+  $('pipe-stop').disabled = !pipeConnected || !!pipeAction || stopping || generating;
+  $('pipe-stop').textContent = pipeAction === 'stop' || stopping ? '等待当前步骤结束…'
+    : generating ? '日报生成中，停不下来' : '当前步骤结束后停止整轮';
   $('nav-sync-dot').hidden = !running;
   // 「我的订阅」公众号视图上的同步按钮/进度横幅跟着同一份快照走
   if (typeof renderWechatSubsStatus === 'function') renderWechatSubsStatus();
@@ -288,13 +294,42 @@ async function retryFailed() {
   } catch (e) { toast('重试未能启动', { key: 'pipeline', detail: e.message }); }
   finally { await refreshPipe(); pipeAction = ''; renderPipeButtons(); }
 }
+// 日报那一批跑着时,「停止整轮」停的是**整批**(日报那一侧的停止,它会顺手停掉手上
+// 这一轮管道)。只停管道的话,日报接着跑下一个来源 —— 按钮上写的「后面排着的类型都
+// 不再跑」就成了一句空话。判据是**身份对得上的那份**计划(`pipeFlowLive`,同那条线):
+// 日报两轮之间挤进来一次手动同步时,页面上这一轮是那次同步,停的也该是它。
+function pipeDailyLive() { return pipeFlowLive(pipeSnapshot)?.kind === 'daily'; }
+// 这一下停的是哪一轮:日报那一批认批次身份,其余认这一轮的 run id。
+function pipeStopTarget() {
+  const s = pipeSnapshot;
+  if (pipeDailyLive()) return { daily: true, id: pipeFlowLive(s).owner };
+  return s?.running ? { daily: false, id: s.run_id || '' } : null;
+}
 async function stopPipe() {
-  if (pipeAction || !pipeSnapshot?.running || pipeSnapshot.stop_requested) return;
+  const stoppable = () => !pipeAction && !!pipeStopTarget()
+    && !pipeSnapshot.stop_requested && !pipeSnapshot.flow_live?.stopping;
+  if (!stoppable()) return;
+  // **确认的是点下去那一刻的这一轮。** 确认框开着时这一轮可能收尾、下一轮接上了:
+  // 那一下不许落到下一轮头上。前端核一遍(身份变了直接作废),后端在停止那把锁里
+  // 再核一遍(确认之后、请求落地之前那道缝前端管不到)。
+  const target = pipeStopTarget();
+  if (!await confirmBox({
+    title: '停止这一轮？',
+    body: '当前这一步做完就停，后面排着的类型都不再跑。已完成的结果会保留。' + (target.daily ? '这一轮不出日报。' : ''),
+    ok: '停止整轮', danger: true,
+  })) return;
+  const now = pipeStopTarget();
+  if (!now || now.daily !== target.daily || now.id !== target.id) {
+    toast('没有停止', { key: 'pipeline', detail: '确认之前那一轮已经结束或换了一轮，刷新一下再看。' });
+    return;
+  }
+  if (!stoppable()) return;
   pipeAction = 'stop'; invalidatePipeStatus(); renderPipeButtons();
   try {
-    await pipePost('/api/pipeline/stop');
+    const r = await pipePost(target.daily ? '/api/daily/stop' : '/api/pipeline/stop',
+      target.daily ? { batch: target.id } : { run_id: target.id });
     pipeSnapshot.stop_requested = true; renderPipeState(pipeSnapshot);
-    toast('已请求停止', { key: 'pipeline', type: 'info', detail: '等待所有当前执行中的阶段结束；已完成的结果会保留。' });
+    toast('已请求停止', { key: 'pipeline', type: 'info', detail: r?.detail || '等待所有当前执行中的阶段结束；已完成的结果会保留。' });
   } catch (e) { toast('停止请求未完成', { key: 'pipeline', detail: e.message }); }
   finally { await refreshPipe(); pipeAction = ''; renderPipeButtons(); }
 }

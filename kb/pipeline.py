@@ -21,6 +21,8 @@ from kb.config import DATA_DIR, announce_config_issue
 from kb.fetch_rounds import NoEvidence
 from kb.collectors import active_collector
 from kb.pipeline_retry import retry_failed_plan, start_retry_failed, today_failed
+from kb import pipeline_flow as flow
+from kb.pipeline_sources import run_sources
 from kb.pipeline_stages import (
     _extract_pass,
     _finish_extract_stage,
@@ -123,7 +125,58 @@ _RUNNERS = {"crawl": _run_crawl, "export": _run_export,
             "projects": _run_projects, "wiki": _run_wiki}
 
 
-def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
+#: 跳过 / 提前结束一类时,它那几步卡片上写的话。
+SKIPPED = "本次跳过"
+CUT_REST = "这一类提前结束，这一步没跑"
+CUT_EXPORT = "本类型提前结束，这次没导出"
+
+
+def _sources(stages: list[str], crawl_filter: dict | None, owner: str) -> None:
+    """抓取 + 导出,按来源那一层(类型节点)跑。
+
+    多来源按来源串着跑(`pipeline_sources`)。**只有一个来源时走老路**:
+    `_run_crawl(crawl_filter)` / `_run_export(crawl_filter)` 原样各调一次,既有回归
+    钉着这两个入口和它们的参数;这里只在两步之间多问一句「这一类跳过/提前结束了没有」。
+    """
+    scopes = crawl_channels(crawl_filter)
+    if len(scopes) > 1:
+        run_sources(stages, crawl_filter, owner)
+        return
+    node = flow.source_key(scopes[0]["channel"]) if scopes else ""
+    if not flow.enter(owner, node):
+        for s in flow.SOURCE_STEPS:
+            if s in stages:
+                _stage(s, "skipped", SKIPPED)
+        return
+    try:
+        if "crawl" in stages and not flow.advance(owner, node, "crawl"):
+            _stage("crawl", "skipped", CUT_REST)
+        elif "crawl" in stages:
+            try:
+                _run_crawl(crawl_filter)
+            except NoEvidence as exc:
+                # 抓取那道闸拦住了(两处参与证据都记不下,见
+                # `fetch_rounds.open_round`)。**抛要照抛** —— 后面的导出阶段才是
+                # 真会往 vault 落文章的那一步;但原因要先写进阶段卡片,不然用户
+                # 只看到收尾补的那句「流程中断,未完成」(`_end_run` 只改
+                # pending/running 的卡片,所以这张 error 不会被它盖掉),而这道
+                # 闸的全部代价都押在「误报看得见」上。
+                _stage("crawl", "error", str(exc))
+                _log(f"抓取没有起跑:{exc}")
+                raise
+        if "export" in stages and not _state.get("stop_requested"):
+            if flow.advance(owner, node, "export"):
+                _run_export(crawl_filter)
+            else:
+                _stage("export", "skipped", CUT_EXPORT)
+    finally:
+        flow.leave(owner, node)
+
+
+def _run_pipeline(stages: list[str], crawl_filter: dict | None = None,
+                  owner: str = "") -> None:
+    """按类型往下跑。`owner` 是这一轮带着的那份类型计划(`pipeline_flow.begin`),
+    空串 = 没有计划,一律照常跑(既有调用方和回归都不传它)。"""
     pre_thread = None
     try:
         # 抓取被反爬间隔限速(页间/号间随机 sleep),期间 CPU 和网络全闲着:
@@ -136,9 +189,7 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
                 try:
                     _extract_pass("存量", ex_stats)
                     # 管道还没走到 extract 阶段:别让卡片停在"running"误导人
-                    if ex_stats["ok"] + len(ex_stats["failed_paths"]) \
-                            + len(ex_stats["empty_paths"]) \
-                            + len(ex_stats["no_text_paths"]) > 0:
+                    if _pre_worked(ex_stats):
                         _state["stages"]["extract"] = {
                             "status": "pending",
                             "detail": f"存量已提取 {ex_stats['ok']} 篇,等索引后做增量"}
@@ -147,27 +198,31 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
             pre_thread = threading.Thread(target=_pre_extract, daemon=True)
             pre_thread.start()
 
+        sources_ran = False
+        group = None                   # (节点 key, 跳过了没有)
         for s in STAGES:
             if _state.get("stop_requested"):
                 break
             if s not in stages:
                 _state["stages"][s] = {"status": "skipped", "detail": "未选择"}
-            elif s == "crawl":
-                try:
-                    _run_crawl(crawl_filter)
-                except NoEvidence as exc:
-                    # 抓取那道闸拦住了(两处参与证据都记不下,见
-                    # `fetch_rounds.open_round`)。**抛要照抛** —— 后面的导出阶段才是
-                    # 真会往 vault 落文章的那一步;但原因要先写进阶段卡片,不然用户
-                    # 只看到收尾补的那句「流程中断,未完成」(`_end_run` 只改
-                    # pending/running 的卡片,所以这张 error 不会被它盖掉),而这道
-                    # 闸的全部代价都押在「误报看得见」上。
-                    _stage("crawl", "error", str(exc))
-                    _log(f"抓取没有起跑:{exc}")
-                    raise
-            elif s == "export":
-                _run_export(crawl_filter)
-            elif s == "index":
+                continue
+            if s in flow.SOURCE_STEPS:
+                if not sources_ran:
+                    sources_ran = True
+                    _sources(stages, crawl_filter, owner)
+                continue
+            key = _group_of(s)
+            if group is None or group[0] != key:
+                if group is not None:
+                    flow.leave(owner, group[0])
+                group = (key, not flow.enter(owner, key))
+            if group[1]:
+                _skip_step(s, pre_thread, ex_stats, SKIPPED)
+                continue
+            if not flow.advance(owner, key, s):
+                _skip_step(s, pre_thread, ex_stats, CUT_REST)
+                continue
+            if s == "index":
                 if pre_thread and pre_thread.is_alive():
                     _stage("index", "running", "等存量提取收尾(避免并发写库)")
                     pre_thread.join()
@@ -190,7 +245,52 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None) -> None:
         # until it finishes, including stop requests and unexpected exceptions.
         if pre_thread:
             pre_thread.join()
+        flow.leave_running(owner)
+        _keep_flow(owner)
+        # 手动同步那份计划随这一轮收尾作废;日报那一份由日报那一批自己收(owner 是批次)。
+        # 判据在收尾**之前**取:收尾那一刻起下一轮就可以起跑、换掉 run id。
+        mine = bool(owner) and owner == _state.get("run_id")
         _end_run()
+        if mine:
+            flow.end(owner)
+
+
+def _pre_worked(stats: dict) -> bool:
+    """存量那一遍有没有真做过事(提取成了、失败了、或者判出了空正文)。"""
+    return stats["ok"] + len(stats["failed_paths"]) + len(stats["empty_paths"]) \
+        + len(stats["no_text_paths"]) > 0
+
+
+def _group_of(stage: str) -> str:
+    return next(key for key, _, steps in flow.GROUPS if stage in steps)
+
+
+def _skip_step(stage: str, pre_thread, ex_stats: dict, why: str) -> None:
+    """这一类被跳过 / 提前结束了,它的这一步不跑。
+
+    **提取那一步例外**:存量那一遍是抓取期间并行跑的,早已真做了事 —— 它的结论
+    要照实收进卡片(`_finish_extract_stage`),不能一句「没跑」把它盖掉。跳过只是
+    不再做增量那一遍。
+    """
+    if stage == "extract" and pre_thread:
+        pre_thread.join()
+        if _pre_worked(ex_stats):
+            _finish_extract_stage(ex_stats)
+            return
+    _stage(stage, "skipped", why)
+
+
+def _keep_flow(owner: str) -> None:
+    """把这一轮的类型计划抄进 `_state`,随这一轮一起落盘(面板翻历史时还看得到)。
+
+    带上这一轮的 run id:前端只认 `flow.run == run_id` 的那一份(上一轮的残留、
+    或者别人那份计划都对不上)。**这一步不许抛** —— 它只是展示,收尾那一笔才要紧。
+    """
+    try:
+        told = flow.record(owner)
+        _state["flow"] = {"run": _state.get("run_id", ""), **told} if told else None
+    except Exception as e:                            # noqa: BLE001 - 见上
+        _log(f"类型计划没能留档:{e}")
 
 
 def start_pipeline(stages: list[str] | None = None,
@@ -268,9 +368,19 @@ def start_pipeline(stages: list[str] | None = None,
             # 存了一份,见那边)。显式清空、不靠"没设过"兜底:留着就是拿上一轮
             # 「公众号已经成了」去抵这一轮的欠账。
             "results": {},
+            # 类型计划那份留档同理(`_keep_flow` 收尾时才写)。
+            "flow": None,
         })
+    # 类型计划在锁外建(要问一次采集器注册表拿名字)。日报那一批的几轮共用一份。
+    # **建不出来也照常起跑**:`running` 已经占上了,在这里抛出去就再没有谁去收尾,
+    # 管道从此一直「运行中」。没有计划只是少了跳过 / 提前结束那几颗按钮。
+    try:
+        owner = flow.begin(run_id, batch, planned, crawl_filter)
+    except Exception as e:                            # noqa: BLE001 - 见上
+        owner = ""
+        _log(f"这一轮没有类型计划(跳过 / 提前结束不可用):{type(e).__name__}: {e}")
     threading.Thread(target=_run_pipeline, args=(wanted, crawl_filter),
-                     daemon=True).start()
+                     kwargs={"owner": owner}, daemon=True).start()
     return run_id
 
 

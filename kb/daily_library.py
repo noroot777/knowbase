@@ -116,6 +116,21 @@ def library_round(batch: str, sync_round) -> None:
              'detail': f'读不出定时设置({e}),这一轮没整理'})
         library_progress('skipped', f'{LIBRARY_LABEL}:读不出定时设置({e}),这一轮跳过')
         return
+    # 用户在同步中心那条线上点了「本次跳过」:这一批不整理,如实记一项。
+    from kb import pipeline_flow as flow
+    if not flow.enter(batch, 'tidy'):
+        _state['channels'].append(
+            {'channel': '', 'label': LIBRARY_LABEL, 'status': 'skipped',
+             'detail': '本次跳过'})
+        library_progress('skipped', f'{LIBRARY_LABEL}:本次跳过')
+        return
+    try:
+        _library_run(batch, sync_round)
+    finally:
+        flow.leave(batch, 'tidy')
+
+
+def _library_run(batch: str, sync_round) -> None:
     # **进度写自己那一格(`progress=library_progress`),不写日报的 phase/detail。**
     # 写同一格就是把已经确定的 done/failed 改写成「同步中」,而前端只在
     # `phase === 'failed'` 时留失败横幅 —— 一次根本没出来的日报于是被报成「日报

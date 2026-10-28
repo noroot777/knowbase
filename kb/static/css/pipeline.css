@@ -50,7 +50,6 @@
 .pipe-retry-help summary { cursor: pointer; color: var(--brand); }
 .pipe-retry-help p { margin-top: 8px; line-height: 1.7; }
 .pipe-retry-help strong { color: var(--ink); }
-.pipe-workbench { display: grid; grid-template-columns: minmax(0,1fr) 320px; gap: 16px; align-items: start; }
 .pipe-stage-panel, .pipe-log-panel, .pipe-history-panel { background: white; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; min-width: 0; }
 .pipe-section-heading { display: flex; justify-content: space-between; gap: 12px; align-items: center; padding: 18px 20px; border-bottom: 1px solid var(--line); }
 .pipe-section-heading h2 { font-size: 16px; font-weight: 650; }
@@ -97,33 +96,7 @@
 #pipe-log { font: 12px/1.9 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .pipe-log-footer { padding: 11px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
 .pipe-log-footer > :last-child { margin-left: auto; }
-/* 历史运行:一行一轮,点进去整屏按那一轮渲染。一轮的红很容易在被人看见之前就被
-   下一轮覆盖掉,这是唯一查得到它的地方 —— 所以它**和被它改写的东西并排**,而不是
-   待在页尾(原来点一行改的是上面一千像素外的内容,屏幕上什么都看不见)。
-   **钉住**:展开一条问题明细就能把左边那列步骤拉长几百像素,选择器不能跟着滚出去。 */
-.pipe-history-panel { position: sticky; top: 14px; }
-#pipe-history-list { max-height: min(360px, calc(100vh - 230px)); overflow-y: auto; overscroll-behavior: contain; }
-.pipe-history-empty { padding: 18px 20px; font-size: 13px; color: var(--muted); }
-.pipe-history-row { display: block; width: 100%; padding: 11px 18px 12px;
-  border: none; border-bottom: 1px solid var(--line-soft); border-radius: 0;
-  background: none; text-align: left; font-size: 13px; color: var(--ink); cursor: pointer; white-space: normal; }
-.pipe-history-row:last-child { border-bottom: none; }
-.pipe-history-row:hover { background: var(--paper); }
-.pipe-history-row.on { background: var(--brand-tint); box-shadow: inset 3px 0 0 var(--brand); }
-.pipe-history-r1 { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
-.pipe-history-r2 { display: block; margin-top: 2px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-.pipe-history-when { font: 12px var(--font-mono); color: var(--ink-2); }
-.pipe-history-kind { color: var(--ink-2); }
-.pipe-history-where { color: var(--muted); overflow-wrap: anywhere; }
-.pipe-history-result { font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; }
-.pipe-history-row[data-status=error] .pipe-history-result { color: var(--danger); }
-.pipe-history-row[data-status=ok] .pipe-history-result { color: var(--ok); }
-.pipe-history-row[data-status=running] .pipe-history-result { color: var(--brand); }
-/* 「最新」那一枚:挑一轮和回到最新在同一处,不用去别处找另一个按钮 */
-.pipe-history-row.latest .pipe-history-when::after { content: "最新"; margin-left: 7px;
-  font: 10.5px var(--font-body); color: var(--brand-deep); background: var(--brand-soft);
-  border-radius: 4px; padding: 1px 5px; vertical-align: 1px; }
-#pipe-history-live .pipe-history-row { border-bottom: 1px solid var(--line); }
+/* 历史运行那张表(一行一轮、一列一类)和概况卡里那条类型线的样式在 pipe_flow.css。 */
 
 
 /* **两栏，880 宽。** 一栏排下来正文内容 1240px，而弹窗可视区在 900/800/720 三种
@@ -236,15 +209,7 @@
   background: var(--card); flex-shrink: 0; display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
 .pipe-setup-footer > div:last-child { display: flex; justify-content: flex-end; gap: 10px; margin-left: auto; }
 .pipe-setup-footer #pipe-est { flex: 1 1 260px; min-width: 0; }
-/* **窄屏那一档只有这一个断点。** 原来这里只塌列,而「轮次列排到步骤上面、钉住关掉」
-   写在另一个更窄的断点里 —— 两条都命中时后者赢,于是 1000~1180 这一段列塌成了单列、
-   而选择器还钉着、还排在它改写的内容后面,正是「单列下它反过来挡住内容」那一档。
-   塌列和那两件事是同一个决定,所以待在同一个 `@media` 里。 */
 @media (max-width: 1180px) {
-  .pipe-workbench { grid-template-columns: 1fr; }
-  /* 选择器要排在被它改写的内容**之前**;钉住关掉(单列下它会挡住内容) */
-  .pipe-workbench > .pipe-history-panel { order: -1; position: static; }
-  #pipe-history-list { max-height: 260px; }
   #pipe-log-box { height: 280px; }
 }
 /* **两栏回落成一列。** 断点按弹窗自己的宽度定(880 + 两边留白),不蹭手机断点:

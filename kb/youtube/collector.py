@@ -7,8 +7,9 @@ from kb.collectors.feeds import FeedCollector
 from kb.feeds import registry as reg
 from kb.feeds.sync import _claim_write, _save_failure, _within_history
 from kb.maintenance import maintenance_lock
+from kb.pipeline_flow import halted
 from kb.pipeline_segments import note_retry_targets
-from kb.pipeline_state import _stage, _state
+from kb.pipeline_state import _stage
 from kb.youtube import discovery, media, notes, products, ranking, storage
 from kb.youtube.admission import TEMPORARY, gate
 from kb.youtube.channels import config
@@ -16,7 +17,8 @@ from kb.youtube.settings import of
 
 
 def stopped():
-    return bool(_state.get('stop_requested'))
+    """整轮停止,或者正在跑的这一类被提前结束(口径只有一份:`pipeline_flow.halted`)。"""
+    return halted()
 
 
 def process(rows, settings, scope, summary, deadline):

@@ -32,6 +32,7 @@ from kb.pipeline_history import (
     update_history_round as update_history_round,
 )
 from kb import pipeline_results as _results
+from kb.pipeline_payload import run_payload as _payload
 from kb.pipeline_persist import (
     _SEQ_GEN,
     _dump_bytes,
@@ -268,39 +269,9 @@ def _saved_round_strict() -> dict | None:
 
 
 def run_payload() -> dict:
-    """一轮运行的终态记录。**落盘的那份和按 id 留的那份是同一份**。
-
-    两处曾经各写各的:`_finished` 只留了身份、结束时刻、stopped 和 stages。于是
-    "没亲眼看到自己那一轮收尾、照 id 去取"的调用方(`daily_sync._sync_round` 被
-    接替的那条路)拿到的是一份**缺计划、缺来源范围、缺失败名单**的记录 —— 它看着
-    像一份完整结果,合并时却因为没有 `planned_stages` 被整个过滤掉,那一轮真实
-    的抓取失败就此消失。契约只有一份,两边都用它。
-    """
-    return {
-        "started_at": _state["started_at"],
-        "finished_at": _state["finished_at"],
-        "stopped": _state.get("stopped", False),
-        "run_kind": _state.get("run_kind", ""),
-        "planned_stages": _state.get("planned_stages"),
-        "stages": deepcopy(_state["stages"]),
-        "crawl_filter": deepcopy(_state["crawl_filter"]),
-        # 导出范围单独落一份:下一次重试要从**它**恢复,不是从收窄后的抓取范围
-        "export_filter": deepcopy(_state.get("export_filter") or {}),
-        # run_id 跟名单一起落盘:retry_notes 要拿它认"这份名单是不是这一轮的"
-        "run_id": _state.get("run_id", ""),
-        # 完成序号 + 发号世代:恢复时靠它们分出两份落盘各记着哪一轮(见
-        # `pipeline_persist._seq_of`)。**合并出来的那份也要带**,否则整批那一份一
-        # 落盘就是「没有顺序凭据」,重启之后反而被判成比子轮更旧。
-        "run_seq": _state.get("run_seq", 0),
-        "seq_gen": _state.get("seq_gen"),
-        "crawl_retry": deepcopy(_state.get("crawl_retry") or {}),
-        # 结果账:逐来源的结论和它实际覆盖的范围(`kb/pipeline_results.py`)。
-        # **跟着这份契约走**,当日账本折的就是它 —— 落不下来的话折账只能退回
-        # 「把整步那张合并卡片摊到每个来源上」,一轮里成功的来源也被记成欠着。
-        "results": _results.snapshot(),
-        "log": list(_state["log"]),
-    }
-
+    """一轮运行的终态记录。**落盘的那份和按 id 留的那份是同一份**;字段契约在
+    `pipeline_payload.run_payload`(拆过去只因为行数,入口仍是这一个)。"""
+    return _payload(_state)
 
 
 def _write_state(payload: dict) -> None:
@@ -490,8 +461,9 @@ def _restore_once() -> None:
         # 来源也算成欠着 —— 状态文件里明明写着 `results.crawl.wechat_local=ok`,
         # 恢复后自己把这份事实扔了,点一次重试又把公众号抓一遍(第 4 轮审查 R2
         # 实测 `restored.results=<字段缺失>`、`retry_wechat=['wechat_local']`)。
+        # 类型计划(`flow`)同一档:缺了它,重启后最新那一轮的类型耗时就没了。
         for key in ("stages", "crawl_filter", "export_filter", "crawl_retry",
-                    "results"):
+                    "results", "flow"):
             got = pick.get(key)
             # 取历史那份时 `export_filter` / `crawl_retry` 本来就没有:**留空而不是
             # 沿用上一轮的**,那两个字段错一个就是静默不抓。存量记录没有 `results`

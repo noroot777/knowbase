@@ -32,6 +32,7 @@ from kb.feeds.paths import export_path
 from kb.feeds.retry_targets import (TZ, _succeeded_today,  # noqa: F401
                                     still_failing)
 from kb.feeds.fetching import CollectionBudgetExceeded, SOURCE_SECONDS, fetch_source
+from kb.pipeline_flow import halted
 from kb.pipeline_segments import note_retry_targets
 from kb.source_types import SOURCE_TYPES
 from kb.pipeline_state import _state, _stage
@@ -223,7 +224,7 @@ def _prefetch_x(kind, sources, settings, scope):
     x_channels.prefetch(sources, settings, budget=X_LOCAL_SECONDS,
                         since=scope.since if scope.ranged else '',
                         on_progress=progress,
-                        should_stop=lambda: bool(_state.get('stop_requested')))
+                        should_stop=halted)
 
 
 def _prefetch_digest(kind, sources, settings, scope):
@@ -250,7 +251,7 @@ def _prefetch_digest(kind, sources, settings, scope):
                     since=scope.since if scope.ranged else '',
                     until=scope.until if scope.ranged else '',
                     on_progress=progress,
-                    should_stop=lambda: bool(_state.get('stop_requested')))
+                    should_stop=halted)
 
 
 def collect(kind, scope):
@@ -307,7 +308,7 @@ def collect(kind, scope):
     # Submit only one bounded batch so failures/stop never leave a 51-job backlog.
     with ThreadPoolExecutor(max_workers=FETCH_WORKERS, thread_name_prefix='feed') as pool:
         while pending:
-            if _state.get('stop_requested'):
+            if halted():
                 summary['stopped'] = True
                 break
             if deadline - time.monotonic() < SOURCE_SECONDS:
@@ -362,7 +363,7 @@ def collect(kind, scope):
                         continue
                 summary['checked'] += 1
                 _stage('crawl', 'running', f"{reg.KINDS[kind]} {summary['checked']}/{len(sources)} · {source['name']}")
-    summary['stopped'] |= bool(_state.get('stop_requested'))
+    summary['stopped'] |= halted()
     with reg.db() as c:
         c.execute('INSERT INTO feed_runs(kind,started_at,finished_at,summary) VALUES(?,?,?,?)',
                   (kind,started,reg.now(),json.dumps(summary,ensure_ascii=False)))

@@ -50,6 +50,8 @@ _state: dict = {
     # 同步紧接着拿到全局管道时,布尔仍是 True,停止就落到了别人头上
     # (2026-09-30 审查实测)。
     'pipeline_run': '',
+    #: 这一轮开的那个业务批次(同步中心那份计划的 owner,停止按它核对是不是这一批)。
+    'batch': '',
     'channels': [], 'result': None, 'log': [],
 }
 
@@ -111,7 +113,7 @@ def fresh_round() -> dict:
     """
     return {'phase': 'starting', 'detail': '', 'error': '', 'log': [],
             'settled_at': '', 'library': {'phase': '', 'detail': ''},
-            'stop_requested': False, 'over_budget': False,
+            'stop_requested': False, 'over_budget': False, 'batch': '',
             'channels': [], 'result': None, 'finished_at': ''}
 
 

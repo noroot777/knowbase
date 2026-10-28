@@ -28,6 +28,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from copy import deepcopy
 
+from kb import pipeline_flow as flow
 from kb import pipeline_state as ps
 from kb.pipeline_merge import _merge_runs
 
@@ -356,7 +357,7 @@ def _publish_merged(*, archive: bool) -> Exception | None:
         if archive:
             _archive_refused()
         return e
-    merged = _merge_runs(_batch_runs, _batch_notes, _batch_kind)
+    merged = _merged()
     try:
         ps._write_state(merged)
     except Exception as e:                         # noqa: BLE001 - 见 docstring
@@ -385,6 +386,21 @@ def _publish_merged(*, archive: bool) -> Exception | None:
     return None
 
 
+def _merged() -> dict:
+    """整批合并那一份(`_merge_runs`),外加这一批的类型计划(`pipeline_flow`)。
+
+    计划是这一批几轮共用的那一份,而且比任何一轮管道活得久(「生成日报」那一类
+    根本不是管道里的阶段),所以取**活的那一份**,不取子轮收尾时的快照。身份写成
+    合并结果的 run id:面板只认 `flow.run == run_id` 的那一份。计划已经收掉了
+    (这一批结束之后)就不带 —— 带一份猜出来的,比不带更糟。
+    """
+    merged = _merge_runs(_batch_runs, _batch_notes, _batch_kind)
+    told = flow.record(_batch_id)
+    if told:
+        merged["flow"] = {"run": merged.get("run_id", ""), **told}
+    return merged
+
+
 def _archive_refused() -> None:
     """发布被拒那一档:把这次的结论**原位**补进这一批自己那条历史。**永不抛。**
 
@@ -402,8 +418,7 @@ def _archive_refused() -> None:
     global _batch_issue
     try:
         from kb.pipeline_persist import run_record   # 延迟:同 `_run_record` 那条
-        if ps.update_history_round(run_record(_merge_runs(_batch_runs, _batch_notes,
-                                                          _batch_kind))):
+        if ps.update_history_round(run_record(_merged())):
             return
         why = ('这一批在同步历史里还没有自己那一条,这次的结论没能补进去')
     except Exception as e:                         # noqa: BLE001 - 见 docstring
