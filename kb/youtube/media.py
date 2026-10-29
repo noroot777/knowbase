@@ -13,8 +13,9 @@ from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR, VIDEOS_ROOT
 from kb.youtube import login, throttle, toolchain, transcripts
-from kb.youtube.diagnosis import (LOCAL, OVERSIZE, YOUTUBE, ToolFailure, diagnostics, excerpt, on_disk,
-                                   pump_output, record, redact, scrub, serial, translated, unique, written)
+from kb.youtube.diagnosis import (LOCAL, YOUTUBE, ToolFailure, diagnostics, dropped, excerpt, flooded, lost,
+                                   on_disk, pump_output, record, redact, scrub, serial, translated, unique,
+                                   written)
 from kb.youtube.channels import VIDEO_ID
 from kb.youtube.settings import model_path, of, tools
 
@@ -142,11 +143,11 @@ def run(arguments, output, deadline, stopped, partial=False, origin=YOUTUBE):
                 if stopped() or time.monotonic() >= deadline:
                     raise Interrupted('已停止或本轮视频处理时间预算用尽')
                 if state['oversize']:
-                    raise RuntimeError('工具输出异常过大，已停止本次处理')
+                    raise flooded()
                 time.sleep(.2)
             pump.join(30)
             if state['oversize']:
-                raise RuntimeError('工具输出异常过大，已停止本次处理')
+                raise flooded()
             if state['failure'] is not None:
                 raise ToolFailure(f'写不了工具输出：{state["failure"]}', '', '', LOCAL) from None
         finally:
@@ -256,14 +257,20 @@ def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes
     throttle.witness(noise)
     try:
         entries = parse(output, url)
+        # 列到了几条、但有几行是**本机那道上限**丢的:那几条照旧收下,丢掉的如实说一句。
+        # 不说的话那条视频这一轮就静默不在名单上,面板一切正常。
+        skipped = lost(output.read_text(encoding='utf-8', errors='replace'))
+        if skipped and notes is not None:
+            notes.append(f'有 {skipped} 条视频的那一行超过了本机的单行上限、没有写盘，这一轮没列出来')
     except Exception as error:
         # **半截输出底下那条真实失败说了算**(`PartialOutput.cause`):它带着上游和在完整
         # 诊断上算好的分档,而这儿看得见的只是「没有可解析的条目」。丢掉它的话,本机写盘
         # 失败经过这一抛就成了 YouTube 的失败,再过一次归并又按文本猜成「读不出 cookie」,
         # 面板让人去钥匙串放行(而该做的是腾磁盘)。没有半截输出的照旧按解析错误算。
+        # 没有半截输出时**解析那一抛自己的上游**照旧算数(`diagnosis.dropped` 抛的是本机)。
+        source = cause if cause is not None else error
         raise ToolFailure('；'.join(part for part in (reason, str(error)) if part), noise,
-                          login.coded(cause if cause is not None else error),
-                          getattr(cause, 'origin', YOUTUBE)) from None
+                          login.coded(source), getattr(source, 'origin', YOUTUBE)) from None
     finally:
         heed(output)
     if reason and notes is not None:
@@ -323,7 +330,8 @@ def _detailed(output, url):
     上同样分不开,而漏报是静默丢数据。
     """
     entries, seen = [], set()
-    for line in output.read_text(encoding='utf-8', errors='replace').splitlines():
+    text = output.read_text(encoding='utf-8', errors='replace')
+    for line in text.splitlines():
         if not line.startswith('{'):
             continue
         try:
@@ -354,6 +362,7 @@ def _detailed(output, url):
                         'url': 'https://www.youtube.com/watch?v=' + video_id})
     if not entries:
         noise = diagnostics(output)
+        dropped(text, noise)
         raise ToolFailure(f'yt-dlp 没有从 {url} 解析出带发布时间的视频', noise,
                           throttle.witness(noise))
     return entries
@@ -362,7 +371,8 @@ def _detailed(output, url):
 def _listed(output, url):
     entries = []
     seen = set()
-    for line in output.read_text(encoding='utf-8', errors='replace').splitlines():
+    text = output.read_text(encoding='utf-8', errors='replace')
+    for line in text.splitlines():
         # stdout 和 stderr 都重定向到了同一个文件,所以非 JSON 行照常出现,跳过即可。
         if not line.startswith('{'):
             continue
@@ -383,6 +393,7 @@ def _listed(output, url):
         # **工具的原话要带上**:`login.classify` 靠它分「cookie 读不出来」和「没登录」,
         # 面板上的「yt-dlp 原文」那一行也是它。只报「没列出任何视频」等于把唯一的线索扔了。
         noise = diagnostics(output)
+        dropped(text, noise)
         raise ToolFailure(f'yt-dlp 没有从 {url} 列出任何视频', noise, throttle.witness(noise))
     return entries
 
@@ -449,10 +460,8 @@ def _single(output):
             except ValueError:
                 continue
     noise = diagnostics(output)
-    if OVERSIZE in text:
-        # **是本机那道上限丢的,不是 YouTube 没给。** 照 YouTube 报的话,同一份输出里只要
-        # 还有 JS 挑战之类的警告,分类器就照它们下结论、让人去更新 yt-dlp(实测)。
-        raise ToolFailure('yt-dlp 取到了元数据，但那一行超过了本机的单行上限、没有写盘', noise, '', LOCAL)
+    # **是本机那道上限丢的,不是 YouTube 没给**(三个解析口同一个判据,见 `dropped`)。
+    dropped(text, noise, 'yt-dlp 取到了元数据，但那一行超过了本机的单行上限、没有写盘')
     raise ToolFailure('YouTube 元数据无效，未开始下载或转录', noise, throttle.witness(noise))
 
 

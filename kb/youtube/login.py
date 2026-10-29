@@ -28,7 +28,8 @@ import sys
 from pathlib import Path
 
 from kb.config import DATA_DIR
-from kb.youtube.diagnosis import COOKIES, YOUTUBE, excerpt, heard, record, serial, shown, witnessed
+from kb.youtube.diagnosis import (CAPPED, COOKIES, LOCAL, YOUTUBE, excerpt, heard, record, serial, shown,
+                                  witnessed)
 
 DEFAULT = 'chrome'
 # 顺序决定面板上那张清单的顺序。**每一档的说明都要能单独读懂,不许写「同上」。**
@@ -378,6 +379,11 @@ MESSAGES = {
                     '解题脚本会跟着一起装上；运行时要装的是 deno —— '
                     'yt-dlp 支持好几个，但只有它默认启用，别的装了也不会被用上。'
                     '元数据和字幕不受这一道影响，受影响的是下音频做本地转录那一步。',
+    # **本机这一侧的档**(`diagnosis.CAPPED`):原文里一定还混着 yt-dlp 自己的警告,
+    # 不在这儿把话说死,人只能照那几句去更新 yt-dlp、装 deno —— 照做了下一轮还是一样。
+    CAPPED: 'yt-dlp 其实取到了东西，是 kb 本机给工具输出设的上限把那一行丢掉了：'
+            '这不是 YouTube、登录态或 yt-dlp 版本的问题，原文里同时出现的其他警告也不是这次失败的原因。'
+            '换一条视频或另一个频道再检查一次；总是同一条的话，把下面的原文附上反馈。',
     'unknown': 'yt-dlp 报了一个没能归类的错误，原文附在下面。',
 }
 
@@ -490,7 +496,8 @@ def coded(error) -> str:
     算,理由在 `diagnosis` 那几个常量上面。
     """
     if getattr(error, 'origin', YOUTUBE) != YOUTUBE:
-        return 'unknown'
+        # 别的上游只有一档算数:**本机那道输出上限**(它有自己的说法,见 `MESSAGES`)。
+        return CAPPED if getattr(error, 'code', '') == CAPPED else 'unknown'
     if getattr(error, 'code', '') == UNDECIDED:
         # **已经判过、判不出来**(见 `merge` 和 `UNDECIDED`):这里再拿**拼起来的那段
         # 文本**判一次,就会把别的上游那句 `permission denied` / `429` 当成 YouTube 的墙
@@ -544,6 +551,13 @@ def merge(carrier, errors):
         carrier.code = coded(ranked[0])
         carrier.diagnostic = getattr(ranked[0], 'diagnostic', '')
         carrier.origin = YOUTUBE
+    elif any(coded(error) == CAPPED for error in errors):
+        # 排不上名次、但其中一条是**本机上限丢的**:那就是这一轮的原因,不许被归并成
+        # 「判不出来」再落回「没能归类」(那正是让人照着别的警告去更新 yt-dlp 的那一幕)。
+        own = next(error for error in errors if coded(error) == CAPPED)
+        carrier.code, carrier.origin = CAPPED, LOCAL
+        carrier.diagnostic = getattr(own, 'diagnostic', '')
+        return carrier
     elif errors:
         # **一条都排不上名次时,结论是「判不出来」,不是「没判」。** 留空的话 `coded`
         # 会拿 `carrier` 那段拼起来的消息重新分类 —— 本机的 `permission denied` 和
@@ -609,7 +623,9 @@ def _noticed(result: dict, ledger, spec: str) -> dict:
     **`detail` 不许盖掉失败自己的原文**:那一份是人唯一的线索,警告另挂一行。
     """
     said = witnessed(ledger)
-    flagged = classify(' | '.join(said)) if said else ''
+    # **失败已经判成本机上限丢的那一行时,不拿同一份输出再判一次**:那几句 yt-dlp 警告正是
+    # 当初冒名顶替这次失败的东西,并列挂出来等于把「去更新 yt-dlp」又说一遍(审查实测)。
+    flagged = classify(' | '.join(said)) if said and result.get('code') != CAPPED else ''
     wording = caution(flagged, spec)
     # 这一次**实际用的**是哪一份 cookie 库:从账上读(见 `arguments`),不事后再准备一次
     # 看「现在钉不钉得住」。同一段里几次调用说的是同一句话,按原话去重、不堆 N 遍。
@@ -650,7 +666,8 @@ def _check(settings, deadline, spec) -> dict:
         # 「cookie 读不出来」和「出口撞上机器人验证」—— 两者都和这一步本身对得上。
         # 其余一律算连不上,不拿它冒充「没登录」:那会把人送去反复登录,而问题在另一头。
         code = coded(error)
-        code = code if code in ('cookie_unreadable', 'bot_wall', 'rate_limited') else 'unreachable'
+        # 本机上限那一档照旧说它自己(说成「连不上」会让人去查网络)。
+        code = code if code in ('cookie_unreadable', 'bot_wall', 'rate_limited', CAPPED) else 'unreachable'
         return {'ready': False, 'code': code, 'browser': spec, 'checked': True,
                 'message': describe(code, spec), 'detail': evidence(error)}
     video_id = next((item['video_id'] for item in listed if VIDEO_ID.fullmatch(item['video_id'])), '')

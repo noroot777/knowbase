@@ -107,7 +107,7 @@ class Classification(unittest.TestCase):
         """每一档的说明都要能单独读懂。**比值,不比有无。**"""
         codes = ('metadata_ok', 'yt_dlp_missing', 'no_browser', 'no_channel', 'unreachable',
                  'cookie_unreadable', 'not_logged_in', 'bot_wall', 'rate_limited', 'no_access',
-                 'js_challenge', 'unknown')
+                 'js_challenge', 'output_cap', 'unknown')
         self.assertEqual(set(codes), set(login.MESSAGES), '有档位没有自己的说明,或多了一档没人用')
         spoken = [login.describe(code, 'chrome') for code in codes]
         self.assertEqual(len(spoken), len(set(spoken)), '有两档说的是同一句话')

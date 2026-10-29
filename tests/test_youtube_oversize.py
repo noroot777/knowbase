@@ -13,9 +13,14 @@ yt-dlp,而用户早就是最新版。
 
 所以这一份钉三件事:**剪掉的恰好是选轨永远不会选的**(集合级)、**剪完再量**(端到端,
 真子进程)、**真超限时说的是本机那道上限**(不许被同一份输出里的别的警告冒名顶替)。
+最后那件事**每个读日志的解析口都要成立**(单条元数据、两条列频道的路、总量上限、归并层、
+检查结论旁边那条并列提醒)—— 只修一个口,另外几个照旧让人去更新 yt-dlp(审查实测)。
 """
+import io
 import json
+import os
 import sys
+import tempfile
 import time
 import unittest
 from unittest.mock import patch
@@ -108,13 +113,54 @@ class TrimmingKeepsEveryTrackThatCouldBePicked(unittest.TestCase):
         written = diagnosis.redact(b'WARNING: ' + b'x' * (diagnosis._LINE_CAP + 1) + b'\n')
         self.assertIn(diagnosis.OVERSIZE.encode('utf-8'), written)
 
+    def test_a_line_past_the_parse_ceiling_is_never_parsed(self):
+        """**解析之前还有一道硬天花板**:剪完能很小的那一行,过了天花板也不许拿去解析
+        (解析要占原文约 4 倍内存)。判据是「解析器有没有被叫到」,不是返回值像不像。"""
+        with patch.object(diagnosis, '_PARSE_CAP', len(self.line) - 1), \
+                patch.object(diagnosis.json, 'loads', side_effect=AssertionError('过了天花板还在解析')):
+            written = diagnosis.redact(self.line)
+        self.assertEqual(1, diagnosis.lost(written.decode()))
 
-#: 假 yt-dlp:先印用户贴出来的那几句警告,再印一行元数据 JSON。`@PAYLOAD@` 是那一行的文件。
+    def test_a_line_too_deep_to_parse_is_just_text(self):
+        """嵌套过深(`RecursionError`)和语法不对是同一件事:按非 JSON 行写下去,不许抛出泵线程。"""
+        deep = b'[' * 200000 + b'\n'
+        self.assertEqual(deep, diagnosis.redact(deep))
+
+    def test_a_pump_that_runs_out_of_memory_says_so(self):
+        """内存不够也要落进 `failure`:漏出去的话泵线程静默死掉,这一轮按 yt-dlp 的退出码结算。"""
+        state = {'bytes': 0, 'oversize': False, 'done': False, 'failure': None}
+        with patch.object(diagnosis, 'redact', side_effect=MemoryError()):
+            diagnosis.pump_output(io.BytesIO(b'{}\n'), self.scratch(), state)
+        self.assertIsInstance(state['failure'], MemoryError)
+        self.assertTrue(state['done'])
+
+    def scratch(self):
+        handle, name = tempfile.mkstemp()
+        os.close(handle)
+        self.addCleanup(os.unlink, name)
+        return name
+
+    def test_tlang_somewhere_else_in_the_link_is_not_a_translation(self):
+        """反过来钉一边:`tlang` 这几个字出现在别的参数里不算现场翻译(子串只是快路)。"""
+        for url in ('https://www.youtube.com/api/timedtext?v=x&lang=en&name=xtlang',
+                    'https://www.youtube.com/api/timedtext?v=x&lang=en&xtlang=fr'):
+            with self.subTest(url=url):
+                self.assertFalse(diagnosis.translated({'url': url}))
+        self.assertTrue(diagnosis.translated({'url': 'https://www.youtube.com/api/timedtext?v=x&tlang=fr'}))
+
+
+#: 假 yt-dlp:先印用户贴出来的那几句警告,再印输出。flat 列频道印 `@LISTING@`,
+#: 别的(逐条列频道、取单条元数据)印 `@PAYLOAD@`。
 FAKE = '''
 import pathlib, sys
 sys.stdout.write(@CHALLENGE@)
-sys.stdout.write(pathlib.Path(r'@PAYLOAD@').read_text(encoding='utf-8'))
+answer = r'@LISTING@' if '--flat-playlist' in sys.argv else r'@PAYLOAD@'
+sys.stdout.write(pathlib.Path(answer).read_text(encoding='utf-8'))
 '''
+#: 剪完仍超限的那一种(长简介之类):剪不掉,只能说是本机丢的。
+def bloated():
+    return {**metadata(languages=1, copies=1), 'upload_date': '20261027',
+            'description': 'x' * (diagnosis._LINE_CAP + 1)}
 
 
 class TheRealCallSite(YouTubeFixture):
@@ -123,16 +169,29 @@ class TheRealCallSite(YouTubeFixture):
     def setUp(self):
         super().setUp()
         self.payload = self.root / 'payload.json'
+        self.listing = self.root / 'listing.json'
+        self.listing.write_text(json.dumps({'id': VIDEO, 'title': 't', 'duration': 600}) + '\n', encoding='utf-8')
         script = self.root / 'fake-ytdlp.py'
-        script.write_text(FAKE.replace('@CHALLENGE@', repr(CHALLENGE)).replace('@PAYLOAD@', str(self.payload)),
-                          encoding='utf-8')
+        script.write_text(FAKE.replace('@CHALLENGE@', repr(CHALLENGE)).replace('@PAYLOAD@', str(self.payload))
+                          .replace('@LISTING@', str(self.listing)), encoding='utf-8')
         tool = patch.object(toolchain, 'command', return_value=[sys.executable, str(script)])
         tool.start()
         self.addCleanup(tool.stop)
         self.row = {'video_id': VIDEO, 'entry': {'url': f'https://www.youtube.com/watch?v={VIDEO}'}}
 
+    def answer(self, *lines):
+        self.payload.write_text(''.join(json.dumps(line) + '\n' for line in lines), encoding='utf-8')
+
+    def ours(self, failure):
+        """**是本机那道上限丢的**:三处后果一起看 —— 档、原文、有没有被记成 YouTube 的墙。"""
+        self.assertEqual(diagnosis.LOCAL, failure.origin)
+        self.assertEqual(diagnosis.CAPPED, login.coded(failure), '又落回了别的档(上一次是让人去更新 yt-dlp)')
+        summary = {}
+        collector.wall(summary, ['1'], failure)
+        self.assertEqual({}, summary, '本机那道上限被记成了 YouTube 的墙')
+
     def probe(self, payload):
-        self.payload.write_text(json.dumps(payload) + '\n', encoding='utf-8')
+        self.answer(payload)
         return media.probe(self.row, {'youtube': {}}, time.monotonic() + 30, lambda: False, force=True)
 
     def test_the_eleven_megabyte_answer_is_read(self):
@@ -147,16 +206,76 @@ class TheRealCallSite(YouTubeFixture):
         判据落在后果上:分档不是 `js_challenge`(那会让人去更新 yt-dlp)、给人看的原文里有
         那句「超过了单行上限」、失败归并不把它记成 YouTube 的墙。
         """
-        bloated = {**metadata(languages=1, copies=1), 'description': 'x' * (diagnosis._LINE_CAP + 1)}
         with self.assertRaises(diagnosis.ToolFailure) as caught:
-            self.probe(bloated)
-        failure = caught.exception
-        self.assertEqual(diagnosis.LOCAL, failure.origin)
-        self.assertNotEqual('js_challenge', login.coded(failure), '又让人去更新 yt-dlp 了')
-        self.assertIn(diagnosis.OVERSIZE, login.evidence(failure), '面板上的原文里看不见真正的原因')
-        summary = {}
-        collector.wall(summary, ['1'], failure)
-        self.assertEqual({}, summary, '本机那道上限被记成了 YouTube 的墙')
+            self.probe(bloated())
+        self.ours(caught.exception)
+        self.assertIn(diagnosis.OVERSIZE, login.evidence(caught.exception), '面板上的原文里看不见真正的原因')
+
+    def test_both_listing_paths_say_it_was_us(self):
+        """**列频道那两条路同一个判据**:几十个频道一起报「去更新 yt-dlp」的那一幕。"""
+        source = self.channel()
+        self.answer(bloated())
+        self.listing.write_text(self.payload.read_text(encoding='utf-8'), encoding='utf-8')
+        for name in ('detailed_videos', 'channel_videos'):
+            with self.subTest(path=name), self.assertRaises(diagnosis.ToolFailure) as caught:
+                getattr(media, name)(source, {'youtube': {}}, time.monotonic() + 30, lambda: False)
+            self.ours(caught.exception)
+
+    def test_a_listing_with_one_lost_line_keeps_the_rest_and_says_so(self):
+        """反过来钉一边:列到了别的几条就照旧收下,**丢掉的那条如实说一句**(不许静默缺一条)。"""
+        small = {'id': 'abcdefghijk', 'title': 't', 'duration': 600, 'upload_date': '20261027'}
+        self.answer(small, bloated())
+        notes = []
+        found = media.detailed_videos(self.channel(), {'youtube': {}}, time.monotonic() + 30, lambda: False,
+                                      notes=notes)
+        self.assertEqual(['abcdefghijk'], [item['video_id'] for item in found])
+        self.assertEqual(1, len(notes), notes)
+        self.assertIn('本机的单行上限', notes[0])
+
+    def test_the_total_cap_is_ours_too(self):
+        """一次调用的输出**总量**撞上限也是本机的事。裸 `RuntimeError` 的那一版,检查那一侧
+        说成「连不上 YouTube,先看网络」。"""
+        self.answer(*[{'id': VIDEO, 'filler': 'y' * 4096}] * 64)
+        with patch.object(diagnosis, '_OUTPUT_CAP', 64 * 1024), self.assertRaises(diagnosis.ToolFailure) as caught:
+            media.probe(self.row, {'youtube': {}}, time.monotonic() + 30, lambda: False, force=True)
+        self.ours(caught.exception)
+
+    def test_merging_keeps_it(self):
+        """**归并层不许把它丢回「判不出来」**;反过来,真有一道 YouTube 的墙时照旧是那道墙。"""
+        own = diagnosis.ToolFailure('丢了一行', 'x', diagnosis.CAPPED, diagnosis.LOCAL)
+        vague = diagnosis.ToolFailure('超时', 'y', '', diagnosis.YOUTUBE)
+        walled = diagnosis.ToolFailure('墙', 'z', 'bot_wall', diagnosis.YOUTUBE)
+        self.assertEqual(diagnosis.CAPPED, login.coded(login.merge(diagnosis.ToolFailure('合并'), [vague, own])))
+        self.assertEqual('bot_wall', login.coded(login.merge(diagnosis.ToolFailure('合并'), [own, walled])))
+
+    def test_the_check_speaks_for_itself_and_does_not_echo_the_warnings(self):
+        """**检查结论旁边那条并列提醒**不许再拿同一份输出重算 —— 那几句正是当初冒名顶替的东西。"""
+        self.channel()
+        self.settings(cookies_browser='chrome')
+        self.answer(bloated())
+        result = login.check(self.settings())
+        self.assertEqual(diagnosis.CAPPED, result['code'], result)
+        self.assertEqual(login.describe(diagnosis.CAPPED, 'chrome'), result['message'])
+        self.assertNotIn('warning_code', result, '又并列让人去更新 yt-dlp 了')
+        self.assertIn(diagnosis.OVERSIZE, result.get('detail', ''))
+
+    def test_a_listing_that_overflows_is_not_called_unreachable(self):
+        """列频道那一步撞上它时,检查不许说成「连不上 YouTube」(会让人去查网络)。"""
+        self.channel()
+        self.settings(cookies_browser='chrome')
+        self.answer(bloated())
+        self.listing.write_text(self.payload.read_text(encoding='utf-8'), encoding='utf-8')
+        self.assertEqual(diagnosis.CAPPED, login.check(self.settings())['code'])
+
+    def test_a_check_that_got_through_still_mentions_the_challenge(self):
+        """反过来钉一边:**取到了**的那一轮,JS 挑战那句并列提醒照旧在 —— 它是对的
+        (下音频那一步确实过不去),压掉它的只该是「失败已经判成本机上限」那一种。"""
+        self.channel()
+        self.settings(cookies_browser='chrome')
+        self.answer(metadata())
+        result = login.check(self.settings())
+        self.assertEqual('metadata_ok', result['code'], result)
+        self.assertEqual('js_challenge', result.get('warning_code'))
 
 
 if __name__ == '__main__':

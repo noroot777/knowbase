@@ -187,7 +187,11 @@ class YouTubeMedia(YouTubeFixture):
                      b'[info] Writing video subtitles to: en.vtt\n'):
             with self.subTest(line=keep[:40]):
                 self.assertEqual(keep.decode(), media.redact(keep).decode())
-        self.assertEqual('[过长的输出已遮蔽]\n', media.redact(b'z' * (4 * 1024 * 1024 + 1)).decode())
+        # 替身的字面量不写死:它的措辞改过一次(旧的以 `[` 开头、被当成 JSON 行滤掉),认它的口径只有
+        # `diagnosis.lost`。这里钉的是「超长照旧不写盘、写的是那个替身」。
+        capped = media.redact(b'z' * (4 * 1024 * 1024 + 1))
+        self.assertEqual(1, diagnosis.lost(capped.decode()))
+        self.assertLess(len(capped), 200, '超长那一行还是被原样写了盘')
 
     def test_the_detailed_path_asks_for_real_dates_and_keeps_the_login_state(self):
         """**第 2 条发现路要的就是「真实日期」这一点**,不然它不值那份时间。

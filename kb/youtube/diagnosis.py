@@ -224,11 +224,42 @@ def _hide(match):
 _LINE_CAP = 4 * 1024 * 1024
 #: 一次调用的输出总上限。
 _OUTPUT_CAP = 8 * 1024 * 1024
+#: **解析之前**的那道硬天花板。「先剪再量」把 `_LINE_CAP` 挪到了解析之后,而 `json.loads`
+#: 一行要占原文约 4 倍的内存(实测 6.5 / 13 / 26 MiB 三档都是 4.0 倍)—— 没有这一道,
+#: 一行多大就解析多大。真实元数据远到不了这儿(实测最大 11.55 MiB),到了就不是元数据。
+_PARSE_CAP = 64 * 1024 * 1024
 #: 超限那一行写进文件的替身。**不许长得像 JSON**(不以 `{` / `[` 开头):原先那版是
 #: `[过长的输出已遮蔽]`,`diagnostics()` 把它当 JSON 行滤掉了,于是面板上「yt-dlp 原文」
 #: 只剩同一份输出里那几句 JS 挑战警告 —— 分类器照它们下结论,让人去「更新 yt-dlp」,
-#: 而他早就是最新版,更新了也没用(实测)。消费方按 `OVERSIZE in text` 认它。
+#: 而他早就是最新版,更新了也没用(实测)。**消费方只许过 `lost()` / `dropped()` 认它**。
 OVERSIZE = 'kb:这一行输出超过了单行上限,整行没有写盘'
+#: 「东西是本机那道上限丢的」这一档。**它是 `LOCAL` 上游唯一一个有自己说法的档**
+#: (`login.MESSAGES`):别的本机失败(写盘、权限)各说各的原文就够了,这一档不行 ——
+#: 它的原文里**一定还混着 yt-dlp 自己的那几句警告**,不给它一句话,人只能照那几句去做。
+CAPPED = 'output_cap'
+
+
+def lost(text) -> int:
+    """这份输出里有几行是**本机那道单行上限**丢掉的。"""
+    return str(text or '').count(OVERSIZE)
+
+
+def dropped(text, noise, what='yt-dlp 取到了东西，但有一行超过了本机的单行上限、没有写盘'):
+    """这份输出里有没有**我们自己**丢掉的那一行。有就按本机失败抛,**所有读日志的解析口都过它**。
+
+    原先只有取单条元数据那一处认 `OVERSIZE`,列频道那两条路照旧把失败算成 YouTube 的 ——
+    分类器挑中同一份输出里的 JS 挑战警告,`collector.wall` 再把几十个频道归并成一句
+    「去更新 yt-dlp、装 deno」(审查实测)。**谁报的错不许由抛异常的那一处各自决定。**
+    """
+    if lost(text):
+        raise ToolFailure(what, noise, CAPPED, LOCAL)
+
+
+def flooded():
+    """一次调用的输出**总量**撞上本机上限。和 `dropped` 同一档:裸 `RuntimeError` 没有上游,
+    `login.coded` 按 YouTube 算,检查那一侧就说成「连不上 YouTube,先看网络」(审查实测)。"""
+    return ToolFailure(f'工具输出异常过大（超过本机的总量上限 {_OUTPUT_CAP // 1024 // 1024} MiB），已停止本次处理',
+                       '', CAPPED, LOCAL)
 
 
 def translated(item) -> bool:
@@ -237,7 +268,10 @@ def translated(item) -> bool:
     `media.tracks` 选字幕时排除它们(翻出来的不是原话),`redact` 写盘前剪掉它们 ——
     两处用同一个判据,剪掉的就恰好是选轨永远不会选的那些,选出来的一条都不少。
     """
-    return isinstance(item, dict) and bool(parse_qs(urlsplit(str(item.get('url') or '')).query).get('tlang'))
+    # 子串只是**快路**(一行 4 万条,整条解析要 100 毫秒、子串 4 毫秒),结论仍由解析给:
+    # 不带这几个字的一定没有这个参数,带了的(比如别的参数值里恰好有)要解析了才算数。
+    url = str(item.get('url') or '') if isinstance(item, dict) else ''
+    return 'tlang' in url and bool(parse_qs(urlsplit(url).query).get('tlang'))
 
 
 def trim(value):
@@ -272,11 +306,14 @@ def redact(line: bytes) -> bytes:
     读进内存(`pump_output` 按行迭代),先解析不多花内存。解析不了的照非 JSON 行处理:
     先量上限,再按特征串只遮凭据的值。
     """
+    if len(line) > _PARSE_CAP:
+        return _oversize(len(line))
     stripped = line.strip()
     if stripped.startswith((b'{', b'[')):
         try:
             payload = json.loads(stripped)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # 嵌套过深(`RecursionError`)和语法不对是同一件事:这不是一份能解析的元数据。
             pass
         else:
             cleaned = (json.dumps(trim(scrub(payload)), ensure_ascii=False) + '\n').encode('utf-8')
@@ -305,7 +342,9 @@ def pump_output(stream, path, state):
                     return
                 log.write(data)
                 log.flush()
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, MemoryError) as error:
+        # `MemoryError` 也要落在这儿:解析挪到了上限之前,漏出去的话泵线程静默死掉、
+        # `failure` 仍是 `None`,这一轮按 yt-dlp 自己的退出码结算 —— 又一次本机的事记到 YouTube 头上。
         state['failure'] = error
     finally:
         state['done'] = True
