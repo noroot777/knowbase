@@ -15,6 +15,9 @@ yt-dlp,而用户早就是最新版。
 真子进程)、**真超限时说的是本机那道上限**(不许被同一份输出里的别的警告冒名顶替)。
 最后那件事**每个读日志的解析口都要成立**(单条元数据、两条列频道的路、总量上限、归并层、
 检查结论旁边那条并列提醒)—— 只修一个口,另外几个照旧让人去更新 yt-dlp(审查实测)。
+**反过来:压掉的只许是和结论冲突的那一档**,前一步说过的别的话(读不出 cookie)一个字都不许丢 ——
+按结论整条关掉并列通道的那一版就这么吞过一次(审查实测)。集合级那一条在
+`EveryWarningSurvivesEveryConclusion`。
 """
 import io
 import json
@@ -26,6 +29,7 @@ import unittest
 from unittest.mock import patch
 
 from kb.youtube import collector, diagnosis, login, media, toolchain
+from kb.youtube.diagnosis import CAPPED, LOCAL, YOUTUBE, ToolFailure
 from tests.youtube_fixture import YouTubeFixture
 
 #: 用户贴出来的那几句原话。它们和元数据**同一份输出**,真超限时不许由它们来下结论。
@@ -122,9 +126,25 @@ class TrimmingKeepsEveryTrackThatCouldBePicked(unittest.TestCase):
         self.assertEqual(1, diagnosis.lost(written.decode()))
 
     def test_a_line_too_deep_to_parse_is_just_text(self):
-        """嵌套过深(`RecursionError`)和语法不对是同一件事:按非 JSON 行写下去,不许抛出泵线程。"""
-        deep = b'[' * 200000 + b'\n'
-        self.assertEqual(deep, diagnosis.redact(deep))
+        """嵌套过深(`RecursionError`)和语法不对是同一件事:按非 JSON 行写下去,不许抛出泵线程。
+
+        **三段深度都要走**:`json.loads` 自己先抛的(很深)、解析得过但 `scrub` 递归不过的
+        (几百层,只保护 `json.loads` 的那一版在这一段漏)、都过得去的(浅)。
+        """
+        for depth in (300, 700, 200000):
+            with self.subTest(depth=depth):
+                deep = b'[' * depth + b']' * (depth if depth < 1000 else 0) + b'\n'
+                self.assertTrue(diagnosis.redact(deep).startswith(b'['))
+
+    def test_the_marker_only_counts_where_redact_wrote_it(self):
+        """**丢行的信号不许和内容混得起来**:简介里原样抄了那句话、或者工具自己印了一行以它
+        开头的话,都不算丢了一行。反过来,真丢的那一行照旧数得到。"""
+        quoted = diagnosis.redact((json.dumps({'id': VIDEO, 'description': diagnosis.OVERSIZE}) + '\n').encode())
+        printed = diagnosis.redact((diagnosis.OVERSIZE + '(没别的意思)\n').encode())
+        real = diagnosis.redact(b'z' * (diagnosis._LINE_CAP + 1) + b'\n')
+        self.assertEqual(0, diagnosis.lost(quoted.decode()))
+        self.assertEqual(0, diagnosis.lost(printed.decode()))
+        self.assertEqual(1, diagnosis.lost((quoted + printed + real).decode()))
 
     def test_a_pump_that_runs_out_of_memory_says_so(self):
         """内存不够也要落进 `failure`:漏出去的话泵线程静默死掉,这一轮按 yt-dlp 的退出码结算。"""
@@ -239,6 +259,17 @@ class TheRealCallSite(YouTubeFixture):
         with patch.object(diagnosis, '_OUTPUT_CAP', 64 * 1024), self.assertRaises(diagnosis.ToolFailure) as caught:
             media.probe(self.row, {'youtube': {}}, time.monotonic() + 30, lambda: False, force=True)
         self.ours(caught.exception)
+        self.assertIn('Only images are available', caught.exception.diagnostic, '工具说了什么没交到面板上')
+
+    def test_a_listing_that_cannot_be_rechecked_keeps_what_it_got(self):
+        """条目已经解析在手,**事后核对丢行那一步读不了盘也不许把它们整批丢掉**(还记到 YouTube 头上)。"""
+        self.answer({'id': 'abcdefghijk', 'title': 't', 'duration': 600, 'upload_date': '20261027'})
+        notes = []
+        with patch.object(media, 'lost', side_effect=OSError('读不回')):
+            found = media.detailed_videos(self.channel(), {'youtube': {}}, time.monotonic() + 30,
+                                          lambda: False, notes=notes)
+        self.assertEqual(['abcdefghijk'], [item['video_id'] for item in found])
+        self.assertTrue(any('读不回' in note for note in notes), notes)
 
     def test_merging_keeps_it(self):
         """**归并层不许把它丢回「判不出来」**;反过来,真有一道 YouTube 的墙时照旧是那道墙。"""
@@ -248,16 +279,29 @@ class TheRealCallSite(YouTubeFixture):
         self.assertEqual(diagnosis.CAPPED, login.coded(login.merge(diagnosis.ToolFailure('合并'), [vague, own])))
         self.assertEqual('bot_wall', login.coded(login.merge(diagnosis.ToolFailure('合并'), [own, walled])))
 
-    def test_the_check_speaks_for_itself_and_does_not_echo_the_warnings(self):
-        """**检查结论旁边那条并列提醒**不许再拿同一份输出重算 —— 那几句正是当初冒名顶替的东西。"""
+    def test_the_check_speaks_for_itself_and_does_not_echo_the_challenge(self):
+        """**检查结论旁边那条并列提醒**不许再把 JS 挑战挂出来 —— 那一句正是当初冒名顶替的东西。"""
         self.channel()
         self.settings(cookies_browser='chrome')
         self.answer(bloated())
         result = login.check(self.settings())
         self.assertEqual(diagnosis.CAPPED, result['code'], result)
         self.assertEqual(login.describe(diagnosis.CAPPED, 'chrome'), result['message'])
-        self.assertNotIn('warning_code', result, '又并列让人去更新 yt-dlp 了')
+        self.assertNotEqual('js_challenge', result.get('warning_code'), '又并列让人去更新 yt-dlp 了')
+        self.assertNotIn('deno', result.get('warning', ''))
         self.assertIn(diagnosis.OVERSIZE, result.get('detail', ''))
+
+    def test_what_the_listing_said_still_reaches_the_page(self):
+        """**那一幕原样**:列频道时报了读不出 cookie,随后取元数据撞上限 —— cookie 那句照旧并列在。"""
+        self.channel()
+        self.settings(cookies_browser='chrome')
+        self.answer(bloated())
+        self.listing.write_text('WARNING: cannot decrypt v10 cookies: no key found\n'
+                                + json.dumps({'id': VIDEO, 'title': 't', 'duration': 600}) + '\n', encoding='utf-8')
+        result = login.check(self.settings())
+        self.assertEqual(diagnosis.CAPPED, result['code'], result)
+        self.assertEqual('cookie_unreadable', result.get('warning_code'), '前一步说过的话被吞了')
+        self.assertIn('钥匙串', result.get('warning', ''))
 
     def test_a_listing_that_overflows_is_not_called_unreachable(self):
         """列频道那一步撞上它时,检查不许说成「连不上 YouTube」(会让人去查网络)。"""
@@ -276,6 +320,58 @@ class TheRealCallSite(YouTubeFixture):
         result = login.check(self.settings())
         self.assertEqual('metadata_ok', result['code'], result)
         self.assertEqual('js_challenge', result.get('warning_code'))
+
+
+def sample(code):
+    """一句**单独拿出来就判得出这一档**的原话(取那一档自己的特征串)。"""
+    marks = dict(login._MARKS)[code]
+    return next('WARNING: ' + mark for mark in marks if login.classify('WARNING: ' + mark) == code)
+
+
+class EveryWarningSurvivesEveryConclusion(unittest.TestCase):
+    """**集合级那一条:任何一档结论下,前一步说过的话都还在** —— 除了和结论冲突的那一档(`login.MUTED`)。
+
+    按结论整条关掉并列通道的那一版,今天吞的是「本机上限 × 读不出 cookie」,换成以后任何一档
+    结论都一样。所以枚举的是**全部结论 × 全部并列档**,检查和同步两条路各走一遍(同一份口径)。
+    """
+
+    WARNED = [code for code in login.CAUTIONS if code in login.VERDICTS]
+
+    def test_the_check_side(self):
+        self.assertIn('cookie_unreadable', self.WARNED, '一档都没枚举到,下面全是空转')
+        self.assertIn(CAPPED, login.MUTED, '冲突表里一条都没有,反过来那一半什么都没验')
+        for conclusion in login.MESSAGES:
+            for code in self.WARNED:
+                with self.subTest(conclusion=conclusion, warned=code), diagnosis.heard() as ledger:
+                    diagnosis.record(sample(code))
+                    result = login._noticed({'ready': False, 'code': conclusion}, ledger, 'chrome')
+                    expected = None if code in login.MUTED.get(conclusion, ()) else code
+                    self.assertEqual(expected, result.get('warning_code'))
+
+    def test_the_sync_side(self):
+        for conclusion in [None, *login.VERDICTS, CAPPED]:
+            for code in self.WARNED:
+                with self.subTest(conclusion=conclusion, warned=code):
+                    summary = {}
+                    try:
+                        with collector.heeded(summary, ['7']):
+                            diagnosis.record(sample(code))
+                            if conclusion:
+                                raise ToolFailure('失败', '', conclusion, LOCAL if conclusion == CAPPED else YOUTUBE)
+                    except ToolFailure:
+                        pass
+                    muted = code in login.MUTED.get(conclusion or '', ())
+                    self.assertEqual({} if muted else {code: ['7']}, summary.get('cautions', {}))
+
+    def test_only_the_conflicting_one_goes(self):
+        """两句都说过时,冲突的那一句让位、另一句顶上 —— 不是一起没了。"""
+        said = sample('js_challenge') + ' | ' + sample('cookie_unreadable')
+        self.assertEqual('cookie_unreadable', login.beside(CAPPED, said))
+        self.assertEqual(login.classify(said), login.beside('unknown', said), '没有冲突时就是 classify 的结论')
+        # 今天让位的那一档(`js_challenge`)恰好排在 `_MARKS` 最末,「只看第一档、冲突就不说」在
+        # 今天这张表上和「跳过冲突那档」等价 —— 换一张让**排头那档**让位的表,两者才分得开。
+        with patch.dict(login.MUTED, {CAPPED: ('cookie_unreadable',)}):
+            self.assertEqual('js_challenge', login.beside(CAPPED, said), '冲突那档让位之后,下一档没顶上')
 
 
 if __name__ == '__main__':

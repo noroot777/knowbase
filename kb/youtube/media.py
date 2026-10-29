@@ -143,11 +143,9 @@ def run(arguments, output, deadline, stopped, partial=False, origin=YOUTUBE):
                 if stopped() or time.monotonic() >= deadline:
                     raise Interrupted('已停止或本轮视频处理时间预算用尽')
                 if state['oversize']:
-                    raise flooded()
+                    break
                 time.sleep(.2)
             pump.join(30)
-            if state['oversize']:
-                raise flooded()
             if state['failure'] is not None:
                 raise ToolFailure(f'写不了工具输出：{state["failure"]}', '', '', LOCAL) from None
         finally:
@@ -165,6 +163,9 @@ def run(arguments, output, deadline, stopped, partial=False, origin=YOUTUBE):
             # 已经读到的那句 cookie 警告就整段蒸发(审查三轮各实测到一种组合)。
             # **这里只记事实,要不要说、说给谁听由开账那一段决定**(`diagnosis.heard`)。
             record(state['noise'], origin)
+        if state['oversize']:
+            # 等完成边界读完原文再抛:工具说了什么得交到面板上(先抛的那一版 `diagnostic` 是空的)。
+            raise flooded(state['noise'])
         if process.returncode:
             # **分档在这儿就算完**,算的是完整诊断;异常消息只是给人看的摘要。
             raise ToolFailure(f'{arguments[0]} 执行失败', state['noise'], state['code'], origin)
@@ -259,7 +260,13 @@ def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes
         entries = parse(output, url)
         # 列到了几条、但有几行是**本机那道上限**丢的:那几条照旧收下,丢掉的如实说一句。
         # 不说的话那条视频这一轮就静默不在名单上,面板一切正常。
-        skipped = lost(output.read_text(encoding='utf-8', errors='replace'))
+        try:
+            skipped = lost(output.read_text(encoding='utf-8', errors='replace'))
+        except OSError as error:
+            # 条目已经在手:**核对不了不许把它们整批丢掉**(落进下面那个 except 就是这个后果)。
+            skipped = 0
+            if notes is not None:
+                notes.append(f'读不回这一轮的输出，没能核对有没有被本机上限丢掉的条目：{error}')
         if skipped and notes is not None:
             notes.append(f'有 {skipped} 条视频的那一行超过了本机的单行上限、没有写盘，这一轮没列出来')
     except Exception as error:

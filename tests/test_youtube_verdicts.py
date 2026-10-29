@@ -25,7 +25,7 @@ from unittest.mock import patch
 from kb.feeds import registry as reg
 from kb.feeds.sync import FAILURE_CAP, _save_failure
 from kb.youtube import collector, discovery, login, media, storage
-from kb.youtube.diagnosis import LOCAL, MODEL, YOUTUBE, ToolFailure
+from kb.youtube.diagnosis import CAPPED, LOCAL, MODEL, YOUTUBE, ToolFailure
 from tests.youtube_fixture import YouTubeFixture
 
 #: 落库那两列的名字。**凡是往它们写字的调用都算一个失败展示出口。**
@@ -46,6 +46,12 @@ def failure(code, diagnostic=NOISE, origin=YOUTUBE):
     return ToolFailure('yt-dlp 执行失败', diagnostic, code, origin)
 
 
+#: **判得出来的每一档,连同它的上游**:`VERDICTS` 是 YouTube 那几档(从文本特征认),
+#: 本机上限那一档(`CAPPED`)不靠文本认、上游是本机,所以不在 `VERDICTS` 里 —— 只循环
+#: `VERDICTS` 的话,它「存进库、再读回页面之后还得是它」这件事没有任何一条兜着。
+JUDGED = [(code, YOUTUBE) for code in login.VERDICTS] + [(CAPPED, LOCAL)]
+
+
 #: 字幕那一步失败时留在**摘要**里的那句话。权威诊断里没有它 —— 它是「这一轮试了哪几步、
 #: 最后停在哪」,只有摘要还记得前面那几次(`media` 把每条原因裁到 300 字拼起来)。
 TRIED = '没有可用字幕，且本地语音转录这一步随后也失败了'
@@ -58,7 +64,7 @@ TRIED = '没有可用字幕，且本地语音转录这一步随后也失败了'
 STAGE = '自动字幕 en-orig 下载失败：' * 20
 
 
-def carried(code, diagnostic=NOISE):
+def carried(code, diagnostic=NOISE, origin=YOUTUBE):
     """`media` 合并多条原因时交出来的那个 carrier,**按它的原样造**:两条原因。
 
     第一条只在摘要里留下一句话(没有分档、没有诊断),第二条才是判出档的那次工具失败。
@@ -66,7 +72,7 @@ def carried(code, diagnostic=NOISE):
     就该这样,所以末端既不能拿它当完整证据,**也不能把它整个扔掉**。
     """
     broken = [ValueError(TRIED), ValueError('；'.join(['人工字幕失败' * 20, '自动字幕 en 失败' * 20])),
-              ToolFailure(STAGE, diagnostic, code, YOUTUBE)]
+              ToolFailure(STAGE, diagnostic, code, origin)]
     return login.merge(RuntimeError('；'.join(str(error)[:300] for error in broken)), broken)
 
 
@@ -81,9 +87,9 @@ class VerdictsSurviveTheMerge(unittest.TestCase):
         反过来,要是谁又把排序名单当白名单用,这一条当场红。
         """
         self.assertIn('js_challenge', login.VERDICTS, '这一档都不在名单里,下面全是空转')
-        for code in login.VERDICTS:
+        for code, origin in JUDGED:
             with self.subTest(code=code):
-                merged = login.merge(RuntimeError('字幕都没取到'), [failure(code)])
+                merged = login.merge(RuntimeError('字幕都没取到'), [failure(code, origin=origin)])
                 self.assertEqual(code, login.coded(merged), '归并之后分档没了')
                 self.assertIn('Requested format is not available', merged.diagnostic,
                               '完整原文没跟过来,面板上只剩开头那截')
@@ -191,9 +197,10 @@ class TheVideoRowKeepsTheRealReason(YouTubeFixture):
         只钉 `js_challenge` 那一条触发路径等于把同一个缺陷留给下一档 —— 这个末端
         丢的不是某一档,是「权威诊断」这件事本身。
         """
-        for code in login.VERDICTS:
+        for code, origin in JUDGED:
             with self.subTest(code=code):
-                error = carried(code)
+                error = carried(code, origin=origin)
+                self.assertEqual(code, login.coded(error), '归并那一段就丢了,下面验的不是落库')
                 for mark in (HEAD, TAIL):
                     self.assertNotIn(mark, str(error),
                                      '摘要里本来就没有诊断那两行,否则这条用例什么都没验')

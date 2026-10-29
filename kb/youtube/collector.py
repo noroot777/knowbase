@@ -74,7 +74,7 @@ def wall(summary, source_ids, error):
         known.extend(str(source_id) for source_id in source_ids)
 
 
-def caution(summary, source_ids, ledger):
+def caution(summary, source_ids, ledger, conclusion=''):
     """这一段里工具报过的那些话:记在账上,由收尾归并成一句话。
 
     **只认 YouTube 那个上游说的**(`diagnosis.witnessed`):ffmpeg、whisper-cli 的输出
@@ -87,8 +87,9 @@ def caution(summary, source_ids, ledger):
     **按分档归并、不逐条堆原文**:同一个出口一次全中,逐条堆等于同一句话印 N 遍
     (口径同 `wall`)。认不出的档一个字都不说(见 `login.cautioned`)。
     """
+    # **和这一步结论冲突的那一档不说**,口径与「检查登录态」同一份(`login.beside`)。
     for noise in diagnosis.witnessed(ledger):
-        code = login.classify(noise)
+        code = login.beside(conclusion, noise)
         if code in login.CAUTIONS:
             known = summary.setdefault('cautions', {}).setdefault(code, [])
             known.extend(str(source_id) for source_id in source_ids)
@@ -114,10 +115,14 @@ def heeded(summary, source_ids):
     所以**记在 `media.run` 的完成边界上**(`diagnosis.record`),这儿只负责开账和交账。
     """
     with diagnosis.heard() as ledger:
+        conclusion = ''
         try:
             yield ledger
+        except Exception as error:
+            conclusion = login.coded(error)
+            raise
         finally:
-            caution(summary, source_ids, ledger)
+            caution(summary, source_ids, ledger, conclusion)
 
 
 def discovery_budget(count):

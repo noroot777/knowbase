@@ -240,8 +240,14 @@ CAPPED = 'output_cap'
 
 
 def lost(text) -> int:
-    """这份输出里有几行是**本机那道单行上限**丢掉的。"""
-    return str(text or '').count(OVERSIZE)
+    """这份输出里有几行是**本机那道单行上限**丢掉的。**只认行首**,而且行首那一份只有
+    `redact` 写得出来(工具自己印出一行以它开头的话,`redact` 会给它垫一个空格)。
+
+    原先是在全文里数子串:一条视频简介里原样抄了这句话,就被当成真丢了一行 —— 「没解析出
+    带发布时间的视频」改报成本机上限,列表还多一句不存在的「有 1 条没列出来」(审查实测)。
+    控制信号不许和它所在的那份内容混得起来。
+    """
+    return sum(1 for line in str(text or '').splitlines() if line.startswith(OVERSIZE))
 
 
 def dropped(text, noise, what='yt-dlp 取到了东西，但有一行超过了本机的单行上限、没有写盘'):
@@ -255,11 +261,11 @@ def dropped(text, noise, what='yt-dlp 取到了东西，但有一行超过了本
         raise ToolFailure(what, noise, CAPPED, LOCAL)
 
 
-def flooded():
+def flooded(noise=''):
     """一次调用的输出**总量**撞上本机上限。和 `dropped` 同一档:裸 `RuntimeError` 没有上游,
     `login.coded` 按 YouTube 算,检查那一侧就说成「连不上 YouTube,先看网络」(审查实测)。"""
     return ToolFailure(f'工具输出异常过大（超过本机的总量上限 {_OUTPUT_CAP // 1024 // 1024} MiB），已停止本次处理',
-                       '', CAPPED, LOCAL)
+                       noise, CAPPED, LOCAL)
 
 
 def translated(item) -> bool:
@@ -311,16 +317,19 @@ def redact(line: bytes) -> bytes:
     stripped = line.strip()
     if stripped.startswith((b'{', b'[')):
         try:
-            payload = json.loads(stripped)
+            cleaned = (json.dumps(trim(scrub(json.loads(stripped))), ensure_ascii=False) + '\n').encode('utf-8')
         except (ValueError, RecursionError):
             # 嵌套过深(`RecursionError`)和语法不对是同一件事:这不是一份能解析的元数据。
+            # **`scrub` 也是递归的**,所以它和序列化要一起在这道保护里:只包 `json.loads`
+            # 的那一版,500~999 层那一段照旧从泵线程漏出去(审查实测)。
             pass
         else:
-            cleaned = (json.dumps(trim(scrub(payload)), ensure_ascii=False) + '\n').encode('utf-8')
             return cleaned if len(cleaned) <= _LINE_CAP else _oversize(len(cleaned))
     if len(line) > _LINE_CAP:
         return _oversize(len(line))
-    return _SECRET_VALUE.sub(_hide, line.decode('utf-8', errors='replace')).encode('utf-8')
+    text = _SECRET_VALUE.sub(_hide, line.decode('utf-8', errors='replace'))
+    # 行首那一份替身只许 `redact` 写得出来(见 `lost`)。
+    return ((' ' + text) if text.startswith(OVERSIZE) else text).encode('utf-8')
 
 
 def pump_output(stream, path, state):
@@ -342,8 +351,8 @@ def pump_output(stream, path, state):
                     return
                 log.write(data)
                 log.flush()
-    except (OSError, ValueError, MemoryError) as error:
-        # `MemoryError` 也要落在这儿:解析挪到了上限之前,漏出去的话泵线程静默死掉、
+    except (OSError, ValueError, MemoryError, RecursionError) as error:
+        # `MemoryError` / `RecursionError` 也要落在这儿(后者是兜底带,`redact` 自己先接):解析挪到了上限之前,漏出去的话泵线程静默死掉、
         # `failure` 仍是 `None`,这一轮按 yt-dlp 自己的退出码结算 —— 又一次本机的事记到 YouTube 头上。
         state['failure'] = error
     finally:

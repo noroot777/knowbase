@@ -215,20 +215,27 @@
   各写一份。真超限时写的是 `OVERSIZE`（`kb:` 开头，**不许长得像 JSON**），非 JSON 行的上限照旧。
   **「是本机丢的」这一档（`diagnosis.CAPPED`，上游 `LOCAL`）每个出口都要成立，只修一个口不算修完**：
   认替身只许过 `diagnosis.lost` / `dropped`，**三个解析口**（`_single` 与列频道的 `_listed` / `_detailed`）都过它；
-  列到了别的几条时照旧收下、丢掉的那条记进 `notes`；输出**总量**上限走 `diagnosis.flooded`（裸 `RuntimeError`
-  会被检查说成「连不上 YouTube」）；`_collect_listing` 重包时没有半截输出就用解析那一抛自己的上游；
+  `lost` **只认行首**，行首那一份只有 `redact` 写得出来（工具自己印的同样开头的行会被垫一个空格）——
+  在全文里数子串的话，简介里原样抄了这句话就被当成丢了一行；
+  列到了别的几条时照旧收下、丢掉的那条记进 `notes`，事后核对读不了盘也不许把已解析的条目整批丢掉；
+  输出**总量**上限走 `diagnosis.flooded`，而且要等完成边界读完原文再抛（裸 `RuntimeError`
+  会被检查说成「连不上 YouTube」，先抛的那版原文是空的）；`_collect_listing` 重包时没有半截输出就用解析那一抛自己的上游；
   `login.coded` 只为它破例放过非 YouTube 上游；`merge` 排不出 YouTube 档时它优先于「判不出来」；
   检查结论有它自己的一句话（`MESSAGES[CAPPED]`），列频道那步撞上它不许说成「连不上」；
-  **结论是它时，并列提醒不许再拿同一份输出重算**（那几句正是当初冒名顶替的东西），
+  **并列提醒按档压、不按结论整条关**（`login.MUTED` / `beside`，检查与同步两条路同一份口径）：
+  结论是它时只压 JS 挑战那一档（那一句正是当初冒名顶替的东西），读不出 cookie、限流这些前一步
+  说过的话照旧并列在 —— 按结论整条关掉的那一版把它们一起吞了，而那条通道是它们唯一的出口；
   反过来**取到了**的那一轮，JS 挑战那句并列提醒照旧在。审查实测：只修 `_single` 时，列频道那两条路照旧被
   判成 `js_challenge`、归并成几十个频道一句「去更新 yt-dlp」；检查一边说「没能归类」一边并列让人装 deno。
-  解析之前另有一道 64 MiB 硬天花板（`_PARSE_CAP`，`json.loads` 占原文约 4 倍内存）；嵌套过深按非 JSON 行处理，
-  泵线程连 `MemoryError` 也兜住记进 `failure`。**只剪自动字幕、不剪 `subtitles`**：后者里的翻译轨
+  解析之前另有一道 64 MiB 硬天花板（`_PARSE_CAP`，`json.loads` 占原文约 4 倍内存）；嵌套过深按非 JSON 行处理
+  （`scrub` 也是递归的，和 `json.loads` 一起在保护里），泵线程连 `MemoryError` / `RecursionError` 也兜住记进
+  `failure`。**只剪自动字幕、不剪 `subtitles`**：后者里的翻译轨
   `tracks(automatic=False)` 会选，剪了就是丢数据；它不会同样撑爆，靠的是 yt-dlp 侧的前提 ——
   `get_translated_subs` 要 `--write-auto-subs` 或 `--list-subs` 才为真，而 `probe` / `detailed_videos`
   都不带。**哪天给 `--dump-json` / `--dump-single-json` 那几条命令加上它们，先回来重看这一条。**
-  回归 `tests/test_youtube_oversize.py`（集合级：每一种语言当原语言，剪前剪后选出的轨一样；端到端走真子进程，
-  每个出口一条）。
+  回归 `tests/test_youtube_oversize.py`（集合级：每一种语言当原语言，剪前剪后选出的轨一样；全部结论 × 全部
+  并列档，检查与同步各一遍；端到端走真子进程，每个出口一条），落库再读回页面那一段在
+  `tests/test_youtube_verdicts.py` 的 `JUDGED`（本机上限那一档不在 `VERDICTS` 里，要单独并进去）。
 - **跑成功了也要把工具的警告交出去，而且不许把警告升级成失败**（`diagnosis.heard` / `record` /
   `witnessed`，`login.CAUTIONS`）。cookie 解密失败在 yt-dlp 那边只是一条 warning：进程退 0、公开视频
   照旧列得出来，于是那条铁证跟着临时输出一起被删，面板上只剩「能带着登录态取到元数据」，而这一轮
