@@ -203,6 +203,18 @@
   消费方一律走 `login.coded(error)`，**不许各自 `classify(str(error))`**——异常消息为了给人看已经
   裁过两头，决定性那一行可能正在被省略的中段（`collector` 原先就是拿存过库、裁过三道的 `reason`
   重新分类，于是整批失败被归并成「机器人验证」）。给人看的那一份走 `diagnosis.excerpt`，**两头都留**。
+- **元数据那一行先剪再量，剪的判据和选轨的判据是同一份**（`diagnosis.redact` / `trim` / `translated`）。
+  事故形态（真实请求实测）：yt-dlp 退 0、45 个格式 21 个带音频，`--dump-single-json` 那一行 11.55 MiB，
+  其中 11.42 MiB 是 `automatic_captions`（177 个语言键、2.3 万条，九成九带 `tlang`，即现场翻译的自动字幕）。
+  `redact` 原先**先量 4 MiB 单行上限再解析**，整行换成替身，`media._single` 报「YouTube 元数据无效」；
+  替身又以 `[` 开头、被 `diagnostics()` 当 JSON 行滤掉，面板上的原文只剩同一份输出里那几句 JS 挑战警告，
+  分类器照它们让人去更新 yt-dlp——而用户早就是最新版、挑战也早已解开。**大小因视频而异**（同一轮另一条
+  只有 0.67 MiB），所以同步时成时不成、「检查登录态」那条却必挂。`--extractor-args youtube:skip=translated_subs`
+  **不管用**（它只管人工字幕的翻译）。所以：JSON 行先 `scrub` 再 `trim` 掉带 `tlang` 的条目、**按条目剪不按键剪**
+  （同一个键里原文和译文会混着），剪完再量；`media.tracks` 排除现场翻译用的是同一个 `translated()`，两边不许
+  各写一份。真超限时写的是 `OVERSIZE`（`kb:` 开头，**不许长得像 JSON**），`_single` 据此抛 `LOCAL`——
+  不许被同一份输出里的别的警告冒名顶替，也不许被失败归并记成 YouTube 的墙。非 JSON 行的上限照旧。
+  回归 `tests/test_youtube_oversize.py`（集合级：每一种语言当原语言，剪前剪后选出的轨一样；端到端走真子进程）。
 - **跑成功了也要把工具的警告交出去，而且不许把警告升级成失败**（`diagnosis.heard` / `record` /
   `witnessed`，`login.CAUTIONS`）。cookie 解密失败在 yt-dlp 那边只是一条 warning：进程退 0、公开视频
   照旧列得出来，于是那条铁证跟着临时输出一起被删，面板上只剩「能带着登录态取到元数据」，而这一轮
@@ -655,7 +667,8 @@ Whisper 英文专用模型不能用于其他语言或不明语言；缺工具、
   面板（异常态、代次、显示区归属的两道判据与结束即松开、资料名、轻提示不挡操作）在
   `tests/youtube_probe.mjs`，cookie 钉死、JS 挑战与能力三态在 `tests/test_youtube_challenge.py`，
   **分档穿过公共归并层不丢、并且落库再读回页面还是它**在 `tests/test_youtube_verdicts.py`
-  （工具链自己那条线在 `tests/test_youtube_toolchain.py`）。
+  （工具链自己那条线在 `tests/test_youtube_toolchain.py`），**元数据那一行先剪再量、真超限说是本机上限**在
+  `tests/test_youtube_oversize.py`。
 - 验证不使用真实浏览器登录态、生产 vault、真实媒体下载或付费模型调用。
 - 界面验证先尝试 Chrome 扩展具名会话，但后台创建参数被拒绝（`Capability is not available: visibility`），
   无法保证不激活标签，因此使用独立无头浏览器与临时 profile；没有连接用户 Chrome 的 CDP 或复用已有标签。

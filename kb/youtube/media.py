@@ -9,13 +9,12 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR, VIDEOS_ROOT
 from kb.youtube import login, throttle, toolchain, transcripts
-from kb.youtube.diagnosis import (LOCAL, YOUTUBE, ToolFailure, diagnostics, excerpt, on_disk, pump_output,
-                                   record, redact, scrub, serial, unique, written)
+from kb.youtube.diagnosis import (LOCAL, OVERSIZE, YOUTUBE, ToolFailure, diagnostics, excerpt, on_disk,
+                                   pump_output, record, redact, scrub, serial, translated, unique, written)
 from kb.youtube.channels import VIDEO_ID
 from kb.youtube.settings import model_path, of, tools
 
@@ -450,6 +449,10 @@ def _single(output):
             except ValueError:
                 continue
     noise = diagnostics(output)
+    if OVERSIZE in text:
+        # **是本机那道上限丢的,不是 YouTube 没给。** 照 YouTube 报的话,同一份输出里只要
+        # 还有 JS 挑战之类的警告,分类器就照它们下结论、让人去更新 yt-dlp(实测)。
+        raise ToolFailure('yt-dlp 取到了元数据，但那一行超过了本机的单行上限、没有写盘', noise, '', LOCAL)
     raise ToolFailure('YouTube 元数据无效，未开始下载或转录', noise, throttle.witness(noise))
 
 
@@ -461,8 +464,9 @@ def tracks(metadata, automatic=False):
     keys = [key for key in available if isinstance(key, str) and key != 'live_chat'
             and isinstance(available[key], list) and available[key]]
     if automatic:
+        # 判据和写盘前那一剪是同一份(`diagnosis.translated`):剪掉的恰好是这里永远不选的。
         keys = [key for key in keys if any(isinstance(item, dict) and item.get('url') and
-            not parse_qs(urlsplit(item['url']).query).get('tlang') for item in available[key])]
+            not translated(item) for item in available[key])]
         if original:
             keys = [key for key in keys if key.split('-')[0] == original]
     keys.sort(key=lambda key: (key.split('-')[0] != original if original else not key.endswith('-orig'),

@@ -20,6 +20,7 @@ import itertools
 import json
 import os
 import re
+from urllib.parse import parse_qs, urlsplit
 
 
 def excerpt(text, limit=800):
@@ -214,27 +215,75 @@ def _hide(match):
     return match[1] + match[2] + ('[已遮蔽]' if looks_secret else match[3])
 
 
-#: 单行上限。一份完整 info JSON 几十 KB 很正常,超过这个的不是元数据,整行遮掉。
+#: 单行上限,**量的是剪过之后的那一行**(见 `redact`)。
+#: 原先量的是 yt-dlp 吐出来的原样,注释还写着「一份完整 info JSON 几十 KB 很正常」——
+#: 实测远不止:一条 31 分钟的视频那一行 11.55 MiB,其中 11.42 MiB 是 `automatic_captions`
+#: (自动语音字幕 × 177 种翻译语言 × 每种好几个格式,2.3 万条长链接)。整行被遮掉之后
+#: `_single` 找不到 JSON,报「YouTube 元数据无效」,而 yt-dlp 明明退 0、45 个格式都在。
+#: **大小因视频而异**(同一轮里另一条只有 0.67 MiB),所以同步里有的成、检查却必挂。
 _LINE_CAP = 4 * 1024 * 1024
 #: 一次调用的输出总上限。
 _OUTPUT_CAP = 8 * 1024 * 1024
+#: 超限那一行写进文件的替身。**不许长得像 JSON**(不以 `{` / `[` 开头):原先那版是
+#: `[过长的输出已遮蔽]`,`diagnostics()` 把它当 JSON 行滤掉了,于是面板上「yt-dlp 原文」
+#: 只剩同一份输出里那几句 JS 挑战警告 —— 分类器照它们下结论,让人去「更新 yt-dlp」,
+#: 而他早就是最新版,更新了也没用(实测)。消费方按 `OVERSIZE in text` 认它。
+OVERSIZE = 'kb:这一行输出超过了单行上限,整行没有写盘'
+
+
+def translated(item) -> bool:
+    """这一条字幕是不是 YouTube **现场翻译**出来的(链接带 `tlang`)。**口径只有一份**:
+
+    `media.tracks` 选字幕时排除它们(翻出来的不是原话),`redact` 写盘前剪掉它们 ——
+    两处用同一个判据,剪掉的就恰好是选轨永远不会选的那些,选出来的一条都不少。
+    """
+    return isinstance(item, dict) and bool(parse_qs(urlsplit(str(item.get('url') or '')).query).get('tlang'))
+
+
+def trim(value):
+    """写盘前把**永远用不上**的那一大块剪掉:`automatic_captions` 里的现场翻译条目。
+
+    yt-dlp 没有开关能不生成它们(`youtube:skip=translated_subs` 只管人工字幕的翻译,
+    自动字幕的翻译它照样逐语言造一遍 —— 读过源码、也实测过加不加一样大),所以只能在
+    这道边界上剪。**只剪条目、不改结构**:剩下的语言键照旧在,剪空了的键整个去掉。
+    """
+    if not isinstance(value, dict) or not isinstance(value.get('automatic_captions'), dict):
+        return value
+    kept = {}
+    for key, items in value['automatic_captions'].items():
+        if not isinstance(items, list):
+            kept[key] = items
+            continue
+        original = [item for item in items if not translated(item)]
+        if original:
+            kept[key] = original
+    return {**value, 'automatic_captions': kept}
+
+
+def _oversize(size: int) -> bytes:
+    return f'{OVERSIZE}({size / 1024 / 1024:.1f} MiB,上限 {_LINE_CAP // 1024 // 1024} MiB)\n'.encode('utf-8')
 
 
 def redact(line: bytes) -> bytes:
-    """**一行输出在写进文件之前**就把凭据抹掉。
+    """**一行输出在写进文件之前**就把凭据抹掉,并剪掉用不上的那一大块。
 
-    JSON 行解析出来过一次 `scrub()` 再写回去;解析不了的按特征串整行遮掉。
+    JSON 行**先解析**、过一次 `scrub()` 和 `trim()`,**剪完再量单行上限** —— 先量再剪的话,
+    那 11 MiB 里 99% 是要剪掉的东西,整行却已经被判成「过长」丢掉了。这一行反正已经整个
+    读进内存(`pump_output` 按行迭代),先解析不多花内存。解析不了的照非 JSON 行处理:
+    先量上限,再按特征串只遮凭据的值。
     """
-    if len(line) > _LINE_CAP:
-        return b'[\xe8\xbf\x87\xe9\x95\xbf\xe7\x9a\x84\xe8\xbe\x93\xe5\x87\xba\xe5\xb7\xb2\xe9\x81\xae\xe8\x94\xbd]\n'
-    text = line.decode('utf-8', errors='replace')
-    stripped = text.strip()
-    if stripped.startswith(('{', '[')):
+    stripped = line.strip()
+    if stripped.startswith((b'{', b'[')):
         try:
-            return (json.dumps(scrub(json.loads(stripped)), ensure_ascii=False) + '\n').encode('utf-8')
+            payload = json.loads(stripped)
         except ValueError:
             pass
-    return _SECRET_VALUE.sub(_hide, text).encode('utf-8')
+        else:
+            cleaned = (json.dumps(trim(scrub(payload)), ensure_ascii=False) + '\n').encode('utf-8')
+            return cleaned if len(cleaned) <= _LINE_CAP else _oversize(len(cleaned))
+    if len(line) > _LINE_CAP:
+        return _oversize(len(line))
+    return _SECRET_VALUE.sub(_hide, line.decode('utf-8', errors='replace')).encode('utf-8')
 
 
 def pump_output(stream, path, state):
