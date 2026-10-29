@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from kb import maintenance, pipeline_state
 from kb.feeds import registry as reg, sync
 from kb.web import intake_api
-from kb.youtube import media
+from kb.youtube import login, media
 
 
 class YouTubeFixture(unittest.TestCase):
@@ -24,10 +24,22 @@ class YouTubeFixture(unittest.TestCase):
                                          (maintenance, 'DATA_DIR', self.root),
                                          (sync, 'VAULT_ROOT', self.root / 'vault'),
                                          (media, 'DATA_DIR', self.root),
+                                         # cookie 视图(`login.cookie_view`)也落在数据目录下:
+                                         # 不隔离的话每次跑测试都会往仓库 `data/` 里建链接。
+                                         (login, 'DATA_DIR', self.root),
                                          (media, 'VIDEOS_ROOT', self.root / 'upstream')):
             override = patch.object(target, attribute, value)
             override.start()
             self.addCleanup(override.stop)
+        # cookie 视图的准备结果**不许跟着这台机器的浏览器走**:`login.arguments` 会把
+        # 「这一轮没钉住」记进诊断账,而账上有没有这一条是一大批用例的判据 —— 不打桩的话
+        # 装了 Chrome 的机器上绿、没装的机器上红,而两边的代码一模一样。
+        # 想验降级那一路的用例自己再打一次桩(`tests/test_youtube_challenge.py`)。
+        pinned = patch.object(login, 'cookie_view', side_effect=lambda spec: {
+            'args': ['--cookies-from-browser', spec], 'pinned': True,
+            'store': str(self.root / 'Cookies'), 'reason': ''})
+        pinned.start()
+        self.addCleanup(pinned.stop)
         old = deepcopy(pipeline_state._state)
         pipeline_state._state.update(running=False, stop_requested=False)
         self.addCleanup(lambda: pipeline_state._state.update(old))

@@ -48,6 +48,9 @@ class ToolFailure(RuntimeError):
         self.diagnostic = str(diagnostic or '')
         self.code = code
         self.origin = origin
+        #: 摘要**自己留一份**。消息是「摘要 + 裁过的诊断」拼出来的、拆不回去,而 `shown`
+        #: 要拿原始摘要重新和**未裁**的诊断拼一次(理由见那边),从消息上切是切不对的。
+        self.summary = str(summary)
         super().__init__(f'{summary}；{excerpt(self.diagnostic)}'.strip('；'))
 
 
@@ -63,10 +66,70 @@ class ToolFailure(RuntimeError):
 YOUTUBE = 'youtube'
 MODEL = 'model'
 LOCAL = 'local'
+#: **这条道上记的不是上游说的话**,而是「这一次调用我们自己准备成了什么样」——
+#: 今天只有一件事:cookie 主库钉住了没有(`login.arguments`)。单独一条道是因为它
+#: **一个字都不该进 `login.classify`**:那套判据认的是 yt-dlp 的输出特征,而这里是
+#: 本机文件操作的理由(`cross-device link`、`operation not permitted`),撞上
+#: `login._COOKIE` 的宽特征就会被报成「读不出 cookie,去钥匙串放行」,而问题在别处。
+#: 也不走 `LOCAL`:那一档是**失败**(`on_disk` 抛 `ToolFailure`),这一条是「成了,
+#: 但用的不是最想用的那一份」—— 东西照旧抓得回来。
+COOKIES = 'cookies'
 
 
 #: 归并多条失败时按**证据强度**挑结论,那份口径在 `login.merge` —— 分档的语义归它管,
 #: 这一层只管运输(谁报的、完整原文、给人看那一份怎么裁)。
+
+
+#: 摘要在展示文本里最多占这么大一份,余下全归权威诊断(理由见 `shown`)。
+_CONTEXT = 0.34
+
+
+def shown(error, limit=800) -> str:
+    """一次失败**落库或上屏**时那份给人看的文本。**整个 youtube 包只有这一个出口。**
+
+    **摘要和权威诊断两份都要,顺序是「摘要在前、原文在后」,整句只在最后裁一次。**
+    这两件事谁也替不了谁:
+
+    * 摘要说的是**这一轮试了哪几步、最后停在哪**(「没有可用字幕,且本地语音转录已关闭」)。
+      多条原因合并时它是唯一还记得前面那几次的地方(`media` 把每条裁到 300 字拼起来 ——
+      那是摘要的本分,不是缺陷)。只给诊断的话,「先前那条原因不许被顶掉」那条约束当场破
+      (`tests/test_youtube_diagnosis.py` 的 `walled_captions` 钉着:字幕真撞上墙、本机转录
+      关着的那一轮,`last_error` 里要同时有那句话和 cookie 原文)。
+    * 诊断是**工具自己说的那句话**,决定性的一行常在尾部。只给摘要的话它早就被裁掉了 ——
+      末端把上限从 300 调到 1000、1200 都补不回来,缺的不是字数,是「该读哪一份」。
+
+    所以拼的是**原始摘要 + 未裁的诊断**(`ToolFailure.summary` 自己留了一份;carrier 那种
+    没有这个属性,它的消息本身就是摘要),拼完才裁一次、两头都留。`ToolFailure` 的消息里
+    虽然也嵌了一截裁过的诊断,但那一份拆不回去,所以不从消息上切。
+
+    **裁字只发生在这儿。** 每个数据库出口各自 `str(error)[:N]` 的那一版,后果是分档和
+    完整诊断在内存里都对、`collector.wall` 也收对了,而**重新读库上屏的那一份仍然只有
+    开头那截普通工具输出** —— 面板上既看不到那道 JS 挑战、也看不到「格式不可用」
+    (审查用真实子进程 + 真实库 + 真实页面复现:视频行只剩「处理失败,待重试：
+    python 执行失败；WARNING: ordinary download context …」)。判据落在
+    **重新读库那一份里有没有那一行**,不是「异常对象上有没有」。
+
+    **两份各有自己的预算,整句不许合起来裁一次。** 合着裁的那一版后果是:多次失败把摘要
+    堆到 600 字以上时,1000 字的视频行前半全被摘要占掉,**诊断开头那一行落进省略的中段**
+    —— 而分档恰恰是它定的。审查实测:人工字幕失败、自动字幕 en 失败、en-orig 报
+    `HTTP Error 429`(在诊断开头)、后面跟着长重试上下文和末尾的机器人验证,
+    `code` 是 `rate_limited`、`walls` 也是它,而页面上那一行只有普通上下文和
+    `Sign in to confirm you are not a bot` —— **把「请求过多」显示成了「机器人验证」**,
+    照它的提示去重新登录没有用。所以诊断自己也要两头都留:决定性那一行在头还是在尾,
+    不是我们能预先知道的(429 在头、格式不可用在尾,两种都实测过)。
+
+    **预算先给诊断。** 它是「为什么是这一档」的原文,摘要只是上下文 —— 摘要那一份还很
+    容易因为 carrier 里嵌过诊断片段而重复占用,给它封顶就把这份浪费也封住了。
+
+    空消息退回类名:数据库那两列不许留空,否则面板上那行字只剩一个状态词。
+    """
+    diagnostic = getattr(error, 'diagnostic', '')
+    if not diagnostic:
+        return excerpt(str(error), limit) or type(error).__name__
+    said = excerpt(getattr(error, 'summary', '') or str(error), max(1, int(limit * _CONTEXT)))
+    return f'{said}；{excerpt(diagnostic, limit - len(said) - 1)}'.strip('；') or type(error).__name__
+
+
 #: 同进程内给输出文件编号。跨进程靠 pid,进程内靠这个 —— 两者合起来才唯一。
 _SERIAL = itertools.count()
 

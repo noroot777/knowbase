@@ -27,7 +27,17 @@ import threading
 import time
 from pathlib import Path
 
+# 裁字数的口径只有一份(两头都留,见那个函数的说明)。`diagnosis` 只认 stdlib,没有环。
+from kb.youtube.diagnosis import excerpt
+
 PACKAGE = 'yt-dlp'
+#: 和 yt-dlp 一起装的 JS 挑战解题脚本。**YouTube 现在会对一部分请求发一道 JS 挑战**,
+#: 解不开就只剩预览图那几个格式(实测:带着有效登录态也一样)。官方可执行文件自带这份
+#: 脚本,pip 装的那份不带 —— 所以我们自备的环境要显式带上它。
+#: **不走 `--remote-components`**:那个开关让 yt-dlp 在抓取时从 GitHub/npm 现拉脚本,
+#: 等于把一段每轮都要联网取、而且没版本锚的代码放进采集路径;本地 pip 包同一条渠道、
+#: 跟 yt-dlp 一起更新,也能离线跑。
+SOLVER = 'yt-dlp-ejs'
 _PYPI = 'https://pypi.org/pypi/yt-dlp/json'
 # 同时点两次更新会让两个 pip 装同一个 venv。单进程内一把锁就够(管道也跑在这个进程里)。
 _INSTALL = threading.Lock()
@@ -121,6 +131,57 @@ def installed_version() -> str:
     return _version_of(command())
 
 
+#: `yt-dlp -v` 抬头里那两行。**问的是 yt-dlp 自己认不认**,不是我们去猜它的 site-packages:
+#: 自备那份和 PATH 那份住在不同环境里,而「装了没有」只有它自己说得准。
+_SOLVER_LINE = 'Optional libraries:'
+_RUNTIME_LINE = 'JS runtimes:'
+
+
+def challenge() -> dict:
+    """解 JS 挑战的两样东西在不在:解题脚本(`yt-dlp-ejs`)和 JS 运行时(`login.RUNTIME`)。
+
+    **两样缺一样都解不开**,而缺哪一样让用户做的事不同(前者点一次更新,后者得自己装个
+    运行时),所以分开报。读的是 `yt-dlp -v` 的调试抬头 —— 它不带 URL 时退 2、但抬头照印,
+    所以这里不看退出码。**问 yt-dlp 自己认不认,不去猜它的 site-packages**:自备那份和
+    PATH 那份住在不同环境里。
+
+    **`JS runtimes:` 那一行印的是「启用且找得到」的,不是「机器上装了的」。** 默认只启用
+    deno(见 `login.RUNTIME` 那段的一手源码),所以只装了 node 的机器上这一行就是 `none` ——
+    那不是读错了,yt-dlp 确实不会用它。面板据此让人装 deno,口径和这里一致。
+
+    **每一项三态,判据是「那一行抬头印出来了没有」,不是退出码。** `UNASKED` = 没问到
+    (没有 yt-dlp、探测自己失败、抬头压根没印);`''` = 问到了、确实没有;非空 = 问到了、
+    就是这个版本。`challenge_error` 是探测本身的失败原话。
+    **不许按退出码判成败**:不带 URL 的正常探测本身就退 2(实测),把非零当失败会让
+    每一次都报失败;而原先把两项初始化成空串、只在读到抬头时覆盖,等于**把「没问到」
+    说成「确实没装」** —— 审查实测:`-v` 临时报错的那一轮,面板照旧让人去装
+    `yt-dlp-ejs` 和 deno(机器上两样都在),真正的检查错误一个字都没显示;
+    让同一个替身恢复抬头、不装不卸任何东西,那两句误报就消失了。
+    """
+    found = {'script': UNASKED, 'runtime': UNASKED, 'challenge_error': ''}
+    prefix = command()
+    if not prefix:
+        found['challenge_error'] = '没有找到 yt-dlp'
+        return found
+    _, text = _run([*prefix, '-v', '--ignore-config'], 60)
+    for line in text.splitlines():
+        body = line.split(']', 1)[-1].strip()
+        if _SOLVER_LINE in body:
+            libraries = body.split(_SOLVER_LINE, 1)[1]
+            found['script'] = next((item.strip() for item in libraries.split(',')
+                                    if 'yt_dlp_ejs' in item or 'yt-dlp-ejs' in item), '')
+        elif _RUNTIME_LINE in body:
+            # 一个都没有时 yt-dlp 印的是 `JS runtimes: none`。
+            runtimes = body.split(_RUNTIME_LINE, 1)[1].strip()
+            found['runtime'] = '' if runtimes.lower() in ('', 'none') else runtimes
+    if found['script'] is UNASKED or found['runtime'] is UNASKED:
+        # **抬头没印出来 = 这一项没问到,不是「问到了,确实没有」。** 原文交出去:
+        # 探测自己为什么没成,是人唯一的线索(审查实测的那一轮是 `-v` 报
+        # `ERROR: temporary capability inspection failure` 退 1、一行抬头都没印)。
+        found['challenge_error'] = excerpt(text, 200) or 'yt-dlp 没有印出能力抬头'
+    return found
+
+
 def latest_version(deadline: float | None = None) -> str:
     """问 PyPI 最新版。走项目自己那套请求(含公网校验),不另开一条出口。"""
     from kb.feeds.fetching import request
@@ -147,10 +208,27 @@ def outdated(installed: str, latest: str) -> bool:
     return left < right
 
 
+#: 「这一项还没问过」。**和「问过了,确实没有」必须分得开。**
+#: 事故形态(审查在真实页面上实测):`local()` 原先压根不返回 `script` / `runtime` 两个键,
+#: 面板拿 `!info.script` 判缺失 —— 缺席和空串都是假,于是**一打开订阅管理就红字说两样都缺**,
+#: 而那台机器上 `yt_dlp_ejs-0.8.0` 和 `deno-2.9.0` 都在。离开再回来一样,因为那条便宜的
+#: 状态快照每次都这么答。`None` 是显式的「没问」:它不起子进程(`challenge()` 要起一个
+#: `yt-dlp -v`,而这一份是面板每次刷新都读的),所以它答不了,但**必须答出「我答不了」**。
+UNASKED = None
+
+
 def local() -> dict:
     """**便宜的那一半**:只问本地装的是哪一版、从哪儿来。面板每次刷新都读它,
-    所以这里不碰网络 —— 查上游版本是用户点「检查」时才做的事(见 `status`)。"""
-    return {'installed': installed_version(), 'origin': origin()}
+    所以这里不碰网络、也不起子进程 —— 查上游版本和查解题能力都是用户点「检查」时
+    才做的事(见 `status`)。
+
+    **键要齐**:解题能力那几项显式答 `UNASKED`,不是省掉那几个键。少一个键时面板那边
+    「没问过」和「问过了没有」长得一模一样(见 `UNASKED` 上面那段实测形态)。
+    `challenge_error` 空着:这一份压根没问,所以没有探测错误可报 —— 「没问过」和
+    「问过了、没问成」在面板上说的话不一样。
+    """
+    return {'installed': installed_version(), 'origin': origin(),
+            'script': UNASKED, 'runtime': UNASKED, 'challenge_error': ''}
 
 
 def upgrade(timeout: float = 600) -> dict:
@@ -199,9 +277,15 @@ def _install_now(timeout: float) -> dict:
         if not python.is_file():
             raise RuntimeError('yt-dlp 运行环境不完整，缺少 python 可执行文件')
         code, text = _run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check',
-                           PACKAGE], timeout=timeout)
+                           PACKAGE, SOLVER], timeout=timeout)
         if code:
-            raise RuntimeError(f'安装 yt-dlp 失败：{text[-400:]}')
+            # **解题脚本装不上不许连 yt-dlp 一起不装。** 它只影响「下音频」那一步,而
+            # 元数据、列频道、字幕照旧能跑;一起失败的话,用户连版本都更新不了,而他点这颗
+            # 按钮多半正是因为抓不到东西。退一步只装 yt-dlp,缺了什么由 `status()` 如实报。
+            code, text = _run([str(python), '-m', 'pip', 'install', '--disable-pip-version-check',
+                               PACKAGE], timeout=timeout)
+            if code:
+                raise RuntimeError(f'安装 yt-dlp 失败：{text[-400:]}')
         if not _version_of([str(_entry(target))]):
             raise RuntimeError('装完之后这一份 yt-dlp 跑不出版本号，已经丢掉它；'
                                '原来那份没有动过，仍然可用')
@@ -244,7 +328,7 @@ def status(deadline: float | None = None) -> dict:
     """给面板用的一份状态。**查不到上游版本不是故障**,只是少报一行。"""
     installed = installed_version()
     result = {'installed': installed, 'origin': origin(), 'latest': '',
-              'outdated': False, 'latest_error': ''}
+              'outdated': False, 'latest_error': '', **challenge()}
     if not installed:
         return result
     try:

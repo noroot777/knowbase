@@ -29,10 +29,17 @@ class BrowserSpec(unittest.TestCase):
                 login.validate(bad)
 
     def test_arguments_only_carry_validated_values(self):
-        self.assertEqual(['--cookies-from-browser', 'chrome:Profile 1'],
-                         login.arguments('chrome:Profile 1'))
-        with self.assertRaises(ValueError):
-            login.arguments('netscape')
+        """**钉不住 cookie 主库那条路上,交出去的仍然只能是校验过的那个串。**
+
+        `cookie_store` 在这儿打成「挑不出来」:它读的是真机上那个浏览器目录,留着不打桩的话
+        这条用例在「本机恰好有 Profile 1」的机器上红,还会往仓库数据目录里建视图。
+        钉住那一半由 `tests/test_youtube_challenge.py` 按后果验(yt-dlp 会读到哪一份库)。
+        """
+        with patch.object(login, 'cookie_store', return_value=None):
+            self.assertEqual(['--cookies-from-browser', 'chrome:Profile 1'],
+                             login.arguments('chrome:Profile 1'))
+            with self.assertRaises(ValueError):
+                login.arguments('netscape')
 
 
 class Classification(unittest.TestCase):
@@ -62,9 +69,9 @@ class Classification(unittest.TestCase):
         # 真正指向登录态的只剩这一组。
         self.assertEqual('not_logged_in', login.classify('Account cookies are no longer valid'))
         self.assertEqual('not_logged_in', login.classify('ERROR: Please sign in to view this video'))
-        # 四档都是「一个出口、一次全中」,归并同因失败时按整个集合判。
-        self.assertEqual({'not_logged_in', 'bot_wall', 'cookie_unreadable', 'rate_limited'},
-                         set(login.AUTH_CODES))
+        # 这几档都是「一个出口、一次全中」,归并同因失败时按整个集合判。
+        self.assertEqual({'not_logged_in', 'bot_wall', 'cookie_unreadable', 'rate_limited',
+                          'js_challenge'}, set(login.AUTH_CODES))
         self.assertNotIn('no_access', login.AUTH_CODES, '单条没授权不是这一摊的事')
 
     def test_a_throttled_exit_is_not_a_bot_wall_and_not_a_login_problem(self):
@@ -99,7 +106,8 @@ class Classification(unittest.TestCase):
     def test_every_message_stands_alone_and_differs(self):
         """每一档的说明都要能单独读懂。**比值,不比有无。**"""
         codes = ('metadata_ok', 'yt_dlp_missing', 'no_browser', 'no_channel', 'unreachable',
-                 'cookie_unreadable', 'not_logged_in', 'bot_wall', 'rate_limited', 'no_access', 'unknown')
+                 'cookie_unreadable', 'not_logged_in', 'bot_wall', 'rate_limited', 'no_access',
+                 'js_challenge', 'unknown')
         self.assertEqual(set(codes), set(login.MESSAGES), '有档位没有自己的说明,或多了一档没人用')
         spoken = [login.describe(code, 'chrome') for code in codes]
         self.assertEqual(len(spoken), len(set(spoken)), '有两档说的是同一句话')

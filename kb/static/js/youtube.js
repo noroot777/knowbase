@@ -319,6 +319,26 @@ function youtubeShowYtdlp(info) {
   else if (info.latest) text += '已是上游最新版。';
   else if (info.latest_error) text += '没查到上游版本：' + info.latest_error;
   else text += '点「检查登录态」会一起查上游版本。';
+  // **解 JS 挑战那两样单独说一句。** YouTube 会对一部分请求发一道 JS 挑战,解不开就只
+  // 剩预览图格式 —— 元数据和字幕照旧拿得到,下音频做本地转录那一步会失败(实测:带着
+  // 有效登录态也一样)。缺脚本和缺运行时让用户做的事不同,所以分开说。
+  // **这两样各是三态:没问到 / 问到了确实没有 / 问到了就是这个版本。**
+  // 「没问到」说成「确实没装」的后果实测过两回:①便宜那条状态快照不起子进程、压根没查
+  // (`toolchain.local` 答 null),一打开订阅管理就红字说两样都缺,而机器上明明都装着,
+  // 离开再回来一样;②`yt-dlp -v` 临时报错、一行抬头都没印的那一轮,页面照旧让人去装
+  // yt-dlp-ejs 和 deno,真正的检查错误一个字都没显示 —— 让同一个替身恢复抬头、不装不卸
+  // 任何东西,那两句误报就消失了。**所以缺失一律判严格相等 `=== ''`**:
+  // `!info.script` 把 null / undefined 也算成缺,等于把三态压回两态。
+  const unknown = (value) => value === null || value === undefined;
+  if (unknown(info.script) || unknown(info.runtime)) {
+    text += info.challenge_error
+      ? ' 查不出解那道 JS 挑战要的脚本和运行时：' + info.challenge_error
+      : ' 解那道 JS 挑战要的脚本和运行时，点一次「检查登录态」才会查。';
+  }
+  if (info.script === '') text += ' 还缺 JS 挑战的解题脚本（yt-dlp-ejs），更新一次会一起装上。';
+  // **要装的是 deno,不是「四个里随便一个」**:yt-dlp 默认只启用 deno,只装了 node 的
+  // 机器上这一行照旧是缺(口径见 `login.RUNTIME` 那段一手源码与实测)。
+  if (info.runtime === '') text += ' 机器上没有 deno，装一个才解得开那道挑战 —— yt-dlp 只默认启用它这一个运行时。';
   // **版本旧不是「抓不到」的原因。** 实测新旧两版撞的是同一道登录墙,所以这里只报版本,
   // 不把它写成一条待修的故障 —— 否则用户会以为更新一下登录墙就过了。
   line.textContent = text;

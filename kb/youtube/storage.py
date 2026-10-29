@@ -4,6 +4,7 @@ from contextlib import contextmanager
 
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
+from kb.youtube.diagnosis import shown
 
 
 SCHEMA = '''CREATE TABLE IF NOT EXISTS youtube_videos (
@@ -186,11 +187,17 @@ def update(video_id, **values):
 
 
 def failed(row, error):
+    """这条视频这一轮失败了。**落库那份文本一律由 `diagnosis.shown` 出**,这儿不自己裁。
+
+    这就是人在候选排名里读到的那一行(`listing` 只交 `reason`、面板直接显示它),
+    所以它是**整条诊断交付链的末端**。原先这儿取 `str(error)[:1000]`,把权威诊断
+    换成了被裁过的摘要 —— 事故形态和判据见 `diagnosis.shown`。
+    """
     attempts = row['attempts'] + 1
+    told = shown(error, 1000)
     update(row['video_id'], state='failed', attempts=attempts,
            retry_at=time.time() + min(86400, 1800 * 2 ** min(attempts - 1, 5)),
-           reason=str(error)[:1000] or type(error).__name__,
-           last_error=str(error)[:1000] or type(error).__name__)
+           reason=told, last_error=told)
 
 
 def mark_committed(connection, source, video_id):

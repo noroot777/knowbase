@@ -173,13 +173,16 @@ def _save_result(source, result, scope):
     return added
 
 
+FAILURE_CAP = 1200  #: 失败文案落库上限。来源侧要先把文本压到它之内再交过来(理由在那一侧)
+
+
 def _save_failure(source, error, summary) -> bool:
     """失败也要先拿写锁再认身份(见 `_claim_write`),返回这一笔记没记上。
 
     被改指之后把旧账号那次失败记在新账号头上,是把一条好订阅按别人的毛病推进
     退避(最长 24 小时),面板上还显示"连接失败" —— 而新账号一次都没被访问过。
     """
-    reason = str(error)[:1200] or type(error).__name__
+    reason = str(error)[:FAILURE_CAP] or type(error).__name__
     with reg.db() as c:
         if not _claim_write(c, source):
             return False
