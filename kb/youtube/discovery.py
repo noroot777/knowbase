@@ -1,23 +1,11 @@
 # -*- coding: utf-8 -*-
-"""频道更新的发现:**配了登录态就全程带着它走**,公开订阅只留给「没有登录态」那一档。
+"""带登录态轻量列频道，精确元数据由 candidate_metadata 增量补齐。
 
-**硬约束在 `docs/decisions/youtube-intake.md` 第一节 —— 改这块之前先读那一份。**
+硬约束在 docs/decisions/youtube-intake.md 第一节，变更策略需同步。
 
-**为什么公开订阅不再是主路。** 仓库主人两次点名:先是「那就全程登录态吧」,再是「改成
-daily-report 那种,它都运行的好好的」。公开那份 Atom 又便宜又带播放量,但它**不接受
-cookie**:那批 47/48 的 404 正是从它来的,而「先试公开、失败再带登录态」等于每一轮都
-先付一次那个风险,也先付一次重试的时间。性能代价(单频道从几秒到半分钟一档)已经如实
-报过,他没有收回这两句 —— 所以这里就是全程登录态,不留一条悄悄发无登录态请求的路。
-
-**两条路给的东西不一样,所以不是替代关系。** `detailed` 逐条真解析,日期、播放量、简介
-都是真的(排名要用的全在里面),代价是每条约 4.3 秒;`approximate` 的 flat 列举**只给
-id、标题和时长**(实测连 `youtubetab:approximate_date` 也不给日期),便宜一个数量级。
-所以前者是主路,后者只在它也没取到时兜底。
-
-**后路的发布时间是估算的**,条目上打 `approximate` 标记:真实日期要等 `media.probe` 拿到
-元数据才算数(`ranking` 对估算日期放行),拿到的那一刻由 `admission.calibrate` 换成事实值、
-再过**同一个** `ranking.rejection` 重判资格 —— 估算值不许留到成品里。
-**估算数据不许覆盖已有的精确数据** —— 那道判据在 `storage.discover` 的 SQL 里。
+普通同步不展开频道内每条视频的详情，不以匿名 RSS 或慢速展开掩盖列表失败。
+显式日期补抓仍保留详细发现，避免把估算列表当成指定日期内的事实。
+估算列表不覆盖已知精确数据；未核实的预排候选在处理前校准。
 """
 
 import calendar
@@ -64,10 +52,6 @@ def channel_id(source, deadline):
     raise FeedError('无法解析频道 ID，请改填 /channel/UC… 频道主页')
 
 
-#: 带登录态那两条路各占**单频道总预算**的比例。主路要逐条真解析(实测每条约 4.3 秒),
-#: 给它大头;估算那条 flat 列一次实测 1.4~30 秒,剩下那一段够它跑完。两段加起来留一点
-#: 余量给异常路径。**不许共用一个 deadline**(理由在 `fetch` 的说明里)。
-DETAIL_SHARE = 0.7
 #: 公开那条路的重试(照 daily-report 的 `--retry 3 --retry-delay 1 --retry-all-errors`)。
 #: **只有「没有登录态可用」那一档会走到它** —— 那时它是唯一的办法,失败多试两次近乎免费。
 RSS_ATTEMPTS = 3
@@ -75,74 +59,23 @@ RSS_BACKOFF = 1.0
 
 
 def fetch(source, settings=None, timeout=90, estimates=True, notes=None):
-    """取这个频道的近期视频。**配了浏览器就全程带登录态,两条路从贵到便宜依次让位。**
-
-    1. `detailed()`:频道视频页交给 yt-dlp、**带登录态逐条解析**(daily-report 那条路)。
-       慢(单频道半分钟一档),但日期、播放量、简介都是真的。
-    2. `approximate()`:同一个地址、同一把 cookie,加 `--flat-playlist`。只有 id、标题和
-       时长,发布时间按列表顺序**估算**。
-
-    **第 2 条在显式日期范围那一轮被禁**(`estimates=False`):拿估算值去满足用户指定的
-    范围等于编造「在范围内」这个结论。第 1 条拿的是真实日期,那一轮照旧走它。
-
-    **`settings=None` 是唯一不带登录态的那一档**:没有设置就没有 `cookies_browser`,
-    那时公开订阅是唯一的办法(带重试)。生产里走不到这儿 —— `collect` 开跑前先过
-    `login.readiness`,它不就绪整轮都不开始(而 `settings.of` 给 `cookies_browser` 的
-    默认值是 `chrome`,拿不到空值)。**这条分支是显式的,不是悄悄的退路。**
-
-    **每条路各有自己的那一段预算,不许共用一个 deadline。** 共用的话,前一条**超时**
-    这一档(不是失败,是卡到预算用尽)会把 deadline 耗干,后一条在起子进程之前就被
-    `media.run` 的入口条件判成超时 —— 报出来是「都没取到」,而它一个进程都没起。
-
-    `notes` 是出参:某条路「列了几条之后中断」的说明会落在里面(见 `media._collect_listing`),
-    由 `collector` 转成面板上那句「这个频道没列完」。
-
-    **工具这一次报了一句什么不走出参**:那是 `media.run` 的完成边界记的账
-    (`diagnosis.record`,成功、半截、失败都记),由开账那一段去读(`collector.heeded`)。
-    一层层往上传的那一版只在各自的成功分支上交账,换个失败组合就又漏一次。
-    **它不是失败**:取到的照旧收下,只是并列说一句这一轮可能没带上登录态。
-
-    **第 1 条撞上 429 之后第 2 条压根起不来**:那道闸在请求入口上(`media.ytdlp` 的
-    `throttle.guard`),不在这儿 —— 同一个出口刚说了「请求过于频繁」,换个参数再问一次
-    只是把惩罚加深。它会以一条限流失败的形式落进 `reasons`,所以这里的结构不变。
-    """
+    """普通同步只列 flat；指定日期只取精确列表；未配置登录态的显式调用才走 RSS。"""
     budget = max(6.0, float(timeout))
     spec = '' if settings is None else of(settings)['cookies_browser']
     if not spec:
         return rss(source, time.monotonic() + budget)
-    reasons, failures = [], []
+    label = '带登录态轻量列表' if estimates else '带登录态逐条解析'
     try:
-        return detailed(source, settings, time.monotonic() + budget * DETAIL_SHARE, notes)
+        fetcher = approximate if estimates else detailed
+        return fetcher(source, settings, time.monotonic() + budget, notes)
     except throttle.NotAttempted:
-        # **「没发出去」不许变成「这条路失败了」**:归并成一条 `FeedError` 交出去之后,
-        # 上层只看得见一条普通失败,于是这个频道被记「连接失败」、推半小时退避,而它
-        # 一个毛病都没有(审查实测)。后路也一样会被同一道闸拒掉,不必再试。
         raise
     except Exception as error:
-        reasons.append(f'带登录态逐条解析：{error}')
-        failures.append(error)
-    if not estimates:
-        raise _combined(reasons, failures) from None
-    try:
-        return approximate(source, settings, time.monotonic() + budget * (1 - DETAIL_SHARE), notes)
-    except throttle.NotAttempted:
-        # 走到这儿说明**第一条路是真发出去并失败的**(它自己没发出去的话上面那一道就抛了),
-        # 那条真实失败说了算 —— 这个频道这一次确实没拿到东西,原文也得留得住。
-        raise _combined(reasons, failures) from None
-    except Exception as error:
-        reasons.append(f'估算列举：{error}')
-        failures.append(error)
-        raise _combined(reasons, failures) from None
+        raise _combined([f'{label}：{error}'], [error]) from None
 
 
 def _combined(reasons, failures):
-    """两条路都没成时交出去的那一条。**分档和完整诊断要跟着走**(`login.merge`)。
-
-    只留文字的话,上层只剩一条裁过的 `FeedError` 可读 —— 它只能回去拿文本重新猜是哪一档,
-    而那正是 `login.coded` 的说明里记着的那次误判。**挑哪一条不按到达先后**:逐条解析先报
-    机器人验证、后路随后报 429 时,按先后挑就对外说成「带上登录态通常能过」,而这一轮正是
-    因为 429 停的(审查实测)。各条原因的原话照旧都在这条异常自己的消息里。
-    """
+    """包装发现错误时保留原始上游、分档和完整诊断。"""
     return login.merge(FeedError('；'.join(reasons)), failures)
 
 
@@ -169,7 +102,7 @@ def detailed(source, settings, deadline, notes=None):
 
 
 def approximate(source, settings, deadline, notes=None):
-    """后路:yt-dlp flat 列频道。只有 id、标题和时长,发布时间按列表顺序估算。"""
+    """轻量列频道；估算日期只记录列表顺序，排名前必须补齐真实元数据。"""
     from kb.youtube import media
     listed = media.channel_videos(source, settings, deadline, lambda: False, limit=20,
                                   notes=notes)
@@ -183,7 +116,7 @@ def approximate(source, settings, deadline, notes=None):
         entries.append({'video_id': item['video_id'], 'channel_id': _owner(item, source),
                         'url': item['url'], 'title': item['title'], 'published': stamp,
                         'description': '', 'views': 0, 'approximate': True,
-                        'duration': item['duration']})
+                        'duration': item['duration'], 'listing_position': position})
     return entries
 
 

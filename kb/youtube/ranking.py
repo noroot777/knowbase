@@ -154,8 +154,13 @@ def score(rows, settings, scope, now=None):
         patch = {key: row[key] for key in ('score', 'score_rank')}
         if row['state'] in ('candidate', 'filtered', 'processing') or (
                 row['state'] == 'deferred' and row['retry_at'] <= time.time()):
-            patch.update(state='candidate',
-                         reason=UNKNOWN if row.get('unverified') else '等待排名与处理预算准入')
+            if row.get('_metadata_reason'):
+                patch['reason'] = row['reason'] or row['_metadata_reason']
+                if row['state'] not in ('deferred', 'processing') and not row.get('metadata_pending'):
+                    patch['state'] = 'candidate'
+            else:
+                patch.update(state='candidate', reason=(UNKNOWN if row.get('unverified')
+                                                       else '等待排名与处理预算准入'))
         storage.update(row['video_id'], **patch)
     return ranked
 
