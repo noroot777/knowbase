@@ -78,10 +78,10 @@ function favEmptyHtml() {
   const filtered = favFilter !== 'all' || $('fav-search').value.trim() || $('fav-source').value;
   if (filtered) return '<div class="fv-empty"><span>没有符合当前筛选的收藏。</span><button class="text-button" onclick="resetFavFilters()">清除筛选</button></div>';
   const text = {
-    all: '还没有收藏，可在图鉴或阅读页添加收藏。',
+    all: '还没有收藏。',
     inbox: '没有待探索的收藏。',
-    done: '没有已完成的收藏，可在收藏详情中标为完成。',
-    archived: '没有暂存的收藏，暂存的内容可以随时放回待探索。',
+    done: '没有已完成的收藏。',
+    archived: '没有暂存的收藏。',
   }[favView];
   return `<div class="fv-empty"><span>${text}</span><a href="#gallery" onclick="switchTab('gallery');return false">打开工具图鉴${arrow('right')}</a></div>`;
 }
@@ -164,7 +164,7 @@ function favDetailHtml(item) {
     <button class="away-exit fv-detail-exit" onclick="closeFavDetail()" aria-label="关闭收藏详情">${icon('close')}</button>
     <div class="fv-detail-content"><span class="fv-detail-kind fv-${category}">${icon(FAV_FILTERS[category][1])}${FAV_FILTERS[category][0]}</span>
       <h2 class="fv-detail-title" tabindex="-1">${esc(action.name || item.title)}</h2>
-      ${description !== item.quote ? `<p class="fv-detail-description">${esc(description)}</p>` : ''}
+      ${description && description !== item.quote ? `<p class="fv-detail-description">${esc(description)}</p>` : ''}
       ${item.quote ? `<blockquote>${esc(item.quote)}</blockquote>` : ''}
       <dl class="fv-detail-meta">${action.name && action.name !== item.title ? `<div><dt>原文</dt><dd>${esc(item.title)}</dd></div>` : ''}<div><dt>来源</dt><dd>${esc(favWhere(item))}</dd></div><div><dt>收藏于</dt><dd>${favDate(item.created_at)}</dd></div><div><dt>状态</dt><dd>${FAV_STATUSES[item.status]}</dd></div>${action.eta ? `<div><dt>预计用时</dt><dd>${esc(action.eta)}</dd></div>` : ''}</dl>
       <div class="fv-detail-links">${favDocA(item, `${esc(favOriginal(item).label)}${arrow('right')}`, 'fv-primary-link', true)}${originalUrl !== '#' ? `<a href="${esc(originalUrl)}" target="_blank" rel="noopener">原文${arrow('ext')}</a>` : ''}${favOriginal(item).indexed ? `<a href="${esc(obsLink(item))}">Obsidian${arrow('ext')}</a>` : ''}</div>
@@ -190,7 +190,7 @@ function favStartHtml() {
   const aiRecommended = item && favTri?.fresh && favTri.data?.hero?.id === item.id;
   const why = item ? (aiRecommended ? favTri.data.hero.why : '') || favDescription(item) : '';
   return `<div class="fv-start"><div class="fv-aside-heading"><span>${icon('spark')}灵感起步</span><span class="fv-tiny-dot" aria-hidden="true"></span></div>
-    ${item ? `<div class="fv-recommendation"><div class="fv-rec-label"><span>${aiRecommended ? 'AI 推荐' : '从你的待探索中挑选'}</span>${item.action?.eta ? `<span>${esc(item.action.eta)}</span>` : ''}</div><h3>${esc(item.action?.name || item.title)}</h3><p>${esc(why)}</p><div class="fv-rec-actions"><button onclick="openFavDetail(${item.id})">就看这个${arrow('right')}</button>${pool.length > 1 ? '<button class="text-button" onclick="swapHero()">换一条</button>' : ''}</div></div>` : ''}
+    ${item ? `<div class="fv-recommendation"><div class="fv-rec-label"><span>${aiRecommended ? 'AI 推荐' : '从你的待探索中挑选'}</span>${item.action?.eta ? `<span>${esc(item.action.eta)}</span>` : ''}</div><h3>${esc(item.action?.name || item.title)}</h3>${why ? `<p>${esc(why)}</p>` : ''}<div class="fv-rec-actions"><button onclick="openFavDetail(${item.id})">就看这个${arrow('right')}</button>${pool.length > 1 ? '<button class="text-button" onclick="swapHero()">换一条</button>' : ''}</div></div>` : ''}
     ${favTriageHtml()}</div>`;
 }
 

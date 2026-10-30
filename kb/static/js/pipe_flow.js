@@ -384,9 +384,11 @@ async function pipeFlowAct(action) {
   pipeAction = 'flow'; renderPipeButtons();
   try {
     await pipePost('/api/pipeline/flow', { owner: model.plan.owner, node: node.key, action });
-    const said = { skip: [`${node.label} 这次跳过`, '轮到它之前都可以点「恢复执行」改回来。'],
-      unskip: [`${node.label} 恢复执行`, ''], cut: [`已请求结束 ${node.label}`, '手上这一步停下后接着下一类。'] }[action];
-    toast(said[0], { key: 'pipeline', type: 'ok', detail: said[1] });
+    // 三条 detail 都去掉了:那一行自己的 facts 已经写着「轮到它之前都可以改回来」,
+    // 「恢复执行」那颗按钮也就在同一行上;结束那一条的射程刚在确认框里说过。
+    const said = { skip: `${node.label} 这次跳过`,
+      unskip: `${node.label} 恢复执行`, cut: `已请求结束 ${node.label}` }[action];
+    toast(said, { key: 'pipeline', type: 'ok' });
   } catch (e) {
     toast('没有受理', { key: 'pipeline', detail: e.message });
   } finally {

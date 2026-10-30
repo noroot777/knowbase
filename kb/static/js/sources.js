@@ -351,7 +351,7 @@ async function loadSourceModule(reset = false, selectedId = null) {
     $('source-subscriptions-count').textContent = data.sources.length;
     if (reset) fillSourceSettings(data.settings);
     const run = data.last_run;
-    $('source-last-run').textContent = run ? `上次检查 ${sourceTime(run.finished_at)} · 新增 ${run.summary.added} 条${run.summary.errors.length ? ' · ' + run.summary.errors.length + ' 个来源失败' : ''}${run.summary.message ? ' · ' + run.summary.message : ''}` : '尚未同步。先检查订阅，再开始收集。';
+    $('source-last-run').textContent = run ? `上次检查 ${sourceTime(run.finished_at)} · 新增 ${run.summary.added} 条${run.summary.errors.length ? ' · ' + run.summary.errors.length + ' 个来源失败' : ''}${run.summary.message ? ' · ' + run.summary.message : ''}` : '尚未同步。';
     // 显式把已加载条数传过去。**这一处今天是冗余带,如实记着**:
     // `renderSourceView` 不给 `visibleCount` 时自己会回落到 `sourceOffset`,而
     // 它和 `sourceRows.length` 在这条路上恒等(两者一起累加)—— 定点注入去掉这

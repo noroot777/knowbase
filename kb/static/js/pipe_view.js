@@ -75,7 +75,7 @@ function pipeStateHint(s, result, failed, skipped, progress, owed = 0) {
   if (result.stopped) return '已完成结果已保留。可重新配置同步，已有内容会按现有规则去重。';
   if (skipped) return `${skipped} 个步骤被跳过，具体原因见下方。`;
   if (result.finished_at && progress.total && progress.completed === progress.total) return `本次${progress.label}计划的 ${progress.total} 个步骤均已完成。`;
-  return '同步在后台执行，切换页面不会中断。';
+  return '同步在后台执行。';
 }
 function pipeDuration(start, finish) {
   const from = new Date((start || '').replace(' ', 'T')).getTime();

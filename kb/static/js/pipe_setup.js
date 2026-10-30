@@ -487,8 +487,7 @@ async function startPipeFromModal() {
   try {
     await pipePost(path, body);
     closePipeModal();
-    toast(daily ? '同步已启动，跑完出日报' : '同步已启动',
-          { key: 'pipeline', type: 'ok', detail: '任务在后台执行，可随时回来查看进度。' });
+    toast(daily ? '同步已启动，跑完出日报' : '同步已启动', { key: 'pipeline', type: 'ok' });
   } catch (e) {
     failure = e.message;
     pipeSetupError('启动未确认：' + e.message + '。正在核对运行状态，请勿重复提交。');

@@ -148,7 +148,7 @@ function gcardHtml(t) {
     <span class="gcard-body">
       <span class="gcard-top"><span class="gmark ${kc}">${icon(glyph)}</span><span class="gcard-heading"><span class="gname">${esc(t.name)}</span><span class="gkind ${kc}">${esc(kindLabel(t.kind))}</span></span></span>
       ${t.promo_soft ? '<span class="gpromo" title="这个工具的每一条记录都出自疑似软广">全部出自软广?</span>' : ''}
-      <span class="gsum">${esc(t.summary || '还没有简介，打开收录记录了解更多。')}</span>
+      <span class="gsum">${esc(t.summary || '还没有简介。')}</span>
       <span class="gtags">${tags}</span>
       <span class="gstat"><span class="gtally">${tallySvg(Math.min(t.n, 5), 13)}</span>
         <span class="gcount">${t.n} 次提及 · ${t.accounts} 个来源</span>

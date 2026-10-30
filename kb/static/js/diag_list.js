@@ -30,9 +30,8 @@ function careRenderList() {
     const empty = document.createElement('div');
     empty.className = 'care-empty';
     empty.textContent = CARE.q ? '这个搜索词在这一组里没有命中。'
-      : CARE.group === 'attention' ? '这一组现在是空的——没有等着你决定的内容。'
-        : CARE.group === 'archived' ? '还没有搁置过任何内容。'
-          : '这一组现在是空的。';
+      : CARE.group === 'archived' ? '还没有搁置过任何内容。'
+        : '这一组现在是空的。';
     host.appendChild(empty);
     careRenderBatch();
     return;
@@ -264,7 +263,8 @@ function careRenderRunningPane(host) {
   const hint = document.createElement('p');
   hint.textContent = live.running
     ? '进度只以阶段为粒度公布，所以这里不猜「正在处理哪一条」：条目仍然留在它自己那一档里。'
-    : '「待执行」只表示这几条已经排上了，不表示有东西在运行。要开始请用「立即执行」或到同步中心新建一次同步。';
+    // 留的是口径(「待执行」≠「在跑」),去掉的是「要开始请用立即执行」—— 那颗按钮就在这一屏上。
+    : '「待执行」只表示这几条已经排上了，不表示有东西在运行。';
   head.appendChild(hint);
   box.appendChild(head);
   for (const stage of (live.stages || [])) {
