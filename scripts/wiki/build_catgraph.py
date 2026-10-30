@@ -41,8 +41,7 @@ VIEWS = {
         "out": "graph-projects.html",
         "title": "开源项目图谱 · 按用途归类",
         "h1": "开源项目图谱<em> · 按用途归类</em>",
-        "sub": "库里攒下的每个开源项目,按它到底拿来干什么归类。"
-               "点任意一个:看它是什么、常和谁一起被提到、出自哪些文章。",
+        "sub": "",
         "accent": "#0e7edb",
         "unit": "个项目",
         "repo_toggle": True,
@@ -54,8 +53,7 @@ VIEWS = {
         "out": "graph-skills.html",
         "title": "Skill 图谱 · 按用途归类",
         "h1": "Skill 图谱<em> · 按用途归类</em>",
-        "sub": "给 AI Agent 装的技能包,按它帮你干什么归类。"
-               "「本体是软件、只是带 skill 能力」的(Claude Code、豆包这类)已被剔除。",
+        "sub": "「本体是软件、只是带 skill 能力」的(Claude Code、豆包这类)不计入。",
         "accent": "#7c5cff",
         "unit": "个 skill",
         "repo_toggle": False,

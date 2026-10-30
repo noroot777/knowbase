@@ -48,9 +48,9 @@
   </nav>
   <nav class="tabs nav-section" id="source-navigation" aria-label="信息来源">
     <button id="tab-subs" onclick="switchTab('subs')"><i data-icon="rss"></i><span class="nav-text">我的订阅</span></button>
-    <button id="nav-grab" onclick="grabFromNav()" title="给一个链接，内容抓进知识库"><i data-icon="box"></i><span class="nav-text">存链接</span></button>
+    <button id="nav-grab" onclick="grabFromNav()"><i data-icon="box"></i><span class="nav-text">存链接</span></button>
     <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span class="nav-text">同步中心</span><span id="nav-sync-dot" hidden aria-label="同步进行中"></span></button>
-    <button id="tab-care" onclick="switchTab('care')" title="没走完收录的内容在这里处理"><i data-icon="list"></i><span class="nav-text">问题与待办</span><span id="nav-care-count" class="nav-count"></span></button>
+    <button id="tab-care" onclick="switchTab('care')"><i data-icon="list"></i><span class="nav-text">问题与待办</span><span id="nav-care-count" class="nav-count"></span></button>
   </nav>
   <nav class="explore-links nav-section" aria-label="知识图谱">
     <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i><span class="nav-text">项目图谱</span><span class="nav-ext"><i data-arrow="ext"></i></span></a>
@@ -187,7 +187,7 @@
       <span id="daily-sched-label" class="daily-head-fact">正在读取定时设置…</span>
       <button class="text-button" id="daily-sched-toggle" onclick="toggleDailySched()" aria-expanded="false" aria-controls="daily-sched">改定时</button>
       <span id="daily-new-count" class="daily-new-count" hidden></span>
-      <label class="daily-presync" title="勾上就先依次同步所选来源，再用新取回来的内容出报"><input type="checkbox" id="daily-presync" onchange="renderDailyButtons()"> 先同步一轮</label>
+      <label class="daily-presync"><input type="checkbox" id="daily-presync" onchange="renderDailyButtons()"> 先同步一轮</label>
       <button id="daily-gen" onclick="runDaily()"><span id="daily-gen-label">生成日报</span></button>
     </div>
   </header>

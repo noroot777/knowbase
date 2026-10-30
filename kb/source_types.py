@@ -54,8 +54,8 @@ SOURCE_TYPES = {
     'social': SourceType('social', '大V观点', '关注的人，此刻的想法。', ('social',),
                          icon='chat', interval_minutes=1440, url_is_origin=True,
                          url_hint='输入 X / Twitter 账号主页，或其他社交媒体的 RSS 地址',
-                         note='X 的取法在下面的「取法」那一块里选，每一档要准备的东西不同。'
-                              '也可以为单个账号填写专用订阅链接，它优先于任何通道。',
+                         note='每一档取法要准备的东西不同。为单个账号填的专用订阅链接，'
+                              '优先于任何通道。',
                          adapter='social'),
     'rss': SourceType('rss', 'RSS', '让值得读的文章，自己来到这里。', ('rss',),
                       body_from_link=True, url_is_origin=True),
@@ -68,8 +68,7 @@ SOURCE_TYPES = {
     'youtube': SourceType('youtube', 'YouTube', '频道更新先排名，只处理值得读的视频。',
                          ('youtube',), icon='paper', interval_minutes=1440,
                          url_hint='输入 YouTube 的 /channel/UC… 或 /@频道名 主页',
-                         note='先排出一张候选榜，再按数量与时长预算处理；优先复用字幕，'
-                              '需要时仅下载音频转录，英文内容翻译为中文。不分析画面。',
+                         note='只对候选榜入选的视频花算力，英文内容翻译为中文。',
                          adapter='youtube'),
     # 没有 feed 的站点走这条路:解析列表页。独立成一类而不是塞进 rss,是因为
     # 它的失败形态不同 —— 读 feed 坏在对方服务,解析页面还会坏在**对方改版**,
@@ -89,17 +88,15 @@ SOURCE_TYPES = {
                                   '一条一篇的普通 feed 请加到「RSS」那一类。',
                          # **这几个字段全部经 `textContent` 落地,写 markdown 就是把星号
                          # 显示给人看**(回归 `test_feed_sources.SourceCopyTests`)。
-                         note='给 TLDR 这类"一期一封"的简报用：RSS 本身不带正文，我们按它给的'
-                              '期号去每期页面把每条简讯拆出来，标着「赞助」的那些不收。'
-                              '正文就是简报自己写的摘要，不要再开「补抓原文」——那个'
-                              '外链指向的是别人家的文章，抓回来就不是这条简讯了。',
+                         note='标着「赞助」的那些不收。正文就是简报自己写的摘要，不要开'
+                              '「补抓原文」——那个外链指向的是别人家的文章，抓回来就不是'
+                              '这条简讯了。',
                          adapter='digest'),
     'web': SourceType('web', '网页专栏', '没有订阅源的站点，靠解析列表页跟踪。',
                       ('web',), icon='paper', interval_minutes=720,
                       url_hint='输入站点的文章列表页地址（例如 news / blog 首页）',
-                      note='给没有 RSS / Atom 的站点用：按「每条带发布时间的链接」认出'
-                           '列表，正文建议打开「补抓原文」去文章页取。站点改版时这条'
-                           '订阅会报错，而不是静静地变成「今天没有新文章」。',
+                      note='正文建议打开「补抓原文」去文章页取。站点改版时这条订阅会'
+                           '报错，而不是静静地变成「今天没有新文章」。',
                       adapter='page', body_from_link=True, url_is_origin=True),
     # 手动收录:看到一篇就存下来。**它没有可轮询的源** —— 内容在用户给出链接的
     # 那一刻就抓好入库了(`kb/feeds/grab.py`),所以 `pollable=False`、
@@ -112,9 +109,7 @@ SOURCE_TYPES = {
                         ('inbox',), icon='box', interval_minutes=1440,
                         url_hint='粘贴文章或推文链接，回车存入',
                         note='这一类不轮询：你给一个链接，正文当场抓好写进知识库。'
-                             'X 的单条推文走公开接口（长文连正文一起取），其他站点'
-                             '按文章正文提取。按站点自动归到一个收件桶里，'
-                             '抓不到正文的不会入库——重试一次的代价只是再抓一遍。',
+                             '抓不到正文的不会入库，重试一次的代价只是再抓一遍。',
                         adapter='manual', pollable=False, body_from_link=True,
                         url_is_origin=True),
 }
