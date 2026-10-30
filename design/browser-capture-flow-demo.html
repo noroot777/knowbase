@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>从浏览器采集 · 流程重排原型</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2317604f'/%3E%3Ctext x='9' y='24' font-size='27' fill='white'%3Ek%3C/text%3E%3C/svg%3E">
+<style>
+:root{--paper:#F3F5F4;--paper-2:#ECF0EE;--card:#FFF;--ink:#14202B;--ink-2:#3A4750;--muted:#66727C;
+--line:#DCE3E0;--line-soft:#E9EDEB;--brand:#17604F;--brand-deep:#0E4A3B;--brand-soft:#DFF0E9;--brand-tint:#F0F7F4;
+--ok:#2E7D57;--danger:#B3402F;--warn:#8A5A22;--warn-soft:#F6EBDC;
+--font-display:"Songti SC","STSong","Source Han Serif SC",serif;
+--font-mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+--font-body:-apple-system,"PingFang SC","Noto Sans SC",sans-serif}
+*{box-sizing:border-box}
+body{margin:0;background:var(--paper);color:var(--ink);font:15px/1.7 var(--font-body)}
+.wrap{max-width:1180px;margin:auto;padding:34px 24px 70px}
+h1{font:900 34px/1.35 var(--font-display);margin:0}
+.lede{color:var(--muted);margin:10px 0 0;max-width:62ch}
+.tag{display:inline-block;font:11px/1 var(--font-mono);color:var(--warn);background:var(--warn-soft);
+padding:6px 9px;border-radius:4px;margin-bottom:18px}
+.cols{display:grid;grid-template-columns:1fr 380px;gap:38px;margin-top:34px;align-items:start}
+h2{font-size:15px;margin:34px 0 14px}
+h2:first-child{margin-top:0}
+.flow{list-style:none;padding:0;margin:0;counter-reset:s}
+.flow li{counter-increment:s;position:relative;padding:11px 0 11px 40px;border-bottom:1px solid var(--line-soft)}
+.flow li::before{content:counter(s);position:absolute;left:0;top:11px;width:24px;height:24px;border-radius:50%;
+background:var(--paper-2);color:var(--muted);font:11px/24px var(--font-mono);text-align:center}
+.flow.now li::before{background:var(--paper-2)}
+.flow.next li::before{background:var(--brand);color:#fff}
+.flow .where{font:11px/1 var(--font-mono);color:var(--muted);display:block;margin-bottom:3px}
+.flow del{color:var(--muted);text-decoration-color:var(--danger)}
+.pain{border-left:3px solid var(--danger);background:var(--card);padding:14px 16px;margin:0 0 12px;border-radius:0 6px 6px 0}
+.pain b{display:block;margin-bottom:4px}
+.pain p{margin:0;color:var(--ink-2);font-size:14px}
+.pain .fix{margin-top:7px;color:var(--brand-deep);font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:13.5px;margin:0}
+th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+th{font-size:11px;color:var(--muted);font-weight:500;letter-spacing:.04em}
+td.y{color:var(--danger);font:12px/1.6 var(--font-mono)}
+td.n{color:var(--ok);font:12px/1.6 var(--font-mono)}
+/* —— 弹窗实物 —— */
+.stage{position:sticky;top:28px}
+.switch{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.switch button{font:12px/1 var(--font-body);padding:8px 10px;border:1px solid var(--line);background:var(--card);
+color:var(--ink-2);border-radius:5px;cursor:pointer}
+.switch button[aria-pressed=true]{background:var(--brand);border-color:var(--brand);color:#fff}
+.popup{width:380px;border:1px solid var(--line);border-radius:10px;background:var(--card);overflow:hidden;
+box-shadow:0 10px 30px rgba(20,32,43,.09)}
+.popup header{display:flex;justify-content:space-between;align-items:baseline;padding:12px 16px;
+border-bottom:1px solid var(--line-soft);font-size:11px;color:var(--muted)}
+.popup header strong{font-size:14px;color:var(--ink)}
+.popup main{padding:16px}
+.popup h3{font:900 21px/1.4 var(--font-display);margin:0 0 12px}
+.card{border:1px solid var(--line);border-radius:7px;padding:13px 14px;margin:0 0 14px}
+.card .t{font-weight:600;line-height:1.5;margin-bottom:5px}
+.meta{font:11px/1.7 var(--font-mono);color:var(--muted)}
+.state{display:inline-block;font:11px/1 var(--font-mono);padding:5px 7px;border-radius:4px;margin-top:8px}
+.state.gap{background:var(--warn-soft);color:var(--warn)}
+.state.has{background:var(--brand-soft);color:var(--brand-deep)}
+.url{font:11px/1.7 var(--font-mono);color:var(--muted);overflow-wrap:anywhere;margin:0}
+.acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.popup button.go{border:1px solid var(--brand);background:var(--brand);color:#fff;border-radius:6px;
+padding:9px 14px;font:13px/1.5 var(--font-body);cursor:pointer}
+.popup button.alt{border:1px solid var(--line);background:var(--card);color:var(--brand);border-radius:6px;
+padding:9px 14px;font:13px/1.5 var(--font-body);cursor:pointer}
+.popup button:disabled{opacity:.45;cursor:not-allowed}
+.foot{font-size:11px;color:var(--muted);margin:14px 0 0;line-height:1.65}
+.grab{display:flex;gap:10px;margin:12px 0}
+.grab div{flex:1;border:1px solid var(--line-soft);border-radius:6px;padding:9px 10px;background:var(--paper-2)}
+.grab span{display:block;font:10px/1 var(--font-mono);color:var(--muted);margin-bottom:5px}
+.grab b{font:13px/1.3 var(--font-mono);color:var(--ink)}
+.edge{font:11px/1.6 var(--font-mono);color:var(--ink-2);background:var(--paper-2);border-radius:5px;
+padding:8px 10px;margin:7px 0 0;overflow-wrap:anywhere}
+.edge i{font-style:normal;color:var(--muted);margin-right:6px}
+details.full{margin-top:11px;border-top:1px solid var(--line-soft);padding-top:10px}
+details.full summary{font-size:12px;color:var(--brand);cursor:pointer}
+details.full textarea{width:100%;height:120px;margin-top:9px;border:1px solid var(--line);border-radius:5px;
+padding:8px;font:11px/1.7 var(--font-mono);color:var(--ink-2);background:var(--paper-2);resize:vertical}
+.check{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;color:var(--ink-2);
+margin:13px 0 0;line-height:1.6;cursor:pointer}
+.mismatch{border-left:3px solid var(--warn);background:var(--warn-soft);padding:11px 13px;border-radius:0 5px 5px 0}
+.mismatch p{margin:0 0 6px;font-size:12.5px}
+.done{border-left:3px solid var(--ok);background:var(--brand-tint);padding:12px 14px;border-radius:0 5px 5px 0}
+.note{font-size:12.5px;color:var(--muted);margin:14px 0 0;padding-top:12px;border-top:1px solid var(--line-soft)}
+.note b{color:var(--ink-2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+<span class="tag">交互原型 · 不连生产库 · 右侧弹窗可点</span>
+<h1>从浏览器采集，倒过来走。</h1>
+<p class="lede">人已经站在那篇文章上了。现在却要他先回知识库声明一次意图，再回来执行 —— 整条流程的繁琐都从这一个双向交接长出来。把它去掉，常见路径从六步变三步，而且全程不离开文章标签。</p>
+
+<div class="cols">
+<div>
+
+<h2>现在这样</h2>
+<ol class="flow now">
+<li><span class="where">知识库 · 问题与待办</span>点「从浏览器采集」，新标签打开补抓页</li>
+<li><span class="where">知识库 · 补抓页</span>核对网址，点「发起浏览器采集」—— 建一个 15 分钟后过期的待办</li>
+<li><span class="where">文章标签</span>切回去，点扩展</li>
+<li><span class="where">扩展弹窗</span>在下拉里<b>找到并选中</b>刚才那个待办</li>
+<li><span class="where">扩展弹窗</span>点「读取此页」，在小框里把全文重读一遍，勾确认，提交</li>
+<li><span class="where">知识库 · 补抓页</span>再切回去看回执，点「继续导出与索引」</li>
+</ol>
+
+<h2>改成这样</h2>
+<ol class="flow next">
+<li><span class="where">文章标签</span>点扩展（或 ⌘⇧Y）—— 它当场告诉你这一页是知识库里的哪一条</li>
+<li><span class="where">扩展弹窗</span>点「读取此页」，核对字数与首尾，勾确认</li>
+<li><span class="where">扩展弹窗</span>点「补回去」，回执和下一步就在原地</li>
+</ol>
+<p class="note"><b>待办没有消失，是降级成兜底。</b> 只有「反查不到这一页」时才需要它 —— 站点跳转、语言前缀、短链。那时扩展也不让你跑一趟：见右边第 6 种。</p>
+
+<h2>四件事各自的根因</h2>
+
+<div class="pain"><b>① 待办是在传一个本可以当场算出的事实</b>
+<p>它用一枚 15 分钟的内存令牌，告诉扩展「这个 URL 对应库里哪一条」。而 <code>paths.item_key = sha256(kind + ':' + url)</code> —— key 本来就由 URL 算出，<code>grab_store.known(url)</code> 这份现成口径已经在按 URL 回答同一个问题。</p>
+<p class="fix">→ 扩展打开时拿当前页 URL 问一次服务端，命中就直接干活。待办只在反查不到时登场。</p></div>
+
+<div class="pain"><b>② 15 分钟有效期逼着你赶</b>
+<p>长文还没读完，待办先过期了；回去重发，又是一轮两个标签来回切。</p>
+<p class="fix">→ 主路径没有待办，也就没有期限。兜底路径保留 15 分钟不变。</p></div>
+
+<div class="pain"><b>③ 把全文塞进小框让你重读一遍</b>
+<p>弹窗最宽 800px，正文四五千字。而你正看着原文 —— 你要的不是「正文是什么」，是<b>「它抓到的和我看到的是不是同一篇」</b>。</p>
+<p class="fix">→ 默认只给字数、段数、开头和结尾两行。全文收进「看全文」里，要查再展开。</p></div>
+
+<div class="pain"><b>④ 结果在另一个标签上</b>
+<p>提交完要切回补抓页才看得到回执和「继续导出与索引」。</p>
+<p class="fix">→ 回执和下一步就在弹窗里。补抓页退成配对页 + 兜底指认页 + 历史回执。</p></div>
+
+<h2>要不要重装扩展</h2>
+<table>
+<tr><th>改动</th><th>落在哪</th><th>要重装吗</th></tr>
+<tr><td>按当前页 URL 反查条目</td><td>服务端新端点</td><td class="n">不用</td></tr>
+<tr><td>弹窗主界面重排（去下拉、首尾预览、原地回执）</td><td><code>popup.html/js/css</code></td><td class="y">要重装</td></tr>
+<tr><td>「就用这一页补回去」</td><td>扩展 + 服务端</td><td class="y">要重装</td></tr>
+<tr><td>「收录这条链接」（接现有手动收录）</td><td>扩展 + 服务端</td><td class="y">要重装</td></tr>
+<tr><td>补抓页退成兜底页</td><td><code>kb/static/</code></td><td class="n">不用</td></tr>
+<tr><td>权限清单（<code>activeTab/scripting/storage</code>）</td><td>不动</td><td class="n">不用</td></tr>
+</table>
+<p class="note"><b>结论：要重装一次。</b> 权限清单一个字不改，所以重装时 Chrome 不会多要任何授权；配对密钥存在扩展本地，重装后要重新粘一次 —— 这一步我会在补抓页上留着。</p>
+
+<h2>这一条请你定夺</h2>
+<p class="note">「这一页不在知识库里 → <b>收录这条链接</b>」接的是现有的手动收录（<code>kb/feeds/grab.py</code>），技术上顺手。但它让扩展从「补正文的工具」变成「知识库的浏览器前哨」—— 是功能扩张，不是流程优化。<b>不做也完全成立</b>：那时第 5 种状态就只说一句「这一页不在知识库里」。右边可以点开看它长什么样。</p>
+
+</div>
+
+<div class="stage">
+<div class="switch" role="group" aria-label="切换弹窗状态">
+<button data-go="a" aria-pressed="true">① 命中·缺正文</button>
+<button data-go="b" aria-pressed="false">② 读完·核对</button>
+<button data-go="c" aria-pressed="false">③ 写入完成</button>
+<button data-go="d" aria-pressed="false">④ 已有正文</button>
+<button data-go="e" aria-pressed="false">⑤ 不在库里</button>
+<button data-go="f" aria-pressed="false">⑥ 页面跳转过</button>
+</div>
+
+<div class="popup">
+<header><strong>k· Knowbase</strong><span>由你选择，只读此页</span></header>
+<main>
+
+<section data-panel="a">
+<h3>这一页在知识库里。</h3>
+<div class="card">
+<p class="t">OpenAI 模型即将登陆 Google Cloud</p>
+<p class="meta">RSS · OpenAI Blog · 2026/10/21</p>
+<span class="state gap">正文缺失 · 页面上没识别出正文</span>
+</div>
+<div class="acts"><button class="go" data-go="b">读取此页</button><button class="alt" data-go="b">读取所选文字</button></div>
+<p class="foot">不刷新、不滚动、不跳转、不关闭这个标签。不上传 Cookie、密码、表单或整页 HTML。</p>
+</section>
+
+<section data-panel="b" hidden>
+<h3>核对后才写入。</h3>
+<div class="grab">
+<div><span>不重复字数</span><b>4 812</b></div>
+<div><span>段落</span><b>37</b></div>
+</div>
+<p class="edge"><i>开头</i>OpenAI 今天宣布，其模型将通过 Google Cloud 向企业客户开放……</p>
+<p class="edge"><i>结尾</i>……该能力将于本月底面向所有企业客户开放。</p>
+<details class="full"><summary>看全文</summary>
+<textarea readonly>OpenAI 今天宣布，其模型将通过 Google Cloud 向企业客户开放。此次合作意味着……（此处为原型占位文本，真实弹窗展示服务端确认过的完整正文）</textarea>
+</details>
+<label class="check"><input type="checkbox" id="ok"><span>我已核对：这是这篇文章的完整正文，不是登录提示、摘要或选段。</span></label>
+<div class="acts"><button class="go" id="submit" data-go="c" disabled>补回去</button><button class="alt" data-go="a">重来</button></div>
+</section>
+
+<section data-panel="c" hidden>
+<h3>补回去了。</h3>
+<div class="done">
+<p class="t">已写入 4 812 字</p>
+<p class="meta">OpenAI 模型即将登陆 Google Cloud</p>
+</div>
+<p class="foot">翻译、导出、索引还没跑。可以等下一轮同步，也可以现在跑后两段 —— 条目化提取按全库取数，不在这颗按钮里。</p>
+<div class="acts"><button class="go">继续导出与索引</button><button class="alt">在知识库里打开</button></div>
+</section>
+
+<section data-panel="d" hidden>
+<h3>这一页已经有正文。</h3>
+<div class="card">
+<p class="t">OpenAI 模型即将登陆 Google Cloud</p>
+<p class="meta">RSS · OpenAI Blog · 2026/10/21</p>
+<span class="state has">正文 4 812 字 · 10/21 从浏览器补入</span>
+</div>
+<p class="foot">不会覆盖。确实要换掉现在这一份时再重新采集，旧回执保留到新的提交为止。</p>
+<div class="acts"><button class="alt" data-go="b">重新采集正文</button></div>
+</section>
+
+<section data-panel="e" hidden>
+<h3>这一页不在知识库里。</h3>
+<p class="url">https://openai.com/zh-Hans-CN/index/openai-models-google-cloud/</p>
+<p class="foot">没有任何条目绑着这个地址，也没有待办在等它。</p>
+<div class="acts"><button class="go">收录这条链接</button></div>
+<p class="note">↑ 这颗按钮是<b>待定项</b>：它接现有的手动收录。不要的话这一屏就只剩上面那句话。</p>
+</section>
+
+<section data-panel="f" hidden>
+<h3>这一页不在知识库里，但有一条在等它。</h3>
+<div class="mismatch">
+<p>站点把你带到了另一个地址。确认是同一篇，就直接用这一页补回去。</p>
+</div>
+<div class="card">
+<p class="t">OpenAI 模型即将登陆 Google Cloud</p>
+<p class="edge"><i>条目</i>openai.com/index/openai-models-google-cloud/</p>
+<p class="edge"><i>当前</i>openai.com<b>/zh-Hans-CN</b>/index/openai-models-google-cloud/</p>
+</div>
+<div class="acts"><button class="go" data-go="b">就用这一页补回去</button></div>
+<p class="note">现在要为这一步跑回知识库：取消待办 → 把地址抄进框里 → 重新发起 → 再切回来。</p>
+</section>
+
+</main>
+</div>
+</div>
+</div>
+
+<script>
+(() => {
+  const panels = [...document.querySelectorAll('[data-panel]')];
+  const tabs = [...document.querySelectorAll('.switch button')];
+  function show(name) {
+    panels.forEach(p => { p.hidden = p.dataset.panel !== name; });
+    tabs.forEach(t => t.setAttribute('aria-pressed', String(t.dataset.go === name)));
+    const box = document.getElementById('ok');
+    if (name === 'b' && box) { box.checked = false; document.getElementById('submit').disabled = true; }
+  }
+  document.addEventListener('click', event => {
+    const go = event.target.closest('[data-go]');
+    if (go) show(go.dataset.go);
+  });
+  document.addEventListener('change', event => {
+    if (event.target.id === 'ok') document.getElementById('submit').disabled = !event.target.checked;
+  });
+})();
+</script>
+</body>
+</html>
