@@ -327,7 +327,11 @@ class FromPageRequest(BaseModel):
     """`POST /api/grab/from-page` 的请求体 —— 正文由**人打开着的那个标签**提供。"""
     model_config = ConfigDict(extra='forbid')
     url: str = Field(min_length=1, max_length=2048)
-    title: str = Field(default='', max_length=500)
+    # 标题 1000 跟着 `extract.js` 那一刀(它 `slice(0, 1000)`)和旧 `/upload` 的
+    # `max_length=1000`:收窄一点就会让长标题的页面在 pydantic 那层收一个 422,
+    # 而 422 的话术说不出人该干什么。正文上限刻意留宽:超 `MAX_CHARS` 由
+    # `grab.from_page` 拒,它能说清超了多少、下一步选哪一段。
+    title: str = Field(default='', max_length=1000)
     body: str = Field(min_length=1, max_length=400_000)
 
 

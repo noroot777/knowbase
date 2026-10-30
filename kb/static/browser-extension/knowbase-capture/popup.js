@@ -20,7 +20,8 @@
     busy = value;
     const available = !!element('intent').value;
     for (const name of ['read', 'selection']) element(name).disabled = value || !available;
-    for (const name of ['collect', 'collect-page']) element(name).disabled = value || !here;
+    for (const name of ['collect', 'collect-page', 'collect-selection'])
+      element(name).disabled = value || !here;
     for (const name of ['connect', 'refresh', 'intent']) element(name).disabled = value || (name === 'intent' && !intents.length);
     element('save').disabled = value || !preview || !element('complete').checked;
   }
@@ -77,6 +78,7 @@
   async function loadHere() {
     element('here-actions').hidden = true;
     element('collect-page').hidden = true;
+    element('collect-selection').hidden = true;
     element('here-title').hidden = true;
     try {
       here = await currentTab();
@@ -89,7 +91,10 @@
     element('here-url').textContent = plainUrl(here.url);
     const state = await grabApi(`/state?url=${encodeURIComponent(here.url)}`);
     if (state.known) {
-      element('here-state').textContent = state.done ? '这一页已在知识库里。' : '这一页已收下，还没写完。';
+      // 「还没写完」时服务端会连着给出人该去哪一页点哪一颗(`resume`)。
+      // 自己另编一句就等于把那份口径抄进扩展,它改了这里不会跟着改。
+      element('here-state').textContent = state.done
+        ? '这一页已在知识库里。' : `这一页已收下，还没写完${state.resume || ''}。`;
       element('here-title').textContent = state.title || '';
       element('here-title').hidden = !state.title;
       return;
@@ -176,16 +181,25 @@
     setBusy(true);
     try {
       const result = await grabApi('', {method: 'POST', body: JSON.stringify({url: here.url})});
-      await loadHere();
+      // 同下面提交那一处:收下之后刷新失败不改变已经收下这件事,更不该把
+      // 下面那两颗兜底按钮露出来 —— 那会让人把已入库的这一页再读一遍正文。
+      try { await loadHere(); } catch { /* 照旧报「已收下」 */ }
       status(result.detail || '已收下');
     } catch (error) {
       status(error.message, true);
+      // 两颗一起露出,因为**服务端抓不到**和**它自动识别不出正文**是两回事:
+      // 前者给「改用这一页的正文」就够了,后者(整页是脚本渲染的壳、正文在
+      // iframe 里、页面没有能认出的文章容器)只有人自己选中那一段才取得到。
+      // 只给前一颗的话,`extract.js` 回的「请选好全文再读一次」就指向一颗
+      // 不存在的按钮 —— 人照着做完,无处可点。
       element('collect-page').hidden = false;
+      element('collect-selection').hidden = false;
     }
     finally { setBusy(false); }
   });
 
   element('collect-page').addEventListener('click', () => collect('article'));
+  element('collect-selection').addEventListener('click', () => collect('selection'));
 
   // 用这一页的正文收录。和补正文那条路同一套:先问服务端(不通过就一个字都不读
   // 第二遍)、预览上的字数用服务端那一份、人勾完确认才提交。
@@ -201,10 +215,12 @@
       preview = payload;
       element('page-title').textContent = verified.title;
       element('page-url').textContent = plainUrl(captured.page_url);
-      element('count').textContent = `${verified.characters} 字符 · ${mode === 'selection' ? '你所选的文字' : '自动识别的文章区域'} · 尚未上传`;
+      // 不写「尚未上传」:这一刻正文**已经**传给本机服务核对过了(上面那次预检)。
+      // 待定的是「收不收进知识库」,说成没上传会让人以为取消就什么都没发生。
+      element('count').textContent = `${verified.characters} 字符 · ${mode === 'selection' ? '你所选的文字' : '自动识别的文章区域'} · 尚未收录`;
       element('body').value = captured.body;
       element('preview').hidden = false;
-      status('先核对全文。只有勾选确认并点击使用，才会收录进知识库。');
+      status('全文已传给本机服务核对，先看一遍。只有勾选确认并点击使用，才会收录进知识库。');
     } catch (error) { status(error.message, true); }
     finally { setBusy(false); }
   }
@@ -236,10 +252,16 @@
   // 「这一页」那一问失败不该挡住待办那一块:两件事互不依赖,一边连不上时
   // 另一边照旧可用(反过来也一样)。
   async function refreshAll() {
-    await loadIntents();
+    // 两边各自接住,顺序不构成依赖:`loadIntents` 抛出时(密钥不对、服务没起)
+    // 「这一页」照旧要问 —— 写成 `await loadIntents()` 打头就等于让它一失败
+    // 这一整块永远停在「正在确认这一页…」,而注释还写着互不依赖。
+    // `loadIntents` 那个错要原样抛出去:connect 那颗按钮靠它判密钥对不对。
+    let failure = null;
+    try { await loadIntents(); } catch (error) { failure = error; }
     try { await loadHere(); } catch (error) {
       element('here-state').textContent = '没能确认这一页：' + error.message;
     }
+    if (failure) throw failure;
   }
   element('save').addEventListener('click', async () => {
     if (busy || !preview || !element('complete').checked) return;
@@ -248,7 +270,10 @@
       if (collecting) {
         const result = await grabApi('/from-page', {method: 'POST', body: JSON.stringify(preview)});
         clearPreview();
-        await loadHere();
+        // 已经收下了。这一问失败只是「状态没刷新」—— 落进下面那个 catch 会
+        // 告诉人「可再次提交同一预览」,而预览刚被 clearPreview 清掉,他照着
+        // 做不到;更要紧的是那句话会让他以为**没收下**。
+        try { await loadHere(); } catch { /* 下面照旧报「已收下」 */ }
         status(result.detail || '已收下');
         return;
       }

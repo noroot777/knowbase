@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from kb import config, pipeline
-from kb.feeds import grab, registry as reg
+from kb.feeds import grab, grab_page, registry as reg
 from kb.feeds.fetching import Response
 from tests.grab_fixtures import (BODY, DIGEST_SUMMARY, SOFT_WALL, TWEET_FULL, WALL,
                                  GrabCase, PAGE, TWEET, html_resp, page_html,
@@ -151,6 +151,56 @@ class EndpointTests(GrabCase):
         with self.pipeline_patch():
             self.assertEqual(200, self.from_page().status_code)
         self.assertEqual(400, self.from_page(path='/precheck').status_code)
+
+    def test_an_over_long_browser_page_is_refused_instead_of_quietly_cut(self):
+        """超上限**直接拒**,不许截了之后当成「人核对过的完整正文」存进去。
+
+        判据落在**库里那一行**和**预检那个字数**上,不是「有没有报错」:
+        截断的事故形态恰恰是一切看着都正常 —— 预览里是全文、人勾了确认、
+        接口回 200、`confirmed=True`,只有尾巴在 SQLite 里不见了,而
+        `put_items` 的 `DO NOTHING` 让重投救不回来。
+
+        反过来钉一边:正好压线的那一份照旧收得进去,且**一个字符都没少**
+        (否则「一律拒」也能让上面那半条绿)。
+        """
+        tail = '这是尾巴，被截掉就再也补不回来了。'
+        over = '长' * (grab_page.MAX_CHARS - len(tail) + 1) + tail
+        self.assertGreater(len(over), grab_page.MAX_CHARS)
+        with self.pipeline_patch():
+            refused = self.from_page(body=over)
+        self.assertEqual(400, refused.status_code)
+        self.assertIn(str(len(over)), refused.json()['detail'], '要说清超了多少')
+        # 预检同一份判据:不让人读完整页、核对完预览才被拒
+        self.assertEqual(400, self.from_page(body=over, path='/precheck').status_code)
+        with reg.db() as conn:
+            self.assertEqual(0, conn.execute('SELECT count(*) FROM feed_items').fetchone()[0])
+        self.assertEqual([], self.runs)
+
+        exact = '长' * (grab_page.MAX_CHARS - len(tail)) + tail
+        self.assertEqual(grab_page.MAX_CHARS, len(exact))
+        checked = self.from_page(body=exact, path='/precheck')
+        self.assertEqual(200, checked.status_code, checked.text)
+        with self.pipeline_patch():
+            self.assertEqual(200, self.from_page(body=exact).status_code)
+        with reg.db() as conn:
+            stored = conn.execute('SELECT body FROM feed_items WHERE url=?', (PAGE,)).fetchone()['body']
+        # **被确认的那一份 == 存进去的那一份**:预检报的字数、库里的字数、
+        # 以及最后那句尾巴,三样必须同时对得上。
+        self.assertEqual(len(exact), checked.json()['characters'])
+        self.assertEqual(exact, stored)
+        self.assertTrue(stored.endswith(tail))
+
+    def test_a_long_page_title_is_not_turned_into_an_opaque_422(self):
+        """标题上限跟着 `extract.js` 那一刀(1000),收窄一点就是一个 422。
+
+        422 的话术说不出人该干什么 —— 而标题长不是人的错,页面给什么是什么。
+        反过来钉一边:真的超长(嵌了一整段话的 `document.title`)照旧拒,
+        不许把上限取消了算完。
+        """
+        with self.pipeline_patch():
+            answer = self.from_page(title='标' * 1000)
+        self.assertEqual(200, answer.status_code, answer.text)
+        self.assertEqual(422, self.from_page(url=PAGE + '?x=1', title='标' * 1001).status_code)
 
     def test_a_link_already_in_the_library_is_not_collected_twice(self):
         """已经收过的那一条:照旧回那句话,不新建、不覆盖正文。"""

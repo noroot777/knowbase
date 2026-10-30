@@ -445,11 +445,19 @@ def from_page(url: str, title: str, body: str) -> dict:
     `body_provenance` 记的是 `browser_grab` 而不是 `web`:知识库里这两种来历
     必须分得出来,不然事后谁也说不清某一篇的正文是我们核对过的还是人递进来的。
 
-    **准入因此只剩内容质量那一道**(`grab_page.body_confirmed` —— 按**行**去重
-    之后的字数,和手动收录第 ⑧ 道、浏览器补抓的 `_admit_body` 是同一份口径,不是
-    第二套)。关卡那几道在这条路上没有意义,而且正好相反:真撞上关卡的页面恰恰是
-    这条路存在的理由 —— 服务端抓不到,他的浏览器里有,而一张「请先登录」的页面
-    他自己看得见,不会去点收录。
+    **准入因此只剩长度那两道**(下不足 `body_confirmed`、上超 `MAX_CHARS`,都是
+    按**行**去重之后的字数,和手动收录第 ⑧ 道、浏览器补抓的 `_admit_body` 同一份
+    口径,不是第二套)。关卡那几道在这条路上没有意义,而且正好相反:真撞上关卡的
+    页面恰恰是这条路存在的理由 —— 服务端抓不到,他的浏览器里有,而一张「请先登录」
+    的页面他自己看得见,不会去点收录。
+
+    **超上限一律拒,不许截了之后接着存**(口径同 `browser_capture._admit_body`
+    的 `MAX_BODY`,也同 `link-grab.md` 那条「判据要落在最后真写进库的那一份上」)。
+    `_grab_web` 那边可以截(`admit(limit=)`),是因为那份正文从头到尾没人看过,
+    截多截少都只是我们自己抓到的一段;**这条路相反,人在预览里核对过才点的确认**,
+    悄悄只存前一半会让 `confirmed=True` 变成一句假证 —— 库里那条看着是人核对过的
+    完整正文,实际尾巴没了,而且**正文不可恢复**(`put_items` 的 `DO NOTHING` 挡着
+    重投)。拒掉顶多让他重选一段再读一次。
 
     **X 不接**:单条推文有自己的取法(`_grab_x`:`x_post_meta`、
     `content_kind='post'`、引文与媒体行),从这里进来会绕开那一整套,在库里留下
@@ -458,12 +466,18 @@ def from_page(url: str, title: str, body: str) -> dict:
     url = normalize(url)
     if classify(url) == 'x':
         raise GrabError('X 的单条推文不走这条路，直接收录这个链接即可。')
-    body = body.replace('\r\n', '\n').replace('\r', '\n').strip()[:grab_page.MAX_CHARS]
+    body = body.replace('\r\n', '\n').replace('\r', '\n').strip()
     if not grab_page.body_confirmed(body):
         # 口径同 `_grab_web` 那一档「没找到正文」:这里不另说一套门槛数字,
         # 人的下一步是「在文章里选好正文再读一次」,而不是去算字数。
         raise GrabError(f'这一页读到的内容不足 {readable.MIN_CHARS} 个不重复字符，'
                         f'看着不像一篇完整正文。请先在文章里选好全文，再读一次。')
+    if len(body) > grab_page.MAX_CHARS:
+        # 这里**只拒不截**,理由见上面 docstring 那一段:截了再存会让人核对过的
+        # 那一份和库里那一份不是同一份。数字说出来,他才知道该选掉多少。
+        raise GrabError(f'这一页读到 {len(body)} 个字符，超过单条 '
+                        f'{grab_page.MAX_CHARS} 字符的上限。请在文章里选中要收录的'
+                        f'那一部分，再读一次 —— 截断之后存进去的就不是你核对过的那一份了。')
     host = (urlsplit(url).hostname or '').lower().removeprefix('www.')
     return {'url': url, 'title': grab_page.title_fallback(title.strip(), body, host),
             'body': body, 'author': host, 'published': '',
