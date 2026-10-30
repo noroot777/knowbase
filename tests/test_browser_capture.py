@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from kb import browser_capture as capture
-from kb.feeds import registry as reg
+from kb.feeds import readable, registry as reg
 from kb.web import browser_capture_api
 from kb.source_types import catalog, permits_link_body
 from tests.test_feed_fulltext import FullTextCase
@@ -115,6 +115,44 @@ class BrowserCaptureTests(FullTextCase):
                 self.assertEqual(409, self.upload(request, page_url=wrong).status_code)
         self.assertNotEqual(BODY, self.row(other)['body'])
 
+    def test_refused_page_is_handed_back_so_the_person_can_switch_to_it(self):
+        """浏览器停在另一个地址:拒绝那一刻的真实网址要带回补抓页,**可一键改用**。
+
+        事故形态:站点按浏览器语言跳转(`openai.com/index/x` 在中文浏览器里落到
+        `/zh-Hans-CN/index/x`),这一类订阅**每一次**都被拒,而人只看到一句
+        「网址不同」—— 真实网址服务端此刻就拿着,却丢掉了;更坏的是原来那句
+        「回知识库核对最终网址并重新发起」在页面上**当场做不到**(有待办时那一栏
+        和「发起」都禁用,得先取消待办)。
+        **记下来不等于放行**:原请求照旧只认它绑定的那一页,改用它要人另发一次。
+        反过来钉一边:没撞上网址不同时那一栏一直是空的(否则页面上会常驻一颗
+        指向别处的按钮)。
+        """
+        key = self.put(url='https://openai.com/index/openai-models-google-cloud/')
+        request = capture.create(key, 'https://openai.com/index/openai-models-google-cloud/')
+        self.assertEqual(200, self.precheck(request, page_url=request['page_url']).status_code)
+        self.assertEqual('', capture.item_state(key)['pending'][0]['seen_url'],
+                         '没撞上就不该记下任何「另一页」')
+        landed = 'https://openai.com/zh-Hans-CN/index/openai-models-google-cloud/'
+        self.assertEqual(409, self.precheck(request, page_url=landed).status_code)
+        self.assertEqual(landed, capture.item_state(key)['pending'][0]['seen_url'])
+        # 记下来**不是**放行:这个请求仍然只写得了它绑定的那一页,正文一个字没动
+        self.assertEqual(409, self.upload(request, page_url=landed).status_code)
+        self.assertNotEqual(BODY, self.row(key)['body'])
+        # `save` 那条路共用同一份判据,也记同一处(扩展先读后传的那一次)
+        self.assertEqual(409, self.upload(request, page_url=landed + '?utm=1').status_code)
+        self.assertEqual(landed + '?utm=1', capture.item_state(key)['pending'][0]['seen_url'])
+        # 人点下「改用这个地址」= 拿它另发一个请求,旧的被服务端顶掉
+        switched = capture.create(key, landed)
+        self.assertEqual('', switched['seen_url'])
+        self.assertEqual([switched['id']],
+                         [one['id'] for one in capture.item_state(key)['pending']])
+        self.assertEqual(200, self.precheck(switched, page_url=landed).status_code)
+        self.assertEqual(200, self.upload(switched, page_url=landed).status_code)
+        self.assertEqual(BODY, self.row(key)['body'])
+        # 被顶掉的那个不再改写它记下的那一份(页面上只显示 pending 的那一个)
+        self.assertEqual(409, self.precheck(request, page_url='https://openai.com/ja-JP/x').status_code)
+        self.assertEqual(landed + '?utm=1', capture._intents[request['id']]['seen_url'])
+
     def test_precheck_refuses_before_reading_with_the_same_verdict_as_upload(self):
         """读之前先问一次,判据和 `save` 同一组 —— 否则人白读一整页。
 
@@ -123,7 +161,12 @@ class BrowserCaptureTests(FullTextCase):
         同步改过、请求已经过期。`precheck` 一个字都不落库。
         """
         repeated = 'Sign in to continue reading this story. Subscribe to unlock it now.\n' * 17
-        self.assertGreater(len(repeated), 1300)
+        # 这条用例的**前提**:原始长度过得了那道门槛(扩展曾经那么数,所以放行),
+        # 按行去重之后过不了(服务端拒)。门槛的唯一源头是 `readable.MIN_CHARS` ——
+        # 原来这里写的是实测记下的魔数 1300,而这段文字只有 1156 字,前提断言从
+        # 引入那天起就恒假,底下那十来条**一条都没跑到**(基线既有)。
+        self.assertGreater(len(repeated), readable.MIN_CHARS)
+        self.assertLess(readable.substance(repeated), readable.MIN_CHARS)
         request = self.intent()
         before = self.row(self.key)
         thin = self.precheck(request, body=repeated)
