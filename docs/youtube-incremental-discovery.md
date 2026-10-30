@@ -45,14 +45,18 @@
   内容处理、且没有真实错误的候选可豁免。失败冷却、取消、熔断不混作纯预算未轮到。
 - 实际元数据请求后字段不完整或中断，存储层将 `metadata_pending` 置为 1；它跨轮保存，
   不因跳过 300 秒冷却而退回「未尝试」。精确元数据补齐或合格内容完成时才清除。
-- 升级存量库只加列；旧版 `deferred` 且有重试时间的候选保守保留为待核实，
-  没有重试时间且只有通用元数据说明的条目恢复为 `candidate`，不清除真实错误。
+- 升级存量库只加列；只有 `deferred`、无准入闸代码且原因属于通用元数据说明的行
+  才补种 `metadata_pending`。有重试时间时标记未完成，无重试时恢复为 `candidate`；
+  直播、首映、时长、处理预算和未知原因不借共享的延后状态推断成元数据待办。
 - 取消状态在元数据、处理与落账阶段连续保留；成功覆盖最后集中落在同一事务，取消时
   不清除任何频道的既有错误、次数或退避，也不把频道记入 `succeeded_ids`。
 - 纯元数据待办只更新说明，不把健康候选标为 `deferred`。已有真实预算或熔断延后原因
-  可跨轮保留；元数据补齐或实际内容处理推进后，才按真实结果更新该状态与原因。
-- 成功覆盖遇到维护锁或数据库异常，通过来源失败出口记录错误，并继续保存本轮历史、
-  重试范围与最终进度。没有待记成功的来源时不争抢维护锁；旧提醒只在成功提交时清除。
+  可跨轮保留。迁移、元数据挂起、补齐写回共用存储层 SQL 归属判据；补齐时只释放
+  元数据专属延后，其他子系统的状态、原因、闸代码和冷却一律保留。
+- 成功覆盖遇到维护锁或数据库异常，只记录本机保存告警、扣留本轮成功，并继续保存
+  本轮历史和最终进度；不改变订阅错误账、不推退避、不加入频道失败重试名单。
+  真正的频道失败仍保留在原失败名单。没有待记成功的来源时不争抢维护锁；旧提醒
+  只在成功提交时清除。
 - 单条本地超时或事实字段缺失暂缓 5 分钟，避免每轮都由同一个坏候选占掉全部预算。
 - 实际上游失败保留原始诊断；429 继续通过同一份请求级熔断账停止后续读取。
 - 写回精确快照时核对旧快照未改变、仍有有效频道归属且没有永久移除记录。
@@ -222,7 +226,8 @@ Ruff 实际使用 `/Users/fjh/code/_deps/liveportrait/.venv/bin/ruff`；项目�
 
 ## 追加审查修复与验证（2026-10-30）
 
-对应 `SqxprDLd0bEx/round-1` 的三条必须修复项，本轮只调整 YouTube 链路：
+对应 `SqxprDLd0bEx/round-1` 的三条必须修复项，当轮只调整 YouTube 链路。
+此节保留当时验证记录，其中过宽的旧库补种与收尾错误归类由后续二轮追加修复替代：
 
 - **跨轮未完成事实**：存储层新增只增不减的 `metadata_pending` 列。实际请求后字段
   不完整或局部中断的候选，即便下一轮被五分钟冷却跳过，仍保留未完成身份，不再把
@@ -293,3 +298,71 @@ SHA-256：`195189ea833107d0c677503ac1a1c1fd1ef67e33787f12d62ae8171a68b0cc70`。
 四个实现与一个测试文件通过 Ruff、内存编译、700 行检查，`git diff --check` 通过。
 未运行整套或未改动测试，审查列出的其他回归面仍由验收前置命令覆盖；没有真实
 YouTube/模型请求或生产数据写入。这些结果验证状态正确性，不代表生产抓取耗时实测。
+
+## 二轮追加审查修复与验证（2026-10-31）
+
+对应 `SqxprDLd0bEx/round-2` 的三条必须修复项，本轮没有调整其他频道或扩大抓取范围：
+
+- **本机故障不罚频道**：最终成功事务的维护锁或数据库异常写入本轮 `local_error`
+  和告警，扣留本轮成功；仍保存历史、刷新最终进度，但不改订阅的旧错误、失败次数、
+  冷却和提醒，也不新增 `failed_ids`。真正的频道失败仍走原通道，二者不混为一类。
+- **延后归属只有一份判据**：存储层 `metadata_deferral()` 提供参数化 SQL，要求
+  `state='deferred'`、`gate_code=''` 且原因恰为两类元数据说明。旧库补种、元数据
+  挂起和补齐写回都按写入时的当前行判断，不凭共享状态或调用前读到的行猜测归属。
+- **只释放自己的延后**：旧库迁移不把直播、首映、时长、处理预算或未知原因标成
+  元数据未完成；补齐时可清除独立的 `metadata_pending`，但其他子系统的状态、原因、
+  闸代码和冷却保留。元数据挂起同样不能把别人的十五分钟冷却缩短成五分钟。
+
+### 登记的定点测试
+
+本轮只修改并运行 `tests/test_youtube_incremental_completion.py`，未运行其他测试文件。
+ash monitor `TgY5blBlTTi_`，退出码 `0`；已读取真实完整日志：
+`Ran 25 tests in 0.869s`，`OK`。
+
+覆盖迁移原因/闸代码组合及幂等、两类元数据延后正常释放、并发更新为其他延后后的
+SQL 写入保护、其他子系统冷却保留、锁故障不罚频道、真实成功事务中途数据库异常
+全量回滚，以及本机故障与真正频道失败并存时的重试名单隔离；原有取消与跨轮错误账
+保护用例仍在本轮修改文件内，一并通过。
+
+实际工作目录：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。
+
+未过滤的原始命令：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-review4-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-review4-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-review4-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_incremental_completion -v
+```
+
+日志：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/TgY5blBlTTi_.log`。
+SHA-256：`c2617a04e2dcf01079f6675a921d9e5a569947da102be0a32bffe4f90cd74030`。
+登记前的两个实现文件与本轮测试文件指纹保存在
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/review-fix-4/tested-code.sha256`，
+返回结果后及提交前逐项核对一致。日志仅有既有 Starlette/httpx 弃用提示，未改动无关依赖。
+
+### 隔离后端接口冒烟
+
+全新临时数据/笔记/视频目录，使用真实 FastAPI `TestClient`，未启动生产服务或调度器。
+媒体、列表与模型使用本地替身，真实 `collect`、`process`、成品校验、发布和历史保存
+照常执行；只在最终成功事务入口注入本机 `LockBusy`。另在同一临时库验证旧版列升级、
+直播行误带元数据标记后的安全补齐，以及真正元数据延后的正常解除。
+
+| 观察项 | 实际结果 |
+| --- | --- |
+| `GET /api/intake/youtube` / `GET /api/intake/youtube/ranking` | 均为 HTTP 200 |
+| 真实处理并发布的成品 | 2 条 |
+| 两个已正常抓取频道的旧成功时间、错误、次数、冷却和提醒 | 全部原样保留 |
+| 本轮新增成功 / 频道失败 / 失败重试目标 | 均为 0 |
+| 同步历史 / 最终进度 | 历史已保存；`error` 明示本机保存失败、下一轮重算 |
+| 迁移后的直播行 / 真正元数据延后行 | `metadata_pending=0` / `metadata_pending=1` |
+| 补齐元数据后直播状态、原因、闸代码及原冷却 | 全部保留，仅清元数据标记 |
+| 真正元数据延后补齐后 | 恢复 `candidate`，元数据原因、冷却与标记清除 |
+| 候选榜状态分布 | `ready=2`、`deferred=1`（真实直播闸）、`candidate=1` |
+
+证据目录：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/review-fix-4/`，包含
+`api-smoke.py`、`api-smoke.log`、`api-evidence.json`、`migration.json`、
+`metadata-writeback.json`、`summary.json`、`overview-api.json`、`ranking-api.json`、
+`cleanup.json` 和数据目录记录。冒烟脚本在仓库外，不作为另一套回归运行。
+临时数据已清理；本轮没有浏览器操作，因此没有浏览器通道降级，也没有声称完成页面点检。
+
+两个实现与一个测试文件通过 Ruff、内存编译和 700 行检查，`git diff --check` 通过。
+其余回归仍留给验收前置命令，没有为了填审查覆盖留白去运行未修改的测试。
+没有读取生产库或 cookie，没有真实 YouTube/模型请求；未做生产抓取耗时实测。

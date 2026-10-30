@@ -66,22 +66,84 @@ class MetadataOutcomes(IncrementalFixture):
         self.assertEqual('candidate', stored['state'])
         self.assertTrue(candidates.fresh(stored))
 
-    def test_legacy_upgrade_preserves_uncertain_cooldowns_and_restores_clean_candidates(self):
-        for number in range(1, 4):
+    def foreign_deferrals(self):
+        return [('live', '直播尚未结束，稍后重新确认发布状态'),
+                ('upcoming', '首映尚未开始'),
+                ('duration_budget', '超过单条视频时长预算'),
+                ('', '本轮视频处理预算已用完，留待下轮'),
+                ('', '其他子系统的延后原因'),
+                ('live', candidates.PENDING)]
+
+    def test_legacy_upgrade_only_marks_metadata_owned_cooldowns(self):
+        foreign = self.foreign_deferrals()
+        for number in range(1, len(foreign) + 6):
             self.pending(number)
-        storage.update('00000000001', state='deferred', reason=candidates.PENDING, retry_at=time.time() + 300)
+        retry_at = time.time() + 900
+        storage.update('00000000001', state='deferred', reason=candidates.PENDING, retry_at=retry_at)
         storage.update('00000000002', state='deferred', reason=candidates.PENDING)
         storage.failed(storage.rows()[2], RuntimeError('旧字幕错误'))
+        storage.update('00000000004', state='deferred', reason=candidates.STALE, retry_at=retry_at)
+        storage.update('00000000005', state='deferred', reason=candidates.STALE)
+        for number, (code, reason) in enumerate(foreign, 6):
+            storage.update(f'{number:011d}', state='deferred', reason=reason, gate_code=code, retry_at=retry_at)
         with reg.db() as connection:
             connection.execute('ALTER TABLE youtube_videos DROP COLUMN metadata_pending')
         rows = storage.rows()
-        self.assertEqual([1, 0, 0], [row['metadata_pending'] for row in rows])
-        self.assertEqual(['deferred', 'candidate', 'failed'], [row['state'] for row in rows])
+        self.assertEqual([1, 0, 0, 1, 0] + [0] * len(foreign), [row['metadata_pending'] for row in rows])
+        self.assertEqual(['deferred', 'candidate', 'failed', 'deferred', 'candidate'],
+                         [row['state'] for row in rows[:5]])
         self.assertEqual('旧字幕错误', rows[2]['last_error'])
+        for row, (code, reason) in zip(rows[5:], foreign):
+            self.assertEqual(('deferred', code, reason, retry_at),
+                             (row['state'], row['gate_code'], row['reason'], row['retry_at']))
+        for _ in range(3):
+            self.assertEqual(rows, storage.rows())
         entry = candidates.calibrated(rows[0], self.metadata(rows[0]['entry']))
         self.assertTrue(storage.refresh_metadata(rows[0], entry))
         self.assertEqual(0, storage.rows()[0]['metadata_pending'])
         self.assertEqual(0, storage.rows()[0]['metadata_pending'])
+
+    def test_metadata_refresh_never_releases_foreign_deferral_even_with_pending_marker(self):
+        for number, (code, reason) in enumerate(self.foreign_deferrals(), 1):
+            with self.subTest(code=code, reason=reason):
+                self.pending(number)
+                row = storage.rows()[-1]
+                retry_at = time.time() + 900
+                storage.update(f'{number:011d}', state='deferred', reason=reason, gate_code=code,
+                               retry_at=retry_at, metadata_pending=1)
+                entry = candidates.calibrated(row, self.metadata(row['entry']))
+                self.assertTrue(storage.refresh_metadata(row, entry))
+                after = storage.rows()[-1]
+                self.assertEqual(('deferred', code, reason, retry_at),
+                                 (after['state'], after['gate_code'], after['reason'], after['retry_at']))
+                self.assertEqual(0, after['metadata_pending'])
+                self.assertTrue(candidates.fresh(after))
+
+    def test_metadata_only_refresh_releases_both_owned_reasons(self):
+        for number, reason in enumerate((candidates.PENDING, candidates.STALE), 1):
+            self.pending(number)
+            storage.update(f'{number:011d}', state='deferred', reason=reason,
+                           retry_at=time.time() + 300, metadata_pending=1)
+            row = storage.rows()[-1]
+            entry = candidates.calibrated(row, self.metadata(row['entry']))
+            self.assertTrue(storage.refresh_metadata(row, entry))
+            after = storage.rows()[-1]
+            self.assertEqual(('candidate', '', 0, 0),
+                             (after['state'], after['reason'], after['retry_at'], after['metadata_pending']))
+
+    def test_metadata_defer_preserves_foreign_cooldowns_and_reason(self):
+        for number, (code, reason) in enumerate(self.foreign_deferrals(), 1):
+            self.pending(number)
+            retry_at = time.time() + 900
+            storage.update(f'{number:011d}', state='deferred', reason=reason, gate_code=code, retry_at=retry_at)
+            for attempted in (False, True):
+                with self.subTest(code=code, reason=reason, attempted=attempted):
+                    storage.defer_metadata([(storage.rows()[-1], candidates.PENDING, time.time() + 300)],
+                                           attempted=attempted)
+                    after = storage.rows()[-1]
+                    self.assertEqual(('deferred', code, reason, retry_at),
+                                     (after['state'], after['gate_code'], after['reason'], after['retry_at']))
+                    self.assertEqual(int(attempted), after['metadata_pending'])
 
     def test_budget_only_metadata_annotations_do_not_defer_healthy_candidates(self):
         self.pending(1)
@@ -306,20 +368,22 @@ class CompletionIntegrity(IncrementalFixture):
         self.assertEqual([], summary['succeeded_ids'])
 
     def assert_finalization_failure(self, result, previous):
-        identifiers = {str(source['id']) for source, before in previous}
         self.assertEqual([], result['succeeded_ids'])
-        self.assertEqual(identifiers, set(result['failed_ids']))
-        self.assertEqual(len(previous), len(result['errors']))
+        self.assertEqual([], result['failed_ids'])
+        self.assertEqual([], result['errors'])
+        self.assertEqual(len(previous), result['deferred'])
+        self.assertEqual(len(previous), result['processed'])
+        self.assertEqual(len(previous), result['added'])
         self.assertEqual(result, reg.latest_run('youtube')['summary'])
         self.assertEqual('error', self.stages.call_args.args[1])
+        self.assertIn('本机保存成功结果失败', result['message'])
+        self.assertIn('下一轮重算', self.stages.call_args.args[2])
         for source, before in previous:
+            self.assert_preserved(before, source)
             after = self.standing(source)
-            self.assertEqual(before['last_success'], after['last_success'])
-            self.assertEqual(before['failures'] + 1, after['failures'])
             self.assertEqual('上轮提醒', after['last_notice'])
-            self.assertGreater(after['retry_at'], time.time())
 
-    def test_success_lock_failure_is_recorded_per_source_and_round(self):
+    def test_success_lock_failure_is_local_and_does_not_penalize_sources(self):
         previous = self.prepared_sources()
         original = collector.maintenance_lock
         acquisitions = 0
@@ -335,16 +399,54 @@ class CompletionIntegrity(IncrementalFixture):
                 patch.object(collector, 'note_retry_targets') as retry:
             result, _ = self.collect()
         self.assert_finalization_failure(result, previous)
-        self.assertEqual(result['failed_ids'], retry.call_args.args[1])
-        self.assertTrue(all('索引正在跑' in row['reason'] for row in result['errors']))
+        self.assertEqual([], retry.call_args.args[1])
+        self.assertIn('索引正在跑', result['local_error'])
 
-    def test_success_database_failure_keeps_history_and_retry_targets(self):
+    def test_success_database_failure_keeps_history_without_channel_backoff(self):
         previous = self.prepared_sources()
         with patch.object(collector, 'commit_successes', side_effect=sqlite3.OperationalError('database is locked')), \
                 patch.object(collector, 'note_retry_targets') as retry:
             result, _ = self.collect()
         self.assert_finalization_failure(result, previous)
+        self.assertEqual([], retry.call_args.args[1])
+        self.assertIn('database is locked', result['local_error'])
+
+    def test_success_transaction_database_failure_rolls_back_without_penalty(self):
+        previous = self.prepared_sources()
+        original_commit, original_repointed = collector.commit_successes, collector._repointed
+
+        def repointed(connection, source):
+            if source['id'] == previous[-1][0]['id']:
+                raise sqlite3.OperationalError('database is locked')
+            return original_repointed(connection, source)
+
+        def commit(sources, summary):
+            with patch.object(collector, '_repointed', side_effect=repointed):
+                return original_commit(sources, summary)
+
+        with patch.object(collector, 'commit_successes', side_effect=commit):
+            result, _ = self.collect()
+        self.assert_finalization_failure(result, previous)
+
+    def test_local_finalization_failure_does_not_hide_real_channel_failures(self):
+        previous = self.prepared_sources()
+        broken = self.channel(3)
+
+        def listing(source, *arguments):
+            if source['id'] == broken['id']:
+                raise RuntimeError('频道读取失败')
+            return []
+
+        with patch.object(collector, 'commit_successes', side_effect=maintenance.LockBusy('本机维护忙')), \
+                patch.object(collector, 'note_retry_targets') as retry:
+            result, _ = self.collect(listing)
+        self.assertEqual([str(broken['id'])], result['failed_ids'])
         self.assertEqual(result['failed_ids'], retry.call_args.args[1])
+        self.assertEqual(1, len(result['errors']))
+        self.assertEqual(len(previous), result['deferred'])
+        for source, before in previous:
+            self.assert_preserved(before, source)
+            self.assertEqual('上轮提醒', self.standing(source)['last_notice'])
 
     def test_clean_cold_start_displays_unselected_videos_as_candidates(self):
         for number in range(2, 7):

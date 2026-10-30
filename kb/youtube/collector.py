@@ -508,10 +508,10 @@ def _round(scope):
     try:
         commit_successes(completed_sources, summary)
     except Exception as error:
-        for source in completed_sources:
-            wall(summary, [source['id']], error)
-            _save_failure(source, _Told(error), summary)
-        throttle.caught(error)
+        summary['local_error'] = diagnosis.shown(error, FAILURE_CAP)
+        summary['deferred'] += len(completed_sources)
+        summary['message'] += ('；' if summary['message'] else '') + \
+            '本机保存成功结果失败，成功结果未写入，下一轮重算：' + summary['local_error']
     # **同一个原因不要在面板上重复一遍又一遍。** 登录态失效时每个频道都会报同样那句话,
     # 逐条读完才明白是一个问题 —— 这里归并成一句带频道数的话,逐条明细照旧留在 errors 里。
     # 按 `AUTH_CODES` 整个集合判,并且**按真正出现的那一档说话** —— 机器人验证、
@@ -546,7 +546,7 @@ def _round(scope):
         message += f"；{len(summary['errors'])} 个频道处理失败，详情可重试"
     if summary['message']:
         message += '；' + summary['message']
-    _stage('crawl', 'stopped' if summary['stopped'] else 'error' if summary['errors'] else 'ok',
+    _stage('crawl', 'stopped' if summary['stopped'] else 'error' if summary['errors'] or summary.get('local_error') else 'ok',
            message, failures=summary['errors'])
     return summary
 
