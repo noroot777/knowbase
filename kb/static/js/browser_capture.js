@@ -69,6 +69,25 @@
         cancel.dataset.cancelIntent = request.id;
         cancel.textContent = '取消此请求';
         row.append(note, url, cancel);
+        // 浏览器停在了另一个地址(站点按语言跳转是最常见的那一种):服务端在拒绝
+        // 那一刻就记下了真实的最终网址,这里把它摆出来并给一颗改用它的按钮。
+        // 上面那一栏在有待办时是禁用的,所以**出路只能开在这里** —— 否则扩展那
+        // 句「可一键改用它重发」指向的操作在页面上做不到。改不改仍然是人点的。
+        if (request.seen_url && request.seen_url !== request.page_url) {
+          const block = document.createElement('div');
+          block.className = 'mismatch';
+          const lead = document.createElement('p');
+          lead.className = 'hint';
+          lead.textContent = '浏览器停在另一个地址，本次没有读取正文。';
+          const seen = document.createElement('p');
+          seen.className = 'url';
+          seen.textContent = plainUrl(request.seen_url);
+          const use = document.createElement('button');
+          use.dataset.useUrl = request.seen_url;
+          use.textContent = '改用这个地址';
+          block.append(lead, seen, use);
+          row.append(block);
+        }
         element('pending-list').append(row);
       }
     }
@@ -158,12 +177,16 @@
 
   element('pending-list').addEventListener('click', async event => {
     const cancel = event.target.closest('[data-cancel-intent]');
-    if (processing || !cancel) return;
+    const reuse = event.target.closest('[data-use-url]');
+    if (processing || (!cancel && !reuse)) return;
     processing = true;
     actionError = '';
     render();
     try {
-      await api(`/intents/${encodeURIComponent(cancel.dataset.cancelIntent)}`, {method: 'DELETE'});
+      // 改用另一个地址走的是同一个 `create`:服务端自己把这篇文章旧的那个待办
+      // 顶掉,所以不必先取消再发起(中间那一下谁都接不住)。
+      if (reuse) await api('/intents', {method: 'POST', body: JSON.stringify({key: itemKey, page_url: reuse.dataset.useUrl})});
+      else await api(`/intents/${encodeURIComponent(cancel.dataset.cancelIntent)}`, {method: 'DELETE'});
       await refresh();
     } catch (error) { actionError = error.message; }
     finally { processing = false; render(); }

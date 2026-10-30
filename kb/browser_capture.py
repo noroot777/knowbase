@@ -32,7 +32,7 @@ _lock = threading.RLock()
 _intents: dict[str, dict] = {}
 _NOT_PENDING = '请求已取消、被新的采集请求替代或条目已变化，请回补抓页查看当前请求'
 _STALE = '条目已被其他操作修改或排除。本次没有覆盖，请重新核对并发起采集'
-_OTHER_PAGE = '当前页面与指定文章网址不同。请回知识库核对最终网址并重新发起，未保存正文'
+_OTHER_PAGE = '当前页面与指定文章网址不同。补抓页上已标出这一页的地址，可一键改用它重发，未保存正文'
 
 _DEFAULT_PORTS = {'http': 80, 'https': 443}
 #: WHATWG 的 path / query 百分号编码集之外的可打印 ASCII。`%` 留在里面是关键:
@@ -250,7 +250,7 @@ def create(key: str, expected_url: str) -> dict:
             extra['status'] = 'superseded'
         identity = secrets.token_urlsafe(24)
         created = time.time()
-        intent = dict(public(item), id=identity, page_url=expected,
+        intent = dict(public(item), id=identity, page_url=expected, seen_url='',
                       content_hash=item['content_hash'], content_rev=item['content_rev'],
                       created_at=created, expires_at=created + TTL, status='pending', receipt=None)
         _intents[identity] = intent
@@ -259,7 +259,8 @@ def create(key: str, expected_url: str) -> dict:
 
 def view(intent: dict) -> dict:
     return {name: intent[name] for name in
-            ('id', 'key', 'kind', 'title', 'url', 'page_url', 'created_at', 'expires_at', 'status', 'receipt')}
+            ('id', 'key', 'kind', 'title', 'url', 'page_url', 'seen_url',
+             'created_at', 'expires_at', 'status', 'receipt')}
 
 
 def get(identity: str) -> dict:
@@ -335,9 +336,32 @@ def _admit_page(identity: str, captured_url: str, method: str) -> dict:
         raise ValueError('未知的采集方式')
     if not permits_link_body(state['kind']):
         raise ValueError('此来源不允许从原文链接替换正文，未保存')
-    if page_url(captured_url) != state['page_url']:
+    actual = page_url(captured_url)
+    if actual != state['page_url']:
+        _seen_elsewhere(identity, actual)
         raise ValueError(_OTHER_PAGE)
     return state
+
+
+def _seen_elsewhere(identity: str, actual: str) -> None:
+    """把**浏览器实际停在哪一页**记在这个待办上 —— 拒绝的那一刻手上就有它。
+
+    调用方必须持 `_lock`。**只记,不判**:改不改用这个地址仍然要人在补抓页上
+    点一下,所以「扩展不会用另一篇文章静默覆盖」一个字都没松 —— 松的只是
+    「人得自己去地址栏抄一遍」。
+
+    事故形态:站点按浏览器语言跳转(`openai.com/index/x` 在中文浏览器里落到
+    `openai.com/zh-Hans-CN/index/x`)之后,这一类订阅**每一次**都被拒,而人看到
+    的只有一句「网址不同」:真实的最终网址服务端此刻拿着,却丢掉了。更坏的是
+    拒绝语原来指向的那条出路(「回知识库核对最终网址并重新发起」)在页面上**当场
+    做不到** —— 有待办时那一栏和「发起」都是禁用的,得先在下面取消待办。
+    **不在这里顺手剥掉语言前缀**:那是站点自己的约定,`/zh-Hans-CN` 在别的站
+    完全可能是路径的真身,剥错一次就是把**另一篇**文章的正文写进这一条,而
+    `page_url` 那份口径的底线正是「宽的那头只会多认一个同页地址」。
+    """
+    intent = _intents.get(identity)
+    if intent and intent['status'] == 'pending':
+        intent['seen_url'] = actual
 
 
 def _admit_item(intent: dict) -> None:

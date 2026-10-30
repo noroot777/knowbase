@@ -11,6 +11,15 @@
       <button id="connect" class="secondary">保存并连接</button>
       <p class="hint">只允许本机 127.0.0.1 / localhost。密钥不放进网址，不发送给文章网站。</p>
     </details>
+    <section id="here">
+      <h2 id="here-state">正在确认这一页…</h2>
+      <p id="here-title" class="t" hidden></p><p id="here-url" class="url"></p>
+      <div class="actions" id="here-actions" hidden>
+        <button id="collect">收录这条链接</button>
+        <button id="collect-page" class="secondary" hidden>改用这一页的正文</button>
+        <button id="collect-selection" class="secondary" hidden>改用所选文字</button>
+      </div>
+    </section>
     <section>
       <label for="intent">补回哪个待办</label><select id="intent" disabled><option value="">请先在知识库发起采集请求</option></select>
       <p id="expected" class="url"></p>
