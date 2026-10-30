@@ -42,6 +42,9 @@ const context = vm.createContext({
   },
   fetch: async (url, options = {}) => {
     const sent = options.body ? JSON.parse(options.body) : null;
+    // 「这一页在知识库里吗」是另一族端点(`/api/grab`),和待办那一块互不依赖 ——
+    // 收录那条路自己的判据由 tests/grab_from_page_gate.mjs 钉。
+    if (url.includes('/api/grab/state')) return {status: 200, data: {ok: true, known: true, done: true, title: '已有'}};
     if (url.endsWith('/pending')) return {status: 200, data: {intents: [INTENT]}};
     if (url.endsWith('/precheck')) { prechecks.push(sent); return replies.shift() ?? {status: 200, data: {ok: true, characters: 694}}; }
     if (url.endsWith('/upload')) { uploads += 1; return {status: 200, data: {detail: '已补入'}}; }

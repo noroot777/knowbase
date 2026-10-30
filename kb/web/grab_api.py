@@ -19,11 +19,12 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from kb import pipeline
 from kb.feeds import grab
+from kb.web.browser_capture_api import extension_access
 from kb.feeds.registry import KINDS
 from kb.source_types import SOURCE_TYPES, permits_origin_body
 
@@ -269,15 +270,15 @@ def grab_restore(body: RestoreRequest):
     return _duplicate(url, seen, restore_only=True)
 
 
-@router.post('')
-def grab_link(body: GrabRequest):
+def _store(url: str, entry: dict) -> dict:
+    """组装好的 entry → 入库 → 把后半条链跑起来。**两个入口共用这一份**。
+
+    服务端自己抓的(`grab_link`)和人从浏览器里递进来的(`grab_from_page`)在这一步
+    之后完全一样:同一道 `DO NOTHING`、同一档重复、同一份字段、同一轮写穿。
+    各写一遍的话其中一处迟早变成「不启动管道、只说一句已完成」—— 那正是
+    `_write_through` 自己头上记着的事故形态。
+    """
     try:
-        url = grab.normalize(body.url)
-        # **查重排在抓取前面**:已经收过的那一条连 HTTP 都不必发。它只是一句
-        # 提示 —— 真正防重复的是 `put_items` 的 `DO NOTHING`(见 `grab.known`)。
-        if seen := grab.known(url):
-            return _duplicate(url, seen, refetch=body.refetch)
-        entry = grab.grab(url)
         saved = grab.save(entry)
     except grab.GrabError as e:
         raise HTTPException(400, str(e)) from None
@@ -306,3 +307,71 @@ def grab_link(body: GrabRequest):
     # 后半条链:export 把它写成 vault 里那一篇、index 让检索找得到、extract
     # 买一次打标(收件桶默认开着提取,见 `grab.bucket`)。
     return _write_through(out, '已收下')
+
+
+@router.post('')
+def grab_link(body: GrabRequest):
+    try:
+        url = grab.normalize(body.url)
+        # **查重排在抓取前面**:已经收过的那一条连 HTTP 都不必发。它只是一句
+        # 提示 —— 真正防重复的是 `put_items` 的 `DO NOTHING`(见 `grab.known`)。
+        if seen := grab.known(url):
+            return _duplicate(url, seen, refetch=body.refetch)
+        entry = grab.grab(url)
+    except grab.GrabError as e:
+        raise HTTPException(400, str(e)) from None
+    return _store(url, entry)
+
+
+class FromPageRequest(BaseModel):
+    """`POST /api/grab/from-page` 的请求体 —— 正文由**人打开着的那个标签**提供。"""
+    model_config = ConfigDict(extra='forbid')
+    url: str = Field(min_length=1, max_length=2048)
+    title: str = Field(default='', max_length=500)
+    body: str = Field(min_length=1, max_length=400_000)
+
+
+@router.post('/from-page/precheck', dependencies=[Depends(extension_access)])
+def grab_from_page_precheck(body: FromPageRequest):
+    """读之前先问一次,判据和 `/from-page` **同一组**,只是一个字节都不落库。
+
+    口径同 `browser_capture.precheck`:不让人把整页读完、核对完预览、勾完确认
+    之后才被拒。扩展**一处都不判** —— 正文够不够、这条收没收过、X 走不走这条
+    路,答案全在这里,它只负责展示;预览上那个字数也用这里返回的那一份,不许
+    自己再数一遍(那正是浏览器补抓踩过的事故形态)。
+    """
+    try:
+        url = grab.normalize(body.url)
+        if seen := grab.known(url):
+            raise grab.GrabError('这一条已经在知识库里了，不必重复收录。')
+        entry = grab.from_page(url, body.title, body.body)
+    except grab.GrabError as e:
+        raise HTTPException(400, str(e)) from None
+    return {'ok': True, 'url': url, 'title': entry['title'],
+            'characters': len(entry['body'])}
+
+
+@router.post('/from-page', dependencies=[Depends(extension_access)])
+def grab_from_page(body: FromPageRequest):
+    """**服务端自己抓不到的那一页**,用人浏览器里的正文收录成新条目。
+
+    这条路存在的理由就是 `/api/grab` 失败的那一档:登录墙、Cloudflare 关卡、
+    整页由脚本渲染 —— 那时我们这边一个字也取不到,而人正看着完整的文章。
+    拒绝语「在浏览器里打开一次」指向的事他已经做了,再让他回去粘贴一遍是荒谬的。
+
+    **入库之后的每一步都和 `/api/grab` 共用**(`_store`):查重、`DO NOTHING`、
+    字段、写穿那一轮。不同的只有 entry 怎么来的,以及因此记下的
+    `body_provenance`(见 `grab.from_page`)。
+
+    **鉴权比 `/api/grab` 严一档,这是刻意的**:那一头只收一条地址、内容由我们
+    自己去抓;这一头由调用方指定正文,所以要配对密钥(`extension_access`,和浏览器
+    补抓同一份)。没有它,任何能连上本机端口的东西都能把任意内容写成一篇文章。
+    """
+    try:
+        url = grab.normalize(body.url)
+        if seen := grab.known(url):
+            return _duplicate(url, seen)
+        entry = grab.from_page(url, body.title, body.body)
+    except grab.GrabError as e:
+        raise HTTPException(400, str(e)) from None
+    return _store(url, entry)

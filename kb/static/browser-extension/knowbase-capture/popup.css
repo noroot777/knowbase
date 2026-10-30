@@ -26,6 +26,8 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible { outline:2px solid var(--brand); outline-offset:2px; }
 summary { color:var(--brand); cursor:pointer; }
 .url { overflow-wrap:anywhere; font-size:11px; color:var(--muted); }
+#here .t { font-weight:600; font-size:13px; margin:0 0 4px; line-height:1.5; }
+#here-state { margin:0 0 6px; }
 .check { display:flex; gap:8px; align-items:flex-start; }
 .check input { width:auto; margin:5px 0 0; }
 #status { color:var(--brand); min-height:22px; }

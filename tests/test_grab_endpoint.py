@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import json
 import unittest
 from unittest.mock import patch
 
@@ -27,6 +28,11 @@ class EndpointTests(GrabCase):
 
         from kb.server import app
         self.client = self.enterContext(TestClient(app))
+        # 扩展那条路(`/from-page`)在密钥之前还有一道 `local`:只认本机回环。
+        # 默认那个 client 的 Host 是 `testserver`,一个字都打不进来 —— 所以这里
+        # 单配一个真实形状的,那一道由 `needs_the_pairing_key` 正面钉。
+        self.local_client = self.enterContext(
+            TestClient(app, base_url='http://127.0.0.1', client=('127.0.0.1', 54321)))
         self.runs: list[list[str]] = []
 
     def pipeline_patch(self, started=True, reason='其他同步正在运行'):
@@ -52,6 +58,112 @@ class EndpointTests(GrabCase):
         `kb.web.grab_api.RestoreRequest`。
         """
         return self.client.post('/api/grab/restore', json={'url': url})
+
+    def from_page(self, url=PAGE, title='浏览器里那一页', body=BODY, auth=True, path=''):
+        """扩展那条路:正文由人打开着的标签提供,服务端一次 HTTP 都不发。"""
+        from kb import browser_capture as capture
+
+        headers = ({'Authorization': 'Bearer ' + capture.pairing_key(),
+                    'Origin': 'chrome-extension://fixture'} if auth else {})
+        return self.local_client.post(f'/api/grab/from-page{path}',
+                                      json={'url': url, 'title': title, 'body': body},
+                                      headers=headers)
+
+    def test_a_page_from_the_browser_is_collected_without_fetching_anything(self):
+        """人浏览器里那一页 → 一条新条目。**一次 HTTP 都不发**,后半条链照旧跑。
+
+        这条路存在的理由是 `/api/grab` 失败的那一档(登录墙、关卡、脚本渲染):
+        那时我们这边一个字也取不到,而他正看着完整的文章。所以判据要落在
+        「没去抓」「库里那一行是他给的那份正文」「来历分得出来」三件事上。
+        """
+        with self.pipeline_patch(), patch.object(grab, 'request') as fetched:
+            answer = self.from_page()
+        self.assertEqual(200, answer.status_code, answer.text)
+        self.assertEqual(0, fetched.call_count, '这条路不去抓网页')
+        self.assertTrue(answer.json()['ok'])
+        self.assertEqual(1, answer.json()['added'])
+        with reg.db() as conn:
+            row = dict(conn.execute('SELECT * FROM feed_items WHERE url=?', (PAGE,)).fetchone())
+        self.assertEqual(BODY, row['body'])
+        self.assertEqual('content', row['content_kind'])
+        # **来历要分得出来**:我们自己核对过的那一份和人递进来的那一份,
+        # 事后不许混为一谈(口径同 `browser_capture` 的 `manual_paste`)。
+        self.assertEqual('browser_grab', json.loads(row['body_provenance'])['method'])
+        # 入库之后的那一段和 `/api/grab` 共用(`_store`),所以后半条链照旧起跑
+        self.assertEqual([(['export', 'index', 'extract'], grab.KIND)], self.runs)
+
+    def test_a_page_from_the_browser_needs_the_pairing_key(self):
+        """这一头由调用方指定正文,所以鉴权比 `/api/grab` 严一档。
+
+        反过来钉一边:带着密钥的那一次照旧放行(否则「一律拒」也能让上面那条绿)。
+        """
+        from kb import browser_capture as capture
+
+        auth = {'Authorization': 'Bearer ' + capture.pairing_key(),
+                'Origin': 'chrome-extension://fixture'}
+        for path in ('', '/precheck'):
+            with self.subTest(path=path):
+                # 没有密钥:拒
+                self.assertEqual(401, self.from_page(auth=False, path=path).status_code)
+                # 有密钥但不是从本机回环打进来的:也拒,而且这一道**排在密钥前面**
+                self.assertEqual(403, self.client.post(
+                    f'/api/grab/from-page{path}',
+                    json={'url': PAGE, 'title': 't', 'body': BODY},
+                    headers=auth).status_code)
+        with reg.db() as conn:
+            self.assertEqual(0, conn.execute('SELECT count(*) FROM feed_items').fetchone()[0])
+        with self.pipeline_patch():
+            self.assertEqual(200, self.from_page().status_code)
+
+    def test_a_browser_page_that_is_not_an_article_is_refused_and_writes_nothing(self):
+        """复读的登录提示页、X 的单条推文:两档都拒,库里一个字节都不写。
+
+        正文那道门槛和手动收录第 ⑧ 道、浏览器补抓的 `_admit_body` **同一份**
+        (`grab_page.body_confirmed`,按行去重之后的字数)—— 不是第二套。
+        X 不接是因为单条推文有自己的取法(`x_post_meta`、`content_kind='post'`),
+        从这条路进来会在库里留下一条形状不对的推文。
+        反过来钉一边:同一道门槛下,真正的正文照旧收得进去(上面那条)。
+        """
+        for url, body, why in ((PAGE, WALL, '复读提示页'), (TWEET, BODY, 'X 单条推文')):
+            with self.subTest(why=why):
+                self.assertEqual(400, self.from_page(url=url, body=body).status_code)
+                # **预检和写入是同一组判据**:它拒的，这一头也拒
+                self.assertEqual(400, self.from_page(url=url, body=body, path='/precheck').status_code)
+        with reg.db() as conn:
+            self.assertEqual(0, conn.execute('SELECT count(*) FROM feed_items').fetchone()[0])
+        self.assertEqual([], self.runs)
+
+    def test_the_browser_precheck_answers_like_the_write_but_stores_nothing(self):
+        """读之前先问一次:判据和写入同一组,**一个字节都不落库**。
+
+        否则人把整页读完、核对完预览、勾完确认之后才被拒 —— 那正是浏览器补抓
+        踩过的事故形态。预览上那个字数也用这里返回的那一份,扩展不自己数。
+        """
+        with patch.object(grab, 'request') as fetched:
+            answer = self.from_page(path='/precheck')
+        self.assertEqual(200, answer.status_code, answer.text)
+        self.assertEqual(len(BODY), answer.json()['characters'])
+        self.assertEqual(0, fetched.call_count)
+        with reg.db() as conn:
+            self.assertEqual(0, conn.execute('SELECT count(*) FROM feed_items').fetchone()[0])
+        self.assertEqual([], self.runs)
+        # 收过之后再问同一条:预检先拦,不必等人读完再说「已经收过了」
+        with self.pipeline_patch():
+            self.assertEqual(200, self.from_page().status_code)
+        self.assertEqual(400, self.from_page(path='/precheck').status_code)
+
+    def test_a_link_already_in_the_library_is_not_collected_twice(self):
+        """已经收过的那一条:照旧回那句话,不新建、不覆盖正文。"""
+        with self.pipeline_patch():
+            self.assertEqual(200, self.from_page().status_code)
+        self.runs.clear()
+        with self.pipeline_patch():
+            again = self.from_page(body=BODY + '另一份完全不同的正文内容在这里。' * 9)
+        self.assertEqual(200, again.status_code)
+        self.assertTrue(again.json()['duplicate'])
+        with reg.db() as conn:
+            rows = conn.execute('SELECT body FROM feed_items WHERE url=?', (PAGE,)).fetchall()
+        self.assertEqual([BODY], [row['body'] for row in rows], '库里那一份一个字都不许动')
 
     def test_a_staged_duplicate_gets_the_rest_of_the_chain_run_again(self):
         grab.save({'url': PAGE, 'title': 'A', 'body': BODY, 'author': 'x',

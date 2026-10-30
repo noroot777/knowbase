@@ -435,6 +435,43 @@ def _grab_web(url: str, deadline: float) -> dict:
             'published': meta['published'], 'content_kind': 'content'}
 
 
+def from_page(url: str, title: str, body: str) -> dict:
+    """**人正在浏览器里看着的那一页** → 待入库的条目。只组装,不写库(写库是 `save`)。
+
+    和 `_grab_web` 的区别只有一处,而那一处是**证据的来历**:那边由我们自己发
+    HTTP,所以准入要问「对方是不是在拦我」(`grab_page.admit` 的八道,前五道都是
+    这一次响应自己的身份);这边内容来自人打开着的那个标签,**断言「这一页就是
+    那篇文章」的是人自己** —— 和 `browser_capture.save_pasted` 同构,所以
+    `body_provenance` 记的是 `browser_grab` 而不是 `web`:知识库里这两种来历
+    必须分得出来,不然事后谁也说不清某一篇的正文是我们核对过的还是人递进来的。
+
+    **准入因此只剩内容质量那一道**(`grab_page.body_confirmed` —— 按**行**去重
+    之后的字数,和手动收录第 ⑧ 道、浏览器补抓的 `_admit_body` 是同一份口径,不是
+    第二套)。关卡那几道在这条路上没有意义,而且正好相反:真撞上关卡的页面恰恰是
+    这条路存在的理由 —— 服务端抓不到,他的浏览器里有,而一张「请先登录」的页面
+    他自己看得见,不会去点收录。
+
+    **X 不接**:单条推文有自己的取法(`_grab_x`:`x_post_meta`、
+    `content_kind='post'`、引文与媒体行),从这里进来会绕开那一整套,在库里留下
+    一条形状不对的推文。它照旧走 `POST /api/grab`。
+    """
+    url = normalize(url)
+    if classify(url) == 'x':
+        raise GrabError('X 的单条推文不走这条路，直接收录这个链接即可。')
+    body = body.replace('\r\n', '\n').replace('\r', '\n').strip()[:grab_page.MAX_CHARS]
+    if not grab_page.body_confirmed(body):
+        # 口径同 `_grab_web` 那一档「没找到正文」:这里不另说一套门槛数字,
+        # 人的下一步是「在文章里选好正文再读一次」,而不是去算字数。
+        raise GrabError(f'这一页读到的内容不足 {readable.MIN_CHARS} 个不重复字符，'
+                        f'看着不像一篇完整正文。请先在文章里选好全文，再读一次。')
+    host = (urlsplit(url).hostname or '').lower().removeprefix('www.')
+    return {'url': url, 'title': grab_page.title_fallback(title.strip(), body, host),
+            'body': body, 'author': host, 'published': '',
+            'content_kind': 'content', 'body_provenance': json.dumps(
+                dict(method='browser_grab', page_url=url, page_title=title.strip(),
+                     captured_at=reg.now(), confirmed=True), ensure_ascii=False)}
+
+
 # -------------------------------------------------------------------------- 入口
 
 def grab(url: str, *, deadline: float | None = None) -> dict:

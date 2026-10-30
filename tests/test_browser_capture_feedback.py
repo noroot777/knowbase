@@ -1,9 +1,10 @@
-"""浏览器补抓的**客户端**那几条 node 探针的入口(不起真浏览器,纯 `vm` 跑脚本)。
+"""采集扩展与补抓页**客户端**那几条 node 探针的入口(不起真浏览器,纯 `vm` 跑脚本)。
 
-五条各钉一件事,都是实测过的事故形态:共用的 HTTP 错误解析、一次性反馈不被
+六条各钉一件事,都是实测过的事故形态:共用的 HTTP 错误解析、一次性反馈不被
 2 秒轮询盖掉、准入判据一律问服务端(扩展自己不判)、网址那一栏人动过就不许被
-填回去、浏览器停在另一个地址时那条出路开在待办行里。硬约束与事故形态见
-`docs/decisions/browser-capture.md`。
+填回去、浏览器停在另一个地址时那条出路开在待办行里、以及**同一个扩展**里那颗
+「收录这条链接」的判据一处都不在扩展里(那一条的硬约束在
+`docs/decisions/link-grab.md`,其余见 `docs/decisions/browser-capture.md`)。
 """
 
 from pathlib import Path
@@ -33,3 +34,6 @@ class BrowserCaptureClientTests(unittest.TestCase):
 
     def test_page_the_browser_landed_on_can_be_adopted_in_one_click(self):
         self.probe('browser_capture_other_page.mjs')
+
+    def test_collecting_a_new_link_keeps_every_verdict_on_the_server(self):
+        self.probe('grab_from_page_gate.mjs')
