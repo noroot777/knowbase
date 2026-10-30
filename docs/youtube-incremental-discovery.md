@@ -1,0 +1,88 @@
+# YouTube 增量发现与元数据缓存
+
+## 本轮改变
+
+普通同步不再为每个频道展开最近 10 条视频的详细信息。现在依次执行：
+
+1. 全部待查频道串行读取带登录态的 flat 列表，每频道最多 20 条；频道间仍停 1 秒。
+2. 列表全部结束后，复用 6 小时内的精确元数据，只补新增或过期的视频详情。
+3. 拿到真实发布时间、播放量及简介后，使用原有资格判断和评分公式重排。
+4. 再按原有视频数量、时长及处理预算取字幕、ASR、翻译和生成内容笔记。
+
+所有远端请求仍由 yt-dlp 使用已配置浏览器的登录态，不改用匿名 RSS，不增加频道并发。
+列表失败直接保留可重试错误，不再隐式启动另一轮昂贵的逐条展开。
+
+## 时间和完整性边界
+
+| 环节 | 限制 | 超额处理 |
+| --- | --- | --- |
+| 普通频道列表 | 单频道 30 秒，整轮最多 900 秒 | 未轮到的频道下轮继续 |
+| 指定日期的详细发现 | 单频道 90 秒，整轮最多 900 秒 | 继续保留原有部分输出和覆盖说明 |
+| 增量元数据 | 整轮 120 秒，单条不超过 30 秒 | 未更新的视频暂不排名，来源不报完整成功 |
+| 精确排名快照 | 最长复用 6 小时 | 过期后先刷新，不能将旧播放量冒充实时值 |
+| 视频深加工 | 继续使用 `youtube.run_seconds`，默认 900 秒 | 未完成内容留待下轮 |
+
+这些是不同阶段的额度，不保证整轮或冷启动一定在几分钟内完成。
+尤其首次运行或升级后旧候选没有缓存时间标记时，需要按预算逐轮补齐；
+不会为了得到一张看似完整的榜单，把缺失播放量当成零或把估算日期当真。
+
+显式日期补抓继续使用详细列表，而不是拿估算列表证明视频位于指定日期内。
+新增候选的真实日期到手后仍经过共同的窗口、订阅历史下界、未来时间和 AI 相关性判断。
+真实播放量为零是有效数据；缺失、布尔、负数或非有限播放量不是零观看事实。
+
+## 缓存与安全
+
+- `entry.metadata_checked_at` 只在得到精确数据时推进。重复 flat 列表不会把旧快照续成新缓存。
+- 元数据补齐不下载、不转录、不调用内容模型；新候选优先，并按列表位置跨频道轮转。
+- 未被请求的视频不会因本轮停止或限流被登记成失败或推入失败退避。
+- 单条本地超时或事实字段缺失暂缓 5 分钟，避免每轮都由同一个坏候选占掉全部预算。
+- 实际上游失败保留原始诊断；429 继续通过同一份请求级熔断账停止后续读取。
+- 写回精确快照时核对旧快照未改变、仍有有效频道归属且没有永久移除记录。
+- 已在元数据阶段获得的工具结果在同一轮处理时直接复用，不再重复 probe。
+
+## 可观测性
+
+同步进度分别显示「频道列表」「元数据更新」「视频处理」。最终消息同时显示三个阶段
+各自耗时，以及精确缓存复用、新查、待更新数量；`feed_runs.summary` 额外保存：
+
+- `timings.discovery_seconds`、`timings.metadata_seconds`、`timings.processing_seconds`。
+- `metadata.reused`、`metadata.refreshed`、`metadata.pending`、`metadata.failed` 和 `metadata.ttl_seconds`。
+
+`ranked` 只统计本轮可以使用的精确候选，待更新的视频仍在候选列表里，以未排名/待处理状态
+和明确理由保留；不会因为未知而被永久排除。排序公式不变，但使用的是最多 6 小时的明确
+缓存快照，不能称为所有视频的实时播放量排名。
+
+## 验证范围
+
+本轮新增 `tests/test_youtube_incremental.py`，并更新
+`tests/test_youtube_fallback.py` 中与旧发现策略直接冲突的断言。
+只执行本轮新写/改动的这两个文件，由 ash regression 哨兵登记真实命令和结果；
+其余回归留给验收前置命令，不以历史结果冒充本轮通过。
+
+验证使用临时 SQLite、媒体与模型替身，不启动真实频道抓取，不读取真实 cookie，
+不调用付费模型。接口核对覆盖候选排名响应中的未知标记和未排名状态。
+本轮不修改页面结构或样式，不操作浏览器，也不声称已在生产跑出新的分钟级测速结果。
+
+## 真实验证结果（2026-10-30）
+
+- ash 回归登记：`8HN_Zg6s0uMA`，真实退出码 `0`。
+- 结果：`Ran 45 tests in 7.691s`，`OK`；仅包含本轮新增/修改的两个测试文件。
+- 接口冒烟包含 FastAPI ASGI `GET /api/intake/youtube/ranking`：返回 `200`，
+  待补元数据条目保持 `approximate=true`、`score_rank=0`、`state=deferred`。
+- 静态验证：六个新增/改动 Python 文件的 Ruff、内存编译、700 行上限检查通过，
+  `git diff --check` 通过。
+- 没有执行全仓回归，没有抓真实 YouTube、读取生产 cookie、调用模型或操作浏览器。
+
+登记命令的实际工作目录：
+`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。
+
+未过滤的原始命令：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-incremental-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-incremental-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-incremental-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_incremental tests.test_youtube_fallback -v
+```
+
+完整日志：
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/8HN_Zg6s0uMA.log`。
+
+日志 SHA-256：`2a88557982d63e0561e849ad149fd4a2daae81d3d55d094cba9587b2a6a45d00`。

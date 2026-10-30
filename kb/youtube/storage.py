@@ -100,6 +100,8 @@ def discover(source, entries):
         for entry in entries:
             if permanently_excluded({'entry': entry}, connection):
                 continue
+            if not entry.get('approximate'):
+                entry = {**entry, 'metadata_checked_at': time.time()}
             # **估算数据不许覆盖已有的精确数据。** 发现有两条路:RSS 带真实发布时间和播放量,
             # yt-dlp 的后路只有列表顺序估出来的时间和 views=0(见 `discovery.approximate`)。
             # 判据待在这条语句自己的 CASE 里 —— 先 SELECT 一次再决定要不要写,中间那一下
@@ -173,6 +175,35 @@ def recalibrate(video_id, entry):
             WHERE video_id=? AND json_extract(entry,'$.approximate') IS 1""",
             (payload, views if isinstance(views, int) else -1,
              views if isinstance(views, int) else 0, reg.now(), video_id))
+
+
+def refresh_metadata(row, entry):
+    """仅更新尚未被替换、未被永久移除且仍有有效归属的元数据快照。"""
+    with maintenance_lock(), db() as connection:
+        changed = connection.execute('''UPDATE youtube_videos SET entry=?,views=?,updated_at=?
+            WHERE video_id=? AND entry=?
+            AND NOT EXISTS(SELECT 1 FROM feed_item_exclusions removed
+                WHERE removed.kind='youtube' AND removed.url=json_extract(youtube_videos.entry,'$.url'))
+            AND EXISTS(SELECT 1 FROM youtube_video_sources owner JOIN subscriptions source
+                ON source.id=owner.source_id WHERE owner.video_id=youtube_videos.video_id
+                AND source.enabled=1 AND source.url=owner.source_url)''',
+            (json.dumps(entry, ensure_ascii=False), entry['views'], reg.now(), row['video_id'],
+             json.dumps(row['entry'], ensure_ascii=False)))
+        return changed.rowcount == 1
+
+
+def defer_metadata(updates):
+    """同一连接批量挂起待更新候选，保留既有失败、成品和永久移除状态。"""
+    if not updates:
+        return
+    with db() as connection:
+        connection.executemany('''UPDATE youtube_videos SET score_rank=0,
+            state=CASE WHEN state IN ('ready','excluded','failed') THEN state ELSE 'deferred' END,
+            reason=CASE WHEN state IN ('ready','excluded','failed') THEN reason ELSE ? END,
+            retry_at=CASE WHEN state IN ('ready','excluded','failed') THEN retry_at ELSE COALESCE(?,retry_at) END
+            WHERE video_id=? AND NOT EXISTS(SELECT 1 FROM feed_item_exclusions removed
+                WHERE removed.kind='youtube' AND removed.url=json_extract(youtube_videos.entry,'$.url'))''',
+            [(reason, retry_at, row['video_id']) for row, reason, retry_at in updates])
 
 
 def update(video_id, **values):

@@ -1,4 +1,4 @@
-"""发现的两条路(全程登录态)、估算数据的写入保护、窗口收口,以及列频道的解析。
+"""轻量列表与显式日期详细发现、估算数据的写入保护、窗口收口及列频道解析。
 
 **为什么写入保护要有「反过来」那一条**:两条发现路给的东西不一样,逐条解析带真实播放量和
 发布时间,flat 列举只有列表顺序估出来的时间和 `views=0`。只钉「精确能覆盖估算」是不够的
@@ -74,36 +74,34 @@ class DiscoveryFallback(YouTubeFixture):
         for source, label in ((self.source, '/channel/UC… 订阅'), (self.handle, 'handle 订阅')):
             with self.subTest(source=label):
                 asked = []
+                listed = [dict(item, channel_id='UC' + f'{number:022d}')
+                          for number, item in enumerate(self.listed, 1)]
                 with patch.object(discovery, 'request', side_effect=lambda url, **kwargs: asked.append(url)), \
-                        patch.object(media, 'detailed_videos', return_value=self.detailed) as detailed, \
-                        patch.object(media, 'channel_videos') as listing:
+                        patch.object(media, 'detailed_videos') as detailed, \
+                        patch.object(media, 'channel_videos', return_value=listed) as listing:
                     entries = discovery.fetch(source, {'youtube': {}})
                 self.assertEqual([], asked, '配了浏览器的那一轮不许发无登录态请求')
-                detailed.assert_called_once()
-                listing.assert_not_called()
-                self.assertEqual(2, len(entries))
+                detailed.assert_not_called()
+                listing.assert_called_once()
+                self.assertEqual(3, len(entries))
                 # 归属以工具自己报的那一份为准 —— 补它不该再去发一次请求。
-                self.assertEqual(['UC' + '0' * 21 + '1', 'UC' + '0' * 21 + '2'],
+                self.assertEqual(['UC' + f'{number:022d}' for number in range(1, 4)],
                                  [entry['channel_id'] for entry in entries])
 
-    def test_the_logged_in_path_is_the_one_that_runs_first(self):
-        """**主路就是 daily-report 那条**:同一个地址交给 yt-dlp、带登录态逐条解析。
-
-        判据落在**条目本身**:日期真实(没有 `approximate` 标记)、播放量真实、简介带回来了
-        (`ai_only` 要用它);而估算那条一次都不许起。
-        """
-        with patch.object(media, 'detailed_videos', return_value=self.detailed) as detailed, \
-                patch.object(media, 'channel_videos') as listing:
+    def test_lightweight_logged_in_listing_does_not_expand_details(self):
+        with patch.object(media, 'detailed_videos') as detailed, \
+                patch.object(media, 'channel_videos', return_value=self.listed) as listing:
             entries = discovery.fetch(self.source, {'youtube': {}})
-        listing.assert_not_called()
-        self.assertEqual(2, len(entries))
-        self.assertTrue(all('approximate' not in entry for entry in entries))
-        self.assertEqual([1000, 2000], [entry['views'] for entry in entries])
-        self.assertTrue(all(entry['description'] for entry in entries), '简介要带回来,ai_only 要用')
-        self.assertLessEqual(detailed.call_args.kwargs['limit'], 20, '一轮别翻太多条,逐条解析很贵')
-        self.assertIn('notes', detailed.call_args.kwargs, '「没列完」那句话要有地方落')
+        detailed.assert_not_called()
+        listing.assert_called_once()
+        self.assertEqual(3, len(entries))
+        self.assertTrue(all(entry['approximate'] for entry in entries))
+        self.assertEqual([0, 0, 0], [entry['views'] for entry in entries])
+        self.assertEqual([0, 1, 2], [entry['listing_position'] for entry in entries])
+        self.assertEqual(20, listing.call_args.kwargs['limit'])
+        self.assertIn('notes', listing.call_args.kwargs)
 
-    def test_detail_failure_falls_back_and_marks_the_guesswork(self):
+    def test_flat_listing_marks_unknown_values_for_later_calibration(self):
         with patch.object(media, 'detailed_videos', side_effect=RuntimeError('逐条解析也没取到')), \
                 patch.object(media, 'channel_videos', return_value=self.listed):
             entries = discovery.fetch(self.source, {'youtube': {}})
@@ -188,42 +186,22 @@ class DiscoveryFallback(YouTubeFixture):
                 discovery.fetch(self.source, settings=None, timeout=6)
         self.assertLess(time.monotonic() - started, 4, '退避放不下就别退避')
 
-    def test_each_path_keeps_its_own_slice_of_the_budget(self):
-        """**两条路共用一个 deadline 时,主路卡到预算用尽会让后路一个进程都起不起来。**
-
-        主路失败有两档形态:立刻回来的(cookie 读不出来、频道不存在),和卡到预算用尽的。
-        后者共用 deadline 时,`media.run` 在起子进程之前就按「已超时」拒掉 —— 报出来是
-        「都没取到」,而后路其实一次都没跑。这里让主路**真的**把自己那一段耗干,
-        再看后路手里还剩多少。
-        """
-        seen = {}
-
-        def burning_detail(source, settings, deadline, stopped, limit=10, notes=None):
-            while time.monotonic() < deadline:
-                time.sleep(0.01)
-            raise RuntimeError('逐条解析超时')
-
-        def listing(source, settings, deadline, stopped, limit=20, notes=None):
-            seen['left'] = deadline - time.monotonic()
-            return self.listed
-
-        # 比例调小只为把这条用例的等待压到半秒级;切分本身与比例取值无关。
-        with patch.object(discovery, 'DETAIL_SHARE', 0.5), \
-                patch.object(media, 'detailed_videos', side_effect=burning_detail), \
-                patch.object(media, 'channel_videos', side_effect=listing):
+    def test_listing_gets_the_budget_without_first_waiting_for_details(self):
+        with patch.object(discovery.time, 'monotonic', return_value=100), \
+                patch.object(media, 'detailed_videos') as detailed, \
+                patch.object(media, 'channel_videos', return_value=self.listed) as listing:
             entries = discovery.fetch(self.source, {'youtube': {}}, timeout=6)
-        self.assertEqual(3, len(entries), '主路把自己那一段耗干,第 2 条照旧要跑完')
-        self.assertGreater(seen['left'], 1.0, '第 2 条起跑时手里还得有预算')
-        self.assertTrue(0.5 <= discovery.DETAIL_SHARE < 1,
-                        '默认比例要真的切出两段来,而且慢的那条拿大头')
+        self.assertEqual(3, len(entries))
+        self.assertEqual(106, listing.call_args.args[2])
+        detailed.assert_not_called()
 
-    def test_every_path_failing_names_every_reason(self):
-        """两条路都没取到时,两份原话都要带上 —— 面板上那一行是唯一的线索。"""
-        with patch.object(media, 'detailed_videos', side_effect=RuntimeError('登录态读不出来')), \
+    def test_listing_failure_is_visible_without_expensive_fallback(self):
+        with patch.object(media, 'detailed_videos') as detailed, \
                 patch.object(media, 'channel_videos', side_effect=RuntimeError('没列出任何视频')):
             with self.assertRaises(FeedError) as raised:
                 discovery.fetch(self.source, {'youtube': {}})
-        for fragment in ('登录态读不出来', '没列出任何视频'):
+        detailed.assert_not_called()
+        for fragment in ('带登录态轻量列表', '没列出任何视频'):
             self.assertIn(fragment, str(raised.exception))
 
 
@@ -269,15 +247,13 @@ class DiscoveryBudget(YouTubeFixture):
                 self.assertEqual(total, summary['checked'])
                 self.assertEqual(0, summary['skipped'], '一个都不许静默留到下一轮')
 
-    def test_each_channel_gets_enough_budget_for_the_logged_in_path(self):
+    def test_each_channel_gets_a_bounded_lightweight_listing_budget(self):
         sources, seen, summary = self.checked_channels(5, offset=900)
         self.assertEqual(len(sources), len(seen), '每个频道都该被查一次')
         self.assertEqual({collector.DISCOVERY_PER_SOURCE}, set(seen), '单频道预算只有一份口径')
-        slice_for_detail = collector.DISCOVERY_PER_SOURCE * discovery.DETAIL_SHARE
-        self.assertGreaterEqual(slice_for_detail, 30,
-                                '主路那一段至少要够一个频道跑完(实测半分钟一档)')
+        self.assertEqual(30, collector.DISCOVERY_PER_SOURCE)
         # 反过来钉一边:整轮还是有上限的,不许一轮发现无限期跑下去。
-        self.assertLessEqual(collector.DISCOVERY_CEILING, 1800)
+        self.assertLessEqual(collector.DISCOVERY_CEILING, 900)
         self.assertGreaterEqual(collector.DISCOVERY_CEILING,
                                 collector.DISCOVERY_PER_SOURCE * 4,
                                 '上限连几批都放不下的话,后面的频道永远轮不到')

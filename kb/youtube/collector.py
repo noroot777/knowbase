@@ -11,7 +11,8 @@ from kb.maintenance import maintenance_lock
 from kb.pipeline_flow import halted
 from kb.pipeline_segments import note_retry_targets
 from kb.pipeline_state import _stage
-from kb.youtube import diagnosis, discovery, login, media, notes, products, ranking, storage, throttle
+from kb.youtube import (candidate_metadata, diagnosis, discovery, login, media, notes,
+                        products, ranking, storage, throttle)
 from kb.youtube.admission import TEMPORARY, UNDATED, calibrate, gate
 from kb.youtube.channels import config
 from kb.youtube.settings import of
@@ -22,17 +23,9 @@ def stopped():
     return halted()
 
 
-#: 单个频道的发现预算。两条路按 `discovery.DETAIL_SHARE` 分这一份:带登录态逐条解析
-#: 拿大头(单频道半分钟一档),估算列举拿剩下那点。
-DISCOVERY_PER_SOURCE = 90.0
-#: **两个频道之间歇这么久。借的是 daily-report 的参数**
-#: (`fetch_yt_channels_v2.py` 的 `time.sleep(1)  # Rate limit`):那份每天跑 48 个频道、
-#: 每个频道逐条解析 20 条,从没撞过 429。
+DISCOVERY_PER_SOURCE = 30.0
 DISCOVERY_SPACING = 1.0
-#: 整轮发现的上限。**串行之后同样的 900 秒只够 ~20 个频道**(实测单频道 10 条约 43 秒),
-#: 一轮覆盖不到一半 —— 翻到 1800 秒按实测能覆盖 ~40 个。剩下的照旧记进 `skipped`,
-#: 下一轮接着查(`pending` 按 `last_attempt` 排序,轮着来;按 URL 去重,不会重复入库)。
-DISCOVERY_CEILING = 1800.0
+DISCOVERY_CEILING = 900.0
 
 
 class _Told(RuntimeError):
@@ -125,15 +118,16 @@ def heeded(summary, source_ids):
             caution(summary, source_ids, ledger, conclusion)
 
 
-def discovery_budget(count):
+def discovery_budget(count, per_source=None):
     """这一轮发现的总额度。**歇的那几拍要算进去,不是只算频道自己的时间。**
 
     不算的话额度正好卡在 `count * DISCOVERY_PER_SOURCE` 上,而真实耗时还要多出
     `(count - 1)` 拍 —— 于是每一轮固定有最后几个频道被那道闸拦掉、静默进 `skipped`,
-    而它们本该轮得到。`max(90.0, ...)` 是只有一两个频道那一轮的地板,
+    而它们本该轮得到。至少留够一个频道的额度,
     `DISCOVERY_CEILING` 是上限(超出的下一轮接着查)。
     """
-    return min(DISCOVERY_CEILING, max(90.0, count * (DISCOVERY_PER_SOURCE + DISCOVERY_SPACING)))
+    per_source = DISCOVERY_PER_SOURCE if per_source is None else per_source
+    return min(DISCOVERY_CEILING, max(per_source, count * (per_source + DISCOVERY_SPACING)))
 
 
 def process(rows, settings, scope, summary, deadline):
@@ -180,8 +174,8 @@ def process(rows, settings, scope, summary, deadline):
             # (`heeded` 的 `finally`):一本账跨两步的话同一条警告会被后面那一步再记一遍
             # (归并按频道去重,但档数不去重)。
             with heeded(summary, row.get('eligible_sources', [row['source_id']])):
-                metadata = media.probe(row, settings, deadline, stopped,
-                                       scope.force or row['gate_code'] in TEMPORARY)
+                metadata = row.get('_metadata') or media.probe(
+                    row, settings, deadline, stopped, scope.force or row['gate_code'] in TEMPORARY)
             if decision := gate(metadata, policy, row):
                 storage.update(row['video_id'], state=decision.state, reason=decision.reason,
                                gate_code=decision.code, retry_at=time.time() + decision.retry_seconds)
@@ -347,20 +341,9 @@ def _round(scope):
                                ('youtube', started, reg.now(), json.dumps(summary, ensure_ascii=False)))
         return summary
     succeeded = []
-    # **一个频道一个频道地查,两个之间歇一拍 —— 不许并发。** 这条是撞过 429 之后按
-    # daily-report 改的:它那份 `fetch_yt_channels.py` 起先也是 8 路并发(拿 RSS 地址),
-    # 后来整个换成 `fetch_yt_channels_v2.py` 的串行 + `time.sleep(1)  # Rate limit`,
-    # 自此每天 48 个频道、每个逐条解析 20 条都跑得通。我们这边原先 4 路并发、频道之间
-    # 不歇,量比它小却撞上了 429 —— YouTube 限的是**出口的瞬时请求速率**,不是一天的总量,
-    # 所以快不起来的地方只能用等来换。**不要为了快改回并发**:429 的报错落在登录态检查上
-    # (见 `login.classify` 的 `rate_limited`),从面板上看像是「没登录」,追起来要绕一大圈。
-    #
-    # **发现的预算按主路真实的速度定。** 全程登录态之后每一轮都是逐条解析:单频道半分钟
-    # 一档(实测每条约 4.3 秒,`discovery.DETAIL_LIMIT` 封在 10 条)。预算卡在 90 秒就只有
-    # 头几个频道轮得到,其余静默进 `skipped`(面板上看不出区别)—— 所以按待查频道数算一个
-    # 够用的额度(连歇的那几拍一起算进去),再用 `DISCOVERY_CEILING` 封顶。
-    per_source = DISCOVERY_PER_SOURCE
-    discovery_deadline = time.monotonic() + discovery_budget(len(pending))
+    per_source = 90.0 if scope.ranged else DISCOVERY_PER_SOURCE
+    discovery_started = time.monotonic()
+    discovery_deadline = discovery_started + discovery_budget(len(pending), per_source)
     while pending and not stopped():
         # **第一个频道无条件放行。** 「剩下的时间够不够再查一个」这道闸只能拦后续的:
         # 额度正好是 `len(pending) * (per_source + spacing)` 时,这个判断在第一个上就差
@@ -404,7 +387,7 @@ def _round(scope):
             _save_failure(source, _Told(error), summary)
             throttle.caught(error)
         summary['checked'] += 1
-        _stage('crawl', 'running', f"YouTube · 轻量检查 {summary['checked']}/{len(sources)} 个频道")
+        _stage('crawl', 'running', f"YouTube · 频道列表 {summary['checked']}/{len(sources)} 个频道")
         # **撞上 429 就当场收手这一轮。** 限的是**出口**不是这个频道:接着查下去的话,
         # 剩下的频道每一个都再去撞一次同样的墙 —— 惩罚被这一轮自己加深、拖长,面板上
         # 多出几十条不是它们自己毛病的失败,它们还一起进了退避(下一轮想试都试不了)。
@@ -417,10 +400,30 @@ def _round(scope):
         if throttle.tripped(throttle.YOUTUBE):
             break
     summary['skipped'] += len(pending)
+    discovery_seconds = time.monotonic() - discovery_started
     rows = storage.rows([source['id'] for source in succeeded])
-    ranked = ranking.score(rows, of(settings), scope)
+    metadata_started = time.monotonic()
+    _stage('crawl', 'running', f"YouTube · 频道列表完成 {summary['checked']}/{len(sources)}，增量更新元数据")
+    prepared = candidate_metadata.refresh(
+        rows, settings, scope, metadata_started + candidate_metadata.RUN_SECONDS, stopped,
+        observe=lambda row: heeded(summary, [owner['source_id'] for owner in row['owners']]),
+        progress=lambda done, total: _stage('crawl', 'running', f'YouTube · 元数据更新 {done}/{total}'))
+    summary['metadata'] = prepared['stats']
+    failures = {}
+    for row, error in prepared['errors']:
+        affected = [owner['source_id'] for owner in row['owners']]
+        wall(summary, affected, error)
+        for source_id in affected:
+            failures.setdefault(source_id, []).append(login.evidence(error, 500))
+    ranked = ranking.score(prepared['rows'], of(settings), scope)
     summary['ranked'] = len(ranked)
-    failures = process(ranked, settings, scope, summary, time.monotonic() + of(settings)['run_seconds'])
+    processing_started = time.monotonic()
+    summary['timings'] = {'discovery_seconds': round(discovery_seconds, 2),
+                          'metadata_seconds': round(processing_started - metadata_started, 2)}
+    for source_id, reasons in process(ranked, settings, scope, summary,
+                                      processing_started + of(settings)['run_seconds']).items():
+        failures.setdefault(source_id, []).extend(reasons)
+    summary['timings']['processing_seconds'] = round(time.monotonic() - processing_started, 2)
     # **「取到了,但…」和「卡住了」分开说**:前者这一轮确实带回了东西,后者没有。
     # 混成一句会把一条 cookie 警告说得像整个频道失败了(口径见 `caution`)。
     # **要在落库之前归并**:订阅那条提醒(`last_notice`)取的就是这一刻的 `message`,
@@ -439,8 +442,9 @@ def _round(scope):
         summary['message'] += ('；' if summary['message'] else '') + \
             f"{len(unsaid)} 个频道这一轮发出过请求，" + login.cautioned(code, gateway['browser'])
     for source in succeeded:
-        outstanding = any(not row['excluded'] and (row['last_error'] or row['state'] in ('deferred', 'processing'))
-                          for row in storage.rows([source['id']]))
+        outstanding = (source['id'] in prepared['pending_sources'] or
+                       any(not row['excluded'] and (row['last_error'] or row['state'] in ('deferred', 'processing'))
+                           for row in storage.rows([source['id']])))
         completed = storage.ready(source)
         if scope.ranged:
             completed = [row for row in completed if scope.since <= row['entry']['published'][:10] <= scope.until]
@@ -476,6 +480,11 @@ def _round(scope):
         summary['message'] += ('；撞上 429 后这一轮提前收手，' if throttle.tripped(throttle.YOUTUBE)
                                else '；') + \
             f'还有 {len(pending)} 个频道未轮到，留待下轮轻量检查'
+    timing, metadata = summary['timings'], summary['metadata']
+    summary['message'] += ('；' if summary['message'] else '') + (
+        f"列表发现 {timing['discovery_seconds']:g} 秒；元数据更新 {timing['metadata_seconds']:g} 秒"
+        f"（复用 {metadata['reused']} 条 6 小时内精确缓存，新查 {metadata['refreshed']} 条，"
+        f"待更新 {metadata['pending']} 条暂不排名）；视频深加工 {timing['processing_seconds']:g} 秒")
     with reg.db() as connection:
         connection.execute('INSERT INTO feed_runs(kind,started_at,finished_at,summary) VALUES(?,?,?,?)',
                            ('youtube', started, reg.now(), json.dumps(summary, ensure_ascii=False)))
