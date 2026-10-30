@@ -5,8 +5,8 @@
 普通同步不再为每个频道展开最近 10 条视频的详细信息。现在依次执行：
 
 1. 全部待查频道串行读取带登录态的 flat 列表，每频道最多 20 条；频道间仍停 1 秒。
-2. 列表全部结束后，复用 6 小时内的精确元数据，只补新增或过期的视频详情。
-3. 拿到真实发布时间、播放量及简介后，使用原有资格判断和评分公式重排。
+2. 列表全部结束后，已完成/已排除视频不再探测；其他视频复用 6 小时内快照，只补新增或过期详情。
+3. 所有候选继续使用原有资格判断和评分公式预排；未核实与旧快照保留明确说明，不伪装成实时事实。
 4. 再按原有视频数量、时长及处理预算取字幕、ASR、翻译和生成内容笔记。
 
 所有远端请求仍由 yt-dlp 使用已配置浏览器的登录态，不改用匿名 RSS，不增加频道并发。
@@ -17,14 +17,15 @@
 | 环节 | 限制 | 超额处理 |
 | --- | --- | --- |
 | 普通频道列表 | 单频道 30 秒，整轮最多 900 秒 | 未轮到的频道下轮继续 |
-| 指定日期的详细发现 | 单频道 90 秒，整轮最多 900 秒 | 继续保留原有部分输出和覆盖说明 |
-| 增量元数据 | 整轮 120 秒，单条不超过 30 秒 | 未更新的视频暂不排名，来源不报完整成功 |
-| 精确排名快照 | 最长复用 6 小时 | 过期后先刷新，不能将旧播放量冒充实时值 |
+| 指定日期的详细发现 | 单频道 90 秒，整轮最多 1800 秒 | 继续保留原有部分输出和覆盖说明 |
+| 增量元数据 | 整轮 120 秒，单条不超过 30 秒 | 未轮到的视频保留预排，不因此阻止频道成功 |
+| 精确快照刷新 | 未完成视频 6 小时后进入刷新队列 | 旧值仅作为缓存快照，不冒充实时播放量 |
 | 视频深加工 | 继续使用 `youtube.run_seconds`，默认 900 秒 | 未完成内容留待下轮 |
 
 这些是不同阶段的额度，不保证整轮或冷启动一定在几分钟内完成。
 尤其首次运行或升级后旧候选没有缓存时间标记时，需要按预算逐轮补齐；
-不会为了得到一张看似完整的榜单，把缺失播放量当成零或把估算日期当真。
+榜单不会因此大面积失去名次；缺失播放量仍显示「未知」，估算日期仍标未知。
+这些条目只是预排，进入内容处理时仍要拿真实元数据重判准入，不能把估算日期固化到成品。
 
 显式日期补抓继续使用详细列表，而不是拿估算列表证明视频位于指定日期内。
 新增候选的真实日期到手后仍经过共同的窗口、订阅历史下界、未来时间和 AI 相关性判断。
@@ -32,38 +33,43 @@
 
 ## 缓存与安全
 
-- `entry.metadata_checked_at` 只在得到精确数据时推进。重复 flat 列表不会把旧快照续成新缓存。
+- `entry.metadata_checked_at` 由存储层的 `discover`、`refresh_metadata`、`recalibrate` 统一推进。
+  重复 flat 列表不会把旧快照续成新缓存，完成的视频也不会因为超过 6 小时重新消耗元数据预算。
 - 元数据补齐不下载、不转录、不调用内容模型；新候选优先，并按列表位置跨频道轮转。
 - 未被请求的视频不会因本轮停止或限流被登记成失败或推入失败退避。
+- 单条视频的元数据错误不把正常频道推进连接失败退避；只有登录态/限流等出口级错误或
+  该频道整批可用候选都探测失败才升级到频道。视频自己的失败原因、次数与冷却期照常保留。
+- 已有预算或熔断延后原因不被元数据提示覆盖；尚未轮到补数据与实际处理未完成分别判定。
 - 单条本地超时或事实字段缺失暂缓 5 分钟，避免每轮都由同一个坏候选占掉全部预算。
 - 实际上游失败保留原始诊断；429 继续通过同一份请求级熔断账停止后续读取。
 - 写回精确快照时核对旧快照未改变、仍有有效频道归属且没有永久移除记录。
 - 已在元数据阶段获得的工具结果在同一轮处理时直接复用，不再重复 probe。
+- 默认允许命中工具自身的短期磁盘缓存，仅显式强制同步才绕过该缓存。
 
 ## 可观测性
 
-同步进度分别显示「频道列表」「元数据更新」「视频处理」。最终消息同时显示三个阶段
-各自耗时，以及精确缓存复用、新查、待更新数量；`feed_runs.summary` 额外保存：
+同步进度分别显示「频道列表」「元数据更新」「视频处理」。最终进度行单独展示三个阶段
+各自耗时，以及缓存复用、新查、待更新和失败数量；`summary.message` 仍只承载告警与待办，
+完全干净的同步保持为空，不把统计文字写进频道 `last_notice`。`feed_runs.summary` 额外保存：
 
 - `timings.discovery_seconds`、`timings.metadata_seconds`、`timings.processing_seconds`。
 - `metadata.reused`、`metadata.refreshed`、`metadata.pending`、`metadata.failed` 和 `metadata.ttl_seconds`。
 
-`ranked` 只统计本轮可以使用的精确候选，待更新的视频仍在候选列表里，以未排名/待处理状态
-和明确理由保留；不会因为未知而被永久排除。排序公式不变，但使用的是最多 6 小时的明确
-缓存快照，不能称为所有视频的实时播放量排名。
+`ranked` 包含待核实的预排候选，未知数据不会因为元数据预算不足而丢掉名次或被永久排除。
+排序公式不变；未知条目保留 `approximate`，旧值以缓存快照说明，不能称为所有视频的实时播放量排名。
 
 ## 验证范围
 
-本轮新增 `tests/test_youtube_incremental.py`，并更新
-`tests/test_youtube_fallback.py` 中与旧发现策略直接冲突的断言。
-只执行本轮新写/改动的这两个文件，由 ash regression 哨兵登记真实命令和结果；
-其余回归留给验收前置命令，不以历史结果冒充本轮通过。
+初版新增 `tests/test_youtube_incremental.py` 并更新 `tests/test_youtube_fallback.py`。
+本次修复修改前者并新增 `tests/test_youtube_incremental_review.py`，只执行这两个本次
+新写/改动的文件，由 ash regression 哨兵登记真实命令和结果；其余回归留给验收前置
+命令，不以初版或历史结果冒充本次通过。
 
 验证使用临时 SQLite、媒体与模型替身，不启动真实频道抓取，不读取真实 cookie，
-不调用付费模型。接口核对覆盖候选排名响应中的未知标记和未排名状态。
-本轮不修改页面结构或样式，不操作浏览器，也不声称已在生产跑出新的分钟级测速结果。
+不调用付费模型。接口核对覆盖候选排名响应中的未知标记、预排名次和频道成功状态。
+不修改页面结构或样式；页面点检只访问本地隔离数据，不声称已在生产跑出新的分钟级测速结果。
 
-## 真实验证结果（2026-10-30）
+## 初版验证记录（2026-10-30，修复前）
 
 - ash 回归登记：`8HN_Zg6s0uMA`，真实退出码 `0`。
 - 结果：`Ran 45 tests in 7.691s`，`OK`；仅包含本轮新增/修改的两个测试文件。
@@ -86,3 +92,57 @@ env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-incremental-validation/data KB_VAUL
 `/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/8HN_Zg6s0uMA.log`。
 
 日志 SHA-256：`2a88557982d63e0561e849ad149fd4a2daae81d3d55d094cba9587b2a6a45d00`。
+
+## 修复后验证结果（2026-10-30）
+
+- ash 登记：`sKEv8vJelELz`，退出码 `0`；真实日志为 `Ran 34 tests in 1.957s`、`OK`。
+- 仅执行本次修改的 `tests.test_youtube_incremental` 与新增的
+  `tests.test_youtube_incremental_review`，没有补跑其他文件或全仓回归。
+- 覆盖冷启动 48 频道/384 候选、已完成与排除条目不再探测、三个精确 entry 写入口、
+  延后原因/保护状态名次保留、单条/整批/登录态失败、多归属隔离和清洁同步告警为空。
+- 首次登记 `rac5QMKHSUiY` 因测试夹具缺少成品校验证据、排除原因码及浏览器字段失败；
+  已补真实成品证明和必要字段后重跑，没有绕过成品隔离机制或放宽断言。
+
+实际工作目录：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。
+
+未过滤的原始命令：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-review1-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-review1-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-review1-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_incremental tests.test_youtube_incremental_review -v
+```
+
+日志：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/sKEv8vJelELz.log`。
+SHA-256：`33627f44d581094f4f78473df7d3abb7c41e99b6dab2917e7898f6a8eca86a92`。
+
+### 接口与页面冒烟
+
+临时数据目录为 `/private/tmp/kb-J45OI3nIhEEf-review1-smoke`，独立运行本轮代码；
+列频道、元数据、字幕与笔记模型均为本地替身，成品仍通过真实完整性证明。
+关闭调度器后启动临时 uvicorn，仅监听 `127.0.0.1:48991`，不连接生产服务。
+
+摆局特意把增量元数据预算设为零，深加工只许两条，验证最坏冷启动的可用性：
+
+| 观察项 | 实际结果 |
+| --- | --- |
+| 启用频道 / 候选总数 | 48 / 384 |
+| 预排名次数 / 页面展示前 100 条的无名次条数 | 384 / 0 |
+| 成功频道 / 因真实处理预算留待后续的频道 | 46 / 2 |
+| 频道错误 / 已完成并入库的中文成品 | 0 / 2 |
+| `GET /api/intake/youtube/ranking` | HTTP 200，`total=384` |
+
+真实打开「我的订阅 → YouTube → 订阅管理」并点击视图按钮，截图确认：候选保留名次，
+未校准播放量仍写「未知」；普通频道显示「最近成功」，仅两个实际有处理待办的频道未记成功。
+页面另含四个原始停用频道，卡片总数为 52，不能把它们算作本次 48 个启用频道的失败。
+
+浏览器按通道顺序尝试：Chrome 扩展库存可用，但以具名会话「🔎 YouTube抓取修复」和
+`visible:false` 新建后台标签时返回 `Capability is not available: visibility`。
+为避免激活用户窗口或切换标签，不撤掉后台限制重试，改用独立 `chrome-headless-shell`，
+临时 profile，始终无头；没有连接用户 Chrome 的调试端口或复用任何既有标签。
+本地页面不需要登录态，降级不影响验证；没有点击同步、登录检查、更新工具或其他写操作。
+
+证据归档目录：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/review-fix-1`，含
+`smoke-summary.json`、`ranking-api.json`、`page-evidence.json`、`ranking.png`、`sources.png`
+及隔离服务/页面脚本。服务已停止，无头浏览器及临时 profile 已回收。
+
+修复后的七个 Python 文件 Ruff、内存编译、700 行上限及 `git diff --check` 通过。
+这些是离线替身与本地页面验证，不是生产频道抓取测速，也未调用真实 YouTube 或模型。

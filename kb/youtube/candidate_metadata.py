@@ -1,11 +1,11 @@
-"""频道列表完成后，按预算补齐新增/过期元数据；估算数据不进入正式排名。"""
+"""频道列表完成后按预算补元数据；未轮到的候选保留预排资格。"""
 
 import contextlib
 import math
 import time
 from datetime import datetime, timedelta, timezone
 
-from kb.youtube import admission, media, ranking, storage, throttle
+from kb.youtube import admission, login, media, ranking, storage, throttle
 from kb.youtube.settings import of
 
 
@@ -13,8 +13,8 @@ TTL_SECONDS = 6 * 3600
 RUN_SECONDS = 120.0
 VIDEO_SECONDS = 30.0
 RETRY_SECONDS = 300
-PENDING = '等待补齐真实发布时间与播放量，暂不参与排名'
-STALE = '元数据超过 6 小时，等待刷新后重新排名'
+PENDING = '发布时间与播放量尚未核实，暂按候选信息预排，处理前再次核实'
+STALE = '播放量为超过 6 小时的缓存快照，暂按缓存预排，处理前再次核实'
 
 
 def fresh(row, now=None):
@@ -37,10 +37,22 @@ def calibrated(row, metadata):
     entry = admission.calibrate({**row, 'entry': {**original, 'views': 0, 'description': ''}}, metadata)
     if entry is None:
         return None
-    entry.update(views=int(count), metadata_checked_at=time.time())
+    entry.update(views=int(count))
     if isinstance(metadata.get('title'), str) and metadata['title'].strip():
         entry['title'] = metadata['title'].strip()
     return entry
+
+
+def source_failures(errors, eligible):
+    failed_ids = {row['video_id'] for row, error in errors}
+    failures = {}
+    for row, error in errors:
+        for owner in row['owners']:
+            source_id = owner['source_id']
+            if (login.coded(error) in login.AUTH_CODES or
+                    eligible.get(source_id) and eligible[source_id] <= failed_ids):
+                failures.setdefault(source_id, []).append(error)
+    return failures
 
 
 def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=None):
@@ -48,17 +60,20 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
     now = datetime.now(timezone.utc)
     floor = now - timedelta(days=policy['window_days'])
     stats = {'reused': 0, 'refreshed': 0, 'pending': 0, 'failed': 0, 'ttl_seconds': TTL_SECONDS}
-    accepted, queue, errors, metadata_by_id = set(), [], [], {}
-    positions = {}
+    queue, errors, metadata_by_id = [], [], {}
+    positions, eligible = {}, {}
     source_ids = {owner['source_id'] for row in rows for owner in row['owners']}
     for row in rows:
         if row.get('excluded'):
             continue
         representative, _, _ = ranking.qualify(row, policy, scope, now, floor)
-        if representative is None:
-            accepted.add(row['video_id'])
-        elif fresh(row):
-            accepted.add(row['video_id'])
+        if representative is None or row['state'] == 'excluded':
+            continue
+        for source_id in representative['eligible_sources']:
+            eligible.setdefault(source_id, set()).add(row['video_id'])
+        if row['state'] == 'ready':
+            continue
+        if fresh(row):
             stats['reused'] += 1
         else:
             source_id = representative['source_id']
@@ -80,7 +95,7 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
         try:
             with observe(row) if observe else contextlib.nullcontext():
                 metadata = media.probe(row, settings, min(deadline, time.monotonic() + VIDEO_SECONDS),
-                                       stopped, force=True)
+                                       stopped, force=scope.force)
             if stopped() or storage.permanently_excluded(row):
                 if storage.permanently_excluded(row):
                     pending.pop(row['video_id'], None)
@@ -90,7 +105,6 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
                 defer(row, PENDING, time.time() + RETRY_SECONDS)
                 continue
             if storage.refresh_metadata(row, entry):
-                accepted.add(row['video_id'])
                 metadata_by_id[row['video_id']] = metadata
                 pending.pop(row['video_id'], None)
                 stats['refreshed'] += 1
@@ -110,9 +124,13 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
     latest = storage.rows(list(source_ids))
     waiting = [row for row in latest if row['video_id'] in pending and not row.get('excluded')]
     stats['pending'] = len(waiting)
-    current = [row for row in latest if row['video_id'] in accepted]
+    current = [row for row in latest if not row.get('excluded')]
     for row in current:
         if row['video_id'] in metadata_by_id:
             row['_metadata'] = metadata_by_id[row['video_id']]
+        elif row['video_id'] in pending:
+            row['_metadata_reason'] = PENDING if row['entry'].get('approximate') else STALE
+    failures = source_failures(errors, eligible)
     return {'rows': current, 'stats': stats, 'errors': errors,
-            'pending_sources': {owner['source_id'] for row in waiting for owner in row['owners']}}
+            'pending_ids': {row['video_id'] for row in waiting},
+            'source_errors': failures, 'pending_sources': set(failures)}

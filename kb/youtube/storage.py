@@ -89,6 +89,11 @@ def permanently_excluded(row, connection=None):
                 (reg.item_key('youtube', row['entry']['url']),)).fetchone())
 
 
+def snapshot(entry):
+    """所有精确 entry 写入口统一记录快照时间，flat 列表不续期。"""
+    return entry if entry.get('approximate') else {**entry, 'metadata_checked_at': time.time()}
+
+
 def discover(source, entries):
     with maintenance_lock(), db() as connection:
         current = connection.execute('SELECT url,enabled FROM subscriptions WHERE id=?',
@@ -100,8 +105,7 @@ def discover(source, entries):
         for entry in entries:
             if permanently_excluded({'entry': entry}, connection):
                 continue
-            if not entry.get('approximate'):
-                entry = {**entry, 'metadata_checked_at': time.time()}
+            entry = snapshot(entry)
             # **估算数据不许覆盖已有的精确数据。** 发现有两条路:RSS 带真实发布时间和播放量,
             # yt-dlp 的后路只有列表顺序估出来的时间和 views=0(见 `discovery.approximate`)。
             # 判据待在这条语句自己的 CASE 里 —— 先 SELECT 一次再决定要不要写,中间那一下
@@ -167,7 +171,7 @@ def recalibrate(video_id, entry):
 
     不走 `update()`:它的白名单是无条件覆盖那一类字段,`entry` 不能那样写。
     """
-    payload = json.dumps(entry, ensure_ascii=False)
+    payload = json.dumps(snapshot(entry), ensure_ascii=False)
     views = entry.get('views')
     with db() as connection:
         connection.execute("""UPDATE youtube_videos
@@ -187,7 +191,7 @@ def refresh_metadata(row, entry):
             AND EXISTS(SELECT 1 FROM youtube_video_sources owner JOIN subscriptions source
                 ON source.id=owner.source_id WHERE owner.video_id=youtube_videos.video_id
                 AND source.enabled=1 AND source.url=owner.source_url)''',
-            (json.dumps(entry, ensure_ascii=False), entry['views'], reg.now(), row['video_id'],
+            (json.dumps(snapshot(entry), ensure_ascii=False), entry['views'], reg.now(), row['video_id'],
              json.dumps(row['entry'], ensure_ascii=False)))
         return changed.rowcount == 1
 
@@ -197,9 +201,11 @@ def defer_metadata(updates):
     if not updates:
         return
     with db() as connection:
-        connection.executemany('''UPDATE youtube_videos SET score_rank=0,
+        connection.executemany('''UPDATE youtube_videos SET
+            score_rank=CASE WHEN state IN ('ready','excluded','failed') THEN score_rank ELSE 0 END,
             state=CASE WHEN state IN ('ready','excluded','failed') THEN state ELSE 'deferred' END,
-            reason=CASE WHEN state IN ('ready','excluded','failed') THEN reason ELSE ? END,
+            reason=CASE WHEN state IN ('ready','excluded','failed') OR (state='deferred' AND reason<>'')
+                THEN reason ELSE ? END,
             retry_at=CASE WHEN state IN ('ready','excluded','failed') THEN retry_at ELSE COALESCE(?,retry_at) END
             WHERE video_id=? AND NOT EXISTS(SELECT 1 FROM feed_item_exclusions removed
                 WHERE removed.kind='youtube' AND removed.url=json_extract(youtube_videos.entry,'$.url'))''',

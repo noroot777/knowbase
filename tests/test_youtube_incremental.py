@@ -85,17 +85,19 @@ class IncrementalMetadata(IncrementalFixture):
         self.assertEqual(0, result['rows'][0]['views'])
         self.assertEqual(1, result['stats']['refreshed'])
 
-    def test_budget_exhaustion_does_not_rank_guessed_or_expired_values(self):
+    def test_budget_exhaustion_preserves_provisional_candidates_without_failing_sources(self):
         self.pending(1)
         storage.discover(self.source, [self.entry(2)])
         self.expire(next(row for row in storage.rows() if row['video_id'] == '00000000002'))
         result, asked = self.refresh(deadline=time.monotonic() - 1)
         asked.assert_not_called()
-        self.assertEqual([], result['rows'])
+        self.assertEqual(2, len(result['rows']))
         self.assertEqual(2, result['stats']['pending'])
-        self.assertEqual({self.source['id']}, result['pending_sources'])
-        self.assertTrue(all(row['score_rank'] == 0 for row in storage.rows()))
-        self.assertTrue(all(row['state'] == 'deferred' for row in storage.rows()))
+        self.assertEqual(set(), result['pending_sources'])
+        ranked = ranking.score(result['rows'], of(self.settings_value), self.scope)
+        self.assertEqual(2, len(ranked))
+        self.assertTrue(all(row['score_rank'] > 0 for row in storage.rows()))
+        self.assertTrue(all('预排' in row['reason'] for row in storage.rows()))
 
     def test_large_pending_batch_does_not_open_a_database_for_every_video(self):
         storage.discover(self.source, [{**self.entry(number), 'approximate': True}
@@ -106,7 +108,7 @@ class IncrementalMetadata(IncrementalFixture):
         self.assertEqual(30, result['stats']['pending'])
         self.assertLessEqual(opened.call_count, 3)
 
-    def test_missing_date_or_view_count_remains_retryable_and_unranked(self):
+    def test_missing_date_or_view_count_remains_unknown_and_outside_processing_until_retry(self):
         for invalid in ({'timestamp': None}, {'view_count': None}, {'view_count': True},
                         {'view_count': float('nan')}, {'view_count': -1}, {'view_count': 2 ** 63}):
             with self.subTest(invalid=invalid):
@@ -115,11 +117,13 @@ class IncrementalMetadata(IncrementalFixture):
                 result, asked = self.refresh(
                     lambda row, *arguments, **kwargs: {**self.metadata(row['entry']), **invalid})
                 self.assertEqual(1, asked.call_count)
-                self.assertEqual([], result['rows'])
+                self.assertEqual(number, len(result['rows']))
+                ranked = ranking.score(result['rows'], of(self.settings_value), self.scope)
+                self.assertEqual([], ranking.select(ranked, of(self.settings_value)))
                 stored = next(row for row in storage.rows() if row['video_id'] == entry['video_id'])
                 self.assertTrue(stored['entry']['approximate'])
                 self.assertGreater(stored['retry_at'], time.time())
-                self.assertEqual(0, stored['score_rank'])
+                self.assertGreater(stored['score_rank'], 0)
 
     def test_facts_outside_window_are_rejected_after_calibration(self):
         self.pending()
@@ -151,7 +155,7 @@ class IncrementalMetadata(IncrementalFixture):
         _, asked = self.refresh(lambda row, *arguments, **kwargs: self.metadata(row['entry']),
                                 deadline=global_deadline)
         self.assertEqual(global_deadline, asked.call_args.args[2])
-        self.assertTrue(asked.call_args.kwargs['force'])
+        self.assertFalse(asked.call_args.kwargs['force'])
 
     def test_stop_does_not_start_metadata_requests(self):
         self.pending()
@@ -256,16 +260,16 @@ class IncrementalCollector(IncrementalFixture):
         self.assertEqual((1, 0), (first['metadata']['refreshed'], second['metadata']['refreshed']))
         self.assertEqual(1, second['metadata']['reused'])
 
-    def test_expired_metadata_budget_leaves_source_incomplete_without_ranking_zero_views(self):
+    def test_expired_metadata_budget_does_not_clear_provisional_ranking(self):
         entry = self.pending()
         with patch.object(candidates, 'RUN_SECONDS', 0):
             result, asked = self.collect(lambda *arguments: [entry])
         asked.assert_not_called()
-        self.assertEqual(0, result['ranked'])
+        self.assertEqual(1, result['ranked'])
         self.assertEqual(1, result['metadata']['pending'])
         self.assertEqual([], result['succeeded_ids'])
         self.assertGreater(result['deferred'], 0)
-        self.assertIn('暂不排名', result['message'])
+        self.assertNotIn('暂不排名', result['message'])
 
     def test_processing_reuses_metadata_already_fetched_for_this_round(self):
         self.pending()
@@ -289,5 +293,5 @@ class IncrementalCollector(IncrementalFixture):
         self.assertEqual(200, response.status_code)
         item = response.json()['items'][0]
         self.assertTrue(item['approximate'])
-        self.assertEqual(0, item['score_rank'])
+        self.assertEqual(1, item['score_rank'])
         self.assertEqual('deferred', item['state'])
