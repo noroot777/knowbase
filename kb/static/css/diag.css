@@ -142,6 +142,16 @@
 /* 色值一律走 token(CLAUDE.md):`--card` 就是那块白。 */
 .care-exits .care-exit-danger:hover { background: var(--danger); color: var(--card); }
 .care-exits button[disabled] { opacity: .5; }
+/* 「从浏览器采集」:**这两条人工出口里的主项**(「手动补正文」退成 ghost),
+   但比「立即执行」那块实心底低一档 —— 同一行上两块实心深松绿分不出主次。
+   色值一律走 token(CLAUDE.md),软底 + 品牌描边这一套和 `.tabs button.on` 同源。 */
+.care-exits .care-exit-main { background: var(--brand-soft); color: var(--brand-deep);
+  box-shadow: inset 0 0 0 1px var(--brand); }
+.care-exits .care-exit-main:hover { background: var(--brand-tint); }
+/* 「从浏览器采集」的前提 / 它为什么灰着 —— 就地一行,不弹 toast 也不只塞 title
+   (title 在触屏上压根出不来,见 `diag_detail.js` 的说明)。 */
+.care-exit-note { margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.care-exit-blocked { color: var(--warn); }
 
 .care-log-rows { display: flex; flex-direction: column; gap: 10px; max-height: 60vh;
   overflow: auto; }

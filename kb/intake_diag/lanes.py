@@ -56,7 +56,13 @@ class Lane:
     state: str
     summary: str
     step: int
-    #: 这一档可以走哪几个出口(口径在 `kb.intake_diag.actions`)。
+    #: 这一档可以走哪几个出口(口径在 `kb.intake_diag.actions`)。**顺序就是屏幕上
+    #: 那几颗按钮的顺序**,前端只负责画(`kb/static/js/diag_detail.js`)。
+    #: `capture`(从浏览器采集)和 `body`(手动补正文)写的是同一列、过的是同一道
+    #: 准入(`browser_capture._admit_body`),所以**它们俩只许一起出现**;`capture`
+    #: 排在前面是因为会落到正文这三档的多半是「要登录 / 脚本渲染 / HTTP 403」那
+    #: 几页 —— 那些页人已经在浏览器里开着,从那个标签抓比手工全选复制顺得多
+    #: (`docs/decisions/browser-capture.md`)。手动补正文退成兜底。
     exits: tuple[str, ...]
 
 
@@ -66,9 +72,9 @@ ATTENTION, QUEUED, RUNNING, RESOLVED, ARCHIVED = (
 
 LANES: tuple[Lane, ...] = (
     Lane('body_held', ATTENTION, BODY, '待人工确认', '已挂起，不会自动重试', 1,
-         ('requeue', 'body', 'relink', 'run', 'snooze', 'exclude')),
+         ('requeue', 'capture', 'body', 'relink', 'run', 'snooze', 'exclude')),
     Lane('body_exhausted', ATTENTION, BODY, '重试已停止', '重试预算已用完', 1,
-         ('run', 'requeue', 'body', 'relink', 'snooze', 'exclude')),
+         ('run', 'requeue', 'capture', 'body', 'relink', 'snooze', 'exclude')),
     # **不许一概说「已按原文入库」**:这一档只说明翻译额度用完了,而「入没入库」
     # 是导出那一头的事实(`exported_hash`)—— 还没导出过的那几条照旧在这一档里,
     # 对它们说「已经按原文写进知识库」是谎报(审查第 1 轮 F06)。单条到底入没入
@@ -77,7 +83,7 @@ LANES: tuple[Lane, ...] = (
          '译不动，按原文继续走后面的流程', 2,
          ('run', 'requeue', 'snooze', 'exclude')),
     Lane('body_queued', QUEUED, BODY, '待执行', '未开始 · 等待调度', 1,
-         ('run', 'body', 'relink', 'snooze', 'exclude')),
+         ('run', 'capture', 'body', 'relink', 'snooze', 'exclude')),
     Lane('translate_queued', QUEUED, TRANSLATE, '待执行', '未开始 · 等待调度', 2,
          ('run', 'snooze', 'exclude')),
     Lane('ingest_queued', QUEUED, INGEST, '待执行', '正文已定，等待写入知识库', 3,

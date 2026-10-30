@@ -139,6 +139,7 @@ function careCountText(value, field) {
 function careRunExit(name, row, lane) {
   if (name === 'run') return careRun(row.kind, [row.key]);
   if (name === 'requeue') return careRequeue(row.kind, [row.key], careRowLives(row));
+  if (name === 'capture') return careOpenCapture(row);
   if (name === 'body') return carePasteBody(row);
   if (name === 'relink') return careRelink(row);
   if (name === 'release') {
@@ -245,7 +246,31 @@ async function careRelease(kind, keys, decisions) {
   }
 }
 
-/** 手动补正文。**长度判据在服务端**(按行去重之后的字数),这里只拦空输入,
+/** 从浏览器采集:把这一条交给补抓页(`/browser-capture?item=<key>`),由人在那篇
+    文章自己的标签上点扩展、预览确认,正文补回原条目。
+
+    **这里只是一次交接,不做任何判断。**
+    - **准入**是后端那一份(`browser_capture._admit_body` / `target()`),界面上由
+      `can_paste` 决定这颗按钮灰不灰(`careApplyPasteability`);
+    - **「是不是这一世」由那条路自己认**(`browser_capture._same_life`,按
+      `fetched_at` + `content_rev`),所以这个地址**刻意只带 key**,不捎一份
+      `life` 过去 —— 捎过去就是在同一个问题上判第二遍,而两份判据的洞不一样
+      (口径见 `docs/decisions/browser-capture.md` 与 `intake-diagnostics.md`)。
+    - **key 用这一条真实的 `feed_items.key`**(和 `/body`、`/requeue` 发出去的
+      是同一个值),不是列表上的展示编号 —— 补抓页按它绑定条目。
+
+    **不弹确认框**:前提(文章开着、扩展装好)写在按钮旁边那行提示里,而确认框里
+    点「开始」之后再 `window.open` 已经不是用户手势,会被弹窗拦截挡掉。
+
+    新标签用 `window.open(..., 'noopener')`:补抓页拿不到 `window.opener`,口径同
+    `fav.js` 那一处。 */
+function careOpenCapture(row) {
+  const url = '/browser-capture?item=' + encodeURIComponent(row.key);
+  window.open(url, '_blank', 'noopener');
+}
+
+/** 手动补正文(**兜底那一颗**,主入口是上面那个「从浏览器采集」)。
+    **长度判据在服务端**(按行去重之后的字数),这里只拦空输入,
     并把服务端那句话原样显示在字段下面 —— 前端自己数一遍就是第二份口径。 */
 async function carePasteBody(row) {
   const floor = CARE.overview?.min_body_chars || 400;

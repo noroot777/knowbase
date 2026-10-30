@@ -24,7 +24,7 @@ class IntakeDiagBrowserTests(unittest.TestCase):
         results = json.loads(result.stdout.strip().splitlines()[-1])
         failed = [r for r in results if not r['ok']]
         self.assertEqual([], [f"{r['name']} — {r.get('detail', '')}" for r in failed])
-        self.assertGreaterEqual(len(results), 60)
+        self.assertGreaterEqual(len(results), 70)
 
 
 if __name__ == '__main__':

@@ -20,7 +20,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
-from kb import browser_capture
+from kb import browser_capture, source_types
 from kb.feeds import readable, registry as reg
 from kb.intake_diag import actions, lanes, ledger, running, shelf, sources
 from kb.web import intake_api
@@ -210,10 +210,15 @@ def item(key: str):
         'item': row,
         'lane': meta,
         'shelved': lane_id == lanes.ARCHIVED,
-        # 「手动补正文」对某些来源压根不开放(`permits_link_body`:X 观点、
-        # YouTube、简报的正文不许被原文链接里的页面替换)。如实交出去,按钮
-        # 由前端禁掉并说清原因 —— 不说清的话人会一直点那颗没反应的按钮。
+        # 「从浏览器采集」和「手动补正文」对某些来源压根不开放
+        # (`permits_link_body`:X 观点、YouTube、简报的正文不许被原文链接后面
+        # 那一页替换)。**这一道闸管那两颗按钮,不许一颗开一颗关** —— 它们写的是
+        # 同一列、过的是同一份准入(`browser_capture._admit_body`)。如实交出去,
+        # 按钮由前端一起禁掉并原样显示下面那句理由 —— 不说清的话人会一直点那颗
+        # 没反应的按钮,而**那句话也只有一份**(`source_types.link_body_refusal`,
+        # 空串 ⇔ 许可),前端不自己编。
         'can_paste': browser_capture.permits_link_body(row['kind']),
+        'paste_block': source_types.link_body_refusal(row['kind']),
         # **按这一世取**(`life`):只按 key 查会把上一世的处理记录列在一条删掉
         # 重收的新内容上(审查第 1 轮 F07)。
         'log': ledger.for_item(key, row['life']),

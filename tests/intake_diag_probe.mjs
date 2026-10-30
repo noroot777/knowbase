@@ -7,7 +7,10 @@
 //      提取不在这一步」—— 这是用户据以决定要不要花这笔钱的全部信息;
 //   ④ X 那两类问题的措辞:限流那条不许引到「重新登录」,覆盖未完成那条不许承诺
 //      断点续传;来源问题没有「不再收录」;
-//   ⑤ 四个宽度无横向溢出、整轮零 JS 错误零 console warning、没有原生弹窗、
+//   ⑤ **「从浏览器采集」是正文那几档的主入口**,「手动补正文」退成兜底:顺序、主次、
+//      按钮旁边那句前提、点下去那个地址带的是真实 key,以及**同一道闸管两颗**
+//      (反过来也钉:合格的那几类照旧两颗都开);
+//   ⑥ 四个宽度无横向溢出、整轮零 JS 错误零 console warning、没有原生弹窗、
 //      页面里不出现 ↗ ↑ ↓ → ▾ ▴ 这些字符(箭头一律走 icons.js)。
 //
 // 需要一个跑着沙箱数据的 kb-web:
@@ -168,8 +171,8 @@ check("重试耗尽那一档有条目", !!exhausted, exhausted);
 await evalJs(`careSelect(${JSON.stringify(exhausted)})`);
 await until(`$('care-detail').textContent.includes('重试已停止')`);
 const exits = await evalJs(`JSON.stringify([...document.querySelectorAll('#care-detail .care-exits button')].map(b => b.textContent))`);
-check("出口齐全:立即执行 / 仅重新排队 / 手动补正文 / 换链接 / 暂缓 / 不再收录",
-      ["立即执行", "仅重新排队", "手动补正文", "换链接", "暂缓", "不再收录"]
+check("出口齐全:立即执行 / 仅重新排队 / 从浏览器采集 / 手动补正文 / 换链接 / 暂缓 / 不再收录",
+      ["立即执行", "仅重新排队", "从浏览器采集", "手动补正文", "换链接", "暂缓", "不再收录"]
         .every(name => JSON.parse(exits).includes(name)), exits);
 await evalJs(`[...document.querySelectorAll('#care-detail .care-exits button')]
                .find(b => b.textContent === '立即执行').click()`);
@@ -371,6 +374,130 @@ await until(`CARE.group === 'attention' && CARE.sections.length > 0
              && CARE.sections.every(s => s.lane.group === 'attention')`);
 check("待决定那一组照旧勾得上",
       await evalJs(`!!document.querySelector('#care-list input[type=checkbox]')`));
+
+// ── 10d. 「从浏览器采集」:正文那几档的主入口,「手动补正文」退成兜底 ─────────
+// 会落到这几档的多半是「页面上没有识别出正文,可能需要登录或由脚本渲染」「这一页
+// 要求先完成验证或登录」「HTTP 403」—— 那些页人**已经在浏览器里开着、登录态也在**,
+// 从那个标签抓比让人手工全选复制粘贴顺得多,也不容易粘坏。所以这里钉四件事:
+// 顺序与主次(读不出主次人就会先点那颗兜底的)、按钮旁边那句前提(不许让人点进去
+// 才发现没装扩展)、那个地址带的是**真实 `feed_items.key`**(补抓页按它绑条目)、
+// 以及**同一道闸管两颗**(反过来也钉:合格的那几类照旧两颗都开)。
+await evalJs(`careSetGroup('attention')`);
+await until(`CARE.group === 'attention' && CARE.sections.some(s => s.lane.id === 'body_exhausted')`);
+const capRow = JSON.parse(await evalJs(`(() => {
+  const s = CARE.sections.find(s => s.lane.id === 'body_exhausted');
+  const row = s.items[0];
+  return JSON.stringify({ id: 'item:' + row.key, key: row.key });
+})()`));
+const capPick = name =>
+  `document.querySelector('#care-detail .care-exits button[data-exit="${name}"]')`;
+const reselect = async () => {
+  await evalJs(`CARE.selected = ''; careSelect(${JSON.stringify(capRow.id)})`);
+  await until(`!!${capPick("capture")}`);
+};
+await reselect();
+const exitOrder = JSON.parse(await evalJs(`JSON.stringify(
+  [...document.querySelectorAll('#care-detail .care-exits button')].map(b => b.dataset.exit))`));
+// 下面那几条都挂在这颗按钮身上,所以先单独问一句它在不在 —— 不问的话出口清单一
+// 变,余下几条会**抛在取值那一行**,整轮结果一条都报不出来(实测注入出来的形态)。
+check("动作区里真有「从浏览器采集」这颗(下面几条都挂在它身上)",
+      exitOrder.includes("capture"), JSON.stringify(exitOrder));
+check("「从浏览器采集」排在「手动补正文」前面,而且紧挨着它",
+      exitOrder.includes("capture")
+        && exitOrder[exitOrder.indexOf("capture") + 1] === "body",
+      JSON.stringify(exitOrder));
+const emphasis = JSON.parse(await evalJs(`(() => {
+  const cap = ${capPick("capture")}, body = ${capPick("body")};
+  if (!cap || !body) return JSON.stringify({ cap: '(没有这颗按钮)', body: '', label: '' });
+  return JSON.stringify({ cap: cap.className, body: body.className,
+    capBg: getComputedStyle(cap).backgroundColor,
+    bodyBg: getComputedStyle(body).backgroundColor, label: cap.textContent });
+})()`));
+check("它是这两颗里的主项,「手动补正文」退成次级",
+      emphasis.label === "从浏览器采集" && emphasis.cap.includes("care-exit-main")
+        && !emphasis.cap.includes("ghost") && emphasis.body.includes("ghost")
+        && emphasis.capBg !== emphasis.bodyBg, JSON.stringify(emphasis));
+const capNote = await evalJs(
+  `document.querySelector('#care-detail .care-exit-note')?.textContent || ''`);
+check("按钮旁边就写着前提:文章此刻开着 + 装过配对好的扩展 + 条件不凑手用兜底那颗",
+      /开着/.test(capNote) && /扩展/.test(capNote) && /手动补正文/.test(capNote), capNote);
+// 点下去那一下:**不弹确认框**(确认之后再 open 已经不是用户手势,会被弹窗拦截挡掉),
+// 直接开新标签。这里把 `window.open` 拦下来看它要去哪儿,所以没有真的开标签。
+const opened = JSON.parse(await evalJs(`(() => {
+  const real = window.open;
+  let got = null;
+  window.open = (url, target, feat) => { got = [url, target, feat]; return null; };
+  try { ${capPick("capture")}?.click(); } finally { window.open = real; }
+  return JSON.stringify(got);
+})()`));
+check("那个 key 是真实的 feed_items.key(32 位 hex),不是展示编号",
+      /^[0-9a-f]{32}$/.test(capRow.key), capRow.key);
+check("点下去进的是带这个 key 的补抓页、开在新标签、不带 opener",
+      !!opened && opened[0] === "/browser-capture?item=" + capRow.key
+        && opened[1] === "_blank" && String(opened[2]).includes("noopener"),
+      JSON.stringify(opened));
+check("点下去没有弹确认框(弹了就会被弹窗拦截挡住)",
+      !(await evalJs(`!!document.querySelector('.confirm-mask')`)));
+// **批量栏里压根不给这一颗**:一个浏览器标签就是一篇文章,勾 20 条采不了 20 篇。
+await evalJs(`(() => {
+  const s = CARE.sections.find(s => s.lane.id === 'body_exhausted');
+  carePick(s.items[0], s.lane, true);
+})()`);
+await until(`!$('care-batch').hidden`);
+check("批量栏里不给「从浏览器采集」",
+      !(await evalJs(`$('care-batch').textContent.includes('从浏览器采集')`)),
+      await evalJs(`$('care-batch').textContent.slice(0, 80)`));
+await evalJs(`CARE.picked.clear(); careRenderList()`);
+// 闸关着的那一侧。**合格的来源压根到不了这几档**(`fulltext._eligible` 里那道
+// `link_body_sql` 已经把 X 观点 / YouTube / 简报挡在补抓队列外面),所以这里把详情
+// 那一问的 `can_paste` 拦下来改成假 —— 验的是**前端拿到这个答案之后怎么画**。
+// 后端对那几类真答什么,由 `tests/test_intake_diag_capture.py` 钉。
+const gate = JSON.parse(await evalJs(`(async () => {
+  const real = window.fetch;
+  const why = 'YouTube 这一类的正文是视频转录稿，而链接后面那一页是播放页（样例）';
+  window.fetch = async (input, init) => {
+    const r = await real(input, init);
+    if (!String(input).includes('/items/')) return r;
+    const data = await r.json();
+    return new Response(JSON.stringify({ ...data, can_paste: false, paste_block: why }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    CARE.selected = '';
+    careSelect(${JSON.stringify(capRow.id)});
+    for (let i = 0; i < 150; i++) {
+      if (${capPick("capture")} && ${capPick("capture")}.disabled) break;
+      await new Promise(r => setTimeout(r, 60));
+    }
+  } finally { window.fetch = real; }
+  const note = document.querySelector('#care-detail .care-exit-note');
+  const one = name => {
+    const b = document.querySelector(
+      '#care-detail .care-exits button[data-exit="' + name + '"]');
+    return { off: !!b && b.disabled, title: (b && b.title) || '' };
+  };
+  return JSON.stringify({ capture: one('capture'), body: one('body'),
+    relink: one('relink'), note: note ? note.textContent : '',
+    blocked: !!(note && note.classList.contains('care-exit-blocked')), why });
+})()`));
+check("闸关着时「从浏览器采集」和「手动补正文」一起禁用(换链接也跟着)",
+      gate.capture.off && gate.body.off && gate.relink.off, JSON.stringify(gate));
+check("禁用态把原因说清了,而且用的是后端那一句、不只塞在 title 里",
+      gate.capture.title === gate.why && gate.body.title === gate.why
+        && gate.note === gate.why && gate.blocked, JSON.stringify(gate));
+// **反过来钉一边**:合格的那几类照旧两颗都开,旁边写的是前提不是拒绝。
+await reselect();
+await until(`${capPick("capture")} && !${capPick("capture")}.disabled`);
+const reopened = JSON.parse(await evalJs(`(() => {
+  const one = name => !!document.querySelector(
+    '#care-detail .care-exits button[data-exit="' + name + '"]')?.disabled;
+  const note = document.querySelector('#care-detail .care-exit-note');
+  return JSON.stringify({ capture: one('capture'), body: one('body'),
+    note: note ? note.textContent : '' });
+})()`));
+check("合格的那几类照旧两颗都开,旁边那行写的是前提",
+      reopened.capture === false && reopened.body === false && /扩展/.test(reopened.note),
+      JSON.stringify(reopened));
 
 // ── 11. 四个宽度无横向溢出 ────────────────────────────────────────────────
 for (const [w, h] of [[320, 760], [390, 844], [768, 1024], [1440, 900]]) {

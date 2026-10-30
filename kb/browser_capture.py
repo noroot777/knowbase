@@ -16,7 +16,7 @@ import time
 from urllib.parse import quote, urlsplit, urlunsplit
 
 from kb.feeds import fulltext, grab_page, readable, registry as reg
-from kb.source_types import link_body_sql, permits_link_body
+from kb.source_types import link_body_refusal, link_body_sql, permits_link_body
 
 TTL = 900
 MAX_BODY = 200_000
@@ -117,7 +117,12 @@ def _checked_target(item: dict | None) -> dict:
     if not item or item['capture_excluded']:
         raise LookupError('条目不存在或已不再收录')
     if not permits_link_body(item['kind']):
-        raise ValueError('此来源的正文不允许被原文链接中的页面替换，不能从浏览器补抓')
+        # 这条路也有一个**绕过界面**的入口:人手敲 `/browser-capture?item=<key>`。
+        # 所以这句拒绝要把「为什么」一起说完,和「问题与待办」里那两颗灰按钮旁边
+        # 那行字同源(`source_types.link_body_refusal`,判据仍只有上面这一句)。
+        raise ValueError('此来源的正文不允许被原文链接中的页面替换，不能从浏览器补抓'
+                         + (f'：{link_body_refusal(item["kind"])}'
+                            if link_body_refusal(item['kind']) else ''))
     if item['content_kind'] == 'post' or item['x_post_meta']:
         raise ValueError('此入口用于单篇文章正文，不处理 X 观点或时间线覆盖问题')
     page_url(item['url'])

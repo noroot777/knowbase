@@ -9,9 +9,17 @@
    自己判:一条内容此刻在哪一档只有后端答得准,而出口是按档分的。 */
 
 const CARE_EXIT_LABELS = {
-  run: '立即执行', requeue: '仅重新排队', body: '手动补正文',
+  run: '立即执行', requeue: '仅重新排队', capture: '从浏览器采集', body: '手动补正文',
   relink: '换链接', snooze: '暂缓', exclude: '不再收录', release: '恢复',
 };
+
+/** 「从浏览器采集」的前提,**写在按钮旁边,不等人点进去才发现**:补抓页需要那篇
+    文章此刻在浏览器里开着,还需要装好并配对过采集扩展(怎么装在补抓页上)。
+    `capture` 和 `body` 共用同一道闸(后端的 `can_paste`),所以这句话只说前提,
+    不说许可。 */
+const CARE_CAPTURE_HINT = '「从浏览器采集」要这篇文章此刻正在你的浏览器里开着，'
+  + '并且装好、配对过 Knowbase 采集扩展（补抓页上有下载和配对说明）。'
+  + '条件不凑手就用兜底那颗「手动补正文」。';
 
 function careRenderDetail() {
   const host = $('care-detail');
@@ -100,6 +108,11 @@ function careRenderItemDetail(host, row, lane) {
   if (why) careBlock(host, row.fulltext_hold ? '为什么要人看一眼' : '最后一次失败的原话',
     why, { mono: true });
   careBlock(host, '接下来会发生什么', careItemAdvice(row, lane));
+  // 「收进来的时间 + 正文版本」这两样**就是浏览器采集那条路认「这一世」的判据**
+  // (`kb.browser_capture._same_life`),而这块面板自己按 `feed_items.life` 认
+  // (`kb.intake_diag.warrant`)。两份口径各有主人,**这里不再判第三遍** —— 屏幕上
+  // 把那两个值如实摆出来就够:它们一变,补抓页上那张回执就认不出来了(按设计当
+  // 「没有回执」,不是「正文被改过」)。
   careBlock(host, '这一条的身份', [
     `内容编号 ${row.key}`,
     `收进来的时间 ${careTime(row.fetched_at, { seconds: true })}`,
@@ -116,11 +129,13 @@ function careRenderItemDetail(host, row, lane) {
 function careItemAdvice(row, lane) {
   if (lane.id === 'body_held') {
     return ['补抓拿到了页面，但没能确认哪一段是这一篇的正文，所以它一次都不扣重试预算、'
-      + '就挂起等人看一眼。原样重试很可能还是同一个结果——优先「手动补正文」或者「换链接」。'];
+      + '就挂起等人看一眼。原样重试很可能还是同一个结果——这一页要是你已经在浏览器里'
+      + '打开着，「从浏览器采集」最省事；否则试「换链接」，再不行才手动补正文。'];
   }
   if (lane.id === 'body_exhausted') {
     return ['重试预算已经用完，自动同步不会再碰它。「仅重新排队」等于再给一轮机会；'
-      + '要是原文站点本来就读不到（要登录、脚本渲染），换链接或手动补正文更省事。',
+      + '要是原文站点本来就读不到（要登录、脚本渲染、HTTP 403），再试一轮也是同一个'
+      + '结果——那几页你多半已经登录着、在浏览器里开着，直接「从浏览器采集」。',
       '它的壳照旧会按原样入库，不会因为补不到正文就丢掉。'];
   }
   if (lane.id === 'translate_exhausted') {
@@ -134,7 +149,8 @@ function careItemAdvice(row, lane) {
   }
   if (lane.id === 'body_queued') {
     return ['它排在这一类来源的补抓队列里，下一轮同步会去取。现在就想取的话用「立即执行」，'
-      + '那一轮的范围是整类来源、不只这一条。'];
+      + '那一轮的范围是整类来源、不只这一条。这一页已经在浏览器里开着的话，'
+      + '「从浏览器采集」只动这一条、也不用等调度。'];
   }
   if (lane.id === 'translate_queued') return ['排在翻译队列里，下一轮同步会译它。'];
   if (lane.id === 'ingest_queued') {
@@ -189,19 +205,35 @@ function careRenderSourceDetail(host, row) {
     + (row.blocked ? '另外，' + row.blocked + '——那跟它这一次为什么失败是两件事。' : '')]);
 }
 
+/** 画出口。**顺序和主次都按后端那一份**(`lane.exits`),这里不挑不排:
+    「从浏览器采集」排在「手动补正文」前面、而且是那两者里的主项,口径写在
+    `kb.intake_diag.lanes.Lane.exits` 上。
+
+    每颗按钮带 `data-exit`,**禁用那一道按它取**(`careApplyPasteability`)——
+    上一版按 `textContent` 认按钮,改一个字就静默认不出来了。 */
 function careExits(host, names, row, lane) {
   const box = document.createElement('div');
   box.className = 'care-exits';
   for (const name of names) {
     const b = document.createElement('button');
     b.type = 'button';
+    b.dataset.exit = name;
     b.textContent = CARE_EXIT_LABELS[name] || name;
     if (name === 'exclude') b.className = 'ghost care-exit-danger';
+    // 「从浏览器采集」是这两条人工出口里的主项(`body` 退成兜底的 ghost),
+    // 但它不跟「立即执行」抢那块实心底 —— 软底 + 品牌描边比它低一档。
+    else if (name === 'capture') b.className = 'care-exit-main';
     else if (name !== 'run') b.className = 'ghost';
     b.onclick = () => careRunExit(name, row, lane);
     box.appendChild(b);
   }
   host.appendChild(box);
+  if (names.includes('capture')) {
+    const note = document.createElement('p');
+    note.className = 'care-exit-note';
+    note.textContent = CARE_CAPTURE_HINT;
+    host.appendChild(note);
+  }
 }
 
 /** 这一条自己的处理记录。**异步补上**:它只是旁证,拿不到也不该拦住整个详情。 */
@@ -238,15 +270,39 @@ async function careLoadItemLog(host, key) {
   box.appendChild(rows);
 }
 
-/** 「手动补正文」对某些来源压根不开放(X 观点、YouTube、简报的正文不许被原文
-    链接里的页面替换)。后端如实给了 `can_paste`,这里把按钮禁掉并说清原因 ——
-    不说清的话人会一直点那颗没反应的按钮。 */
+// 一道闸管的就是这三颗,见下面那段说明。
+const CARE_BODY_GATED = ['capture', 'body', 'relink'];
+
+/** 写正文那几条人工出口对某些来源压根不开放(X 观点、YouTube、简报的正文不许被
+    原文链接后面那一页替换)。
+
+    **一道闸管三颗**:「从浏览器采集」「手动补正文」「换链接」写的都是同一列、过的
+    都是 `browser_capture._admit_body` 那一份准入,所以**不许一颗开一颗关** ——
+    开着的那一颗点下去只会在服务端被拒,而屏幕上看不出是为什么。
+    判据和那句理由都**问后端要**(`can_paste` / `paste_block`,
+    `source_types.link_body_refusal`),前端一个字都不自己编。
+
+    理由**既进 `title` 也就地显示一行**:`title` 在触屏上压根出不来,而「按钮灰着、
+    旁边什么都不说」正是这颗按钮最容易被反复点的形态。 */
 function careApplyPasteability(host, detail) {
   if (detail.can_paste) return;
-  for (const b of host.querySelectorAll('.care-exits button')) {
-    if (b.textContent === CARE_EXIT_LABELS.body || b.textContent === CARE_EXIT_LABELS.relink) {
+  const why = detail.paste_block || '这一类来源的正文不允许被原文链接后面那一页替换';
+  let gated = 0;
+  for (const name of CARE_BODY_GATED) {
+    for (const b of host.querySelectorAll(`.care-exits button[data-exit="${name}"]`)) {
       b.disabled = true;
-      b.title = '这一类来源的正文不允许被原文链接里的页面替换';
+      b.title = why;
+      gated += 1;
     }
   }
+  if (!gated) return;
+  // 前提那句话这时候没有意义了(压根点不了),换成「为什么点不了」。
+  const note = host.querySelector('.care-exit-note') || (() => {
+    const made = document.createElement('p');
+    made.className = 'care-exit-note';
+    host.querySelector('.care-exits').after(made);
+    return made;
+  })();
+  note.classList.add('care-exit-blocked');
+  note.textContent = why;
 }

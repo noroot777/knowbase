@@ -127,8 +127,11 @@ def permits_link_body(kind: str) -> bool:
     (`markdown_source.enrich`)、浏览器采集的准入(`browser_capture.target`)、存量复查
     的分支选择(`feed_fulltext_recheck._plan`)、订阅上那颗「补抓原文」开关
     (`registry.save_subscription`、编辑表单、`fulltext._eligible`)、以及条目卡片上那个
-    「从浏览器补抓」入口(`source_reader.js` 读 catalog 里这一列)。
+    「从浏览器补抓」入口(`source_reader.js` 读 catalog 里这一列)、以及「问题与待办」
+    详情里那两条人工出口(「从浏览器采集」和「手动补正文」,`intake_diag_api.item` 的
+    `can_paste` —— **两颗共用这一道闸,不许一颗开一颗关**)。
     **真正写库的那几条 UPDATE 另有 SQL 形状的同一份判据,见 `link_body_sql`。**
+    禁掉时屏幕上那句理由走 `link_body_refusal`。
 
     **它不是「这一行的正文许不许改」的总闸** —— 那是问题②(`permits_origin_body`)。
     两个问题在 rss / web / inbox / digest 上答案一致,在 social 上分叉:推文的正文取法是
@@ -144,6 +147,33 @@ def permits_link_body(kind: str) -> bool:
     """
     source = SOURCE_TYPES.get(kind)
     return bool(source and source.body_from_link)
+
+
+#: 不许可的那几类各自**为什么**不许可 —— 一句人读得懂、而且据以换一条路走的话。
+#: **判据不在这里**(只有 `permits_link_body` 一份):这张表只负责那句话,许可的一律
+#: 空串。界面上两条写正文的人工出路(「从浏览器采集」和「手动补正文」)共用这一道闸,
+#: 禁掉的时候得说清是为什么 —— 不说清的话人会一直点那颗没反应的按钮
+#: (`kb/static/js/diag_detail.js`、`docs/decisions/browser-capture.md`)。
+_LINK_BODY_REFUSALS = {
+    'social': '大V观点的正文走 X 专用接口取：通用提取器对 x.com 提不出东西，'
+              '拿那一页的文字替换只会把推文正文写坏',
+    'youtube': 'YouTube 这一类的正文是视频转录稿，而链接后面那一页是播放页——'
+               '从那儿读回来的简介和推荐列表会把整篇转录稿换掉，换不回来',
+    'digest': '简报条目的链接指向被这条简讯引用的第三方文章，不是简讯本身',
+    'wechat': '公众号的正文直接来自本机绿泡泡库，不从链接后面那一页取',
+}
+
+
+def link_body_refusal(kind: str) -> str:
+    """许可就空串,不许可就给那句话(**空串 ⇔ `permits_link_body` 为真**)。
+
+    没有登记的新来源走兜底那一句:默认不许可(见 `SourceType.body_from_link`),
+    所以这里必须答得出一句话 —— 返回空串等于告诉界面「可以点」。
+    """
+    if permits_link_body(kind):
+        return ''
+    return (_LINK_BODY_REFUSALS.get(kind)
+            or '这一类来源的正文不允许被原文链接后面那一页替换')
 
 
 def permits_origin_body(kind: str) -> bool:
