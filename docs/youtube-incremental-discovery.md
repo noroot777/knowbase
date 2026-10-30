@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | 普通频道列表 | 单频道 30 秒，整轮最多 900 秒 | 未轮到的频道下轮继续 |
 | 指定日期的详细发现 | 单频道 90 秒，整轮最多 1800 秒 | 继续保留原有部分输出和覆盖说明 |
-| 增量元数据 | 整轮 120 秒，单条不超过 30 秒 | 未轮到的视频保留预排，不因此阻止频道成功 |
+| 增量元数据 | 整轮 120 秒，单条不超过 30 秒 | 干净且未尝试的候选保留预排，不因此阻止频道成功 |
 | 精确快照刷新 | 未完成视频 6 小时后进入刷新队列 | 旧值仅作为缓存快照，不冒充实时播放量 |
 | 视频深加工 | 继续使用 `youtube.run_seconds`，默认 900 秒 | 未完成内容留待下轮 |
 
@@ -39,7 +39,14 @@
 - 未被请求的视频不会因本轮停止或限流被登记成失败或推入失败退避。
 - 单条视频的元数据错误不把正常频道推进连接失败退避；只有登录态/限流等出口级错误或
   该频道整批可用候选都探测失败才升级到频道。视频自己的失败原因、次数与冷却期照常保留。
-- 已有预算或熔断延后原因不被元数据提示覆盖；尚未轮到补数据与实际处理未完成分别判定。
+- 未升级为频道连接失败并不代表频道同步成功。`last_error`、`failed`、`processing` 和
+  本轮已尝试但未完成的视频阻止成功覆盖，不因缓存从新鲜变为过期而消失。
+- 元数据准备返回分离的 `not_reached_ids` 与 `unfinished_ids`；只有前者中尚未进入
+  内容处理、且没有真实错误的候选可豁免。失败冷却、取消、熔断不混作纯预算未轮到。
+- 取消状态在元数据、处理与落账阶段连续保留；成功覆盖最后集中落在同一事务，取消时
+  不清除任何频道的既有错误、次数或退避，也不把频道记入 `succeeded_ids`。
+- 已有预算或熔断延后原因跨轮保留；仅有预排名次不把 `deferred` 改成已恢复的 `candidate`。
+  元数据补齐或实际内容处理推进后，才按真实结果更新该状态与原因。
 - 单条本地超时或事实字段缺失暂缓 5 分钟，避免每轮都由同一个坏候选占掉全部预算。
 - 实际上游失败保留原始诊断；429 继续通过同一份请求级熔断账停止后续读取。
 - 写回精确快照时核对旧快照未改变、仍有有效频道归属且没有永久移除记录。
@@ -61,7 +68,7 @@
 ## 验证范围
 
 初版新增 `tests/test_youtube_incremental.py` 并更新 `tests/test_youtube_fallback.py`。
-本次修复修改前者并新增 `tests/test_youtube_incremental_review.py`，只执行这两个本次
+第一轮修复修改前者并新增 `tests/test_youtube_incremental_review.py`，只执行这两个当轮
 新写/改动的文件，由 ash regression 哨兵登记真实命令和结果；其余回归留给验收前置
 命令，不以初版或历史结果冒充本次通过。
 
@@ -93,7 +100,7 @@ env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-incremental-validation/data KB_VAUL
 
 日志 SHA-256：`2a88557982d63e0561e849ad149fd4a2daae81d3d55d094cba9587b2a6a45d00`。
 
-## 修复后验证结果（2026-10-30）
+## 第一轮修复验证结果（2026-10-30）
 
 - ash 登记：`sKEv8vJelELz`，退出码 `0`；真实日志为 `Ran 34 tests in 1.957s`、`OK`。
 - 仅执行本次修改的 `tests.test_youtube_incremental` 与新增的
@@ -146,3 +153,63 @@ SHA-256：`33627f44d581094f4f78473df7d3abb7c41e99b6dab2917e7898f6a8eca86a92`。
 
 修复后的七个 Python 文件 Ruff、内存编译、700 行上限及 `git diff --check` 通过。
 这些是离线替身与本地页面验证，不是生产频道抓取测速，也未调用真实 YouTube 或模型。
+
+## 第二轮修复与验证（2026-10-30）
+
+本轮修复的是同步完成判定，而非再次调整发现预算或评分公式：
+
+- 同一条视频的未解决错误不随六小时快照过期而被豁免，订阅既有 `last_success`、
+  `last_error`、`failures` 和 `retry_at` 原样保留；它不是一次新的频道连接失败。
+- 明确分离未尝试的干净候选与已尝试不完整/失败/中断的候选；实际 `failed`、
+  `last_error` 和 `processing` 的事实优先于元数据待办集合。
+- 元数据、内容处理、逐频道提交以及最终成功事务中的取消都不产生新的频道成功；
+  已通过证明的成品可照常保存，但错误账的清零统一延迟到未取消的成功事务。
+- 真实延后原因连续三轮预排仍保留，不再因预排把状态改成 `candidate` 而次轮丢失。
+- 48 频道/384 候选用例改接真实 `process`，在模型不可用时，入选内容的频道确实
+  保持未完成；未入选的干净候选不拖累其他频道，不再用空处理桩宣称 48/48 完成。
+
+### 登记的定点测试
+
+ash monitor：`FaCFO_OJJIFV`，退出码 `0`。已读取完整真实日志：
+`Ran 25 tests in 2.391s`，`OK`。
+只运行本轮修改的 `tests.test_youtube_incremental_review` 与新增的
+`tests.test_youtube_incremental_completion`；其余回归留给验收前置命令。
+
+新增的 13 项用例覆盖结果集合互斥与完整性、旧失败冷却、元数据不完整、局部超时、
+请求被拒、取消、缓存鲜/过期不变量，以及真实处理/成品校验/发布和两种收尾取消。
+已有审查用例增加连续三轮原因保留，并校正单条视频失败的来源完成断言。
+
+实际工作目录：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。
+
+未过滤的原始命令：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-review2-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-review2-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-review2-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_incremental_review tests.test_youtube_incremental_completion -v
+```
+
+日志：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/FaCFO_OJJIFV.log`。
+SHA-256：`8b23d5161025fbeb8136de6579a586fe8881a5ae4b1ab541df63c98e852b473e`。
+日志含现有 Starlette/httpx 弃用提示，无失败；未为此改动无关依赖。
+
+### 隔离接口冒烟与检查
+
+使用全新临时数据目录与 FastAPI `TestClient`，不启动生产服务或调度器。
+摆入一条快照超过六小时、视频仍在失败冷却的候选，以真实 `collect` / `process`
+走完后读取来源概览和候选榜，媒体探测调用数为零。
+
+| 观察项 | 实际结果 |
+| --- | --- |
+| `GET /api/intake/youtube` / `GET /api/intake/youtube/ranking` | 均为 HTTP 200 |
+| 原有频道错误、3 次失败、旧成功时间 | 全部保留 |
+| 视频状态 / 本轮新成功频道数 / 未完成频道数 | `failed` / 0 / 1 |
+| 真实 YouTube、媒体或模型请求 | 0 |
+
+证据：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/review-fix-2/`，包含
+`api-smoke.py`、`api-smoke.log`、`summary.json`、`overview.json`、`ranking.json`
+与临时数据目录记录 `data-root.txt`。
+本轮是后端状态契约验证，没有操作浏览器，因此没有浏览器通道降级；
+没有访问用户登录态、cookie 或生产数据，也没有做真实频道抓取测速。
+
+三个实现与两个测试文件通过 Ruff、内存编译和 700 行检查，`git diff --check` 通过。
+Ruff 实际使用 `/Users/fjh/code/_deps/liveportrait/.venv/bin/ruff`；项目自己的虚拟环境
+没有该命令并不等于跳过检查。所有新增/修改测试均已登记跑绿，未执行全套回归。

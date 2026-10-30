@@ -81,24 +81,36 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
             positions[source_id] = positions.get(source_id, 0) + 1
             queue.append((not row['entry'].get('approximate', False), position, source_id, row))
     pending = {item[3]['video_id']: item[3] for item in queue}
+    unfinished = {video_id for video_id, row in pending.items()
+                  if row['last_error'] or row['state'] in ('failed', 'processing')}
+    not_reached, cancelled = set(pending) - unfinished, False
     queue.sort(key=lambda item: (*item[:3], item[3]['video_id']))
     for position, (_, _, _, row) in enumerate(queue, 1):
-        if stopped() or time.monotonic() >= deadline or throttle.notice():
+        cancelled |= stopped()
+        if cancelled or throttle.notice():
+            unfinished.update(pending)
+            not_reached.clear()
+            break
+        if time.monotonic() >= deadline:
             break
         if row['retry_at'] > time.time() and not scope.force:
             continue
         if storage.permanently_excluded(row):
             pending.pop(row['video_id'], None)
             continue
+        not_reached.discard(row['video_id'])
+        unfinished.add(row['video_id'])
         if progress:
             progress(position, len(queue))
         try:
             with observe(row) if observe else contextlib.nullcontext():
                 metadata = media.probe(row, settings, min(deadline, time.monotonic() + VIDEO_SECONDS),
                                        stopped, force=scope.force)
-            if stopped() or storage.permanently_excluded(row):
-                if storage.permanently_excluded(row):
-                    pending.pop(row['video_id'], None)
+            cancelled |= stopped()
+            if cancelled:
+                break
+            if storage.permanently_excluded(row):
+                pending.pop(row['video_id'], None)
                 continue
             entry = calibrated(row, metadata)
             if entry is None:
@@ -109,6 +121,8 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
                 pending.pop(row['video_id'], None)
                 stats['refreshed'] += 1
         except throttle.NotAttempted:
+            unfinished.update(pending)
+            not_reached.clear()
             break
         except media.Interrupted:
             defer(row, PENDING, time.time() + RETRY_SECONDS)
@@ -117,12 +131,22 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
             throttle.caught(error)
             errors.append((row, error))
             stats['failed'] += 1
+    cancelled |= stopped()
+    if cancelled or throttle.notice():
+        unfinished.update(pending)
+        not_reached.clear()
     failed_ids = {row['video_id'] for row, error in errors}
     storage.defer_metadata([
         (row, throttle.notice() or (PENDING if row['entry'].get('approximate') else STALE), None)
         for row in pending.values() if row['video_id'] not in failed_ids])
     latest = storage.rows(list(source_ids))
-    waiting = [row for row in latest if row['video_id'] in pending and not row.get('excluded')]
+    waiting = [row for row in latest if row['video_id'] in pending and not row.get('excluded')
+               and row['state'] not in ('ready', 'excluded')]
+    waiting_ids = {row['video_id'] for row in waiting}
+    unfinished.update(row['video_id'] for row in waiting
+                      if row['last_error'] or row['state'] in ('failed', 'processing'))
+    unfinished &= waiting_ids
+    not_reached &= waiting_ids - unfinished
     stats['pending'] = len(waiting)
     current = [row for row in latest if not row.get('excluded')]
     for row in current:
@@ -132,5 +156,6 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
             row['_metadata_reason'] = PENDING if row['entry'].get('approximate') else STALE
     failures = source_failures(errors, eligible)
     return {'rows': current, 'stats': stats, 'errors': errors,
-            'pending_ids': {row['video_id'] for row in waiting},
+            'pending_ids': waiting_ids, 'not_reached_ids': not_reached,
+            'unfinished_ids': unfinished, 'stopped': cancelled,
             'source_errors': failures, 'pending_sources': set(failures)}

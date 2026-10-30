@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from kb.feeds import registry as reg
 from kb.youtube import candidate_metadata as candidates
-from kb.youtube import collector, media, products, ranking, storage
+from kb.youtube import collector, media, notes, products, ranking, storage
 from kb.youtube.settings import of
 from tests.test_youtube_incremental import IncrementalFixture
 
@@ -46,10 +46,13 @@ class MetadataSnapshots(IncrementalFixture):
     def test_provisional_ranking_does_not_erase_a_real_deferral_cause(self):
         self.pending()
         storage.update('00000000001', state='deferred', reason='撞上限流，没有再发起新的请求')
-        result, asked = self.refresh(deadline=time.monotonic() - 1)
-        asked.assert_not_called()
-        ranking.score(result['rows'], of(self.settings_value), self.scope)
-        self.assertEqual('撞上限流，没有再发起新的请求', storage.rows()[0]['reason'])
+        for round_number in range(3):
+            with self.subTest(round_number=round_number):
+                result, asked = self.refresh(deadline=time.monotonic() - 1)
+                asked.assert_not_called()
+                ranking.score(result['rows'], of(self.settings_value), self.scope)
+                self.assertEqual('撞上限流，没有再发起新的请求', storage.rows()[0]['reason'])
+                self.assertEqual('deferred', storage.rows()[0]['state'])
 
     def test_all_fact_writers_stamp_precise_snapshots(self):
         for writer in ('discover', 'recalibrate', 'refresh_metadata'):
@@ -89,7 +92,7 @@ class MetadataSnapshots(IncrementalFixture):
 
 
 class ChannelCompletion(IncrementalFixture):
-    def collect(self, listing, probe=None, metadata_seconds=120):
+    def collect(self, listing, probe=None, metadata_seconds=120, real_process=False):
         from kb.youtube import discovery, login
 
         with ExitStack() as stack:
@@ -98,7 +101,8 @@ class ChannelCompletion(IncrementalFixture):
             stack.enter_context(patch.object(collector, 'DISCOVERY_SPACING', 0))
             stack.enter_context(patch.object(discovery, 'fetch', side_effect=listing))
             stack.enter_context(patch.object(candidates, 'RUN_SECONDS', metadata_seconds))
-            stack.enter_context(patch.object(collector, 'process', return_value={}))
+            if not real_process:
+                stack.enter_context(patch.object(collector, 'process', return_value={}))
             asked = stack.enter_context(patch.object(media, 'probe', side_effect=probe))
             stages = stack.enter_context(patch.object(collector, '_stage'))
             result = collector.collect(self.scope)
@@ -108,21 +112,28 @@ class ChannelCompletion(IncrementalFixture):
         return next(row for row in reg.subscriptions('youtube')
                     if row['id'] == (source or self.source)['id'])
 
-    def test_cold_start_with_48_channels_ranks_all_candidates_and_advances_each_source(self):
+    def test_cold_start_with_48_channels_ranks_all_and_only_advances_clean_sources(self):
         for number in range(2, 49):
             self.channel(number)
         def listing(source, *arguments):
             return [{**self.entry(source['id'] * 10 + position), 'approximate': True,
                      'description': '', 'views': 0, 'listing_position': position}
                     for position in range(8)]
-        result, asked, _ = self.collect(listing, metadata_seconds=0)
+        with patch.object(notes, 'available', return_value=(False, '模型未配置')):
+            result, asked, _ = self.collect(listing, metadata_seconds=0, real_process=True)
         asked.assert_not_called()
         self.assertEqual(384, result['ranked'])
         self.assertEqual(384, result['metadata']['pending'])
-        self.assertEqual(48, len(result['succeeded_ids']))
-        self.assertEqual(0, result['deferred'])
         active = [row for row in reg.subscriptions('youtube') if row['enabled']]
-        self.assertTrue(all(row['last_success'] and not row['last_error'] for row in active))
+        limit = of(reg.get_settings('youtube'))['rank_limit']
+        unfinished = {owner['source_id'] for row in storage.rows() if row['score_rank'] <= limit
+                      for owner in row['owners']}
+        self.assertTrue(unfinished)
+        self.assertEqual(len(unfinished), result['deferred'])
+        self.assertEqual({str(row['id']) for row in active if row['id'] not in unfinished},
+                         set(result['succeeded_ids']))
+        self.assertTrue(all(bool(row['last_success']) == (row['id'] not in unfinished) for row in active))
+        self.assertTrue(all(not row['last_error'] for row in active))
         response = self.client.get('/api/intake/youtube/ranking').json()
         self.assertEqual(384, response['total'])
         self.assertTrue(all(row['score_rank'] > 0 and row['approximate'] for row in response['items']))
@@ -137,9 +148,10 @@ class ChannelCompletion(IncrementalFixture):
         self.assertEqual(2, asked.call_count)
         self.assertEqual(1, result['metadata']['failed'])
         self.assertEqual([], result['failed_ids'])
-        self.assertEqual([str(self.source['id'])], result['succeeded_ids'])
+        self.assertEqual([], result['succeeded_ids'])
+        self.assertEqual(1, result['deferred'])
         standing = self.standing()
-        self.assertTrue(standing['last_success'])
+        self.assertFalse(standing['last_success'])
         self.assertEqual(0, standing['failures'])
         self.assertEqual(0, standing['retry_at'])
         self.assertEqual('failed', storage.rows()[0]['state'])
