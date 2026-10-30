@@ -13,19 +13,19 @@ TTL_SECONDS = 6 * 3600
 RUN_SECONDS = 120.0
 VIDEO_SECONDS = 30.0
 RETRY_SECONDS = 300
-PENDING = '发布时间与播放量尚未核实，暂按候选信息预排，处理前再次核实'
-STALE = '播放量为超过 6 小时的缓存快照，暂按缓存预排，处理前再次核实'
+PENDING = storage.METADATA_PENDING
+STALE = storage.METADATA_STALE
 
 
 def fresh(row, now=None):
     checked = row['entry'].get('metadata_checked_at')
-    return (not row['entry'].get('approximate') and isinstance(checked, (int, float))
+    return (not row.get('metadata_pending') and not row['entry'].get('approximate') and isinstance(checked, (int, float))
             and not isinstance(checked, bool) and math.isfinite(checked)
             and 0 <= (time.time() if now is None else now) - checked <= TTL_SECONDS)
 
 
 def defer(row, reason, retry_at=None):
-    storage.defer_metadata([(row, reason, retry_at)])
+    storage.defer_metadata([(row, reason, retry_at)], attempted=True)
 
 
 def calibrated(row, metadata):
@@ -82,7 +82,7 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
             queue.append((not row['entry'].get('approximate', False), position, source_id, row))
     pending = {item[3]['video_id']: item[3] for item in queue}
     unfinished = {video_id for video_id, row in pending.items()
-                  if row['last_error'] or row['state'] in ('failed', 'processing')}
+                  if row.get('metadata_pending') or row['last_error'] or row['state'] in ('failed', 'processing')}
     not_reached, cancelled = set(pending) - unfinished, False
     queue.sort(key=lambda item: (*item[:3], item[3]['video_id']))
     for position, (_, _, _, row) in enumerate(queue, 1):
@@ -144,7 +144,7 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
                and row['state'] not in ('ready', 'excluded')]
     waiting_ids = {row['video_id'] for row in waiting}
     unfinished.update(row['video_id'] for row in waiting
-                      if row['last_error'] or row['state'] in ('failed', 'processing'))
+                      if row.get('metadata_pending') or row['last_error'] or row['state'] in ('failed', 'processing'))
     unfinished &= waiting_ids
     not_reached &= waiting_ids - unfinished
     stats['pending'] = len(waiting)

@@ -7,6 +7,10 @@ from kb.maintenance import maintenance_lock
 from kb.youtube.diagnosis import shown
 
 
+METADATA_PENDING = '发布时间与播放量尚未核实，暂按候选信息预排，处理前再次核实'
+METADATA_STALE = '播放量为超过 6 小时的缓存快照，暂按缓存预排，处理前再次核实'
+
+
 SCHEMA = '''CREATE TABLE IF NOT EXISTS youtube_videos (
  video_id TEXT PRIMARY KEY, entry TEXT NOT NULL, views INTEGER NOT NULL DEFAULT 0,
  heat REAL NOT NULL DEFAULT 0, value REAL NOT NULL DEFAULT 0,
@@ -17,7 +21,7 @@ SCHEMA = '''CREATE TABLE IF NOT EXISTS youtube_videos (
  duration REAL NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '',
  last_error TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL,
  validation TEXT NOT NULL DEFAULT '', repair_pending INTEGER NOT NULL DEFAULT 0,
- gate_code TEXT NOT NULL DEFAULT ''
+ gate_code TEXT NOT NULL DEFAULT '', metadata_pending INTEGER NOT NULL DEFAULT 0
 )'''
 OWNERS = '''CREATE TABLE IF NOT EXISTS youtube_video_sources (
  video_id TEXT NOT NULL REFERENCES youtube_videos(video_id) ON DELETE CASCADE,
@@ -50,6 +54,7 @@ def initialize(connection):
     for name, definition in (('validation', "TEXT NOT NULL DEFAULT ''"),
                              ('repair_pending', 'INTEGER NOT NULL DEFAULT 0'),
                              ('gate_code', "TEXT NOT NULL DEFAULT ''"),
+                             ('metadata_pending', 'INTEGER NOT NULL DEFAULT 0'),
                              ('score', 'REAL NOT NULL DEFAULT 0'),
                              ('score_rank', 'INTEGER NOT NULL DEFAULT 0')):
         if name not in columns:
@@ -59,6 +64,10 @@ def initialize(connection):
     # 排名跑完之前,面板上整张榜都是「—」,`select` 看到的也全是 0 名。
     if 'score' not in columns:
         connection.execute('UPDATE youtube_videos SET score=heat, score_rank=heat_rank')
+    if 'metadata_pending' not in columns:
+        connection.execute("UPDATE youtube_videos SET metadata_pending=1 WHERE state='deferred' AND retry_at>0")
+        connection.execute("UPDATE youtube_videos SET state='candidate' WHERE state='deferred' "
+                           "AND metadata_pending=0 AND reason IN (?,?)", (METADATA_PENDING, METADATA_STALE))
     migrate(connection)
     connection.execute("UPDATE youtube_videos SET state='deferred',gate_code='legacy',retry_at=0 "
                        "WHERE state='excluded' AND gate_code=''")
@@ -184,7 +193,11 @@ def recalibrate(video_id, entry):
 def refresh_metadata(row, entry):
     """仅更新尚未被替换、未被永久移除且仍有有效归属的元数据快照。"""
     with maintenance_lock(), db() as connection:
-        changed = connection.execute('''UPDATE youtube_videos SET entry=?,views=?,updated_at=?
+        changed = connection.execute('''UPDATE youtube_videos SET entry=?,views=?,updated_at=?,
+            state=CASE WHEN metadata_pending=1 AND state='deferred' AND last_error='' THEN 'candidate' ELSE state END,
+            reason=CASE WHEN metadata_pending=1 AND state='deferred' AND last_error='' THEN '' ELSE reason END,
+            retry_at=CASE WHEN metadata_pending=1 AND state='deferred' AND last_error='' THEN 0 ELSE retry_at END,
+            metadata_pending=0
             WHERE video_id=? AND entry=?
             AND NOT EXISTS(SELECT 1 FROM feed_item_exclusions removed
                 WHERE removed.kind='youtube' AND removed.url=json_extract(youtube_videos.entry,'$.url'))
@@ -196,27 +209,33 @@ def refresh_metadata(row, entry):
         return changed.rowcount == 1
 
 
-def defer_metadata(updates):
+def defer_metadata(updates, attempted=False):
     """同一连接批量挂起待更新候选，保留既有失败、成品和永久移除状态。"""
     if not updates:
         return
     with db() as connection:
         connection.executemany('''UPDATE youtube_videos SET
-            score_rank=CASE WHEN state IN ('ready','excluded','failed') THEN score_rank ELSE 0 END,
-            state=CASE WHEN state IN ('ready','excluded','failed') THEN state ELSE 'deferred' END,
-            reason=CASE WHEN state IN ('ready','excluded','failed') OR (state='deferred' AND reason<>'')
+            score_rank=CASE WHEN state IN ('ready','excluded','failed','processing') THEN score_rank ELSE 0 END,
+            state=CASE WHEN state IN ('ready','excluded','failed','processing') THEN state
+                WHEN ? OR metadata_pending=1 OR state='deferred' THEN 'deferred' ELSE 'candidate' END,
+            reason=CASE WHEN state IN ('ready','excluded','failed','processing') OR (state='deferred' AND reason<>'')
                 THEN reason ELSE ? END,
-            retry_at=CASE WHEN state IN ('ready','excluded','failed') THEN retry_at ELSE COALESCE(?,retry_at) END
+            retry_at=CASE WHEN state IN ('ready','excluded','failed','processing') THEN retry_at ELSE COALESCE(?,retry_at) END,
+            metadata_pending=CASE WHEN state IN ('ready','excluded') THEN metadata_pending
+                WHEN ? THEN 1 ELSE metadata_pending END
             WHERE video_id=? AND NOT EXISTS(SELECT 1 FROM feed_item_exclusions removed
                 WHERE removed.kind='youtube' AND removed.url=json_extract(youtube_videos.entry,'$.url'))''',
-            [(reason, retry_at, row['video_id']) for row, reason, retry_at in updates])
+            [(attempted, reason, retry_at, attempted, row['video_id']) for row, reason, retry_at in updates])
 
 
 def update(video_id, **values):
     allowed = {'score', 'score_rank', 'state', 'reason',
-               'attempts', 'retry_at', 'duration', 'note', 'last_error', 'validation', 'repair_pending', 'gate_code'}
+               'attempts', 'retry_at', 'duration', 'note', 'last_error', 'validation', 'repair_pending', 'gate_code',
+               'metadata_pending'}
     if not values or set(values) - allowed:
         raise ValueError('视频处理状态字段不正确')
+    if values.get('state') == 'ready':
+        values['metadata_pending'] = 0
     with db() as connection:
         connection.execute('UPDATE youtube_videos SET ' +
                            ','.join(key + '=?' for key in values) + ',updated_at=? WHERE video_id=?',

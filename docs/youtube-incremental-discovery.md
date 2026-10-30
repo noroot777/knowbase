@@ -43,10 +43,16 @@
   本轮已尝试但未完成的视频阻止成功覆盖，不因缓存从新鲜变为过期而消失。
 - 元数据准备返回分离的 `not_reached_ids` 与 `unfinished_ids`；只有前者中尚未进入
   内容处理、且没有真实错误的候选可豁免。失败冷却、取消、熔断不混作纯预算未轮到。
+- 实际元数据请求后字段不完整或中断，存储层将 `metadata_pending` 置为 1；它跨轮保存，
+  不因跳过 300 秒冷却而退回「未尝试」。精确元数据补齐或合格内容完成时才清除。
+- 升级存量库只加列；旧版 `deferred` 且有重试时间的候选保守保留为待核实，
+  没有重试时间且只有通用元数据说明的条目恢复为 `candidate`，不清除真实错误。
 - 取消状态在元数据、处理与落账阶段连续保留；成功覆盖最后集中落在同一事务，取消时
   不清除任何频道的既有错误、次数或退避，也不把频道记入 `succeeded_ids`。
-- 已有预算或熔断延后原因跨轮保留；仅有预排名次不把 `deferred` 改成已恢复的 `candidate`。
-  元数据补齐或实际内容处理推进后，才按真实结果更新该状态与原因。
+- 纯元数据待办只更新说明，不把健康候选标为 `deferred`。已有真实预算或熔断延后原因
+  可跨轮保留；元数据补齐或实际内容处理推进后，才按真实结果更新该状态与原因。
+- 成功覆盖遇到维护锁或数据库异常，通过来源失败出口记录错误，并继续保存本轮历史、
+  重试范围与最终进度。没有待记成功的来源时不争抢维护锁；旧提醒只在成功提交时清除。
 - 单条本地超时或事实字段缺失暂缓 5 分钟，避免每轮都由同一个坏候选占掉全部预算。
 - 实际上游失败保留原始诊断；429 继续通过同一份请求级熔断账停止后续读取。
 - 写回精确快照时核对旧快照未改变、仍有有效频道归属且没有永久移除记录。
@@ -213,3 +219,77 @@ SHA-256：`8b23d5161025fbeb8136de6579a586fe8881a5ae4b1ab541df63c98e852b473e`。
 三个实现与两个测试文件通过 Ruff、内存编译和 700 行检查，`git diff --check` 通过。
 Ruff 实际使用 `/Users/fjh/code/_deps/liveportrait/.venv/bin/ruff`；项目自己的虚拟环境
 没有该命令并不等于跳过检查。所有新增/修改测试均已登记跑绿，未执行全套回归。
+
+## 追加审查修复与验证（2026-10-30）
+
+对应 `SqxprDLd0bEx/round-1` 的三条必须修复项，本轮只调整 YouTube 链路：
+
+- **跨轮未完成事实**：存储层新增只增不减的 `metadata_pending` 列。实际请求后字段
+  不完整或局部中断的候选，即便下一轮被五分钟冷却跳过，仍保留未完成身份，不再把
+  频道判成新成功并清掉旧错误、失败次数和退避。成功补齐元数据或完成合格内容才清标。
+  旧库升级对有重试时间的延后行保守保留未完成事实，无重试的纯元数据注释恢复候选。
+- **收尾异常**：成功事务的取锁及数据库异常统一归入来源失败，随后继续保存同步历史、
+  重试目标与最终进度。空成功列表不取维护锁；成功 ID 只在事务提交后追加。逐频道
+  内容落库不再提前清提醒，停止或最终成功写入失败时保住既有提醒。
+- **状态与解释分开**：数量/时间预算没有轮到的健康候选仍是 `candidate`，元数据待补
+  只是说明；真实处理延后、错误、处理中以及持久的未完成事实不被覆盖。
+
+### 登记的定点测试
+
+本轮只修改并运行 `tests/test_youtube_incremental_completion.py`，没有补跑其他测试。
+ash monitor `tOLYlrj3HD1v`，退出码 `0`；已读取完整真实日志：
+`Ran 20 tests in 0.690s`，`OK`。覆盖不完整/中断请求的冷却跨轮、过期后重试、
+成功清标、旧库迁移幂等、真实维护锁异常、数据库异常、空列表不取锁，以及真实处理后
+三条成品与四十五条候选的状态分布；原有取消与错误账保护用例一并通过。
+
+实际工作目录：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。
+
+未过滤的原始命令：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-review3-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-review3-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-review3-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_incremental_completion -v
+```
+
+日志：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/tOLYlrj3HD1v.log`。
+SHA-256：`195189ea833107d0c677503ac1a1c1fd1ef67e33787f12d62ae8171a68b0cc70`。
+登记前保存的四个实现文件与本轮测试文件指纹在
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/review-fix-3/tested-code.sha256`；
+登记结果返回后及提交前逐项复核一致，避免只引用旧树上的通过记录。
+日志含现有 Starlette/httpx 弃用提示，没有因此调整无关依赖。
+
+### 隔离接口与真实页面冒烟
+
+一次性临时数据/笔记/视频目录，禁用调度器；频道列表、媒体元数据、字幕及笔记生成
+使用本地替身，真实 `collect`、`process`、成品校验及发布逻辑照常执行。
+摆局为六频道各八候选，元数据预处理预算为零、排名及内容处理数量上限为三。
+服务端拒绝非本机 socket 连接，浏览器请求也仅放行本次 loopback 服务。
+
+| 观察项 | 实际结果 |
+| --- | --- |
+| `GET /api/intake/youtube` / `GET /api/intake/youtube/ranking` | 均为 HTTP 200 |
+| 候选总数 / 有名次条数 | 48 / 48 |
+| 接口状态分布 | `ready=3`、`candidate=45`，无 `deferred` |
+| 页面点击「订阅管理」后的真实文案 | 「中文笔记已完成」3、「候选待处理」45、「留待下轮」0 |
+| 页面频道卡片 / 无成功时间卡片 | 6 / 0 |
+| 浏览器未处理运行时异常 | 0 |
+
+已目视检查 `ranking.png` 与 `sources.png`：第 4 名起的未知播放量候选显示
+「候选待处理：发布时间与播放量尚未核实，暂按候选信息预排，处理前再次核实」，
+不再同时声称「留待下轮」。全部六张频道卡片显示本轮成功时间。
+
+本轮重新尝试 Chrome 扩展具名会话「🔎 YouTube增量复核」，以 `visible:false`
+新建后台标签时返回 `Capability is not available: visibility`，没有创建验证标签。
+没有撤掉后台限制或接管用户标签，随后才降到独立 `chrome-headless-shell`，使用全新
+临时 profile，始终无头。页面为本机公开页面，不需要登录态；没有连接用户 Chrome
+调试端口、激活窗口、读取 cookie、点击同步或执行其他生产写操作。
+
+证据目录：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/review-fix-3/`，包含
+`serve.py`、`smoke.py`、`page.mjs`、`service.log`、`smoke-summary.json`、
+`overview-api.json`、`ranking-api.json`、`page.log`、`page-evidence.json`、
+`ranking.png`、`sources.png`、`browser-instance.json`、`cleanup.json`。
+冒烟脚本在仓库外，不属于新增回归套件。清理记录确认服务已退出、无头调试端口关闭、
+临时 profile 和一次性数据目录已删除。
+
+四个实现与一个测试文件通过 Ruff、内存编译、700 行检查，`git diff --check` 通过。
+未运行整套或未改动测试，审查列出的其他回归面仍由验收前置命令覆盖；没有真实
+YouTube/模型请求或生产数据写入。这些结果验证状态正确性，不代表生产抓取耗时实测。

@@ -297,10 +297,12 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
                     storage.mark_committed(connection, source, row['video_id'])
             summary['stopped'] = summary.get('stopped', False) or stopped()
             pending_failure |= summary['stopped']
-            if pending_failure or not record_success:
-                notice = summary['message'] or ('视频仍有未完成处理或待重试错误' if pending_failure else '')
+            if pending_failure:
+                notice = summary['message'] or '视频仍有未完成处理或待重试错误'
                 connection.execute('UPDATE subscriptions SET last_attempt=?,last_notice=? WHERE id=?',
                                    (reg.now(), notice, source['id']))
+            elif not record_success:
+                connection.execute('UPDATE subscriptions SET last_attempt=? WHERE id=?', (reg.now(), source['id']))
             else:
                 connection.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
                     failures=0,retry_at=0,last_notice=? WHERE id=?''',
@@ -310,6 +312,9 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
 
 def commit_successes(sources, summary):
     """成功覆盖集中落在同一事务；收尾中断时不清除任何频道的错误账。"""
+    summary['stopped'] |= stopped()
+    if not sources:
+        return
     completed = []
     with maintenance_lock(), reg.db() as connection:
         connection.execute('BEGIN IMMEDIATE')
@@ -322,14 +327,14 @@ def commit_successes(sources, summary):
                     summary['repointed'] += 1
                     continue
                 connection.execute('''UPDATE subscriptions SET last_success=?,last_error='',
-                    failures=0,retry_at=0 WHERE id=?''', (reg.now(), source['id']))
+                    failures=0,retry_at=0,last_notice=? WHERE id=?''', (reg.now(), summary['message'], source['id']))
                 completed.append(str(source['id']))
             summary['stopped'] |= stopped()
         if summary['stopped']:
             connection.rollback()
             summary['deferred'] += len(sources)
-        else:
-            summary['succeeded_ids'].extend(completed)
+    if not summary['stopped']:
+        summary['succeeded_ids'].extend(completed)
 
 
 def collect(scope):
@@ -480,7 +485,7 @@ def _round(scope):
                        any(not row['excluded'] and
                            (row['last_error'] or row['state'] in ('failed', 'processing') or
                             row['state'] not in ('ready', 'excluded', 'filtered') and
-                            (row['video_id'] in prepared['unfinished_ids'] or
+                            (row.get('metadata_pending') or row['video_id'] in prepared['unfinished_ids'] or
                              row['state'] == 'deferred' and row['video_id'] not in waiting_metadata))
                            for row in storage.rows([source['id']])))
         completed = storage.ready(source)
@@ -500,7 +505,13 @@ def _round(scope):
             wall(summary, [source['id']], error)
             _save_failure(source, _Told(error), summary)
             throttle.caught(error)
-    commit_successes(completed_sources, summary)
+    try:
+        commit_successes(completed_sources, summary)
+    except Exception as error:
+        for source in completed_sources:
+            wall(summary, [source['id']], error)
+            _save_failure(source, _Told(error), summary)
+        throttle.caught(error)
     # **同一个原因不要在面板上重复一遍又一遍。** 登录态失效时每个频道都会报同样那句话,
     # 逐条读完才明白是一个问题 —— 这里归并成一句带频道数的话,逐条明细照旧留在 errors 里。
     # 按 `AUTH_CODES` 整个集合判,并且**按真正出现的那一档说话** —— 机器人验证、

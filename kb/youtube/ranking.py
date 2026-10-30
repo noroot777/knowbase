@@ -156,6 +156,8 @@ def score(rows, settings, scope, now=None):
                 row['state'] == 'deferred' and row['retry_at'] <= time.time()):
             if row.get('_metadata_reason'):
                 patch['reason'] = row['reason'] or row['_metadata_reason']
+                if row['state'] not in ('deferred', 'processing') and not row.get('metadata_pending'):
+                    patch['state'] = 'candidate'
             else:
                 patch.update(state='candidate', reason=(UNKNOWN if row.get('unverified')
                                                        else '等待排名与处理预算准入'))
