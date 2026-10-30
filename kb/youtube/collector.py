@@ -15,6 +15,7 @@ from kb.youtube import (candidate_metadata, diagnosis, discovery, login, media, 
                         products, ranking, storage, throttle)
 from kb.youtube.admission import TEMPORARY, UNDATED, calibrate, gate
 from kb.youtube.channels import config
+from kb.youtube.faults import local_fault, record_local
 from kb.youtube.settings import of
 
 
@@ -148,6 +149,9 @@ def process(rows, settings, scope, summary, deadline):
     attempts = 0
     probes = 0
     for position, row in enumerate(chosen):
+        affected = row.get('eligible_sources', [row['source_id']])
+        if any(str(source_id) in summary.get('local_ids', []) for source_id in affected):
+            continue
         if storage.permanently_excluded(row):
             continue
         if summary['stopped'] or stopped() or time.monotonic() >= deadline:
@@ -252,6 +256,9 @@ def process(rows, settings, scope, summary, deadline):
                 storage.update(deferred['video_id'], state='deferred', reason=notice)
             break
         except Exception as error:
+            if local_fault(error):
+                record_local(summary, error, affected)
+                continue
             storage.failed(row, error)
             affected = row.get('eligible_sources', [row['source_id']])
             wall(summary, affected, error)
@@ -418,9 +425,13 @@ def _round(scope):
             pending = [source, *pending]
             break
         except Exception as error:
-            wall(summary, [source['id']], error)
-            _save_failure(source, _Told(error), summary)
-            throttle.caught(error)
+            if local_fault(error):
+                record_local(summary, error, [source['id']])
+                summary['deferred'] += 1
+            else:
+                wall(summary, [source['id']], error)
+                _save_failure(source, _Told(error), summary)
+                throttle.caught(error)
         summary['checked'] += 1
         _stage('crawl', 'running', f"YouTube · 频道列表 {summary['checked']}/{len(sources)} 个频道")
         # **撞上 429 就当场收手这一轮。** 限的是**出口**不是这个频道:接着查下去的话,
@@ -436,30 +447,42 @@ def _round(scope):
             break
     summary['skipped'] += len(pending)
     discovery_seconds = time.monotonic() - discovery_started
-    rows = storage.rows([source['id'] for source in succeeded])
     metadata_started = time.monotonic()
-    _stage('crawl', 'running', f"YouTube · 频道列表完成 {summary['checked']}/{len(sources)}，增量更新元数据")
-    prepared = candidate_metadata.refresh(
-        rows, settings, scope, metadata_started + candidate_metadata.RUN_SECONDS, stopped,
-        observe=lambda row: heeded(summary, [owner['source_id'] for owner in row['owners']]),
-        progress=lambda done, total: _stage('crawl', 'running', f'YouTube · 元数据更新 {done}/{total}'))
-    summary['metadata'] = prepared['stats']
-    summary['stopped'] |= prepared['stopped']
-    failures = {}
-    for source_id, errors in prepared['source_errors'].items():
-        for error in errors:
-            wall(summary, [source_id], error)
-            failures.setdefault(source_id, []).append(login.evidence(error, 500))
-    ranked = ranking.score(prepared['rows'], of(settings), scope)
-    summary['ranked'] = len(ranked)
-    processing_started = time.monotonic()
+    processing_started = None
+    prepared, failures, waiting_metadata = {'unfinished_ids': set()}, {}, set()
+    summary['metadata'] = {'reused': 0, 'refreshed': 0, 'pending': 0, 'failed': 0,
+                           'ttl_seconds': candidate_metadata.TTL_SECONDS}
+    try:
+        rows = storage.rows([source['id'] for source in succeeded])
+        _stage('crawl', 'running', f"YouTube · 频道列表完成 {summary['checked']}/{len(sources)}，增量更新元数据")
+        prepared = candidate_metadata.refresh(
+            rows, settings, scope, metadata_started + candidate_metadata.RUN_SECONDS, stopped,
+            observe=lambda row: heeded(summary, [owner['source_id'] for owner in row['owners']]),
+            progress=lambda done, total: _stage('crawl', 'running', f'YouTube · 元数据更新 {done}/{total}'))
+        summary['metadata'] = prepared['stats']
+        summary['stopped'] |= prepared['stopped']
+        for row, error in prepared.get('local_errors', []):
+            record_local(summary, error, [owner['source_id'] for owner in row['owners']])
+        for source_id, errors in prepared['source_errors'].items():
+            for error in errors:
+                wall(summary, [source_id], error)
+                failures.setdefault(source_id, []).append(login.evidence(error, 500))
+        ranked = ranking.score(prepared['rows'], of(settings), scope)
+        summary['ranked'] = len(ranked)
+        processing_started = time.monotonic()
+        selected_ids = {row['video_id'] for row in ranking.select(ranked, of(settings), scope.force)}
+        waiting_metadata = prepared['not_reached_ids'] - selected_ids
+        for source_id, reasons in process(ranked, settings, scope, summary,
+                                          processing_started + of(settings)['run_seconds']).items():
+            failures.setdefault(source_id, []).extend(reasons)
+    except Exception as error:
+        if not local_fault(error):
+            raise
+        record_local(summary, error, [source['id'] for source in succeeded])
+    if processing_started is None:
+        processing_started = time.monotonic()
     summary['timings'] = {'discovery_seconds': round(discovery_seconds, 2),
                           'metadata_seconds': round(processing_started - metadata_started, 2)}
-    selected_ids = {row['video_id'] for row in ranking.select(ranked, of(settings), scope.force)}
-    waiting_metadata = prepared['not_reached_ids'] - selected_ids
-    for source_id, reasons in process(ranked, settings, scope, summary,
-                                      processing_started + of(settings)['run_seconds']).items():
-        failures.setdefault(source_id, []).extend(reasons)
     summary['timings']['processing_seconds'] = round(time.monotonic() - processing_started, 2)
     summary['stopped'] |= stopped()
     # **「取到了,但…」和「卡住了」分开说**:前者这一轮确实带回了东西,后者没有。
@@ -481,17 +504,18 @@ def _round(scope):
             f"{len(unsaid)} 个频道这一轮发出过请求，" + login.cautioned(code, gateway['browser'])
     completed_sources = []
     for source in succeeded:
-        outstanding = (summary['stopped'] or source['id'] in failures or
+        try:
+            outstanding = (summary['stopped'] or source['id'] in failures or
+                       str(source['id']) in summary.get('local_ids', []) or
                        any(not row['excluded'] and
                            (row['last_error'] or row['state'] in ('failed', 'processing') or
                             row['state'] not in ('ready', 'excluded', 'filtered') and
                             (row.get('metadata_pending') or row['video_id'] in prepared['unfinished_ids'] or
                              row['state'] == 'deferred' and row['video_id'] not in waiting_metadata))
                            for row in storage.rows([source['id']])))
-        completed = storage.ready(source)
-        if scope.ranged:
-            completed = [row for row in completed if scope.since <= row['entry']['published'][:10] <= scope.until]
-        try:
+            completed = storage.ready(source)
+            if scope.ranged:
+                completed = [row for row in completed if scope.since <= row['entry']['published'][:10] <= scope.until]
             if not commit_notes(source, completed, summary, outstanding, scope.ranged, record_success=False):
                 summary['repointed'] += 1
                 continue
@@ -502,16 +526,18 @@ def _round(scope):
             else:
                 completed_sources.append(source)
         except Exception as error:
-            wall(summary, [source['id']], error)
-            _save_failure(source, _Told(error), summary)
-            throttle.caught(error)
+            if local_fault(error):
+                record_local(summary, error, [source['id']])
+                summary['deferred'] += 1
+            else:
+                wall(summary, [source['id']], error)
+                _save_failure(source, _Told(error), summary)
+                throttle.caught(error)
     try:
         commit_successes(completed_sources, summary)
     except Exception as error:
-        summary['local_error'] = diagnosis.shown(error, FAILURE_CAP)
+        record_local(summary, error, [source['id'] for source in completed_sources], phase='保存成功结果')
         summary['deferred'] += len(completed_sources)
-        summary['message'] += ('；' if summary['message'] else '') + \
-            '本机保存成功结果失败，成功结果未写入，下一轮重算：' + summary['local_error']
     # **同一个原因不要在面板上重复一遍又一遍。** 登录态失效时每个频道都会报同样那句话,
     # 逐条读完才明白是一个问题 —— 这里归并成一句带频道数的话,逐条明细照旧留在 errors 里。
     # 按 `AUTH_CODES` 整个集合判,并且**按真正出现的那一档说话** —— 机器人验证、

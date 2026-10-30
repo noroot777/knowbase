@@ -57,6 +57,12 @@
   本轮历史和最终进度；不改变订阅错误账、不推退避、不加入频道失败重试名单。
   真正的频道失败仍保留在原失败名单。没有待记成功的来源时不争抢维护锁；旧提醒
   只在成功提交时清除。
+- 发现落库、元数据写回、内容处理和笔记发布也共用 `faults.local_fault` 判据。
+  本机维护锁、SQLite 忙/写盘资源故障只记 `local_error` / `local_ids` 与本轮告警；
+  不增加视频 `attempts`、不写视频或频道失败退避，也不进入 `failed_ids`。受影响频道
+  扣留成功，其他已完成频道仍可成功；批量元数据注释或预算状态写入的本机异常同样收口。
+- 精确候选更新播放量不清空旧简介，不用只有日期的元数据覆盖已有精确发布时间；
+  估算候选仍须取得真实时间和简介后才能完成校准，未知字段不产生永久过滤的假结论。
 - 单条本地超时或事实字段缺失暂缓 5 分钟，避免每轮都由同一个坏候选占掉全部预算。
 - 实际上游失败保留原始诊断；429 继续通过同一份请求级熔断账停止后续读取。
 - 写回精确快照时核对旧快照未改变、仍有有效频道归属且没有永久移除记录。
@@ -366,3 +372,70 @@ SHA-256：`c2617a04e2dcf01079f6675a921d9e5a569947da102be0a32bffe4f90cd74030`。
 两个实现与一个测试文件通过 Ruff、内存编译和 700 行检查，`git diff --check` 通过。
 其余回归仍留给验收前置命令，没有为了填审查覆盖留白去运行未修改的测试。
 没有读取生产库或 cookie，没有真实 YouTube/模型请求；未做生产抓取耗时实测。
+
+## 新审查修复与验证（2026-10-31）
+
+对应 `Os8A8bYYXGcd/round-1` 的两条必须修意见：
+
+1. 统一 YouTube 发现落库、增量元数据、内容处理和笔记发布的本机故障判据。
+   `LockBusy`、SQLite 结构化基本/扩展存储错误码、数据库忙和文件系统资源故障
+   只记本轮本机告警及未完成来源；不转成视频失败、频道连接失败或新增退避。
+   批量元数据注释、排名/预算状态写回和最终成功提交也使用相同收口。
+   真正网络/上游失败仍走原失败账，受影响来源扣留成功，其他健康来源不受牵连。
+2. 精确候选刷新播放量时保留已知简介和精确发布时间。新元数据没有简介、给出
+   `None`/空白或只有 `upload_date`，不再使旧事实丢失或降为当日零点；估算条目
+   仍须按真实元数据校准，未放宽资格判断或成品完整性要求。
+
+### 登记的定点测试
+
+本轮仅新增 `tests/test_youtube_incremental_faults.py`，未运行未修改的测试文件。
+使用 `start_monitor(regression=true)` 登记的原始命令为：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-review5-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-review5-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-review5-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_incremental_faults -v
+```
+
+实际 cwd：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。
+哨兵 `4LRadQ_uzXIR` 退出码 **0**；已读取原始日志，**19 项 / 0.285 秒 / OK**。
+日志：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/4LRadQ_uzXIR.log`。
+SHA-256：`da792283a724947ba92be92fb578bc2e7443db7bdb6ce425a09ebb9edfd2ffba`。
+三个实现文件与新增测试文件的登记前指纹保存在
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/review-fix-5/tested-code.sha256`；
+收到结果后、提交前及提交后的代码内容逐项比对一致。
+日志只有既有 Starlette/httpx 弃用提示，未改动无关依赖。
+
+### 隔离后端接口冒烟
+
+使用全新临时数据、笔记和视频目录，真实执行 `collect`、`process`、成品校验、
+发布和同步历史保存，通过 FastAPI `TestClient` 读取接口，不启动生产服务或调度器。
+频道列表、媒体与模型使用本地替身；同时禁止 socket 连接和 cookie 读取。
+两个频道均有已过期的精确候选：一个仅在元数据写回时注入 `LockBusy`；另一个标题
+无 AI 关键词、旧简介包含 LLM/AI 语义，本次元数据无简介且仅有 `upload_date`。
+
+| 观察项 | 实际结果 |
+| --- | --- |
+| `GET /api/intake/youtube` / `GET /api/intake/youtube/ranking` | 均为 HTTP 200 |
+| 故障频道的旧成功时间、错误、失败次数与冷却 | 全部原样保留 |
+| 故障视频失败次数、错误与冷却 | `0` / 空 / `0`，仍为 `candidate` |
+| 本轮频道失败 / 失败重试目标 / 元数据失败数 | 均为 0 |
+| 健康频道 | 正常记录成功、清除旧失败账；真实处理并发布 1 条完整成品 |
+| 健康视频的旧简介与精确发布时间 | 全部保留；播放量更新为 8800，未被过滤掉榜 |
+| 探测与处理 | 两条各探测一次，仅健康视频读取字幕并处理 |
+| 候选榜状态分布 | `ready=1`、`candidate=1` |
+| 同步历史 / 最终进度 | 历史保存且接口一致；`error` 明示本机故障、下一轮重算 |
+
+冒烟命令（cwd 同上）：
+
+```sh
+PYTHONPATH="$PWD" PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python /Users/fjh/code/harness/data/runs/J45OI3nIhEEf/review-fix-5/api-smoke.py
+```
+
+脚本、`api-smoke.log`、`api-evidence.json`、`summary.json`、`overview-api.json`、
+`ranking-api.json`、前后频道账快照和 `cleanup.json` 均在上述 `review-fix-5/` 证据目录。
+冒烟日志 SHA-256：`bad9c41b4eb5f3c57cafb957e7c5555fce8d962f781709453f08c9ee78666f65`。
+脚本在仓库外，是本轮隔离接口冒烟，不运行其他回归文件。临时目录已清理，未启动
+后台服务或浏览器；没有浏览器通道降级，也不声称完成页面点检。
+
+三个实现文件与新增测试文件通过 Ruff、内存编译和 700 行检查，`git diff --check` 通过。
+未读取生产库或 cookie，未请求真实 YouTube 或模型；未实测生产抓取耗时，也未覆盖
+真实磁盘耗尽或进程并发锁争用。其余未修改回归仍由验收前置命令统一执行。

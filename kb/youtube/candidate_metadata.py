@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from kb.youtube import admission, login, media, ranking, storage, throttle
+from kb.youtube.faults import local_fault
 from kb.youtube.settings import of
 
 
@@ -34,9 +35,11 @@ def calibrated(row, metadata):
             or not math.isfinite(count) or not 0 <= count <= 2 ** 63 - 1):
         return None
     original = row['entry']
-    entry = admission.calibrate({**row, 'entry': {**original, 'views': 0, 'description': ''}}, metadata)
+    entry = admission.calibrate({**row, 'entry': {**original, 'views': 0}}, metadata)
     if entry is None:
         return None
+    if not original.get('approximate'):
+        entry['published'] = original['published']
     entry.update(views=int(count))
     if isinstance(metadata.get('title'), str) and metadata['title'].strip():
         entry['title'] = metadata['title'].strip()
@@ -60,7 +63,7 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
     now = datetime.now(timezone.utc)
     floor = now - timedelta(days=policy['window_days'])
     stats = {'reused': 0, 'refreshed': 0, 'pending': 0, 'failed': 0, 'ttl_seconds': TTL_SECONDS}
-    queue, errors, metadata_by_id = [], [], {}
+    queue, errors, local_errors, metadata_by_id = [], [], [], {}
     positions, eligible = {}, {}
     source_ids = {owner['source_id'] for row in rows for owner in row['owners']}
     for row in rows:
@@ -127,6 +130,9 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
         except media.Interrupted:
             defer(row, PENDING, time.time() + RETRY_SECONDS)
         except Exception as error:
+            if local_fault(error):
+                local_errors.append((row, error))
+                continue
             storage.failed(row, error)
             throttle.caught(error)
             errors.append((row, error))
@@ -135,7 +141,7 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
     if cancelled or throttle.notice():
         unfinished.update(pending)
         not_reached.clear()
-    failed_ids = {row['video_id'] for row, error in errors}
+    failed_ids = {row['video_id'] for row, error in errors + local_errors}
     storage.defer_metadata([
         (row, throttle.notice() or (PENDING if row['entry'].get('approximate') else STALE), None)
         for row in pending.values() if row['video_id'] not in failed_ids])
@@ -156,6 +162,7 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
             row['_metadata_reason'] = PENDING if row['entry'].get('approximate') else STALE
     failures = source_failures(errors, eligible)
     return {'rows': current, 'stats': stats, 'errors': errors,
+            'local_errors': local_errors,
             'pending_ids': waiting_ids, 'not_reached_ids': not_reached,
             'unfinished_ids': unfinished, 'stopped': cancelled,
             'source_errors': failures, 'pending_sources': set(failures)}
