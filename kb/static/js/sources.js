@@ -445,7 +445,6 @@ function updateSourceFilterControls() {
   $('source-q').setAttribute('aria-label', manage ? '搜索订阅名称、链接或分组' : '搜索来源内容');
   $('source-filter').hidden = manage;
   $('source-list-expand').hidden = manage;
-  $('source-list-label').textContent = manage ? '已订阅' : '内容列表';
   $('source-filter-reset').hidden = !$('source-q').value.trim() && (manage || !$('source-filter').value);
 }
 function clearSourceFilters() {
@@ -473,7 +472,7 @@ async function renderSourceView(reset = false, visibleCount = 0) {
   if (sourceView === 'manage') {
     sourceItemsFailed = false;
     const rows = sourceData.sources.filter(s => (s.name+' '+s.url+' '+s.group_name).toLowerCase().includes(q.toLowerCase()));
-    $('source-list').innerHTML = rows.map(renderSubscription).join('') || `<div class="source-empty"><h3>${q ? '没有匹配的订阅' : '还没有订阅'}</h3><p>${q ? '清除筛选，重新查看全部订阅。' : '添加一个感兴趣的来源，之后在最新内容中阅读。'}</p><button class="ghost" ${q ? 'data-clear-source-filters' : 'data-add-source'}>${q ? '清除筛选' : '添加订阅'}</button></div>`;
+    $('source-list').innerHTML = rows.map(renderSubscription).join('') || `<div class="source-empty"><h3>${q ? '没有匹配的订阅' : '还没有订阅'}</h3><button class="ghost" ${q ? 'data-clear-source-filters' : 'data-add-source'}>${q ? '清除筛选' : '添加订阅'}</button></div>`;
     $('source-items-count').textContent = `${rows.length} / ${sourceData.sources.length} 个`;
     if (reset) $('source-list-pane').scrollTop = 0;
     updateSourceRunStatus();
@@ -497,7 +496,7 @@ async function renderSourceView(reset = false, visibleCount = 0) {
     if (!currentSourceItems(kind, version, q, id)) return;
     sourceItemsFailed = true;
     resetSourceReader('内容读取失败，请重新读取。');
-    $('source-list').innerHTML = `<div class="source-empty" role="alert"><h3>内容读取失败</h3><p>${esc(e.message)}</p><p>稍后会自动重试，也可以立即重新读取。</p><button class="ghost" data-retry-items>重新读取</button></div>`;
+    $('source-list').innerHTML = `<div class="source-empty" role="alert"><h3>内容读取失败</h3><p>${esc(e.message)}</p><button class="ghost" data-retry-items>重新读取</button></div>`;
   }
 }
 function currentSourceItems(kind, version, q, id) {
@@ -572,7 +571,7 @@ function renderSourceItems() {
   // 写成"有内容才显示"的话,搜一个词恰好一条不中,那句"有 N 条翻译失败"和那颗
   // 按钮会一起消失 —— 而它们说的事实一个字都没变。
   $('source-list').innerHTML = note + (rows ||
-    `<div class="source-empty">${icon(sourceModules.get(sourceKind).icon)}<h3>${$('source-q').value || $('source-filter').value ? '没有匹配的内容' : '关注已就位，等待第一条内容'}</h3><p>${$('source-q').value || $('source-filter').value ? '清除筛选，或换一个订阅来源试试。' : sourceData?.unconfigured && !sourceData?.ready ? sourceConfigHint() : '点击“同步全部”开始收集，也可以先到订阅管理调整关注列表。'}</p>${$('source-q').value || $('source-filter').value ? '<button class="ghost" data-clear-source-filters>清除筛选</button>' : ''}</div>`);
+    `<div class="source-empty"><h3>${$('source-q').value || $('source-filter').value ? '没有匹配的内容' : '还没有内容'}</h3>${$('source-q').value || $('source-filter').value ? '<button class="ghost" data-clear-source-filters>清除筛选</button>' : sourceData?.unconfigured && !sourceData?.ready ? `<p>${esc(sourceConfigHint())}</p>` : ''}</div>`);
   $('source-more').hidden = sourceOffset >= sourceTotal;
   $('source-more').textContent = `加载更多（已显示 ${sourceRows.length} / ${sourceTotal}）`;
   $('source-items-count').textContent = `${sourceTotal} 条`;

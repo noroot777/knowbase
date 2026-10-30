@@ -546,12 +546,12 @@ async function doSearch() {
     }
   }
   if (!res.hits.length) {
-    $('results').innerHTML = '<div class="empty-state"><span class="empty-icon">' + icon('search') + '</span><h3>没有找到相关内容</h3><p>试试更短的关键词，或减少来源与主题限制。</p><button class="ghost" onclick="clearSearchFilters()">清空筛选条件</button></div>';
+    $('results').innerHTML = '<div class="empty-state"><h3>没有找到相关内容</h3><button class="ghost" onclick="clearSearchFilters()">清空筛选条件</button></div>';
     return;
   }
   // 命中里的标题/账号/摘要/片段/实体都是被索引的外部内容,拼进 innerHTML 前一律转义
   searchHits = res.hits;
-  $('results').innerHTML = `<p class="search-count">找到 ${res.hits.length} 条相关内容 · 点击标题阅读全文</p>` + res.hits.map((h, i) => `
+  $('results').innerHTML = `<p class="search-count">找到 ${res.hits.length} 条相关内容</p>` + res.hits.map((h, i) => `
     <div class="hit" data-hit="${i}">
       <h3>${docA(h, h.title)}</h3>
       <div class="meta">

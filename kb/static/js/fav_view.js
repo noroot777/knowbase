@@ -39,7 +39,6 @@ function renderFavCollection() {
   favItems.forEach(item => counts[favCategory(item)]++);
   $('fav-filters').innerHTML = Object.entries(FAV_FILTERS).map(([key, [label, glyph]]) =>
     `<button class="${favFilter === key ? 'on' : ''}" onclick="filterFavs('${key}')" aria-pressed="${favFilter === key}">${icon(glyph)}${label}<span>${counts[key]}</span></button>`).join('');
-  $('fav-list-title').textContent = favFilter === 'all' ? '收藏架' : FAV_FILTERS[favFilter][0];
   $('fav-result-count').textContent = `${items.length} 条${items.length !== favItems.length ? ` / 共 ${favItems.length} 条` : ''}`;
   $('fav-list').className = favLayout === 'list' ? 'fv-grid fv-compact' : 'fv-grid';
   const focus = document.activeElement?.closest('[data-fav-preview]')?.dataset.favPreview;
@@ -70,7 +69,7 @@ function favCardHtml(item) {
     </button>
     ${item.note ? `<button class="fv-card-note" onclick="openFavDetail(${item.id})" aria-label="编辑 ${esc(title)} 的笔记">${icon('paper')}<span>${esc(item.note)}</span></button>` : ''}
     <div class="fv-card-meta"><span>${esc(favWhere(item))}</span><time datetime="${esc(item.created_at)}">${favDate(item.created_at).slice(5)}</time></div>
-    <div class="fv-card-footer"><span class="fv-card-eta">${item.status !== 'inbox' ? `<span class="fv-state-${item.status}">${item.status === 'done' ? '✓ 已完成' : '已暂存'}</span>` : esc(action.eta || (item.quote ? '随时回看' : '按自己的节奏'))}</span>
+    <div class="fv-card-footer"><span class="fv-card-eta">${item.status !== 'inbox' ? `<span class="fv-state-${item.status}">${item.status === 'done' ? '✓ 已完成' : '已暂存'}</span>` : esc(action.eta || '')}</span>
       ${favDocA(item, `${esc(favOriginal(item).label)}${arrow('right')}`, 'fv-read-link', true)}</div>
   </article>`;
 }
@@ -170,8 +169,8 @@ function favDetailHtml(item) {
       <dl class="fv-detail-meta">${action.name && action.name !== item.title ? `<div><dt>原文</dt><dd>${esc(item.title)}</dd></div>` : ''}<div><dt>来源</dt><dd>${esc(favWhere(item))}</dd></div><div><dt>收藏于</dt><dd>${favDate(item.created_at)}</dd></div><div><dt>状态</dt><dd>${FAV_STATUSES[item.status]}</dd></div>${action.eta ? `<div><dt>预计用时</dt><dd>${esc(action.eta)}</dd></div>` : ''}</dl>
       <div class="fv-detail-links">${favDocA(item, `${esc(favOriginal(item).label)}${arrow('right')}`, 'fv-primary-link', true)}${originalUrl !== '#' ? `<a href="${esc(originalUrl)}" target="_blank" rel="noopener">原文${arrow('ext')}</a>` : ''}${favOriginal(item).indexed ? `<a href="${esc(obsLink(item))}">Obsidian${arrow('ext')}</a>` : ''}</div>
       ${action.cmd ? `<div class="fv-command"><div><span>${icon('code')}上手命令</span><button class="text-button" data-cmd="${esc(action.cmd)}" onclick="copyFavCmd(this)">复制</button></div><code>${esc(action.cmd)}</code><small>来自行动卡，请确认内容后再执行。</small></div>` : ''}
-      ${!item.action && item.status === 'inbox' && !item.quote ? `<div class="fv-extract"><p>还没有行动卡？让 AI 提炼用途、上手命令和预计用时。</p><button class="text-button" data-fav-mutation onclick="extractFavAction(${item.id})"${disabled}>${icon('spark')}生成行动卡</button></div>` : ''}
-      <section class="fv-note-editor"><div><label for="fav-note">我的随手记</label><span>为什么收藏它？</span></div><textarea id="fav-note" rows="4" placeholder="想到的用法、想解决的问题，或试过后的心得…" oninput="draftFavNote(this.value)">${esc(note || '')}</textarea><div class="fv-note-footer"><span id="fav-note-state" role="status">${favDrafts.has(item.id) ? '有未保存的草稿' : '给未来的自己留个线索'}</span><button class="ghost" data-fav-mutation onclick="saveFavNote(${item.id})"${disabled}>保存笔记</button></div></section>
+      ${!item.action && item.status === 'inbox' && !item.quote ? `<div class="fv-extract"><button class="text-button" data-fav-mutation onclick="extractFavAction(${item.id})"${disabled}>${icon('spark')}生成行动卡</button></div>` : ''}
+      <section class="fv-note-editor"><div><label for="fav-note">我的随手记</label></div><textarea id="fav-note" rows="4" placeholder="想到的用法、想解决的问题，或试过后的心得…" oninput="draftFavNote(this.value)">${esc(note || '')}</textarea><div class="fv-note-footer"><span id="fav-note-state" role="status">${favDrafts.has(item.id) ? '有未保存的草稿' : ''}</span><button class="ghost" data-fav-mutation onclick="saveFavNote(${item.id})"${disabled}>保存笔记</button></div></section>
       <div class="fv-detail-actions">${item.status === 'inbox' ? `<button data-fav-mutation onclick="favMark(${item.id},'done')"${disabled}>✓ 标为完成</button><button class="ghost" data-fav-mutation onclick="favMark(${item.id},'archived')"${disabled}>先暂存</button>` : `<button data-fav-mutation onclick="favMark(${item.id},'inbox')"${disabled}>放回待探索${arrow('right')}</button>`}<button class="text-button fv-delete" data-fav-mutation onclick="favDel(${item.id})"${disabled}>删除收藏</button></div>
     </div></div>`;
 }
@@ -191,10 +190,8 @@ function favStartHtml() {
   const aiRecommended = item && favTri?.fresh && favTri.data?.hero?.id === item.id;
   const why = item ? (aiRecommended ? favTri.data.hero.why : '') || favDescription(item) : '';
   return `<div class="fv-start"><div class="fv-aside-heading"><span>${icon('spark')}灵感起步</span><span class="fv-tiny-dot" aria-hidden="true"></span></div>
-    <div class="fv-start-intro"><span class="fv-start-mark" aria-hidden="true">${icon('bookmark')}</span><h2>先从一条开始<span>不急着全部做完。</span></h2><p>收藏不是待办清单。今天有空，就捡一个好奇的想法试试。</p></div>
-    ${item ? `<div class="fv-recommendation"><div class="fv-rec-label"><span>${aiRecommended ? 'AI 推荐' : '从你的待探索中挑选'}</span>${item.action?.eta ? `<span>${esc(item.action.eta)}</span>` : ''}</div><h3>${esc(item.action?.name || item.title)}</h3><p>${esc(why)}</p><div class="fv-rec-actions"><button onclick="openFavDetail(${item.id})">就看这个${arrow('right')}</button>${pool.length > 1 ? '<button class="text-button" onclick="swapHero()">换一条</button>' : ''}</div></div>` : '<div class="fv-aside-tip">点选左侧的任意收藏，在这里查看详情、记录想法，或整理状态。</div>'}
-    ${favTriageHtml()}
-    <div class="fv-aside-footnote">${icon('paper')}一段摘录，一个想法，也值得留下。</div></div>`;
+    ${item ? `<div class="fv-recommendation"><div class="fv-rec-label"><span>${aiRecommended ? 'AI 推荐' : '从你的待探索中挑选'}</span>${item.action?.eta ? `<span>${esc(item.action.eta)}</span>` : ''}</div><h3>${esc(item.action?.name || item.title)}</h3><p>${esc(why)}</p><div class="fv-rec-actions"><button onclick="openFavDetail(${item.id})">就看这个${arrow('right')}</button>${pool.length > 1 ? '<button class="text-button" onclick="swapHero()">换一条</button>' : ''}</div></div>` : ''}
+    ${favTriageHtml()}</div>`;
 }
 
 function favTriageHtml() {
@@ -210,7 +207,7 @@ function favTriageHtml() {
   const status = triage?.running ? '正在后台整理，你可以继续浏览。'
     : triage?.error ? triage.error : !inboxIds.size ? '建议针对待探索收藏，可切换到「待探索」查看。'
     : triage?.data && !triage.fresh ? '收藏有变化，建议可重新生成。'
-    : triage?.data ? '整理建议已就绪，不会自动移动收藏。' : '用 AI 找出值得先试的内容和重复收藏。';
+    : triage?.data ? '整理建议已就绪，不会自动移动收藏。' : '';
   return `<section class="fv-ai"><div class="fv-ai-heading"><h3>${icon('spark')}让 AI 搭把手</h3><button id="fav-triage-btn" class="text-button" onclick="runTriage()"${triage?.running ? ' disabled' : ''}>${triage?.running ? '<span class="spin"></span>整理中' : triage?.data ? '重新整理' : '生成建议'}</button></div><p role="status">${esc(status)}</p>
     ${duplicates.map(group => `<details class="fv-suggestion"><summary>${group.ids.length} 条收藏可能重复${arrow('caretDown')}</summary><p>${esc(group.verdict || '内容方向相近，先对比再决定留哪条。')}</p>${group.ids.map(id => { const row = favItems.find(item => item.id === id); return `<button class="text-button" onclick="openFavDetail(${id})">${esc(row.action?.name || row.title)}${id === group.keep ? ' · 建议保留' : ''}${arrow('right')}</button>`; }).join('')}${group.ids.includes(group.keep) ? `<button class="text-button" data-fav-mutation onclick="archiveFavDuplicates([${group.ids.join(',')}],${group.keep})"${favBusy ? ' disabled' : ''}>保留推荐，其余暂存${arrow('right')}</button>` : ''}</details>`).join('')}
     ${cold.length ? `<details class="fv-suggestion"><summary>${cold.length} 条收藏可以重新考虑${arrow('caretDown')}</summary><p>AI 的取舍建议，仅供参考。</p>${cold.map(suggestion => { const row = favItems.find(item => item.id === suggestion.id); return `<button class="text-button" onclick="openFavDetail(${row.id})">${esc(row.action?.name || row.title)}${arrow('right')}</button><p>${esc(suggestion.why || '可以暂存，等需要的时候再找回来。')}</p>`; }).join('')}</details>` : ''}

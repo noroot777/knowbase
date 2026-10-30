@@ -52,7 +52,7 @@ function pipeStateHint(s, result, failed, skipped, progress, owed = 0) {
   if (s.running) {
     if (s.stop_requested) return '正在等待执行中的步骤收尾；全部结束前暂不能新建同步，已完成结果会保留。';
     if (failed) return `已有 ${failed} 个步骤失败，本轮仍在执行。请等全部步骤结束后再新建同步；失败项不会阻止下一轮。`;
-    return `本轮${progress.label}尚未结束，暂不能新建同步。任务在后台执行，切换页面不会中断。`;
+    return `本轮${progress.label}尚未结束，暂不能新建同步。`;
   }
   if (progress.generating) return '同步部分已经做完，正在生成日报；这一段停不下来，生成完这里会自动更新。';
   // **这一轮红过、而今天已经没有可补的了**:那句「或按上次抓取范围重试失败项」
@@ -63,7 +63,7 @@ function pipeStateHint(s, result, failed, skipped, progress, owed = 0) {
   // 两句都不许拿来说它
   if (progress.genFailed) return '日报这一轮没有生成出来，原因在「生成日报」那一类里；同步到的内容都已入库，可以到日报页再生成一次。';
   if (failed && !owed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，但今天这几步已经不用补了（后来抓成了，或者那几条订阅已停用、删除）。明细在下面那一步里。`;
-  if (failed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，不影响新建同步。可重新配置一次同步，或按上次抓取范围重试失败项。`;
+  if (failed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，不影响新建同步。`;
   // **这一轮全绿不等于今天没欠账。** 一天里会跑好几轮,而上面那句话只念得出最后
   // 一轮:今天早些时候失败的那几步在一轮全绿收尾之后就不在它里面了,而「重试失败
   // 项」补的正是它们(后端口径 `pipeline_retry.today_failed`)。不说的话按钮冒出来
@@ -88,7 +88,7 @@ function initPipeStageRows() {
   if ($('pipe-stages').children.length) return;
   $('pipe-stages').innerHTML = Object.entries(STAGE_META).map(([key, meta], i) => `
     <div class="pipe-stage" id="pipe-stage-${key}" data-status="">
-      <span class="pipe-stage-number">${i + 1}</span><div><h3>${meta.name}</h3><p class="pipe-stage-desc">${meta.desc}</p><p class="pipe-stage-detail"></p><p class="pipe-stage-pending" hidden></p>
+      <span class="pipe-stage-number">${i + 1}</span><div><h3>${meta.name}</h3><p class="pipe-stage-detail"></p><p class="pipe-stage-pending" hidden></p>
       <details hidden><summary></summary><div class="pipe-failures"></div></details></div><span class="pipe-stage-status"></span>
     </div>`).join('');
 }
@@ -166,7 +166,7 @@ function renderPipeState(s) {
     `正在查看 ${pipeRunWhen(viewing)} 那一轮的结果，不是最新状态。`;
   // 这张卡现在讲的是哪一轮、那一轮红没红 —— 顶边和底色跟着换。只读那一档**转灰不转
   // 黄**:它不是一条警告,是「这不是此刻」。
-  $('pipe-state-label').textContent = viewing ? '这一轮的结果' : '当前状态';
+  $('pipe-state-label').textContent = viewing ? '这一轮的结果' : '';
   const result = pipeResult(s), stages = result.stages || {};
   const planned = pipePlannedStages(result), label = pipeRunLabel(result);
   // 阶段行挪进了「选中那一类」的详情里(`pipe_flow.js`):露出来的只有这一类的那几步,

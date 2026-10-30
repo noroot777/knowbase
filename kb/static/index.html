@@ -36,10 +36,9 @@
 <div id="nav-mask" hidden onclick="toggleNavigation(false)"></div>
 <aside id="sidebar" aria-label="工作区导航">
   <div class="sidebar-brand">
-    <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false"><span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span><span class="wordmark">Knowbase<small>个人知识库</small></span></a>
+    <a class="brand-lockup" href="#gallery" onclick="switchTab('gallery');return false"><span class="brand-icon" aria-hidden="true"><i data-icon="library"></i></span><span class="wordmark">Knowbase</span></a>
     <button class="icon-button mobile-close" onclick="toggleNavigation(false)" aria-label="关闭导航">×</button>
   </div>
-  <div class="nav-label">我的工作区</div>
   <nav class="tabs" aria-label="主要导航">
     <button id="tab-gallery" class="on" onclick="switchTab('gallery')" aria-current="page"><i data-icon="grid"></i><span class="nav-text">工具图鉴</span><span id="nav-tool-count" class="nav-count"></span></button>
     <button id="tab-search" onclick="switchTab('search')"><i data-icon="search"></i><span class="nav-text">全文检索</span></button>
@@ -47,14 +46,12 @@
     <button id="tab-fav" onclick="switchTab('fav')"><i data-icon="bookmark"></i><span class="nav-text">我的收藏</span></button>
     <button id="tab-daily" onclick="switchTab('daily')"><i data-icon="paper"></i><span class="nav-text">每日日报</span><span id="nav-daily-dot" hidden aria-label="日报生成中"></span></button>
   </nav>
-  <div class="nav-label">信息来源</div>
   <nav class="tabs nav-section" id="source-navigation" aria-label="信息来源">
     <button id="tab-subs" onclick="switchTab('subs')"><i data-icon="rss"></i><span class="nav-text">我的订阅</span></button>
     <button id="nav-grab" onclick="grabFromNav()" title="给一个链接，内容抓进知识库"><i data-icon="box"></i><span class="nav-text">存链接</span></button>
     <button id="tab-pipe" onclick="switchTab('pipe')"><i data-icon="sync"></i><span class="nav-text">同步中心</span><span id="nav-sync-dot" hidden aria-label="同步进行中"></span></button>
     <button id="tab-care" onclick="switchTab('care')" title="没走完收录的内容在这里处理"><i data-icon="list"></i><span class="nav-text">问题与待办</span><span id="nav-care-count" class="nav-count"></span></button>
   </nav>
-  <div class="nav-label">发现关联</div>
   <nav class="explore-links nav-section" aria-label="知识图谱">
     <a href="/graph/projects" target="_blank" rel="noopener"><i data-icon="network"></i><span class="nav-text">项目图谱</span><span class="nav-ext"><i data-arrow="ext"></i></span></a>
     <a href="/graph/skills" target="_blank" rel="noopener"><i data-icon="layers"></i><span class="nav-text">Skill 图谱</span><span class="nav-ext"><i data-arrow="ext"></i></span></a>
@@ -95,17 +92,17 @@
   <section class="gallery-controls" aria-label="筛选工具">
     <div class="gfilters">
       <div class="gallery-search"><i data-icon="search"></i><input id="g-q" type="search" autocomplete="off" aria-label="搜索工具" placeholder="搜索工具名称、用途或主题…"><kbd>/</kbd></div>
-      <label class="select-field"><span>来源</span><select id="g-src" aria-label="工具来源"><option value="">全部来源</option><option value="gzh">公众号</option><option value="video">视频</option></select></label>
+      <label class="select-field"><select id="g-src" aria-label="工具来源"><option value="">全部来源</option><option value="gzh">公众号</option><option value="video">视频</option></select></label>
     </div>
     <div id="g-kinds" class="gseg" aria-label="工具类型"></div>
     <div class="topic-filter"><span class="filter-label">主题</span><div id="g-topics" class="gtopic-row"></div><button id="g-topic-toggle" class="text-button" aria-expanded="false" onclick="toggleTopics()">展开全部</button></div>
   </section>
-  <div class="gallery-toolbar"><div><h2 id="g-section-title">全部工具</h2><span id="g-count" class="gcount-line" role="status" aria-live="polite"></span><button id="g-reset" class="text-button" onclick="resetGalleryFilters()" hidden>清空筛选 ×</button></div>
+  <div class="gallery-toolbar"><div><span id="g-count" class="gcount-line" role="status" aria-live="polite"></span><button id="g-reset" class="text-button" onclick="resetGalleryFilters()" hidden>清空筛选 ×</button></div>
     <div class="gallery-view-controls"><select id="g-sort" aria-label="工具排序"><option value="recent">最近提及</option><option value="n">提及最多</option><option value="first">最早收录</option></select><div class="view-switch" aria-label="显示方式"><button id="g-view-grid" class="on" onclick="setGalleryView('grid')" aria-label="卡片视图" aria-pressed="true"><i data-icon="grid"></i></button><button id="g-view-list" onclick="setGalleryView('list')" aria-label="列表视图" aria-pressed="false"><i data-icon="list"></i></button></div></div>
   </div>
   <div id="g-grid" class="ggrid" aria-label="工具列表" aria-busy="true"></div>
   <div id="g-sentinel"></div>
-  <div id="g-empty" class="empty-state" style="display:none"><span class="empty-icon"><i data-icon="search"></i></span><h3>没有找到匹配的工具</h3><p>换个关键词，或清空筛选重新探索。</p><button onclick="resetGalleryFilters()">清空筛选</button></div>
+  <div id="g-empty" class="empty-state" style="display:none"><h3>没有找到匹配的工具</h3><button onclick="resetGalleryFilters()">清空筛选</button></div>
   <div class="gallery-footer"><span id="g-loaded"></span><button id="g-load-more" class="ghost" onclick="renderGalleryBatch()" hidden>加载更多</button><button class="text-button" onclick="window.scrollTo({top:0,behavior:'smooth'})">回到顶部<i data-arrow="up"></i></button></div>
 </div>
 
@@ -123,7 +120,7 @@
     <select id="f-entity" aria-label="添加实体筛选" onchange="addEntity(this.value)"><option value="">加实体过滤…</option></select>
     <span id="chips"></span>
   </div>
-  <div id="results" aria-live="polite"><div class="empty-state search-welcome"><span class="empty-icon"><i data-icon="search"></i></span><h3>你的下一条线索，就在这里</h3><p>试试一个熟悉的工具，或你想解决的问题。</p><div class="search-suggestions"><button class="ghost" onclick="searchExample('Claude Code')">Claude Code</button><button class="ghost" onclick="searchExample('视频生成')">视频生成</button><button class="ghost" onclick="searchExample('知识管理')">知识管理</button></div></div></div>
+  <div id="results" aria-live="polite"><div class="search-welcome"><button class="ghost" onclick="searchExample('Claude Code')">Claude Code</button><button class="ghost" onclick="searchExample('视频生成')">视频生成</button><button class="ghost" onclick="searchExample('知识管理')">知识管理</button></div></div>
 </div>
 
 <div id="askpanel" style="display:none">
@@ -152,7 +149,7 @@
       <button class="ghost" onclick="switchTab('gallery')">发现好东西<i data-arrow="right"></i></button>
       <details class="fv-settings" ontoggle="if(this.open)initFavTools()">
         <summary aria-label="整理设置"><i data-icon="settings"></i><span>整理设置</span></summary>
-        <div class="fv-settings-popover"><label for="fav-model">AI 整理模型</label><select id="fav-model" onchange="saveFavModel()"><option value="">读取模型中…</option></select><p>仅用于生成行动卡和整理建议。浏览收藏不需要 AI。</p><button class="text-button" onclick="initFavTools(true)">重新读取模型</button><span id="fav-model-state" role="status"></span></div>
+        <div class="fv-settings-popover"><label for="fav-model">AI 整理模型</label><select id="fav-model" onchange="saveFavModel()"><option value="">读取模型中…</option></select><button class="text-button" onclick="initFavTools(true)">重新读取模型</button><span id="fav-model-state" role="status"></span></div>
       </details>
     </div>
   </header>
@@ -167,7 +164,7 @@
       <div class="fv-searchbar"><label class="fv-search"><i data-icon="search"></i><input id="fav-search" type="search" aria-label="搜索收藏" placeholder="找标题、摘录、笔记，或一个工具…" oninput="filterFavs()"><kbd aria-hidden="true">/</kbd></label></div>
       <div id="fav-filters" class="fv-filters" role="group" aria-label="按用途筛选"></div>
       <div class="fv-toolbar">
-        <div class="fv-list-caption"><h2 id="fav-list-title">收藏架</h2><span id="fav-result-count" aria-live="polite"></span></div>
+        <div class="fv-list-caption"><span id="fav-result-count" aria-live="polite"></span></div>
         <div class="fv-list-controls"><select id="fav-source" aria-label="按来源筛选" onchange="filterFavs()"><option value="">全部来源</option></select><select id="fav-sort" aria-label="收藏排序" onchange="filterFavs()"><option value="recent">最近收藏</option><option value="oldest">最早收藏</option><option value="name">名称 A–Z</option></select><div class="fv-view-switch" role="group" aria-label="显示方式"><button id="fav-view-grid" class="on" aria-label="卡片视图" aria-pressed="true" onclick="setFavLayout('grid')"><i data-icon="grid"></i></button><button id="fav-view-list" aria-label="紧凑视图" aria-pressed="false" onclick="setFavLayout('list')"><i data-icon="list"></i></button></div><button id="fav-select-toggle" class="text-button" onclick="toggleFavSelection()" aria-pressed="false">批量整理</button></div>
       </div>
       <div id="fav-error" class="fv-error" role="alert" hidden></div>
@@ -198,7 +195,7 @@
     <label>起 <input type="datetime-local" id="daily-since" oninput="markDailyWindow()"></label>
     <label>止 <input type="datetime-local" id="daily-until" oninput="markDailyWindow()"></label>
     <button class="text-button" onclick="resetDailyWindow()">接上一份日报</button>
-    <span class="hint">按内容的发布时间筛，不是抓取时间；默认从上一份日报的截止时刻算到生成这一刻。</span>
+    <span class="hint">按发布时间筛，不是抓取时间。</span>
     <button class="text-button daily-drawer-close" onclick="cancelDailyWindow()" title="放弃这次改动并收起">取消</button>
   </div>
   <div id="daily-sched" class="daily-drawer daily-schedule" hidden onkeydown="dailyDrawerKey(event, 'sched')">
@@ -208,7 +205,7 @@
       <label><input type="checkbox" id="daily-sync" checked onchange="markDailyDirty()"> 生成前先同步</label>
       <label><input type="checkbox" id="daily-library" checked onchange="markDailyDirty()"> 出完报后整理图鉴与 Wiki</label>
       <label>没有上一份时回溯 <input type="number" id="daily-firstdays" min="1" max="7" value="1" required oninput="markDailyDirty()"> 天</label>
-      <span class="hint">需要知识库服务保持运行；管道被占用时顺延。整理图鉴与 Wiki 排在日报出完之后，不拖慢出报；它会调用模型，关掉后图鉴与三张图谱将停止更新。</span>
+      <span class="hint">服务开着才会触发；管道被占用时顺延。</span>
     </fieldset>
     <div class="daily-channels"><span class="daily-channels-label">同步范围</span><div id="daily-channels" role="group" aria-label="同步范围"></div></div>
     <div class="daily-schedule-footer"><span id="daily-sched-msg" role="status">正在读取定时设置…</span><button id="daily-sched-reload" class="ghost" onclick="loadDailySettings()" hidden>重新读取</button><button class="text-button daily-drawer-close" id="daily-sched-close" onclick="cancelDailySched()">收起</button><button id="daily-sched-save" class="ghost" onclick="saveDailySettings()" disabled>保存设置</button></div>
@@ -227,7 +224,7 @@
         <div class="daily-reader-actions"><button class="text-button" id="daily-copy" onclick="copyDailyReport()" hidden>复制全文</button><button class="text-button daily-delete" id="daily-del" onclick="deleteDailyReport()" hidden>删除</button></div>
       </div>
       <p id="daily-reader-meta" class="hint"></p>
-      <div id="daily-reader-body"><div class="daily-empty"><h3>还没有日报</h3><p>点右上角「生成日报」：把这段时间里发布的内容写成一份日报。想先取一遍新内容就勾上它旁边的「先同步一轮」。</p></div></div>
+      <div id="daily-reader-body"><div class="daily-empty"><h3>还没有日报</h3></div></div>
     </article>
   </div>
 </div>
@@ -248,10 +245,12 @@
          `#pipe-stages` 挪进了详情里:失败明细、「不再抓取」都还挂在那几行上。 -->
     <div id="pipe-flow" class="pipe-flow" hidden><div class="pipe-flow-track" id="pipe-flow-track"><div class="pipe-flow-groups" id="pipe-flow-groups"></div><div class="pipe-flow-rail" id="pipe-flow-rail" role="tablist" aria-label="本轮要跑的类型"></div></div>
       <div class="pipe-flow-detail" id="pipe-flow-detail" role="tabpanel"><span class="pipe-flow-notch" id="pipe-flow-notch"></span><div class="pipe-flow-dhead" id="pipe-flow-dhead"></div><p class="pipe-flow-why" id="pipe-flow-why" hidden></p><div id="pipe-stages" aria-label="同步阶段"></div><div id="pipe-flow-extra"></div></div></div>
-    <div class="pipe-overview-footer"><span id="pipe-state-hint">同步在后台执行，切换页面不会中断。</span><button class="ghost" id="pipe-stop" onclick="stopPipe()" hidden>本阶段结束后停止</button></div>
+    <div class="pipe-overview-footer"><span id="pipe-state-hint"></span><button class="ghost" id="pipe-stop" onclick="stopPipe()" hidden>本阶段结束后停止</button></div>
     <div id="pipe-issues" class="pipe-issues" hidden role="status">
       <div class="pipe-issues-head"><b id="pipe-issues-title"></b><span class="pipe-issues-act"><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-retry-help" hidden>重试失败项</button><button class="text-button" id="pipe-issues-jump" onclick="jumpToFirstIssue()" hidden>看第一个<i data-arrow="down"></i></button></span></div>
       <p id="pipe-issues-list" class="pipe-issues-where"></p>
+      <!-- 折叠着的:这颗按钮的射程(抓哪些、重跑哪几步)是 retry-scope.md 整篇在讲的
+           事,版面上说不清、也不该常驻。按需展开才是它的位置。 -->
       <details id="pipe-retry-help" class="pipe-retry-help">
         <summary>新建同步和重试失败项有什么区别？</summary>
         <p><strong>新建同步：</strong>按本次通道、订阅和日期抓取。提取失败且仍在待处理列表中的文档，会在下次完整同步再次尝试；其他步骤仍受各自处理范围、去重和重试间隔限制。</p>
@@ -312,7 +311,6 @@
       </div></div>
       <div id="tgt-cands" style="display:none"></div>
       <div id="tgt-list"></div>
-      <p class="hint">添加候选来自本机绿泡泡的会话列表，不走网络。移除订阅不影响已采集的文章。</p>
     </div>
   </section>
 
@@ -339,11 +337,11 @@
   <div id="source-workbench" class="source-workbench">
     <section class="source-stream" aria-label="订阅内容与来源">
       <div class="source-filters"><input id="source-q" type="search" placeholder="搜索已收录的内容…" aria-label="搜索来源内容" oninput="sourceFilterChanged()"><select id="source-filter" aria-label="筛选订阅来源" onchange="sourceFilterChanged()"><option value="">全部订阅</option></select></div>
-      <div class="source-list-heading"><span><span id="source-list-label">内容列表</span> <span id="source-items-count" role="status"></span></span><div class="source-list-tools"><button id="source-filter-reset" class="text-button" onclick="clearSourceFilters()" hidden>清除筛选</button><button id="source-list-expand" class="text-button" onclick="expandSourceList()" aria-pressed="false">只看列表</button></div></div>
+      <div class="source-list-heading"><span id="source-items-count" role="status"></span><div class="source-list-tools"><button id="source-filter-reset" class="text-button" onclick="clearSourceFilters()" hidden>清除筛选</button><button id="source-list-expand" class="text-button" onclick="expandSourceList()" aria-pressed="false">只看列表</button></div></div>
       <div id="source-list-pane" tabindex="0" aria-label="订阅内容列表"><div id="source-list" aria-live="polite"></div><button id="source-more" class="ghost" hidden onclick="moreSourceItems()">加载更多</button></div>
     </section>
     <section id="source-reader" class="source-reader" aria-label="订阅内容阅读" tabindex="-1">
-      <div id="source-reader-empty" class="source-reader-empty"><i data-icon="paper"></i><h3>在这里安心阅读</h3><p>从左侧选择一篇内容，正文会在这里展开。</p></div>
+      <div id="source-reader-empty" class="source-reader-empty"><p>从左侧选一篇</p></div>
       <div id="source-reader-content" class="source-reader-content" hidden>
         <div class="source-reader-toolbar"><button class="text-button source-reader-back" onclick="backToSourceList()"><i data-arrow="left"></i>返回列表</button><span id="source-reader-position" title="当前已加载的可阅读内容"></span><div class="source-reader-actions"><button id="source-reader-prev" class="ghost" onclick="stepSourceReader(-1)" aria-label="上一篇"><i data-arrow="left"></i></button><button id="source-reader-next" class="ghost" onclick="stepSourceReader(1)" aria-label="下一篇"><i data-arrow="right"></i></button><button id="source-reader-expand" class="ghost" onclick="expandSourceReader()" aria-pressed="false" aria-label="专注阅读"><i data-icon="paper"></i><span>专注阅读</span></button></div></div>
         <div id="source-reader-scroll" class="source-reader-scroll" tabindex="0" aria-label="文章正文">
@@ -370,7 +368,7 @@
               <button type="button" class="ghost" id="source-x-import-btn" onclick="importXLoginState()" hidden>从日常浏览器导入</button>
               <button type="button" class="ghost" id="source-x-check" onclick="checkXChannel()">检查连接</button>
             </div>
-            <p id="source-x-import-hint" class="hint" hidden>导入只向日常浏览器要 x.com 的 cookie（在一张后台标签页里按地址取，别的站点不会交出来），同名的覆盖这个 profile 里现有的那几条。那个浏览器要先开远程调试开关，导入时它会弹一次授权；cookie 过期后再点一次就行。</p>
+            <p id="source-x-import-hint" class="hint" hidden>只取 x.com 的 cookie，覆盖这个 profile 里同名的那几条。那个浏览器要先开远程调试开关。</p>
             <p id="source-x-import-state" class="hint" role="status"></p>
             <p id="source-x-cmd" class="hint" hidden>登录要在终端里跑一次（它会要你扫码或贴 Cookie）：<br><code id="source-x-login"></code></p>
           </div>
@@ -389,7 +387,7 @@
         </div>
         <div id="source-settings-error" class="field-err" role="alert"></div><button id="source-settings-save" class="ghost" type="submit">保存设置</button>
       </fieldset></form>
-      <p id="source-settings-status" role="status"></p><div class="source-rule"><p id="source-last-run"></p><p id="source-note"></p><p>每源每次最多读取最近 500 条，后续按原文链接去重。删除订阅保留已收录内容。</p><p>自动同步跟着日报那一轮走：开关、时刻和范围都在日报面板里设。这一类来源当前会不会被带上，写在上面那一行。要立刻拉一次就点「同步全部」。</p><p>保存后自动建立检索索引；知识提取可在同步中心继续执行。</p></div>
+      <p id="source-settings-status" role="status"></p><div class="source-rule"><p id="source-last-run"></p><p id="source-note"></p><p>自动同步跟着日报那一轮走，开关与时刻在日报面板里设。</p><p>每源每次最多读最近 500 条，按原文链接去重。</p></div>
     </aside>
   </div>
   </section>
@@ -402,18 +400,18 @@
   <label for="source-edit-name">名称</label><input id="source-edit-name" maxlength="120" required placeholder="作者或订阅名称">
   <label for="source-edit-url">链接</label><input id="source-edit-url" type="url" maxlength="2048" required placeholder="https://"><p id="source-edit-hint" class="hint"></p>
   <label for="source-edit-group">分组（可选）</label><input id="source-edit-group" maxlength="80" placeholder="例如：中文关注、技术博客">
-  <label for="source-edit-feed">专用订阅链接（可选）</label><input id="source-edit-feed" type="url" maxlength="2048" placeholder="https://"><p class="hint">填写后优先从这里获取内容，主页链接保持不变。</p>
+  <label for="source-edit-feed">专用订阅链接（可选）</label><input id="source-edit-feed" type="url" maxlength="2048" placeholder="https://">
   <label><input id="source-edit-enabled" type="checkbox" checked> 启用此订阅</label>
   <div id="source-edit-fulltext-option" style="display:none">
-  <label><input id="source-edit-fulltext" type="checkbox" disabled> 去原文链接补抓正文</label><p class="hint">给只提供链接和摘要的聚合源用（例如 HN Buzzing）：同步时顺着每条的原文链接把正文抓回来，再翻译、写进知识库。本来就提供全文的订阅不要开，那会拿自动提取的结果换掉作者给的全文。打开之后，这个来源已收录的旧条目也会分批补抓并重新翻译。</p>
+  <label><input id="source-edit-fulltext" type="checkbox" disabled> 去原文链接补抓正文</label><p class="hint">给只给链接和摘要的聚合源用（如 HN Buzzing）。本来就给全文的订阅不要开；打开之后旧条目也会分批补抓并重译。</p>
   </div>
-  <label><input id="source-edit-extract" type="checkbox"> 提取知识标签</label><p class="hint">用大模型读一遍正文，识别其中的实体与主题，写成标签进入标签检索和主题图谱。<b>不开也能被全文和语义检索搜到</b>，只是没有标签。偏时效、看过就算的订阅（时间线、快讯、简报）不建议开：它们会往标签里灌一批只出现一次的词，把标签检索和主题页稀释掉。</p>
+  <label><input id="source-edit-extract" type="checkbox"> 提取知识标签</label><p class="hint"><b>不开也能被全文和语义检索搜到</b>，只是没有标签。时间线、快讯这类看过就算的订阅不建议开，它们会把标签稀释掉。</p>
   <div id="source-edit-error" class="field-err" role="alert"></div><div class="source-form-actions"><button type="button" class="ghost" onclick="closeSourceEditor()">取消</button><button type="submit" id="source-edit-save">保存订阅</button></div>
   </form></div></div>
 
 <div id="pipe-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closePipeModal()">
   <div class="modal pipe-setup">
-    <div class="pipe-setup-heading"><div><h2>新建同步</h2><p class="hint">勾要抓的来源和时间范围，再勾这一次跑哪几步。</p></div><button class="icon-button" onclick="closePipeModal()" aria-label="关闭同步配置">×</button></div>
+    <div class="pipe-setup-heading"><div><h2>新建同步</h2></div><button class="icon-button" onclick="closePipeModal()" aria-label="关闭同步配置">×</button></div>
     <div id="pipe-setup-connection" class="pipe-notice" hidden role="status"><span></span><button class="ghost" onclick="refreshPipe()">重新连接</button></div>
     <div id="pipe-setup-error" class="pipe-notice" hidden role="alert"></div>
     <!-- 滚动盒是这个 div,不是里面那个 fieldset(理由在 pipeline.css 的
@@ -449,7 +447,7 @@
       <div class="pipe-col">
       <div class="row"><div class="pipe-acct-heading"><label id="pipe-stage-label">跑哪些步骤 <b id="pipe-stage-count"></b></label><button class="text-button" id="pipe-stage-all" onclick="pipeStageToggleAll()">清空选择</button></div>
         <div id="pipe-stage-list" class="pipe-channel-list" role="group" aria-labelledby="pipe-stage-label"></div>
-        <label class="pipe-daily-row"><input type="checkbox" id="pipe-daily" onchange="onPipeDailyToggle()"><span><b>跑完出日报</b><small>用这一轮之后的库存生成今天的日报</small></span></label>
+        <label class="pipe-daily-row"><input type="checkbox" id="pipe-daily" onchange="onPipeDailyToggle()"><span><b>跑完出日报</b></span></label>
         <p id="pipe-stage-hint" class="hint"></p>
       </div>
       </div>
@@ -465,12 +463,8 @@
     <h2>模型分配</h2>
     <div id="stages-content" style="overflow-y:auto;flex:1;min-height:0">
     <div id="stages-presets" class="stage-presets" aria-label="整组模型预设"></div>
-    <div class="hint stage-preset-note">点一下切换整组,按主力 / 轻量分配。GPT 组保留仅支持 Claude 的研究工具循环;下方仍可逐项微调。</div>
-    <div class="row hint" style="margin:-8px 0 6px">
-      各阶段可单独微调,改完即时生效(管道从下一篇起使用)。
-      候选来自「API Key」中勾选的模型,未勾选时用内置候选;<b>选哪家就用哪家的 key</b>。
-      下方<b>推荐</b>按工作轻重分档,点「改用推荐」即可应用。
-    </div>
+    <div class="hint stage-preset-note">GPT 组保留仅支持 Claude 的研究工具循环。</div>
+    <div class="row hint" style="margin:-8px 0 6px">改完即时生效,管道从下一篇起使用。</div>
     <div id="stages-list">
       <div class="empty">加载中…</div>
     </div>
@@ -485,11 +479,8 @@
 <div id="keys-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeKeys()">
   <div class="modal">
     <h2>API Key 设置</h2>
-    <div class="row hint">
-      问答用这里配的 key + base_url 直连中转站(不再走本地 claude CLI)。只存本机
-      <code>data/secrets.json</code>(git 忽略,权限 600),不上传。环境变量优先。
-      <b>base_url</b> 是中转站地址,留空=各家官方:Anthropic 侧填到根(自动补
-      <code>/v1/messages</code>),OpenAI 侧一般带 <code>/v1</code>。
+    <div class="row hint">只存本机 <code>data/secrets.json</code>,环境变量优先。
+      base_url 留空=各家官方:Anthropic 侧填到根(自动补 <code>/v1/messages</code>),OpenAI 侧一般带 <code>/v1</code>。
     </div>
     <div class="row key-block">
       <div class="key-head"><b>Anthropic / Claude</b><span>原生格式 · <span id="key-anthropic-st"></span></span></div>
@@ -516,7 +507,7 @@
                aria-label="OpenAI base_url" placeholder="base_url,如 https://你的gpt中转站.com/v1(留空=官方)">
       </div>
       <label class="key-conversion" for="openai-protocol-conversion">
-        <span><b>Responses → Chat Completions</b><span id="openai-conversion-help" class="hint">仅支持 /chat/completions 的供应商请开启；关闭后使用原生 /responses。旧配置默认开启，普通与流式调用均生效。</span></span>
+        <span><b>Responses → Chat Completions</b><span id="openai-conversion-help" class="hint">供应商只支持 /chat/completions 时开启；关掉走原生 /responses。</span></span>
         <span class="key-conversion-control">
           <input id="openai-protocol-conversion" type="checkbox" role="switch" checked disabled
                  aria-label="Responses → Chat Completions" aria-describedby="openai-conversion-help"
@@ -532,7 +523,7 @@
       <button type="button" id="models-openai-save" class="key-model-save" hidden
               onclick="saveModels('openai')">保存所选模型</button>
     </div>
-    <div class="row hint">key 留空=不改;想清除填一个空格。base_url 想改直接填新的、想清空填一个空格。</div>
+    <div class="row hint">留空=不改,填一个空格=清除。</div>
     <div class="keys-footer">
       <span id="keys-msg" class="hint"></span>
       <button class="ghost" onclick="closeKeys()">关闭</button>
@@ -545,17 +536,14 @@
   <div class="modal">
     <h2>MCP 服务管理</h2>
     <div class="row">状态: <b id="mcp-status">检查中…</b></div>
-    <div class="row hint">
-      MCP server 是 stdio 服务,由 MCP 客户端(Claude Code/Desktop、Cursor、Cline…)
-      按需拉起,无需常驻。工具:<span id="mcp-tools">读取中…</span>
-    </div>
+    <div class="row hint">工具:<span id="mcp-tools">读取中…</span></div>
     <div class="row">
-      <div class="hint">通用配置(粘进任意 MCP 客户端的 mcpServers,点击复制):</div>
+      <div class="hint">通用配置 · 点击复制</div>
       <code id="mcp-config" onclick="copyMcpConfig()" title="点击复制"
             style="white-space:pre;display:block"></code>
     </div>
     <div class="row">
-      <div class="hint">或 Claude Code 一键命令(点击复制):</div>
+      <div class="hint">Claude Code 命令 · 点击复制</div>
       <code id="mcp-cmd" onclick="copyCmd()" title="点击复制"></code>
     </div>
     <div style="display:flex; gap:8px; margin-top:16px">
@@ -601,7 +589,6 @@
   <div id="reader-error" role="status" tabindex="0" hidden>
     <p id="reader-status">此页面无法在阅读器内显示。</p>
     <p><a id="reader-return" data-doc="1" hidden>回到刚才那篇</a></p>
-    <p>可用上方链接在新标签打开目标，或关闭阅读器返回。</p>
   </div>
   <iframe id="reader-frame" title="文章内容"></iframe>
 </div>
@@ -609,7 +596,7 @@
 <div id="shortcuts-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeShortcuts()"><div class="modal shortcuts-dialog"><h2>键盘快捷键</h2><dl><div><dt>快速搜索</dt><dd><kbd>⌘ / Ctrl</kbd> <kbd>K</kbd></dd></div><div><dt>搜索当前图鉴或收藏</dt><dd><kbd>/</kbd></dd></div><div><dt>关闭当前弹窗</dt><dd><kbd>Esc</kbd></dd></div><div><dt>发送问题 / 换行</dt><dd><kbd>Enter</kbd> / <kbd>Shift Enter</kbd></dd></div></dl><button onclick="closeShortcuts()">知道了</button></div></div>
 <div id="wechat-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeWechatSetup()">
   <div class="modal wechat-dialog">
-    <div class="wechat-heading"><div><h2 id="wechat-title">接入你的绿泡泡</h2><p class="hint" id="wechat-intro">从本机已同步的公众号推送中发现文章，收进知识库。</p></div><button class="icon-button" onclick="closeWechatSetup()" aria-label="关闭绿泡泡接入">×</button></div>
+    <div class="wechat-heading"><div><h2 id="wechat-title">接入你的绿泡泡</h2></div><button class="icon-button" onclick="closeWechatSetup()" aria-label="关闭绿泡泡接入">×</button></div>
     <ol class="wechat-steps">
       <li><span class="wechat-step-number">01</span><div><strong>配置供应商</strong><small id="wechat-provider-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openKeys, 'keys-modal')">API Key</button></li>
       <li><span class="wechat-step-number">02</span><div><strong>分配模型与智能体</strong><small id="wechat-model-state">待检查</small></div><button class="ghost" onclick="wechatConfigured(openStages, 'stages-modal')">模型配置</button></li>
@@ -620,20 +607,19 @@
     <label id="wechat-account-row" class="wechat-account-row" hidden>选择本人绿泡泡账号<select id="wechat-account" onchange="renderWechatSetup()"><option value="">请选择本人账号</option></select></label>
     <div id="wechat-authorization" class="wechat-authorization" hidden>
       <strong>获取前，请确认本机操作</strong>
-      <p class="hint" id="wechat-authorization-hint">固定版本 wxkey 会请求 macOS 管理员授权、访问绿泡泡进程，可能退出或重启绿泡泡并创建重签名副本。请先保存正在编辑的消息。密码仅在系统授权框输入，页面不接收密码或明文 key；失败不会自动再次获取。</p>
+      <p class="hint" id="wechat-authorization-hint">固定版本 wxkey 会请求 macOS 管理员授权，可能退出或重启绿泡泡并创建重签名副本。请先保存正在编辑的消息。</p>
       <label class="wechat-consent"><input type="checkbox" id="wechat-consent" onchange="renderWechatSetup()"><span>这是我本人的绿泡泡，我同意上述操作影响。</span></label>
       <button id="wechat-acquire" onclick="startWechatSetup('acquire')" disabled>自动获取 key 并验证</button>
     </div>
     <p id="wechat-error" role="alert"></p>
     <div class="wechat-actions"><button id="wechat-check" onclick="startWechatSetup()">检查并接入绿泡泡</button><button id="wechat-reset-status" class="ghost" onclick="startWechatSetup('reset_status')" hidden>备份并仅重置状态</button><button id="wechat-next" class="ghost" onclick="useLocalWechat()" hidden>去同步公众号</button><button class="ghost" onclick="refreshWechatSetup()">刷新状态</button></div>
-    <p class="hint" id="wechat-runtime-hint">可以关闭窗口，任务继续在后台执行。获取和验证不需要大模型 API。</p>
+    <p class="hint" id="wechat-runtime-hint">可以关窗，任务在后台继续。</p>
     <details class="wechat-agent">
       <summary>方式二：让你的智能体协助接入</summary>
-      <p class="hint" id="wechat-agent-hint">复制提示词，交给在你的本机上、能访问本项目和终端的智能体。这里只复制说明，不会启动智能体或获取 key；获取前仍需你本人确认。</p>
+      <p class="hint" id="wechat-agent-hint">交给能访问本项目和终端的本机智能体。这里只复制说明，获取前仍需你本人确认。</p>
       <div class="wechat-actions"><button id="wechat-agent-copy" class="ghost" onclick="copyWechatAgentPrompt()">复制接入提示词</button><span id="wechat-agent-copy-status" class="hint" role="status" aria-live="polite"></span></div>
       <label for="wechat-agent-prompt">绿泡泡接入提示词</label>
-      <textarea id="wechat-agent-prompt" rows="9" readonly spellcheck="false" aria-describedby="wechat-agent-return"></textarea>
-      <p class="hint" id="wechat-agent-return">智能体处理完成后，回到这里点击「刷新状态」，确认已验证，再去同步公众号。</p>
+      <textarea id="wechat-agent-prompt" rows="9" readonly spellcheck="false"></textarea>
     </details>
     <details class="wechat-explanation hint"><summary>文章怎么获取？需要安装 skill 吗？</summary><p>不需要安装个人情报库 skill。项目会准备独立 Reader，读取本机已同步的公众号推送，提取文章链接，再抓取公开正文、归档和索引；智能体用于后续分析。</p><p>仅覆盖本机已同步的推送，不保证订阅前的历史。私聊、群聊不会被作为文章采集。公众号正文图片走网页下载，不要求绿泡泡缓存图片解码 key。</p><p>本机推送是这里唯一的通道，正文按文章链接公开抓取，所以没有任何凭证要维护。另一条“逐号文章凭证”的通道（要 wxdown 抓包、要人去逐个点开文章）在 wechat-oa 分支上，主干不带它。绿泡泡接入支持 Mac 与 Windows x64 本机；Windows 获取仅适用于兼容的绿泡泡 4.x，确认后只读访问进程。远程服务器读不到你电脑上的绿泡泡。</p></details>
   </div>

@@ -251,7 +251,7 @@ function pipeRangeHints() {
 }
 function renderPipeRange() {
   $('pipe-range-label').textContent = pipeRange.label;
-  $('pipe-range-hint').textContent = pipeRange.from ? pipeRangeHints() || '包含开始与结束当天。日期只影响抓取范围，后续步骤仍处理知识库中的待处理内容。' : '扫描所选来源可提供的文章；已有内容按身份去重。后续步骤会处理知识库中的待处理内容。';
+  $('pipe-range-hint').textContent = pipeRange.from ? pipeRangeHints() || '包含开始与结束当天；日期只管抓取，后续步骤照旧处理库里的待处理内容。' : '扫描所选来源能给的全部文章，已有的按身份去重。';
   renderPipeEst();
 }
 function pipeQuery() { return $('pipe-acct-search').value.trim().toLowerCase(); }
@@ -268,7 +268,7 @@ function pipeChannelBlock(id) {
   }
   const items = filteredPipeAccounts(id);
   const rows = items.map(n => `<label class="pipe-acct"><input type="checkbox" data-channel="${esc(id)}" data-acct="${esc(n)}"${pipeSelected(id).has(n) ? ' checked' : ''}><span>${esc(n)}</span></label>`).join('')
-    || `<div class="pipe-acct-empty">${info.list.length ? '没有匹配的订阅，试试其他关键词。' : '这个来源暂无订阅，请先管理订阅或检查采集器。'}</div>`;
+    || `<div class="pipe-acct-empty">${info.list.length ? '没有匹配的订阅' : '这个来源还没有订阅'}</div>`;
   return `<div class="pipe-acct-group"><div class="pipe-acct-group-head"><b>${label}</b><span data-group-count="${esc(id)}">已选 ${pipeSelected(id).size} / ${info.list.length}</span></div>${rows}</div>`;
 }
 // 勾一个订阅只改分组标题上那个计数。整块重渲染会把键盘焦点从刚勾中的复选框上弄掉,
@@ -390,7 +390,7 @@ function pipeEstText() {
   if (!n) return '请至少选择一个订阅。';
   const sources = pipeReadyChannels().filter(id => pipeSelected(id).size)
     .map(id => `${channelLabel(id)} ${pipeSelected(id).size} 个`).join(' · ');
-  return `${sources} · ${pipeRange.label}。执行中可离开本页，稍后回来查看。`
+  return `${sources} · ${pipeRange.label}。`
     + (failed ? `另有 ${failed} 个来源读取失败，本次不会同步它们。` : '') + tail;
 }
 function renderPipeEst() {

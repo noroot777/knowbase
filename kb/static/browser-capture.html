@@ -14,24 +14,23 @@
 </head>
 <body>
   <main>
-    <header><a href="/#subs">k· Knowbase</a><span>只读指定页面 · 正文补齐</span></header>
+    <header><a href="/#subs">k· Knowbase</a></header>
     <h1>用你已经打开的那一页。</h1>
-    <p class="intro">不再复制粘贴长正文。由你在文章标签里主动采集，预览后补回原条目。</p>
     <ol class="steps" aria-label="处理进度"><li id="step-target" class="on">01 绑定条目</li><li id="step-capture">02 浏览器采集</li><li id="step-process">03 导出与索引</li></ol>
     <p id="message" role="status" aria-live="polite">正在读取目标条目…</p>
     <section class="card" aria-labelledby="target-heading">
       <div class="section-head"><h2 id="target-heading">这次补哪一篇</h2><span id="kind"></span></div>
       <h3 id="title">等待条目</h3><p id="original-url" class="url"></p>
       <label for="page-url">已打开文章的最终网址</label><input id="page-url" type="url" placeholder="https://…" disabled>
-      <p class="hint">默认匹配原网址。若浏览器跳到了另一个文章地址，请明确填入那个最终网址。扩展不会用另一篇文章静默覆盖。</p>
+      <p class="hint">默认匹配原网址。扩展不会用另一篇文章静默覆盖。</p>
       <div class="actions"><button id="create" disabled>发起浏览器采集</button><button id="draft-cancel" class="secondary" hidden>退出重新采集</button></div>
       <p id="intent-note" class="hint"></p>
-      <div id="pending" hidden><h2>这篇文章正在等待的采集</h2><p class="hint">同一篇只保留一个待办，其他标签发起的请求也会显示在这里，可以直接取消。</p><ul id="pending-list" class="pending-list"></ul></div>
+      <div id="pending" hidden><h2>这篇文章正在等待的采集</h2><p class="hint">同一篇只保留一个待办。</p><ul id="pending-list" class="pending-list"></ul></div>
     </section>
     <section class="card" aria-labelledby="capture-heading">
       <h2 id="capture-heading">接下来，在文章标签里操作</h2>
       <ol class="instructions"><li>保持文章在你原来的标签中打开；本页不会替你切换、刷新或接管它。</li><li>点击 Knowbase 扩展，选中本次条目，点击「读取此页」。</li><li>自动识别不准时，先在文章里选好正文，再使用「读取所选文字」。</li><li>核对标题、网址和全文预览，确认是完整正文后，点击「使用此正文」。</li></ol>
-      <p class="hint">只读取已加载的页面内容，不读取 Cookie、密码或表单。登录后可读不等于全文已经加载；不完整时请先加载全文。</p>
+      <p class="hint">只读取已加载的页面内容，不读取 Cookie、密码或表单。登录后可读不等于全文已经加载。</p>
       <details><summary>首次使用：安装与配对（仅需一次）</summary>
         <p>下载并解压扩展。在 Chrome 的扩展管理页启用开发者模式，选择「加载已解压的扩展程序」，选中 knowbase-capture 文件夹。安装由你操作。</p>
         <a class="download" href="/api/browser-capture/extension.zip" download>下载 Knowbase 采集扩展</a>
@@ -43,7 +42,7 @@
     <section id="saved" class="card" hidden aria-labelledby="saved-heading">
       <h2 id="saved-heading">正文已补入，入库还没结束</h2><p id="receipt"></p>
       <p>原条目和历史导出记录保留，旧译文已作废，重新等待翻译、导出和索引。可以等下一轮同步，也可以现在继续。</p>
-      <p class="warning">继续执行跑的是导出与索引两段：同类来源其他待办会一起导出，可能联网补抓别的文章并调用翻译模型；索引会检查全库。这不是只执行当前一篇。条目化提取不在这一步——它按全库取数，不该由一篇文章上的按钮买下；等下一轮同步，或到同步中心起跑弹窗里自己勾。</p>
+      <p class="warning">继续执行跑的是导出与索引两段：同类来源其他待办会一起导出，可能联网补抓别的文章并调用翻译模型；索引会检查全库。条目化提取不在这一步，它按全库取数——等下一轮同步，或到同步中心起跑弹窗里自己勾。</p>
       <div class="actions"><button id="continue">继续导出与索引</button><button id="restart" class="secondary">重新采集正文</button></div><p id="run-note" role="status"></p><a href="/#pipe">到同步中心查看真实结果 <i data-arrow="ext"></i></a>
     </section>
     <footer>浏览器采集只解决这篇文章的正文缺口，不用于补齐 X 账号时间线。待采集请求 15 分钟有效，未完成时服务重启需重新发起；已保存回执按文章恢复，关掉本页、另开标签或重启服务后仍可查看和继续处理。</footer>
