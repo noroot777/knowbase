@@ -185,19 +185,20 @@ def _entry(item: dict) -> dict | None:
     return x_body.record(out, text, prefix=prefix)
 
 
-def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
-    return wait_state(page, handle, deadline, _STATE_JS)
+def _wait_state(page: Chrome, handle: str, deadline: float, *, budget_limited=False) -> dict:
+    return wait_state(page, handle, deadline, _STATE_JS, budget_limited=budget_limited)
 
 
 def _harvest_one(page: Chrome, handle: str, floor: datetime | None, *,
                  deadline=None, max_scrolls=None, should_stop=None, on_ready=None, precise=False) -> tuple[list[dict], str]:
     """Return selected previews and an honest coverage gap, with optional scheduler limits."""
     ready_started = time.monotonic()
+    budget_limited = deadline is not None and deadline < ready_started + ACCOUNT_SECONDS
     deadline = min(deadline or float('inf'), ready_started + ACCOUNT_SECONDS)
     effective_seconds = max(0, deadline - ready_started)
     scroll_limit = MAX_SCROLLS if max_scrolls is None else max_scrolls
     navigate(page, f'https://x.com/{handle}')
-    state = _wait_state(page, handle, deadline)
+    state = _wait_state(page, handle, deadline, budget_limited=True) if budget_limited else _wait_state(page, handle, deadline)
     if on_ready:
         on_ready(time.monotonic() - ready_started)
     page = TimelineState(page, handle, state, _STATE_JS)

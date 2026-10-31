@@ -31,8 +31,9 @@
 照搬),通用档**一个字都不提重新登录**:判不准时多说一句「去登录」就是把限流说成
 掉登录,而那正是要防的那件事。
 
-**自动 X 只消费采集器的结构化队列事实,不从 `last_note` 推断覆盖。** 正文待补、候选
-待确认、五天历史缺口和最近24小时超窗分档；超窗不承诺普通同步可追回，未知说明不发问题。
+**自动 X 只消费采集器的结构化事实,不从 `last_note` 推断覆盖或阻断。** 正文待补、候选
+待确认、五天历史缺口和最近24小时超窗分档；启动/内容限流、安全验证、账号/登录/会话不可用
+各有持久阻断档，原话不丢失，也不复制给未访问来源。超窗不承诺普通同步可追回，未知说明不发问题。
 其他路径的 **`last_note` 不过限流那道关键词。** 它那句话里**会原样嵌着限流那段文案**(实测:
 某账号的 note 是「滚动次数用完,没有读到上次的位置;有 67 条折叠推文暂缓补全(X
 限制了访问频率,页面应用没能启动…),留到下次同步再试」)—— 拿关键词去搜它会把一个
@@ -172,7 +173,7 @@ def problems(kind: str) -> list[dict]:
             # `warrant.source_sig` 一份。
             'sig': warrant.source_sig(source, kind, settings),
         }
-        if reason := (source['last_error'] or ''):
+        if (reason := (source['last_error'] or '')) and reason != source.get('x_intake', {}).get('block', {}).get('reason'):
             name = _kind_of_failure(reason)
             out.append({**shared, 'id': f"source:{source['id']}:{name}",
                         'problem': name, 'evidence': reason, **PROBLEMS[name]})

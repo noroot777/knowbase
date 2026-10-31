@@ -29,7 +29,8 @@
 
 - 持久表包括来源覆盖/尝试账、按 status ID 共享的候选、订阅修订绑定的归属/outbox、最近 30 次阶段统计，
   扫描批次与批次成员两张表，以及按归属记录的过期事件表。
-  新表/索引用 `IF NOT EXISTS`；旧来源表以加列迁移补充 `window_end`，不删旧表、不改已有正文或回执。
+  新表/索引用 `IF NOT EXISTS`；旧来源表以加列迁移补充 `window_end` 与阻断事实，批次补充阻断令牌，
+  不删旧表、不改已有正文或回执。
 - 来源身份绑定 URL、专用订阅链接和单调修订号；改链接后旧任务不能写进新账号，A→B→A 也不复活旧结果。
 - 候选、批次成员与尝试元数据同事务；暂存不发布已确认的最新读数、覆盖、历史缺口或发现完成。
   时间线消费者保留到会话收尾，迟到核心错误阻止该批归属确认和覆盖推进。
@@ -473,3 +474,88 @@ env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-root-validation/data KB_VAULT_ROO
 `browser-cleanup.json`、`server-cleanup.json`；没有留下监听服务。
 未访问真实 X、生产库、登录态或模型；原生 cursor、远端风控、51账号八分钟吞吐仍未验证。
 未修改测试的兼容回归与全仓回归留验收，不扩大到其他模块，也未擅自添加复审轮次。
+
+## gNHc 首轮审查修复（2026-10-31，开工基线 665e4fb）
+
+本轮完整读取437行报告，接受预算归因、阻断归属和遥测污染三项已证实问题；未扩展非阻断清单。
+默认入口切换的覆盖要求通过新增默认路径契约落实，既有 X 用例族仍交验收前置命令执行，
+不违反本轮“只运行自己新增/修改测试”的限制，也不把留白宣称已验证。
+
+### 修复层级与不变量
+
+1. 首屏轮询显式接收 `budget_limited`，自己的切片走空抛 `XBudgetExceeded`；确认过的真实源站错误
+   不被时钟推断覆盖。发现切片不再随账号数量压到低于默认8秒，历史队尾不足同样不起跑，
+   单条正文预算仍独立。详情与 Article 的异常包装保留预算身份，预算中止不消耗候选失败次数。
+2. 采集器把实际观察到的访问阻断持久化为种类、原话、令牌和时间；结构化诊断分别解释启动限流、
+   内容限流、安全验证、账号不可用、明确登录失效、会话不可用。错误不再抑制历史问题，
+   但也不向未访问来源摊派阻断。stage 为批次保存当时阻断令牌，确认可用读数只清同一令牌，
+   防止先前成功回执抹掉后来出现的验证墙。正文中被消费的启动限流通过显式回调交付，不从散文猜。
+3. 耗时/统计是观测数据，不是业务凭据；统计保存和序列化异常只写日志告警，不能回写任何来源的
+   pending、skipped、incomplete、成功、水位或失败账。内容投递和旧失败清除不再被遥测故障否决。
+4. 新增测试从真实默认 `sync.collect` 入口钉当前扫描签名、水位、折叠正文、引用作者、来源改指、
+   attach、迟到限流与排尾恢复；显式日期入口单独钉住，不拿旧整批函数的桩冒充默认实现。
+
+### 本轮验证登记
+
+只登记新增 `tests/test_x_intake_review_runtime.py` 和 `tests/test_x_intake_default_path.py`；
+包括52账号切片、六类持久阻断、迟到阻断令牌、真实竞争 SQLite 写锁以及默认入口行为。
+未修改的 `test_x_channels`、水位、详情、页面政策、timeline 等旧族均未在本轮运行。
+证据目录：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/x-intake-review-gNHc/`（下述短文件名均在此目录）。
+基线 `665e4fb`，代码/测试/JS 共15份 SHA-256 存于 `tested-code.json`，清单自身 SHA-256：
+`3e189ddcae70f6c739014e543da00a3638e2a5e492a12b340cedf92b9c193e70`。
+每份均通过 AST/内存编译（Python）、Ruff（14份 Python）、JS 语法、700行限制与差异空白检查。
+
+首次登记 `6_lsADJMsOBQ` 的真实日志为30项、1.078秒、两失败；均为新增夹具调用错误：
+Article 后路收推文 URL 再转文章页，不能直接传 `/i/article`；更新订阅须传第三个 `source_id` 参数，
+body 中的 `id` 不会更新旧订阅。修正参数并保留预算异常透传、改指后旧内容不得入库的断言，
+随后登记 `qrPfJxd897DF`，真实日志30项、1.069秒、全部通过（此时尚未补下面的 JS 反例）。
+日志分别在任务 `regression/6_lsADJMsOBQ.log`、`regression/qrPfJxd897DF.log`。
+
+真实截图又发现一个本轮消费者错误：Python 的空阻断对象 `{}` 在 JS 为真，健康来源也显示
+“访问受阻”。修正的是阻断记录的类型判别（`block.kind`），不是隐藏错误文本；新增 Node 执行的
+渲染契约覆盖字段缺失、null、空对象与六类真实阻断。最终登记 `9EEbitXvMECE` 的真实日志
+31项、1.090秒、全部通过，无跳过；日志：
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/9EEbitXvMECE.log`。
+本轮两模块的未过滤原始命令，实际 cwd：
+`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-gNHc-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-gNHc-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-gNHc-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_x_intake_review_runtime tests.test_x_intake_default_path -v
+```
+
+### 本轮真实 collect / API / 页面证据
+
+- 全新临时 KB_DATA_DIR、vault、videos，socket 禁止外域连接，调度器禁用；仅 X 首屏/详情、会话、
+  配置就绪和冷却边界替身，实际运行 `sync.collect`、候选队列、批次回执、入库事务、FastAPI 与静态页面。
+  首次仓库外服务脚本漏清新库自带的默认订阅，数量断言失败；清默认订阅后只种9个合成来源，
+  未改产品来迎合冒烟。见 `serve.py`、`smoke-environment.json`、`validation-history.json`。
+- 同轮健康账号先取得内容，另一账号随后内容限流；健康账号仍成功并清旧失败/退避，阻断只属于
+  实际看到429的账号。另分别实际 collect 产生启动限流、安全验证、账号冻结、明确登录失效和会话故障；
+  正文阶段走真实 `x_post.complete/fill`，详情边界返回启动429，候选仍欠账且阻断可持久读取。
+- 遥测阶段持有另一条真实 SQLite `BEGIN IMMEDIATE` 写连接，再调用原 `save_metrics`，实际得到
+  `database is locked`；该来源仍新增1条、进入 succeeded_ids、清旧连接失败与退避。
+  总计2条成品入库，正文预览未混入成品；见 `sync-summary.json`、`subscription-ledgers.json`、
+  `database-evidence.json`、`progress-evidence.json`。
+- 清预取缓存后 health、social overview、items、intake-care 均200；24路真实 HTTP 并发 overview 全200。
+  七个实际阻断来源分别有对应结构化问题和原话（含正文启动限流）；生成的重试描述仍只点名当前来源，
+  保留 rev/scope_sig，不含 extract 阶段，未执行任何重试。见 `api-summary.json`、`api-diagnostics.json`、
+  `http-evidence.json`。健康来源可以仍欠历史覆盖，但不得继承别人的访问阻断。
+- 真实页面9张卡片显示六类短阻断状态、独立正文欠账与最近成功；健康及统计锁来源无虚构“访问受阻”。
+  只读打开六类问题详情，原话、含义与各自建议均匹配；无 JS 异常、横向溢出、外域或非 GET 请求。
+  已查看 `sources.png`、六份 `care-*.png` 对应详情（含裁剪 `detail-*.png`），保留 DOM/网络证据
+  `sources-evidence.json`、`page-evidence.json`、`page-final-network.json`。
+  首轮截图暴露的空对象误报及当时过宽的页面断言保留为 `first-sources.png`、`first-page-*` 等；
+  加强健康来源反断言后重新运行页面冒烟通过，不以首轮脚本的绿色输出替代目视检查。
+
+### 浏览器通道、清理与留白
+
+本审查轮重新尝试具名扩展“🔎 大V审查阻断验证”，`visible:false` 新建后台标签实际返回
+`Capability is not available: visibility`，创建前拒绝。没有省略后台条件重试，才降独立临时 profile
+的 chrome-headless-shell，始终 headless，仅本机 GET；未连接用户 Chrome/CDP、普通标签或 cookie，
+未激活窗口。页面仅导航订阅管理、问题与待办及详情，未点同步、登录、保存、重试或外链。
+通道与原始原因见 `browser-channel.json`、`first-browser-channel.json`。
+
+两次独立无头进程及 profile 均已销毁，服务正常 SIGTERM 退出，临时 KB 根已删除、48999端口无监听；
+见 `browser-cleanup.json`、`first-browser-cleanup.json`、`server-cleanup.json`。
+本轮未访问真实 X、生产数据、用户登录态或模型；源站实时风控、原生 cursor、51账号八分钟吞吐未验证。
+默认入口新增契约不替代既有 X 族兼容回归：未修改的旧测试及全仓回归仍留验收，不能宣称它们已通过。

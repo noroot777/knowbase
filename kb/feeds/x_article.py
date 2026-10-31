@@ -73,7 +73,7 @@ from kb.feeds.x_article_shape import (
     ArticleUnavailable, _code_body, _entities, _entity_image, _fence,
     _media_urls, _must_block, _must_text, _rows)
 from kb.feeds import x_cooldown
-from kb.feeds.x_cdp import CdpError
+from kb.feeds.x_cdp import CdpError, XBudgetExceeded
 from kb.feeds.x_post_meta import stamp
 
 # 接口地址。设成空串 = 整个关掉这一步(不发请求、不拦任何条目)。
@@ -304,6 +304,8 @@ def browser_fetch(session, url: str, *, wait: float | None = None,
         limit = min(limit, deadline)
     try:
         nav = session.goto(page)
+    except XBudgetExceeded:
+        raise
     except CdpError as e:
         raise ArticleUnavailable(f'长文页面打不开:{e}') from None
     # **早一道**:导航明确失败时当场说出原因,既不去读页面、也不等满那一页的
@@ -318,6 +320,8 @@ def browser_fetch(session, url: str, *, wait: float | None = None,
     while True:
         try:
             snap = json.loads(session.eval(_READ_JS))
+        except XBudgetExceeded:
+            raise
         except CdpError as e:
             raise ArticleUnavailable(f'长文页面读不动:{e}') from None
         except (ValueError, TypeError, UnicodeError) as e:

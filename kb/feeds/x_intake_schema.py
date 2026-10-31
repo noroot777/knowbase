@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS x_intake_sources (
  coverage_end TEXT NOT NULL DEFAULT '',
  discovery TEXT NOT NULL DEFAULT 'unattempted', gap TEXT NOT NULL DEFAULT '',
  scan_at REAL NOT NULL DEFAULT 0, history_at REAL NOT NULL DEFAULT 0,
- expired INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', outside TEXT NOT NULL DEFAULT ''
+ expired INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', outside TEXT NOT NULL DEFAULT '',
+ block TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS x_intake_candidates (
  post_id TEXT PRIMARY KEY, entry TEXT NOT NULL, published TEXT NOT NULL,
@@ -22,7 +23,7 @@ CREATE TABLE IF NOT EXISTS x_intake_links (
 CREATE INDEX IF NOT EXISTS x_intake_links_post ON x_intake_links(post_id);
 CREATE TABLE IF NOT EXISTS x_intake_batches (
  id TEXT PRIMARY KEY, source_id INTEGER NOT NULL, identity TEXT NOT NULL,
- boundary TEXT NOT NULL, end TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
+ boundary TEXT NOT NULL, end TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', block_token TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS x_intake_batches_source ON x_intake_batches(source_id,identity,state);
 CREATE TABLE IF NOT EXISTS x_intake_batch_posts (

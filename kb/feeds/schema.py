@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS feed_runs (
 _ADDED_COLUMNS = {
     'x_intake_sources': (
         ('window_end', "TEXT NOT NULL DEFAULT ''"),
+        ('block', "TEXT NOT NULL DEFAULT ''"),
+    ),
+    'x_intake_batches': (
+        ('block_token', "TEXT NOT NULL DEFAULT ''"),
     ),
     # 这一条是新订阅的历史下界(见 `history_floor`)。老库里的订阅补成空串 =
     # 不设下界:它们的存档早就抓完了,回头给它们钉一个下界只会在源站补发旧文

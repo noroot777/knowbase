@@ -2,17 +2,20 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 
 from kb.feeds import x_account, x_browser, x_cooldown, x_page_state, x_post
 from kb.feeds import x_intake_store as store
+from kb.feeds import x_intake_blocks as blocks
 from kb.feeds.x_cdp import CdpError, XBudgetExceeded
 from kb.feeds.x_intake_metrics import Metrics, seconds
 from kb.youtube.faults import local_fault
 
 MIN_USEFUL = 2.0
+MIN_TIMELINE_SECONDS = 8.0
 
 
 class Intake:
@@ -99,6 +102,15 @@ class Intake:
             self.local_error(source, error, phase)
             return False
 
+    def mark_block(self, source, error, phase):
+        if block := blocks.describe(error):
+            try:
+                store.set_block(source, block)
+            except Exception as fault:
+                if not local_fault(fault):
+                    raise
+                self.local_error(source, fault, phase)
+
     def wait(self, deadline, phase):
         remaining = self.cool.remaining()
         if self.stop() or time.monotonic() + remaining + MIN_USEFUL >= deadline:
@@ -134,8 +146,12 @@ class Intake:
                             store.utc(x_channels.watermark(source, self.channel)) or bound)
                 bound = min(bound, self.now)
             slice_seconds = seconds('KB_X_ACCOUNT_SECONDS', 8 if phase == 'discovery' else 20)
+            minimum = min(MIN_TIMELINE_SECONDS, slice_seconds)
+            remaining = deadline - time.monotonic()
+            if remaining < minimum:
+                break
             if phase == 'discovery':
-                slice_seconds = min(slice_seconds, (deadline - time.monotonic()) / (len(queue) + 1))
+                slice_seconds = min(slice_seconds, max(minimum, remaining / (len(queue) + 1)))
             end = min(deadline, time.monotonic() + slice_seconds)
             page._x_deadline = end
             self.announce(f'{"时间线发现" if phase == "discovery" else "五天历史追补"} · @{handle}')
@@ -175,14 +191,17 @@ class Intake:
                     self.cool.cleared()
             except x_page_state.XSessionThrottled as error:
                 self.cool.throttled()
+                self.mark_block(source, error, phase)
                 self.attempt(source, phase, str(error))
                 if source['id'] not in retried:
                     queue.append(source)
                     retried.add(source['id'])
             except (x_page_state.XRateLimited, x_page_state.XAccessBlocked, x_post.PostSessionUnavailable) as error:
                 self.blocked = str(error)
+                self.mark_block(source, error, phase)
                 self.results[handle] = dict(entries=[], error='', skipped=self.blocked)
             except x_account.XAccountUnavailable as error:
+                self.mark_block(source, error, phase)
                 if error.state == 'login':
                     self.blocked = str(error)
                 self.results[handle] = dict(entries=[], error=str(error))
@@ -218,14 +237,21 @@ class Intake:
                 else:
                     self.metrics.count('body_attempted')
                     entries, note = x_post.complete([entry], session=page, deadline=page._x_deadline,
-                                                    should_stop=self.should_stop, unavailable=unavailable)
+                                                    should_stop=self.should_stop, unavailable=unavailable,
+                                                    on_block=lambda error: self.mark_block(source, error, '正文'))
                 if not entries and not unavailable and (self.stop() or self.over(page._x_deadline) or self.cool.remaining()):
                     continue
                 with self.metrics.storage('body'):
                     store.finish(source, task, entries, unavailable, note)
                 self.metrics.count('body_completed', sum(store.complete(entry) for entry in entries))
+            except XBudgetExceeded:
+                continue
+            except x_page_state.XSessionThrottled as error:
+                self.cool.throttled()
+                self.mark_block(source, error, '正文')
             except (x_page_state.XRateLimited, x_page_state.XAccessBlocked, x_post.PostSessionUnavailable) as error:
                 self.blocked = str(error)
+                self.mark_block(source, error, '正文')
             except Exception as error:
                 if local_fault(error):
                     self.local_error(source, error, '正文')
@@ -261,6 +287,10 @@ class Intake:
 
     def package(self):
         from kb.feeds import x_channels
+        for source in self.sources:
+            for timeline in self.timelines.get(source['id'], []):
+                if error := getattr(timeline, 'blocker', None):
+                    self.mark_block(source, error, '收尾')
         confirmed, usable = set(), set()
         for source, phase, bound, observed, result, batch_id in self.scans:
             if result.get('error'):
@@ -307,12 +337,12 @@ class Intake:
                           note=notice, unavailable=unavailable, unavailable_count=len(unavailable), x_intake=True,
                           local_error=self.local.get(source['id'], ''),
                           pending=not read or source['id'] not in usable or bool(progress.get('unconfirmed') or self.local.get(source['id'])
-                                  or self.stop()), deadline=self.metrics.deadline)
+                                  or progress.get('block') or self.stop()), deadline=self.metrics.deadline)
             result.update(run_started=self.started, run_monotonic=self.metrics.started)
             if not read and not entries and source['id'] not in self.local:
                 result['skipped'] = reason or ('已按停止请求中断' if self.stop() else
                                      '本轮未轮到，待下轮' if source['id'] not in self.attempted else '本轮未读到，待下轮')
-            if read and not core_error and progress.get('discovery') == 'complete' and progress.get('latest'):
+            if read and not core_error and not progress.get('block') and progress.get('discovery') == 'complete' and progress.get('latest'):
                 result['watermark'] = progress['latest']
             self.results[handle] = result
             self.metrics.count('pending', pending)
@@ -345,6 +375,8 @@ class Intake:
                 if local_fault(error):
                     for source in self.sources:
                         self.local_error(source, error, '会话')
+                elif isinstance(error, XBudgetExceeded):
+                    pass
                 elif isinstance(error, (x_page_state.XBrowserError, x_post.PostSessionUnavailable, CdpError, EOFError, OSError)):
                     self.blocked = str(error)
                 else:
@@ -355,12 +387,7 @@ class Intake:
         try:
             store.save_metrics(self.started, self.metrics.finish(self.cool))
         except Exception as error:
-            if not local_fault(error):
-                raise
-            for value in result.values():
-                value.update(local_error=f'本机统计保存失败：{error}', pending=True)
-                value.pop('skipped', None)
-                value['incomplete'] = value.get('incomplete', '') + '；本机统计保存失败，下轮重算'
+            logging.getLogger(__name__).warning('X 统计保存失败，不改变来源结论：%s', error)
         return result
 
 

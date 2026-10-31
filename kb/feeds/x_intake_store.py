@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from kb.feeds import registry as reg, x_article, x_body, x_post, x_post_meta
 from kb.feeds import x_intake_batches as batches
+from kb.feeds import x_intake_blocks as blocks
 from kb.feeds import x_intake_retention as retention
 from kb.maintenance import maintenance_lock
 
@@ -166,7 +167,8 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
             return None
         progress = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=?', (source['id'],)).fetchone()
         batch_id = batches.begin(conn, source['id'], identity(source), boundary or progress['floor'],
-                                 end or datetime.now(timezone.utc).isoformat(), batch_id)
+                                 end or datetime.now(timezone.utc).isoformat(), batch_id,
+                                 block_token=blocks.token(progress['block']))
         for entry in entries:
             identifier, published = post_id(entry), utc(entry.get('x_observed_at') or entry.get('published'))
             if not identifier or not published or published < utc(progress['floor']):
@@ -221,6 +223,7 @@ def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end=
             batches.recover(conn, source['id'], identity(source), boundary, end)
         conn.execute("UPDATE x_intake_sources SET covered=?,coverage_end=?,gap=?,discovery=?,latest=?,error='' WHERE source_id=?",
                      (*state, source['id']))
+        blocks.resolve(conn, progress, batch_id, proven or bool(observed))
     return True
 
 
@@ -230,8 +233,17 @@ def progress(source):
                            (source['id'], identity(source))).fetchone()
         result = dict(row) if row else {}
         if row:
+            result['block'] = blocks.decode(row['block'])
             result['unconfirmed'] = batches.count(conn, source['id'], identity(source), row['floor'])
     return result
+
+
+def set_block(source, block):
+    with maintenance_lock(wait=0), db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        if current(conn, source):
+            conn.execute('UPDATE x_intake_sources SET block=? WHERE source_id=? AND identity=?',
+                         (json.dumps(block, ensure_ascii=False), source['id'], identity(source)))
 
 
 def attempt(source, phase, reason=''):
@@ -338,6 +350,7 @@ def statuses(sources, channel='browser'):
                                   ('discovery', 'gap', 'expired', 'error', 'floor', 'scan_at', 'history_at', 'outside')}
             source['x_intake']['pending'] = counts.get((source['id'], identity(source)), 0)
             source['x_intake']['unconfirmed'] = unconfirmed[source['id']]
+            source['x_intake']['block'] = blocks.decode(row['block'])
             from kb.feeds.x_intake_diagnostics import issues
             source['x_intake']['issues'] = issues(source['x_intake'])
 

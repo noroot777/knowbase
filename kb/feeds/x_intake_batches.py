@@ -2,10 +2,10 @@
 from uuid import uuid4
 
 
-def begin(conn, source_id, identity, boundary, end, batch_id=''):
+def begin(conn, source_id, identity, boundary, end, batch_id='', *, block_token=''):
     batch_id = batch_id or uuid4().hex
-    conn.execute('''INSERT INTO x_intake_batches(id,source_id,identity,boundary,end)
-        VALUES(?,?,?,?,?)''', (batch_id, source_id, identity, boundary, end))
+    conn.execute('''INSERT INTO x_intake_batches(id,source_id,identity,boundary,end,block_token)
+        VALUES(?,?,?,?,?,?)''', (batch_id, source_id, identity, boundary, end, block_token))
     return batch_id
 
 
