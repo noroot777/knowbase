@@ -174,9 +174,9 @@ def _seed_defaults(conn) -> None:
 
 
 @contextmanager
-def db():
+def db(timeout=30):
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect(DB_PATH, timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
     # 切 journal 模式要的是**排他锁**,而 SQLite 对这条语句**不走 busy handler**

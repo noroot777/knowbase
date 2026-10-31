@@ -163,6 +163,10 @@ class Session:
         deadline,写不动就报错,而不是替调用方把时间花在那儿。
         """
         deadline = time.monotonic() + timeout
+        if method not in {'Browser.close', 'Target.closeTarget'} and (bound := getattr(self, '_x_deadline', None)):
+            deadline = min(deadline, bound)
+            if deadline <= time.monotonic():
+                raise CdpError('X 本阶段时间预算用完,留待下轮')
         try:
             want = self._send(method, params, sid, deadline)
             while True:

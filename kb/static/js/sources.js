@@ -352,6 +352,7 @@ async function loadSourceModule(reset = false, selectedId = null) {
     if (reset) fillSourceSettings(data.settings);
     const run = data.last_run;
     $('source-last-run').textContent = run ? `上次检查 ${sourceTime(run.finished_at)} · 新增 ${run.summary.added} 条${run.summary.errors.length ? ' · ' + run.summary.errors.length + ' 个来源失败' : ''}${run.summary.message ? ' · ' + run.summary.message : ''}` : '尚未同步。先检查订阅，再开始收集。';
+    $('source-last-run').textContent += xIntakeTiming(run?.summary?.x_intake?.started === data.x_intake?.started ? data.x_intake : null);
     // 显式把已加载条数传过去。**这一处今天是冗余带,如实记着**:
     // `renderSourceView` 不给 `visibleCount` 时自己会回落到 `sourceOffset`,而
     // 它和 `sourceRows.length` 在这条路上恒等(两者一起累加)—— 定点注入去掉这
@@ -524,7 +525,8 @@ function renderSubscription(s) {
     <a class="source-url" href="${esc(safeUrl(s.url))}" title="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a>
     <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}${s.fulltext && sourceModules.get(s.kind)?.body_from_link ? ' · 补抓原文正文' : ''}${s.extract ? ' · 提取知识标签' : ''}</div>
     ${s.configuration_error ? `<p class="source-row-meta">${esc(s.configuration_error)}</p>` : ''}
-    ${!s.last_error && s.last_note ? `<p class="source-row-meta">${esc(s.last_note)}；下次同步从上次的位置接着读。</p>` : ''}
+    ${xIntakeStatus(s)}
+    ${(!s.last_error || s.x_intake) && s.last_note ? `<p class="source-row-meta">${esc(s.last_note)}；${s.x_intake ? '五天内有界重扫，正文待办独立重试。' : '下次同步从上次的位置接着读。'}</p>` : ''}
     ${!s.last_error && s.last_notice ? `<p class="source-row-meta source-skip-notice">${esc(s.last_notice)}</p>` : ''}
     ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>${sourceTime(s.retry_at*1000)} 之后的同步才会再试它；也可点击“同步”立即重试。</p></details>` : ''}</div>
     <div class="source-row-actions"><button class="text-button" data-source-action="edit" data-source-id="${s.id}">编辑</button><button class="text-button" data-source-action="toggle" data-source-id="${s.id}">${s.enabled ? '停用' : '启用'}</button><button class="text-button" data-source-action="sync" data-source-id="${s.id}" ${!s.enabled?'disabled':''}>同步</button><button class="text-button source-delete" data-source-action="delete" data-source-id="${s.id}">删除</button></div></article>`;

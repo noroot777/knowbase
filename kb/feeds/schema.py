@@ -24,10 +24,11 @@
 from __future__ import annotations
 
 from kb.feeds.exclusion import SCHEMA as EXCLUSION_SCHEMA
+from kb.feeds.x_intake_schema import SCHEMA as X_INTAKE_SCHEMA
 from kb.intake_diag.ledger import SCHEMA as CARE_LOG_SCHEMA
 from kb.intake_diag.shelf import SCHEMA as SHELF_SCHEMA
 
-SCHEMA = '''
+SCHEMA = X_INTAKE_SCHEMA + '''
 CREATE TABLE IF NOT EXISTS feed_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscriptions (
  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, name TEXT NOT NULL,
@@ -260,4 +261,3 @@ def _migrate(conn) -> None:
         " WHEN new.life='' BEGIN"
         f"  UPDATE feed_items SET life={_LIFE} WHERE key=new.key;"
         " END")
-

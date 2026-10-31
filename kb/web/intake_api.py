@@ -52,11 +52,16 @@ def overview(kind: str):
     kind_checked(kind)
     sources = reg.subscriptions(kind)
     settings = reg.get_settings(kind)
+    if kind == 'social':
+        from kb.feeds import x_intake_store
+        channel = x_channels.channel_of(settings)
+        x_intake_store.statuses(sources, channel)
     for source in sources:
         source['configuration_error'] = reg.configuration_error(source, settings)
     with reg.db() as c:
         count = c.execute('SELECT count(*) FROM feed_items WHERE kind=?',(kind,)).fetchone()[0]
     return {'sources':sources, 'settings':settings, 'last_run':reg.latest_run(kind),
+            'x_intake': x_intake_store.latest_metrics('browser' if channel == 'attach' else channel) if kind == 'social' else None,
             'total':count, 'enabled':sum(s['enabled'] for s in sources),
             'ready':sum(s['enabled'] and not s['configuration_error'] for s in sources),
             'unconfigured':sum(s['enabled'] and bool(s['configuration_error']) for s in sources),
