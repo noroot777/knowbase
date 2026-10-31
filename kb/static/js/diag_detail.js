@@ -6,20 +6,26 @@
    这种不存在的事。
 
    **出口按后端给的那一份给**(`lane.exits` / 来源问题的 `actionable`),前端不
-   自己判:一条内容此刻在哪一档只有后端答得准,而出口是按档分的。 */
+   自己判:一条内容此刻在哪一档只有后端答得准,而出口是按档分的。
+
+   **这一屏不加次级标题,也不描述按钮。** 原先每一块都顶着一行小标题(「收录进度」
+   「最后一次失败的原话」「接下来会发生什么」「这一条的身份」),而下面那块东西自己
+   就长着那个样子:四段进度条、灰底的证词、一段话、一组事实。同理,建议里不再写
+   「用『从浏览器采集』最省事,否则试『换链接』」—— 那几颗按钮就排在这段话底下,
+   顺序还是后端按主次给的。留下来的只有**屏幕上看不出来的那些**:再试一轮会不会
+   还是同一个结果、这一下要不要花模型的钱、它的壳入没入库。 */
 
 const CARE_EXIT_LABELS = {
   run: '立即执行', requeue: '仅重新排队', capture: '从浏览器采集', body: '手动补正文',
   relink: '换链接', snooze: '暂缓', exclude: '不再收录', release: '恢复',
 };
 
-/** 「从浏览器采集」的前提,**写在按钮旁边,不等人点进去才发现**:补抓页需要那篇
-    文章此刻在浏览器里开着,还需要装好并配对过采集扩展(怎么装在补抓页上)。
-    `capture` 和 `body` 共用同一道闸(后端的 `can_paste`),所以这句话只说前提,
-    不说许可。 */
-const CARE_CAPTURE_HINT = '「从浏览器采集」要这篇文章此刻正在你的浏览器里开着，'
-  + '并且装好、配对过 Knowbase 采集扩展（补抓页上有下载和配对说明）。'
-  + '条件不凑手就用兜底那颗「手动补正文」。';
+/** 「从浏览器采集」的前提,**写在按钮旁边,不等人点进去才发现**:它需要那篇文章
+    此刻在浏览器里开着,还需要装好并配对过采集扩展(怎么装写在采集抽屉里,这里不
+    重复一遍)。`capture` 和 `body` 共用同一道闸(后端的 `can_paste`),所以这句话
+    只说前提,不说许可。 */
+const CARE_CAPTURE_HINT = '「从浏览器采集」要这篇文章此刻在你的浏览器里开着，'
+  + '并装好、配对过采集扩展；否则用「手动补正文」。';
 
 function careRenderDetail() {
   const host = $('care-detail');
@@ -95,67 +101,71 @@ function careRenderItemDetail(host, row, lane) {
     link.insertAdjacentHTML('beforeend', arrow('ext'));
     host.appendChild(link);
   }
-  const steps = careBlock(host, '收录进度', []);
+  const steps = careBlock(host, '', []);
   steps.appendChild(careStepsNode(CARE.overview.item_steps, lane.step,
     lane.id.endsWith('_recent') ? CARE.overview.item_steps.length : lane.step));
   const stateLine = document.createElement('p');
   stateLine.textContent = `${lane.stage} · ${lane.state}：${lane.summary}`;
   steps.appendChild(stateLine);
+  // 那句原话**贴着它解释的那一行**放,不另起一块、也不再标「最后一次失败的原话」:
+  // 紧跟在「重试已停止:…」下面的那块灰底等宽字,本来就只能是它自己的原话。
+  const why = careWhyOf(row, lane);
+  if (why) {
+    const quote = document.createElement('p');
+    quote.className = 'care-evidence';
+    quote.textContent = why;
+    steps.appendChild(quote);
+  }
   if (row.fulltext_url) {
     careBlock(host, '换过的取正文地址', row.fulltext_url, { mono: true });
   }
-  const why = careWhyOf(row, lane);
-  if (why) careBlock(host, row.fulltext_hold ? '为什么要人看一眼' : '最后一次失败的原话',
-    why, { mono: true });
-  careBlock(host, '接下来会发生什么', careItemAdvice(row, lane));
+  careBlock(host, '', careItemAdvice(row, lane));
   // 「收进来的时间 + 正文版本」这两样**就是浏览器采集那条路认「这一世」的判据**
   // (`kb.browser_capture._same_life`),而这块面板自己按 `feed_items.life` 认
   // (`kb.intake_diag.warrant`)。两份口径各有主人,**这里不再判第三遍** —— 屏幕上
-  // 把那两个值如实摆出来就够:它们一变,补抓页上那张回执就认不出来了(按设计当
+  // 把那两个值如实摆出来就够:它们一变,采集抽屉里那张回执就认不出来了(按设计当
   // 「没有回执」,不是「正文被改过」)。
-  careBlock(host, '这一条的身份', [
-    `内容编号 ${row.key}`,
-    `收进来的时间 ${careTime(row.fetched_at, { seconds: true })}`,
-    `正文版本 ${row.content_rev}${row.body_provenance ? ' · 正文来自人工补入' : ''}`,
-    // 三句话,三件不同的事(审查第 1 轮 F06:别拿「某一环完成了」当「已交付」)。
-    !row.exported_hash ? '这一条还没有写进知识库'
+  //
+  // **一块灰框,不是四块。** 一行一个「内容编号 / 收进来的时间 / 正文版本」的标签,
+  // 等于拿三个词去说明三样本来就认得出的东西:时间戳、版本号、32 位十六进制的 key。
+  careBlock(host, '', [[
+    `${careTime(row.fetched_at, { seconds: true })} 收进来 · 正文版本 ${row.content_rev}`
+      + (row.body_provenance ? ' · 人工补入' : ''),
+    // 「某一环完成了」不等于「已交付」:入没入库按这一条自己的导出回执说。
+    !row.exported_hash ? '还没有写进知识库'
       : row.exported_hash === row.content_hash ? '知识库里就是这一份内容'
         : '知识库里躺着的是它早先那一版，这一份还没写进去',
-  ], { mono: true });
+    row.key,
+  ].join('\n')], { mono: true });
   careExits(host, lane.exits, row, lane);
   careLoadItemLog(host, row.key);
 }
 
 function careItemAdvice(row, lane) {
   if (lane.id === 'body_held') {
-    return ['补抓拿到了页面，但没能确认哪一段是这一篇的正文，所以它一次都不扣重试预算、'
-      + '就挂起等人看一眼。原样重试很可能还是同一个结果——这一页要是你已经在浏览器里'
-      + '打开着，「从浏览器采集」最省事；否则试「换链接」，再不行才手动补正文。'];
+    return ['拿到了页面，但认不出哪一段是正文，所以挂起等人看一眼，一次都没扣重试预算。'
+      + '原样重试多半还是同一个结果。'];
   }
   if (lane.id === 'body_exhausted') {
-    return ['重试预算已经用完，自动同步不会再碰它。「仅重新排队」等于再给一轮机会；'
-      + '要是原文站点本来就读不到（要登录、脚本渲染、HTTP 403），再试一轮也是同一个'
-      + '结果——那几页你多半已经登录着、在浏览器里开着，直接「从浏览器采集」。',
-      '它的壳照旧会按原样入库，不会因为补不到正文就丢掉。'];
+    return ['重试预算已经用完，自动同步不会再碰它；原文站点本来就读不到'
+      + '（要登录、脚本渲染、HTTP 403）的话，再给一轮也是同一个结果。',
+      '它的壳照旧按原样入库，不会因为补不到正文就丢掉。'];
   }
   if (lane.id === 'translate_exhausted') {
     // **入没入库按这一条自己的导出回执说**,不一概说「已经按原文入库」:还没导出
     // 过的那几条也在这一档里(审查第 1 轮 F06)。
     return [(row.exported_hash
-      ? '译不动，知识库里躺的是原文（外文）那一份——检索到的是英文。'
-      : '译不动。它还没有写进知识库：导出那一步会按原文把它写进去，'
-        + '所以检索到的会是英文那一份。')
-      + '「立即执行」会把这个范围里等着译的一起放回队列并立刻跑一轮翻译，要花模型的钱。'];
+      ? '译不动，知识库里躺的是原文那一份，检索到的是英文。'
+      : '译不动，它还没写进知识库——导出会按原文写进去，检索到的是英文。')
+      + '「立即执行」会把这个范围里等着译的一起跑一轮翻译，要花模型的钱。'];
   }
   if (lane.id === 'body_queued') {
-    return ['它排在这一类来源的补抓队列里，下一轮同步会去取。现在就想取的话用「立即执行」，'
-      + '那一轮的范围是整类来源、不只这一条。这一页已经在浏览器里开着的话，'
-      + '「从浏览器采集」只动这一条、也不用等调度。'];
+    return ['排在这一类来源的补抓队列里，下一轮同步会去取。'
+      + '「立即执行」的范围是整类来源，不只这一条。'];
   }
   if (lane.id === 'translate_queued') return ['排在翻译队列里，下一轮同步会译它。'];
   if (lane.id === 'ingest_queued') {
-    return ['正文已经定下来了，等着写进知识库。注意：正文补入 ≠ 已入库，'
-      + '要等一轮导出才真的写进去。'];
+    return ['正文已经定下来了，但要等一轮导出才真的写进知识库。'];
   }
   return ['这一环已经完成了。'];
 }
@@ -175,15 +185,21 @@ function careRenderSourceDetail(host, row) {
     link.insertAdjacentHTML('beforeend', arrow('ext'));
     host.appendChild(link);
   }
-  const steps = careBlock(host, '这一次检查走到哪一步', []);
+  const steps = careBlock(host, '', []);
   steps.appendChild(careStepsNode(CARE.overview.source_steps, row.step, row.step));
   const stateLine = document.createElement('p');
   stateLine.textContent = `${row.state}：${row.label}`;
   steps.appendChild(stateLine);
-  careBlock(host, '实际含义', row.explanation);
-  careBlock(host, '来源原话', row.evidence, { mono: true });
-  careBlock(host, '建议', row.advice);
-  careBlock(host, '保留下来的东西', [
+  // 和文章那一侧同一个摆法:原话贴着它解释的那一行,后面才是「这意味着什么、
+  // 建议怎么办」。标题撤了 —— 灰底等宽字是原话、下面两段是人话,看一眼就分得开。
+  if (row.evidence) {
+    const quote = document.createElement('p');
+    quote.className = 'care-evidence';
+    quote.textContent = row.evidence;
+    steps.appendChild(quote);
+  }
+  careBlock(host, '', [row.explanation, row.advice]);
+  careBlock(host, '', [
     row.since ? `同步下界 ${careTime(row.since) || row.since}` : '这条订阅还没有水位',
     row.retry_at ? '退避已经打上，下一轮自动同步会按它再试一次' : '',
     '这一次复查成功不代表发现了新内容，也不会被当成新文章入库。',
@@ -200,8 +216,10 @@ function careRenderSourceDetail(host, row) {
   }
   exits.appendChild(run);
   host.appendChild(exits);
-  careBlock(host, '', ['来源连接问题不是一篇文章，所以这里没有「不再收录」：'
-    + '那颗按钮只影响单篇内容，不该被用来停用一整条订阅（要停用请到「我的订阅」）。'
+  // 这一句解释的是**屏幕上没有的那颗按钮**,所以非说不可:人找不到「不再收录」时,
+  // 下一步多半是去「我的订阅」之外的地方乱点。
+  careBlock(host, '', ['「不再收录」只影响单篇内容，不该被用来停用一整条订阅——'
+    + '要停用请到「我的订阅」。'
     + (row.blocked ? '另外，' + row.blocked + '——那跟它这一次为什么失败是两件事。' : '')]);
 }
 

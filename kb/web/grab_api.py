@@ -339,10 +339,10 @@ class FromPageRequest(BaseModel):
 def grab_from_page_precheck(body: FromPageRequest):
     """读之前先问一次,判据和 `/from-page` **同一组**,只是一个字节都不落库。
 
-    口径同 `browser_capture.precheck`:不让人把整页读完、核对完预览、勾完确认
-    之后才被拒。扩展**一处都不判** —— 正文够不够、这条收没收过、X 走不走这条
-    路,答案全在这里,它只负责展示;预览上那个字数也用这里返回的那一份,不许
-    自己再数一遍(那正是浏览器补抓踩过的事故形态)。
+    口径同 `browser_capture.precheck`:不让人把整页读完之后才被拒。扩展
+    **一处都不判** —— 正文够不够、这条收没收过、X 走不走这条路,答案全在这里,
+    它只负责展示;写完那句话里的字数也用这里返回的那一份,不许自己再数一遍
+    (那正是浏览器补抓踩过的事故形态)。
     """
     try:
         url = grab.normalize(body.url)

@@ -1,22 +1,27 @@
 (() => {
   'use strict';
   const element = id => document.getElementById(id);
-  //: 预览出来那一刻唯一值得说的事:正文**已经**交给本机服务核对过了(两条路都是
-  //: 渲染预览之前先预检)。「勾了才提交」不用写 —— 那道勾和那颗禁用着的按钮就在
-  //: 下面挨着。补待办和收新链接共用这一句,口径只有一份。
-  const PREVIEW_NOTE = '全文已传给本机服务核对过了。';
   let server = '';
   let key = '';
-  let preview = null;
   let busy = false;
   //: 当前标签(`{id, url}`),和服务端对这一页的那一答(`/here`)。
   //: **这一答是这一块界面的全部依据** —— 原先这里还有一个「补回哪个待办」的
   //: 下拉框,要人把服务端已经知道的事再回答一遍。
   let here = null;
   let situation = null;
-  //: 预览区此刻服务于哪一件事:补回某个待办(false)还是收录一篇新文章(true)。
-  //: 两件事共用这一块预览和那道「我已核对」—— 人要核对的东西一模一样。
-  let collecting = false;
+  //: **人点过「这一页就是这一篇」之后,那一下的身份要留在这儿。** 丢掉它的后果实测
+  //: 过:两个条目填了同一个最终网址,点了后一篇那行的「改用它」、界面也说「已改用」,
+  //: 可下一问只按网址发出去,服务端在同页那几个待办里按创建时间代选了最早那个 ——
+  //: 于是「采集」把**后一篇的正文写进了前一篇**,而后一篇仍然缺正文。
+  //:
+  //: 所以它是模块级的,不是 `adoptHere` 里的一个局部变量:人点一下「重新确认」也要
+  //: 带着它去问,否则那一下就把他的选择抹掉了。
+  //: 跟着记下**是在哪一页上点的**。服务端对「带了身份却兑现不了」一律不代选,所以
+  //: 标签这期间自己跳走了(站内重定向、推送式改地址)之后再带着它去问,屏幕上会写着
+  //: 「你选的那个失效了」—— 其实什么都没失效,他只是站到了另一页上,而那时摆出来的
+  //: 候选属于上一页,点下去是把这一页认给了另一篇。换页就当他没点过。
+  let chosen = '';
+  let chosenFor = '';
 
   function status(message, error = false) {
     element('status').textContent = message;
@@ -27,17 +32,9 @@
     busy = value;
     for (const name of ['act', 'act-page', 'act-selection'])
       element(name).disabled = value || !situation;
-    for (const name of ['connect', 'refresh', 'adopt']) element(name).disabled = value;
-    element('save').disabled = value || !preview || !element('complete').checked;
-  }
-
-  function clearPreview() {
-    preview = null;
-    collecting = false;
-    element('preview').hidden = true;
-    element('body').value = '';
-    element('complete').checked = false;
-    element('save').disabled = true;
+    for (const name of ['connect', 'refresh']) element(name).disabled = value;
+    // 「改用它」有几颗要看服务端交回几个待办,所以从那张列表上现读,不记一份名单。
+    for (const button of element('elsewhere-list').querySelectorAll('button')) button.disabled = value;
   }
 
   function localServer(value) {
@@ -50,7 +47,7 @@
   }
 
   async function call(path, options = {}) {
-    if (!server || !key) throw new Error('请先从知识库补抓页复制配对密钥并连接');
+    if (!server || !key) throw new Error('请先从知识库的采集抽屉复制配对密钥并连接');
     const response = await fetch(`${server}${path}`, {
       credentials: 'omit', redirect: 'error', cache: 'no-store',
       headers: {'Content-Type': 'application/json', Authorization: `Bearer ${key}`}, ...options
@@ -85,22 +82,43 @@
   //: 一份」),这里只负责把那一答摆成界面;`null` = 这一档没有可做的事,照旧只显示
   //: 服务端那句话。
   //:
+  //: 两档的主按钮**都叫「采集」**:点下去之后发生什么由上面那句答复说清(「正文还
+  //: 缺着」还是「还不在知识库里」),按钮只说动作。两颗各起一个名字,等于把同一件
+  //: 事按内部实现分成两个词让人去记。
+  //:
   //: `fill` 那一档**一开始就摆出「改用所选文字」**:会落到这一档的多半是自动补抓
   //: 已经试过并失败的页面(要登录、脚本渲染、403),扩展自己的识别同样可能认不出
-  //: 正文,而人站在那一页上选一段是现成的出路。
+  //: 正文,而人站在那一页上选一段是现成的出路。`absent` 那一档等服务端先自己去抓,
+  //: 抓不到才露出来 —— **露不露面和叫什么是两件事**,各占一个字段。
+  //:
+  //: 合成一个字段(空串 = 一开始不显示)的后果实测过:`absent` 失败之后那颗按钮
+  //: 只被 `hidden = false` 放出来,名字还是空串 —— 屏幕上是一颗 26×36 的空白小方块,
+  //: 而 `extract.js` 回的那句「请选好全文再读一次」正指着它。
   const PLANS = {
-    absent: {act: '收录这条链接', selection: ''},
-    fill: {act: '读取这一页的正文', selection: '改用所选文字'},
+    absent: {act: '采集', selection: '改用所选文字', selectionAtFirst: false},
+    fill: {act: '采集', selection: '改用所选文字', selectionAtFirst: true},
     complete: null,
+    //: `undecided` = 同一页上不止一个条目在等、而服务端不肯替人代选。**一颗采集按钮
+    //: 都不给**:这一档没有「哪一篇」这个答案,给了就是让他按一下赌一把,而赌错是
+    //: 正文被另一篇覆盖。出路在下面那张候选列表里,点哪一行就是选哪一篇。
+    undecided: null,
+    //: `saved` = 这一次操作已经写进去了。同样一颗按钮都不给:这一档的意思是「做完
+    //: 了」,摆一颗「采集」等于请他再写一遍,而他此刻只需要看见那张回执。
+    saved: null,
     refused: null,
   };
+
+  //: **「这一档有没有主动作」只由 `PLANS` 答一处。** 按钮藏起来了不等于按不到
+  //: (程序化点击、辅助技术、以后某次改动忘了藏),而 `complete` / `refused` /
+  //: `undecided` / `saved` 这几档按下去会落进 `absent` 那一支 —— 那是拿 `/api/grab`
+  //: 把同一篇收成第二行,正是候选列表存在要防的事。
+  const actionable = () => !!(situation && PLANS[situation.situation]);
 
   // 人点开扩展最先想知道的事:**这一页此刻能做什么。** 一问一答 ——
   // 原先是「问 grab 这一页在不在库里」加一个「补回哪个待办」的下拉框,两份口径
   // 查条目的方式还不一样(一份规范形 vs 两份),迟早在屏幕上互相打脸。
   async function loadHere() {
     situation = null;
-    clearPreview();
     renderSituation();
     try {
       here = await currentTab();
@@ -111,7 +129,9 @@
       return;
     }
     element('here-url').textContent = plainUrl(here.url);
-    situation = await api('/here', {method: 'POST', body: JSON.stringify({url: here.url})});
+    if (chosenFor !== here.url) chosen = chosenFor = '';
+    situation = await api('/here', {method: 'POST',
+                                    body: JSON.stringify({url: here.url, intent_id: chosen})});
     renderSituation();
     // 这一行**清空**:标题那一行就是服务端对这一页的答复,再在下面补一句「已连接」
     // 只是噪声(界面底线:让布局本身解释界面,不加次级描述)。`#status` 留给动作
@@ -127,22 +147,50 @@
     element('here-title').hidden = !title;
     element('here-actions').hidden = !plan;
     element('act-page').hidden = true;
-    element('act-selection').hidden = !(plan && plan.selection);
+    element('act-selection').hidden = !(plan && plan.selectionAtFirst);
     if (plan) {
       element('act').textContent = plan.act;
+      // 名字一律先写上,**不管这一刻露不露面**:失败那条路上只改 `hidden`,它要是
+      // 还指望那时候补名字,放出来的就是一颗没有字的按钮。
       element('act-page').textContent = '改用这一页的正文';
       element('act-selection').textContent = plan.selection;
     }
-    // 等着的那个待办指着另一个地址 —— **这一项是承重的**。站点按浏览器语言跳转
-    // 时(`openai.com/index/x` → `/zh-Hans-CN/index/x`)按网址一问是「不在库里」,
-    // 只凭这一句就请人收录的话,库里立刻多出一行同一篇文章。把那个待办摆出来、
-    // 给一颗「改用这一页的地址」,他一眼就看出是同一篇。
-    const other = (situation && situation.elsewhere && situation.elsewhere[0]) || null;
-    element('elsewhere').hidden = !other;
-    if (other) {
-      element('elsewhere-title').textContent = other.title;
-      element('elsewhere-url').textContent = plainUrl(other.page_url);
-    }
+    renderElsewhere();
+  }
+
+  //: 等着的、但指着另一页的那些待办 —— **这一项是承重的**。站点按浏览器语言跳转
+  //: 时(`openai.com/index/x` → `/zh-Hans-CN/index/x`)按网址一问是「不在库里」,
+  //: 只凭这一句就请人收录的话,库里立刻多出一行同一篇文章。把那个待办摆出来、
+  //: 给一颗「改用这一页的地址」,他一眼就看出是同一篇。
+  //:
+  //: **有几条就摆几条**(服务端一直交回全部,`here()` 只排掉这一答自己用掉的那个)。
+  //: 原先只画 `elsewhere[0]`、adopt 也只认 `[0]`:两个条目的待办同时指着别处时
+  //: (人把最终网址粘错了),他正站着的这一页偏偏是第二条,那就一颗按钮都对不上 ——
+  //: 只能回采集抽屉里一条条改地址,而扩展这一侧存在的理由恰恰是不必回去。
+  //:
+  //: 每行自己那颗按钮在这里当场绑上:这些行每次重画都是新元素,**按 id 绑一次**的
+  //: 写法重画之后点下去什么都不会发生。标题和网址一律 `textContent` —— 它们来自
+  //: 订阅源,拿 innerHTML 拼等于把源站的字当标记送进弹窗这个有 `chrome.*` 的上下文。
+  function renderElsewhere() {
+    const others = (situation && situation.elsewhere) || [];
+    element('elsewhere').hidden = !others.length;
+    element('elsewhere-list').replaceChildren(...others.map(other => {
+      const row = document.createElement('li');
+      const title = document.createElement('p');
+      title.className = 't';
+      title.textContent = other.title;
+      const address = document.createElement('p');
+      address.className = 'url';
+      address.textContent = plainUrl(other.page_url);
+      const adopt = document.createElement('button');
+      adopt.className = 'secondary';
+      adopt.type = 'button';
+      adopt.disabled = busy;
+      adopt.textContent = '这一页就是这一篇，改用它';
+      adopt.addEventListener('click', () => adoptHere(other.key));
+      row.append(title, address, adopt);
+      return row;
+    }));
   }
 
   // 在那个标签上读一次正文。**补正文和收录共用**:同一个提取器、同一句错误话术。
@@ -158,31 +206,49 @@
     return captured;
   }
 
+  // 读完直接写进去。**没有预览区、也没有那道「我已核对」了。**
+  //
+  // 撤掉的是**事前那一问**,不是任何一道准入:长度、网址、条目版本、那条 UPDATE
+  // 自己 WHERE 里的 CAS 全在服务端原样判(`_admit_body` / `_admit_page` /
+  // `_admit_item`)。人就站在那一页上,他比屏幕清楚自己要的是哪一篇,再把同一份
+  // 正文塞进 450px 宽的弹窗里请他重读一遍,拦不住任何服务端拦不住的东西。
+  //
+  // **代价是真的,记在这里**:登录墙、摘要页只要过得了那道去重 400 字符就会被写
+  // 进去,原先指望那道勾挡一手。出路是事后的 —— 写完就把标题和字数摆出来,不对
+  // 就到知识库里那一条上「重新采集正文」。完整取舍见
+  // docs/decisions/browser-capture.md。
   async function read(mode) {
     if (busy) return;
-    clearPreview();
     setBusy(true);
     try {
       const intent = situation && situation.intent;
       if (!intent) throw new Error('这一页没有要补回的条目，请重新确认这一页');
       const tab = await currentTab();
       // 读之前先问服务端:这个请求还在不在、这一页是不是它指定的那一篇、条目还是
-      // 绑定的那一版吗。不通过就一个字都不读 —— 否则人读完整页才被拒(2026-10-26
-      // 审查实测的三种:网址带中文、复读提示页、读的那几分钟里条目被同步改过)。
+      // 绑定的那一版吗。不通过就一个字都不读 —— 否则人读完整页才被拒(实测三种:
+      // 网址带中文、复读提示页、读的那几分钟里条目被同步改过)。
       await api('/precheck', {method: 'POST', body: JSON.stringify({intent_id: intent.id, page_url: tab.url, method: mode})});
       const captured = await extractFrom(tab, mode);
       // 再问一次,这次带上正文:读的过程中跳转了吗、这份正文过得了入库那道门槛吗。
-      // 预览之后人还要逐段核对,所以判据必须在渲染预览之前就拿到,不能留到提交。
+      // 还留着是因为**它答出字数**(服务端按行去重之后那一份),写完要摆给人看;
+      // 而两次 precheck 与 save 过的是同一组准入,这里先问一次只是早一道。
       const verified = await api('/precheck', {method: 'POST', body: JSON.stringify(
         {intent_id: intent.id, page_url: captured.page_url, body: captured.body, method: mode})});
-      preview = {...captured, intent_id: intent.id};
-      element('page-title').textContent = captured.title;
-      element('page-url').textContent = plainUrl(captured.page_url);
-      element('count').textContent = `${verified.characters} 字符 · ${mode === 'selection' ? '你所选的文字' : '自动识别的文章区域'} · 尚未上传`;
-      element('body').value = captured.body;
-      element('preview').hidden = false;
-      status(PREVIEW_NOTE);
-    } catch (error) { status(error.message, true); }
+      const result = await api('/upload', {method: 'POST', body: JSON.stringify({...captured, intent_id: intent.id})});
+      //: **写成功之后不许把身份放掉。** 放掉之后下一问只按网址和「还剩哪几个待办」
+      //: 重判,同一颗「采集」会被另一篇接管:实测两篇都指着这一页,保存完他选的那一
+      //: 篇、不做任何重新选择再按一下,正文就写进了另一篇(那一篇 content_rev 0→1、
+      //: 正文是这一页的)。服务端认得这张回执(`saved` 那一档),所以带着它去问得到
+      //: 的是「这一次采集已经写进这一条了」,而不是「你选的那个失效了」。要换另一篇
+      //: 得他自己在候选列表里点一下 —— 那正是这颗按钮不该替他决定的事。
+      // 已经写进去了。这一问失败只是「状态没刷新」,不该让人以为正文没保存。
+      try { await loadHere(); } catch { /* 下面照旧报服务端那句话 */ }
+      status(`${captured.title}：${result.detail}（${verified.characters} 字符）`);
+    } catch (error) {
+      const retry = !error.status || error.status >= 500
+        ? '。若连接中断，可再采一次；服务端不会重复替换。' : '';
+      status(error.message + retry, true);
+    }
     finally { setBusy(false); }
   }
 
@@ -192,7 +258,7 @@
   // - `absent`(不在库里)→ 先让服务端自己去抓(走完整的八道准入,还能取到标题、
   //   作者、日期),抓不到才轮到下面那两颗兜底。
   element('act').addEventListener('click', async () => {
-    if (busy || !situation) return;
+    if (busy || !actionable()) return;
     if (situation.situation === 'fill') return read('article');
     // 下面是 `absent` 那一档。**不在这里判是为什么抓不到**:无论登录墙、关卡
     // 还是脚本渲染,人的下一步都一样,而他正看着这一页。
@@ -216,52 +282,47 @@
     finally { setBusy(false); }
   });
 
-  element('act-page').addEventListener('click', () => collect('article'));
+  element('act-page').addEventListener('click', () => actionable() && collect('article'));
   // 这一颗在两档里都有,各归各家:`fill` 走补回原条目(`/upload`),`absent` 走
   // 收录成新条目(`/from-page`)。**判据仍在服务端** —— 这里只是按它那一答选路。
   element('act-selection').addEventListener('click', () =>
-    (situation && situation.situation === 'fill' ? read : collect)('selection'));
+    actionable() && (situation.situation === 'fill' ? read : collect)('selection'));
 
   // 用这一页的正文收录。和补正文那条路同一套:先问服务端(不通过就一个字都不读
-  // 第二遍)、预览上的字数用服务端那一份、人勾完确认才提交。
+  // 第二遍)、字数用服务端那一份、读完直接收录。
   async function collect(mode) {
     if (busy || !here) return;
-    clearPreview();
     setBusy(true);
     try {
       const captured = await extractFrom(here, mode);
       const payload = {url: captured.page_url, title: captured.title, body: captured.body};
       const verified = await grabApi('/from-page/precheck', {method: 'POST', body: JSON.stringify(payload)});
-      collecting = true;
-      preview = payload;
-      element('page-title').textContent = verified.title;
-      element('page-url').textContent = plainUrl(captured.page_url);
-      // 不写「尚未上传」:这一刻正文**已经**传给本机服务核对过了(上面那次预检)。
-      // 待定的是「收不收进知识库」,说成没上传会让人以为取消就什么都没发生。
-      element('count').textContent = `${verified.characters} 字符 · ${mode === 'selection' ? '你所选的文字' : '自动识别的文章区域'} · 尚未收录`;
-      element('body').value = captured.body;
-      element('preview').hidden = false;
-      status(PREVIEW_NOTE);
+      const result = await grabApi('/from-page', {method: 'POST', body: JSON.stringify(payload)});
+      // 已经收下了。这一问失败只是「状态没刷新」—— 不该让人以为没收下。
+      try { await loadHere(); } catch { /* 下面照旧报「已收下」 */ }
+      status(`${verified.title}：${result.detail || '已收下'}（${verified.characters} 字符）`);
     } catch (error) { status(error.message, true); }
     finally { setBusy(false); }
   }
 
-  // 「这一页就是那一篇,改用它」—— 和补抓页上那颗「改用这个地址」同一个动作、
+  // 「这一页就是这一篇,改用它」—— 和采集抽屉上那颗「改用这个地址」同一个动作、
   // 同一个 `create`(旧待办由服务端顶掉,不是先取消再发起),只是搬到了人所在的
-  // 地方。**不是放行**:正文照旧要过服务端那一整套准入,照旧要人核对预览勾确认。
-  element('adopt').addEventListener('click', async () => {
-    const other = (situation && situation.elsewhere && situation.elsewhere[0]) || null;
-    if (busy || !here || !other) return;
+  // 地方。**不是放行**:正文照旧要过服务端那一整套准入。
+  async function adoptHere(key) {
+    if (busy || !here) return;
     setBusy(true);
     try {
-      await api('/here/adopt', {method: 'POST',
-                                body: JSON.stringify({key: other.key, page_url: here.url})});
+      // **接住交回来的那个待办。** 它就是「他选了哪一篇」的身份凭证;扔掉它、转头
+      // 只按网址再问一次,服务端就只能在同页那几个待办里代选 —— 见 `chosen` 那段。
+      const adopted = await api('/here/adopt', {method: 'POST',
+                                                body: JSON.stringify({key, page_url: here.url})});
+      chosen = adopted.id;
+      chosenFor = here.url;
       await loadHere();
       status('已改用这一页的地址。');
     } catch (error) { status(error.message, true); }
     finally { setBusy(false); }
-  });
-  element('complete').addEventListener('change', () => setBusy(busy));
+  }
   element('connect').addEventListener('click', async () => {
     if (busy) return;
     setBusy(true);
@@ -286,37 +347,18 @@
     try { await loadHere(); } catch (error) { status(error.message, true); }
     finally { setBusy(false); }
   });
-  element('save').addEventListener('click', async () => {
-    if (busy || !preview || !element('complete').checked) return;
-    setBusy(true);
-    try {
-      if (collecting) {
-        const result = await grabApi('/from-page', {method: 'POST', body: JSON.stringify(preview)});
-        clearPreview();
-        // 已经收下了。这一问失败只是「状态没刷新」—— 落进下面那个 catch 会
-        // 告诉人「可再次提交同一预览」,而预览刚被 clearPreview 清掉,他照着
-        // 做不到;更要紧的是那句话会让他以为**没收下**。
-        try { await loadHere(); } catch { /* 下面照旧报「已收下」 */ }
-        status(result.detail || '已收下');
-        return;
-      }
-      const result = await api('/upload', {method: 'POST', body: JSON.stringify({...preview, confirmed_complete: true})});
-      clearPreview();
-      // 同收录那一处:已经写进去了,这一问失败只是「状态没刷新」—— 落进下面那个
-      // catch 会说「可再次提交同一预览」,而预览刚被清掉,而且那句话会让人以为
-      // 正文没保存。
-      try { await loadHere(); } catch { /* 下面照旧报服务端那句话 */ }
-      status(result.detail);
-    } catch (error) {
-      const retry = !error.status || error.status >= 500
-        ? '。若连接中断，可再次提交同一预览；服务端不会重复替换。' : '';
-      status(error.message + retry, true);
-    }
-    finally { setBusy(false); }
-  });
 
   async function initialize() {
     setBusy(true);
+    // 版本号摆在头部:这个扩展是「加载已解压的扩展程序」装的,改了代码要人去扩展
+    // 管理页点一次「重新加载」。装的是哪一版只有这里看得出来 —— 没有它,「我到底
+    // 重载过没有」只能靠猜。
+    //
+    // **单独一个 try,不许挡住下面那一整段。** 它纯粹是块装饰;放在主流程里的话,
+    // 一旦取不到清单(宿主没给 `chrome.runtime`),整个初始化当场跳进 catch ——
+    // 人看到的是「连接本机知识库」摊开着、一句报错,而这一页其实好端端的。
+    try { element('version').textContent = 'v' + chrome.runtime.getManifest().version; }
+    catch { /* 显示不出版本号不影响采集 */ }
     try {
       const stored = await chrome.storage.local.get(['server', 'key']);
       element('server').value = stored.server || 'http://127.0.0.1:8787';

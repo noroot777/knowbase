@@ -1,9 +1,10 @@
-"""采集扩展与补抓页**客户端**那几条 node 探针的入口(不起真浏览器,纯 `vm` 跑脚本)。
+"""采集扩展与采集抽屉**客户端**那几条 node 探针的入口(不起真浏览器,纯 `vm` 跑脚本)。
 
-六条各钉一件事,都是实测过的事故形态:共用的 HTTP 错误解析、一次性反馈不被
+八条各钉一件事,都是实测过的事故形态:共用的 HTTP 错误解析、一次性反馈不被
 2 秒轮询盖掉、准入判据一律问服务端(扩展自己不判)、网址那一栏人动过就不许被
-填回去、浏览器停在另一个地址时那条出路开在待办行里、以及**同一个扩展**里那颗
-「收录这条链接」的判据一处都不在扩展里(那一条的硬约束在
+填回去、浏览器停在另一个地址时那条出路开在待办行里、**同一个扩展**里那颗
+「收录这条链接」的判据一处都不在扩展里、**抽屉关掉要真的停、重开要能用**,以及
+**「这个浏览器配过扩展没有」只有扩展自己答得出来**(收录那一条的硬约束在
 `docs/decisions/link-grab.md`,其余见 `docs/decisions/browser-capture.md`)。
 """
 
@@ -37,3 +38,9 @@ class BrowserCaptureClientTests(unittest.TestCase):
 
     def test_collecting_a_new_link_keeps_every_verdict_on_the_server(self):
         self.probe('grab_from_page_gate.mjs')
+
+    def test_closing_the_drawer_stops_polling_and_reopening_still_works(self):
+        self.probe('capture_drawer_shell.mjs')
+
+    def test_only_the_extension_can_say_this_browser_is_paired(self):
+        self.probe('capture_present_mark.mjs')

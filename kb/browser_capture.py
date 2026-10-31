@@ -23,16 +23,16 @@ MAX_BODY = 200_000
 METHODS = ('article', 'selection')
 #: 内存里最多同时留几个等待中的请求。**撞上它的那一下不拒人**:同一篇文章只会有
 #: 一个等待中的请求(`create` 自己把旧的顶掉),所以撞到这个数意味着另外 99 篇各占
-#: 一个,而取消的出口只开在**各自那篇文章的补抓页**上 —— 拒了就得让人逐页去翻。
+#: 一个,而取消的出口只开在**各自那篇文章的采集抽屉**里 —— 拒了就得让人逐条去翻。
 #: 这里改成顶掉**最老的那个**(它也最接近过期):等待中的请求手上没有任何产物,
 #: 代价只是那一篇要重新点一次「发起浏览器采集」,而扩展那边收到的话正是
 #: 「被新的采集请求替代」。
 MAX_PENDING = 100
 _lock = threading.RLock()
 _intents: dict[str, dict] = {}
-_NOT_PENDING = '请求已取消、被新的采集请求替代或条目已变化，请回补抓页查看当前请求'
+_NOT_PENDING = '请求已取消、被新的采集请求替代或条目已变化，请回采集抽屉查看当前请求'
 _STALE = '条目已被其他操作修改或排除。本次没有覆盖，请重新核对并发起采集'
-_OTHER_PAGE = '当前页面与指定文章网址不同。补抓页上已标出这一页的地址，可一键改用它重发，未保存正文'
+_OTHER_PAGE = '当前页面与指定文章网址不同。采集抽屉里已标出这一页的地址，可一键改用它重发，未保存正文'
 
 _DEFAULT_PORTS = {'http': 80, 'https': 443}
 #: WHATWG 的 path / query 百分号编码集之外的可打印 ASCII。`%` 留在里面是关键:
@@ -69,7 +69,7 @@ def page_url(value: str) -> str:
 
     事故形态(2026-10-26 审查实测):服务端原来直接 `urlunsplit` 拼回原字符串,
     而扩展自己 `new URL()` 比一遍 —— 网址里带中文的订阅**每一次**都是人把整篇
-    文章读完、勾完确认之后才被 409 拒,因为扩展比的是 `/文章` 对 `/文章`、服务端
+    文章读完之后才被 409 拒,因为扩展比的是 `/文章` 对 `/文章`、服务端
     收到的是浏览器编码过的 `/%E6%96%87%E7%AB%A0`。`:443`、路径带空格、末尾 `?`
     是同一形态的另外三种。**判据不许在扩展里再写一份**,那只会开出第四第五种。
 
@@ -120,7 +120,7 @@ def _checked_target(item: dict | None) -> dict:
         # 这条路也有一个**绕过界面**的入口:人手敲 `/browser-capture?item=<key>`。
         # 所以这句拒绝要把「为什么」一起说完,和「问题与待办」里那两颗灰按钮旁边
         # 那行字同源(`source_types.link_body_refusal`,判据仍只有上面这一句)。
-        raise ValueError('此来源的正文不允许被原文链接中的页面替换，不能从浏览器补抓'
+        raise ValueError('此来源的正文不允许被原文链接中的页面替换，不能从浏览器采集'
                          + (f'：{link_body_refusal(item["kind"])}'
                             if link_body_refusal(item['kind']) else ''))
     if item['content_kind'] == 'post' or item['x_post_meta']:
@@ -177,7 +177,7 @@ def _same_life(item: dict, row) -> bool:
     `docs/decisions/intake-diagnostics.md` 的「还没做的」里。两边方向一致:认不出
     来一律当「没有回执 / 没有搁置」,不会把一个针对别的内容做过的决定搬到新内容上。
 
-    认不出来就当**「没有回执」,不是「正文被改过」**:后者会在那篇文章的补抓页上
+    认不出来就当**「没有回执」,不是「正文被改过」**:后者会在那篇文章的采集抽屉里
     常驻一句假红字,还连带藏掉回执区、禁掉继续处理那颗按钮,而重抓一次也去不掉
     (那一行审计记的是上一世,怎么比都不等)。
     """
@@ -277,57 +277,116 @@ def _page_aliases(raw: str) -> list[str]:
 _OWED = f"({fulltext._eligible()} AND fulltext_at='')"
 
 
-def here(url: str) -> dict:
+def here(url: str, intent_id: str = '') -> dict:
     """人**正站在哪一页** → 这一页此刻能做什么。一问一答。
 
-    **这条路存在的理由是把决定搬到人所在的地方。** 原先补一篇正文要跨三个界面
-    走七步:知识库面板 → 补抓页复制密钥 → 核对最终网址 → 发起待办 → 回到文章
-    标签 → 在下拉框里挑出刚才那个待办 → 读取。而「这一页是哪一条、写不写得了」
-    这个问题,扩展站在那一页上本来就问得出来 —— 地址栏里那一行就是答案,下拉框
-    是让人把服务端已经知道的事再回答一遍。
+    **这条路存在的理由是把决定搬到人所在的地方。** 「这一页是哪一条、写不写得了」
+    扩展站在那一页上本来就问得出来 —— 地址栏里那一行就是答案,而原先那个下拉框是
+    让人把服务端已经知道的事再答一遍(退场前那七步见决策文档)。
 
     **待办没有被取消,它退到了幕后**:`situation='fill'` 时这里自己 `create` 一个
     (扩展拿到的是它的 `id`),于是 `precheck` / `save` 那一整套准入、CAS、回执与
     审计一个字都不用改 —— 新增的只有「谁来建待办」。`create` 本身幂等:同一
     (条目, 页面)上已有 pending 就复用它和它的有效期,所以反复开扩展不会堆出一串。
 
-    **只在正文还欠着的时候自动建**(`_OWED`)。正文已经齐了的那一条照旧要人在补抓
-    页上明确说一句「重新采集正文」—— 那是另一件事(「我手上这份是错的」),它自带
+    **只在正文还欠着的时候自动建**(`_OWED`)。正文已经齐了的那一条照旧要人在采集
+    抽屉里明确说一句「重新采集正文」—— 那是另一件事(「我手上这份是错的」),它自带
     警示和回执,不该和「把缺的那份补上」挤成同一颗按钮。
 
-    `elsewhere` 交回的是**等着的、但指着另一页的那些待办**。这一项是承重的:站点
-    按浏览器语言跳转时(`openai.com/index/x` → `/zh-Hans-CN/index/x`),人从补抓页
-    发起的待办指着前者、浏览器停在后者,按网址一问「这一页不在库里」—— 要是只凭
-    这一句就请他收录,库里立刻多出一行同一篇文章。把那个待办摆在他眼前、给一颗
-    「改用这一页的地址」,他一眼就看出是同一篇。
+    **但人明确发起过的那一个要先兑现,排在库里那一行前面。** 「这一页是哪一条」
+    有两个答案源:`feed_items.url`,和人自己指过的最终网址。只问前者的话,
+    「发起浏览器采集」「改用这一页的地址」「重新采集正文」这三条路发出的待办在
+    扩展那一侧**一次都不会被认到** —— 而它们存在的全部理由恰恰是「这一页的地址
+    和库里那一行不一样」或者「正文已经齐了、但我手上这份是错的」。两种实测形态见
+    `docs/decisions/browser-capture.md` 的硬约束一节。
+
+    **人点过「这一页就是这一篇」的话,那一下就是答案,不许再按别的规则重判一次 ——
+    一路管到这一次操作做完为止**(`saved`:那张回执就是答案,见下面那一段)。
+    `intent_id` 就是那一下的身份(`/here/adopt` 把待办交回扩展,扩展带着它再问)。
+    **选不出来就不代选**(`undecided`,不带 `intent`,扩展于是一颗采集按钮都不给):
+    同一页上不止一个条目在等而人没点过,或者他点的那个已经失效。
+    准入那几道门证明的是「这一条写得了」,**证明不了「人刚才选的就是这一条」**。
+    丢掉身份、或者按创建时间代选的实测后果(正文写进另一篇、不可恢复)见
+    `docs/decisions/browser-capture.md`。
+
+    `elsewhere` 交回的是**除这一答用掉的那个之外、还等着的所有待办**(指着别页的,
+    和同一页上没被选中的)。这一项是承重的 —— 按语言跳转的站点只凭「这一页不在库
+    里」就请人收录会多出一行同一篇,而 `undecided` 全靠它把候选交出去;见决策文档。
     """
     page = page_url(url)
+    columns = ('SELECT feed_items.*, EXISTS (SELECT 1 FROM feed_item_exclusions'
+               ' WHERE key=feed_items.key) AS capture_excluded,'
+               f' {_OWED} AS owed FROM feed_items')
     with _lock:
         _prune()
-        with reg.db() as conn:
-            aliases = _page_aliases(url)
-            slots = ','.join('?' for name in aliases)
-            row = conn.execute(
-                'SELECT feed_items.*, EXISTS (SELECT 1 FROM feed_item_exclusions'
-                ' WHERE key=feed_items.key) AS capture_excluded,'
-                f' {_OWED} AS owed FROM feed_items'
-                f' WHERE url IN ({slots}) ORDER BY rowid LIMIT 1', aliases).fetchone()
-        def answered(situation: str, detail: str, intent: dict | None = None) -> dict:
-            # **`elsewhere` 一律在最后算。** 上面那个 `_create` 会把同一条目上
-            # 指着别处的旧待办标成 `superseded`,先算就会把刚被顶掉的那个摆出来、
-            # 请人「改用这一页的地址」,而它已经作废了。
+        # 指着**这一页**、而且还写得进去的那些待办。挑待办只许走 `_pending()`
+        # (「兑现不等于放行」,见决策文档)。
+        bound = sorted((one for one in _pending() if one['page_url'] == page),
+                       key=lambda one: one['created_at'])
+
+        def answered(situation: str, detail: str,
+                     item: dict | None = None, intent: dict | None = None) -> dict:
+            # **`elsewhere` 一律在最后算**(下面那个 `_create` 会把同一条目上指着
+            # 别处的旧待办标成 `superseded`,先算就把刚作废的那个摆出来了),而且
+            # **排掉的只有这一答用的那一个** —— 同一页上另一个条目的待办必须摆出
+            # 来,`undecided` 那一档正是靠它把候选交出去的。
             return dict(ok=True, page_url=page, situation=situation, detail=detail,
                         item=public(item) if item else None, intent=intent,
                         elsewhere=[other for other in _pending()
-                                   if other['page_url'] != page])
+                                   if other['id'] != (intent['id'] if intent else None)])
 
+        # **这一次操作已经写进去了:那张回执就是答案**,不许回到按网址、按「还剩哪
+        # 几个待办」重判(实测后果见决策文档)。`saved()` 读审计表,所以服务重启、
+        # 上传那一答在路上丢了,带着同一个身份再问照旧认得。
+        try:
+            done = saved(intent_id) if intent_id else None
+        except ValueError as changed:
+            return answered('refused', str(changed))   # 写进去之后又被别人改过了
+        except LookupError:
+            done = None     # 条目这期间被删了,下面「兑现不了就不代选」接住
+        if done and done['page_url'] == page:
+            return answered('saved', f"这一次采集已经写进这一条了。{done['receipt']['detail']}。", done)
+
+        # 人点过的那一下优先,而且是**唯一**的依据。
+        picked = next((one for one in bound if one['id'] == intent_id), None) if intent_id else None
+        if not picked:
+            # **带了显式身份、却兑现不了 —— 一律不代选。** 判据不许挂在「这一页还剩
+            # 几个待办」上:一个不剩时下面那条按网址查找会命中另一篇、再给它新建一个
+            # 合法待办,而 precheck/CAS/upload 验的只是「这个新待办写得了」,没有一道
+            # 在验「它还是人刚才选的那一篇」。形态见 docs/decisions/browser-capture.md。
+            undecided = bool(intent_id) or len({one['key'] for one in bound}) > 1
+            if undecided:
+                return answered('undecided',
+                                '你选的那个采集请求已经失效了。下面还在等的条目里点一下'
+                                '要补的那一篇；一个都没有就回采集抽屉里重新发起。'
+                                if intent_id else
+                                f'有 {len(bound)} 个条目都在等这一页的正文，'
+                                '点一下你要补的那一篇。')
+            picked = bound[0] if bound else None
+
+        with reg.db() as conn:
+            if picked:
+                row = conn.execute(columns + ' WHERE key=?', (picked['key'],)).fetchone()
+            else:
+                aliases = _page_aliases(url)
+                slots = ','.join('?' for name in aliases)
+                row = conn.execute(columns + f' WHERE url IN ({slots})'
+                                   ' ORDER BY rowid LIMIT 1', aliases).fetchone()
         item = dict(row) if row else None
         if not item:
             return answered('absent', '这一页还不在知识库里。')
         try:
             _checked_target(item)
         except (LookupError, ValueError) as why:
-            return answered('refused', str(why))
+            return answered('refused', str(why), item)
+        if picked:
+            # 人明确发起过:照它答,**不再按「正文欠不欠」重判一次**。正文已经齐了
+            # 的那一条正是「重新采集正文」会走到的形态,按 owed 降级成「齐了,没有
+            # 可做的事」就把那条出路堵死了。准入一道没少:这个待办要能走到这里,
+            # 上面 `_pending()` 的 `writable` 已经过了来源、排除和 CAS。
+            return answered('fill', '知识库里有这一条，但正文还缺着。' if item['owed']
+                            else '你为这一条发起过重新采集，这一页就是它指的那一篇。',
+                            item, picked)
         if not item['owed']:
             # 「在 `feed_items` 里有这一行」和「知识库里搜得到它」是两件事:导出、
             # 索引那半条链占不到管道、或者在保存之后服务重启,都会留下一条「在库
@@ -336,9 +395,8 @@ def here(url: str) -> dict:
             # 迟早把「文件不见了」说成「还在排队」。
             owed = grab_owing(item['url'])
             return answered('complete', '这一条已经在知识库里，正文也齐了。'
-                            + (f'不过{owed}。' if owed else ''))
-        intent = _create(item, page)
-        return answered('fill', '知识库里有这一条，但正文还缺着。', intent)
+                            + (f'不过{owed}。' if owed else ''), item)
+        return answered('fill', '知识库里有这一条，但正文还缺着。', item, _create(item, page))
 
 
 def _prune() -> None:
@@ -453,7 +511,7 @@ def _admit_body(body: str) -> tuple[str, str]:
 
     门槛是 `grab_page.body_confirmed`(按**行**去重之后的字数,见
     `readable.substance`)。扩展侧一度自己数原始长度:复读的登录提示页在那边
-    1367 字过线、这边去重只剩 260 字,于是人把整页读完、勾完确认才被拒。
+    1367 字过线、这边去重只剩 260 字,于是人把整页读完才被拒。
     **不许在扩展里再数一遍**。
     """
     body = body.replace('\r\n', '\n').replace('\r', '\n').strip()
@@ -539,8 +597,13 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
             raise ValueError(_NOT_PENDING)
         intent = _intents[identity]
         actual_url = state['page_url']
+        # `confirmed` 记的是**有没有人逐字看过这份正文**,不是「这次写入合不合法」。
+        # 扩展那道「我已核对」撤掉之后(取舍见 docs/decisions/browser-capture.md),
+        # 这条路上确实没人看过 —— 人选了这一页、点了采集,正文是提取器读的。
+        # 照旧记 True 就是第二句假证词,而 `manual_paste` 那条(人自己粘的)仍然是
+        # True:**两者在知识库里要分得出来,这里就是分得出来的地方。**
         provenance = dict(method='browser_' + method, page_url=actual_url,
-                          page_title=title, captured_at=reg.now(), confirmed=True)
+                          page_title=title, captured_at=reg.now(), confirmed=False)
         with reg.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             current = _items(conn, [intent['key']]).get(intent['key'])
@@ -587,7 +650,9 @@ def save_pasted(key: str, body: str, life: str = '') -> dict:
     `_admit_page`(浏览器交回来的网址规范化之后必须等于指定的最终网址),而粘贴
     压根没有「一页」可比 —— 断言正文属于这篇文章的是**人自己**,所以
     `body_provenance` 记 `manual_paste` 并且 `confirmed=True` 指的是「人确认过」,
-    不是「我们核对过那一页」。两者在知识库里要分得出来,这就是分得出来的地方。
+    不是「我们核对过那一页」。两者在知识库里要分得出来,这就是分得出来的地方 ——
+    **而且现在只有这一条路写得出 `confirmed=True`**:扩展那两条上那道「我已核对」
+    撤了,它们如实记 `False`(见 `save` 里那一段)。
 
     **互斥照旧待在 UPDATE 自己的 WHERE 里**(元规则),而且判据和扩展那条路**逐字
     相同**:key / 来源 / 原网址 / 正文指纹 / 修订号 / 非 X 观点 / 这一类来源准不准

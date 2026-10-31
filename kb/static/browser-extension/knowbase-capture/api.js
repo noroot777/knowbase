@@ -1,4 +1,4 @@
-/* 整站共用的 HTTP 错误解析:知识库页面(`index.html` / `browser-capture.html` 在
+/* 整站共用的 HTTP 错误解析:知识库页面(`index.html` 在
  * `ui.js` 之前加载它)和浏览器扩展各一份消费方,实现只有这一份。
  *
  * **不许写成 `(await r.json()).detail || '失败'`**:未捕获异常时 Starlette 回的是
