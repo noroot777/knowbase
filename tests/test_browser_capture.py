@@ -444,6 +444,29 @@ class BrowserCaptureTests(CaptureCase):
         text = (browser_capture_api.ROOT / page).read_text(encoding='utf-8')
         self.assertLess(text.index('knowbase-capture/api.js'), text.index('/static/js/ui.js'), page)
 
+    def test_setup_answers_where_to_install_and_nothing_about_pairing(self):
+        """`/setup` 只答一件事:装哪个目录。
+
+        它曾经捎一个 `used_before` 回去(判据是 `browser_capture_audit` 里有没有过一
+        行),抽屉据此决定首次引导摆在哪 —— 而那是**另一个范畴的事实**:回执是全库
+        共享的历史,引导问的是此刻**这个浏览器**的配对状态。错位出来的两种形态:
+        ①另一个浏览器采成过一次,于是这个还没配对的也看不到引导,他只会点下「发起
+        采集」然后等一个永远不来的采集;②只用「改用这一页的正文」收录新链接的人一直
+        有配对,那条路只写 `body_provenance`、从不插审计表,引导就永远摊在他眼前。
+        那一问搬去扩展自己在页面上答(`present.js`,回归 `tests/capture_present_mark.mjs`)。
+
+        **按整个键集比,不只问「有没有 `used_before`」** —— 换个名字再捎同一个事实
+        回去是同一个错,而那样写只问有无的用例会全绿。
+        """
+        self.assertEqual(200, self.upload(self.intent()).status_code)
+        with reg.db() as conn:
+            self.assertEqual(1, conn.execute('SELECT count(*) FROM browser_capture_audit')
+                             .fetchone()[0], '回执确实写进去了 —— 下面那一答照旧不许提它')
+        answer = self.client.get('/api/browser-capture/setup')
+        self.assertEqual(200, answer.status_code)
+        self.assertEqual({'extension_dir'}, set(answer.json()))
+        self.assertTrue(answer.json()['extension_dir'].endswith('knowbase-capture'))
+
     def test_item_state_restores_latest_saved_receipt_without_an_intent_id(self):
         original = self.intent()
         self.assertEqual(200, self.upload(original).status_code)

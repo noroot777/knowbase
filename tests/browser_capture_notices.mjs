@@ -44,7 +44,8 @@ const context = vm.createContext({
   URLSearchParams, Date, JSON, setImmediate,
   window: {},
   overlayClosers: {},
-  document: {getElementById: element, createElement: node, body: {append() {}}},
+  document: {getElementById: element, createElement: node, body: {append() {}},
+             documentElement: {dataset: {knowbaseCapture: '1.2.0'}}},
   location: {search: '?item=fixture', origin: 'http://127.0.0.1'},
   navigator: {clipboard: {writeText: async () => { throw new Error('Permission denied'); }}},
   toast: (text, options) => notices.push({text, options}),
@@ -52,7 +53,7 @@ const context = vm.createContext({
   setTimeout(callback) { scheduled = callback; return 1; }, clearTimeout() {},
   apiResponse: async response => response,
   fetch: async url => {
-    if (url.endsWith('/setup')) return {json: async () => ({extension_dir: '/repo/ext', used_before: true})};
+    if (url.endsWith('/setup')) return {json: async () => ({extension_dir: '/repo/ext'})};
     if (url.endsWith('/pairing')) {
       if (pairingFails) throw new Error('Pairing <unavailable>');
       return {key: 'fixture-secret'};

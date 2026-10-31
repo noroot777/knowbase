@@ -6,27 +6,19 @@
  * 关卡还是脚本渲染,人的下一步都一样;④读页之前先问一次,**两问都过就直接收录**
  * (预览区连同那道「我已核对」撤了),标题和字数都用服务端那一份;⑤「改用所选
  * 文字」真的把 `selection` 交给 `extract.js`,也照样直接收录;⑥收下之后刷新失败
- * 不许报成提交失败;⑦正文已齐的那一页一颗按钮都不给;⑧**有待办指着另一个地址时
- * 把它摆出来**(站点按浏览器语言跳转那一类,只说一句「不在库里」会让人收录出第二
- * 行同一篇文章),「改用它」交的是这一页的地址;⑨配对密钥用一次不依赖当前标签的
- * 调用验;⑩结构上不许按失败文案分流,预览那一支也不许回来。
+ * 不许报成提交失败;⑦正文已齐的那一页一颗按钮都不给;⑧**有待办指着别的地址时有几条
+ * 就摆几条**(站点按浏览器语言跳转那一类,只说一句「不在库里」会让人收录出第二行同一
+ * 篇文章),逐行那颗「改用它」交的是这一页的地址和**那一行**的条目;⑨配对密钥用一次
+ * 不依赖当前标签的调用验;⑩结构上不许按失败文案分流,预览那一支也不许回来。
  * 硬约束见 docs/decisions/link-grab.md 与 browser-capture.md。
  */
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
+import {popupDom} from './popup_dom.mjs';
 
 const PAGE = 'https://example.org/posts/hello';
-const elements = new Map();
-function element(id) {
-  if (!elements.has(id)) elements.set(id, {
-    value: '', textContent: '', checked: false, disabled: false, hidden: false, open: false,
-    classList: {toggle() {}, add() {}, remove() {}},
-    append() {}, replaceChildren() {},
-    addEventListener(name, callback) { this[name] = callback; }
-  });
-  return elements.get(id);
-}
+const {element, document} = popupDom();
 
 //: 服务端那一答。每个用例改这一份,扩展只负责把它摆成界面。
 let here = {ok: true, situation: 'absent', detail: '这一页还不在知识库里。',
@@ -41,7 +33,7 @@ const captured = {page_url: PAGE, title: '页面标题', body: 'x'.repeat(1500),
 
 const context = vm.createContext({
   URL, Date, JSON, encodeURIComponent,
-  document: {getElementById: element, createElement: () => ({})},
+  document,
   chrome: {
     tabs: {query: async () => [tab]},
     scripting: {executeScript: async ({files, args}) => {
@@ -159,21 +151,32 @@ assert.match(element('status').textContent, /已收下/, '收下了就该说收�
 assert.doesNotMatch(element('status').textContent, /刷新状态失败/);
 hereReply = null;
 
-// ⑦ 有待办指着另一个地址:摆出来,并且「改用它」交的是**这一页**的地址。
-//    站点按浏览器语言跳转那一类里,只说一句「不在库里」就请人收录,库里立刻
-//    多出一行同一篇文章。
+// ⑦ 有待办指着别的地址:**有几条就摆几条**,每行自带一颗「改用它」,交的是**这一页**
+//    的地址加**那一行**的条目。站点按浏览器语言跳转那一类里,只说一句「不在库里」就
+//    请人收录,库里立刻多出一行同一篇文章;而两个条目的待办同时指着别处时(人把最终
+//    网址粘错了),他正站着的这一页偏偏可能是**第二条** —— 只画第一条等于一颗按钮都
+//    对不上,只能回采集抽屉里一条条改地址,而扩展这一侧存在的理由恰恰是不必回去。
 here = {ok: true, situation: 'absent', detail: '这一页还不在知识库里。', page_url: PAGE,
         item: null, intent: null,
-        elsewhere: [{id: 'i1', key: 'k7', title: '那一篇', page_url: 'https://example.org/en/posts/hello'}]};
+        elsewhere: [{id: 'i1', key: 'k7', title: '那一篇', page_url: 'https://example.org/en/posts/hello'},
+                    {id: 'i2', key: 'k8', title: '另一篇', page_url: 'https://example.org/en/posts/world'}]};
 calls.length = 0;
 await element('refresh').click();
-assert.equal(element('elsewhere').hidden, false, '那个待办要摆在人眼前');
-assert.equal(element('elsewhere-title').textContent, '那一篇');
-assert.match(element('elsewhere-url').textContent, /\/en\/posts\/hello/);
-await element('adopt').click();
+assert.equal(element('elsewhere').hidden, false, '那些待办要摆在人眼前');
+const rows = element('elsewhere-list').children;
+assert.deepEqual(rows.map(row => row.children[0].textContent), ['那一篇', '另一篇'],
+  '有几条就摆几条,顺序照服务端那一答');
+assert.deepEqual(rows.map(row => row.children[1].textContent),
+  ['https://example.org/en/posts/hello', 'https://example.org/en/posts/world']);
+const adoptions = element('elsewhere-list').querySelectorAll('button');
+assert.deepEqual(adoptions.map(one => one.textContent),
+  ['这一页就是这一篇，改用它', '这一页就是这一篇，改用它'], '每行那颗都得有名字');
+// 点**第二行**那一颗:只认 `elsewhere[0]` 的写法在这里会交成 k7。
+await adoptions[1].click();
 const adopted = calls.find(c => c.path === '/api/browser-capture/here/adopt');
 assert.ok(adopted, '「改用它」该走 adopt');
-assert.deepEqual(adopted.sent, {key: 'k7', page_url: PAGE}, '交的是这一页的地址');
+assert.deepEqual(adopted.sent, {key: 'k8', page_url: PAGE},
+  '交的是点中那一行的条目,和这一页的地址');
 
 // ⑧ 反过来钉一边:没有这种待办时那一块不露面
 here = {...here, elsewhere: []};

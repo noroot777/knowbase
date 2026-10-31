@@ -9,17 +9,9 @@
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import vm from 'node:vm';
+import {popupDom} from './popup_dom.mjs';
 
-const elements = new Map();
-function element(id) {
-  if (!elements.has(id)) elements.set(id, {
-    value: '', textContent: '', checked: false, disabled: false, hidden: false, open: false,
-    classList: {toggle() {}, add() {}, remove() {}},
-    append() {}, replaceChildren() {},
-    addEventListener(name, callback) { this[name] = callback; }
-  });
-  return elements.get(id);
-}
+const {element, document} = popupDom();
 
 const INTENT = {id: 'i1', key: 'k1', title: '文章', page_url: 'https://e.org/%E6%96%87%E7%AB%A0',
   created_at: 1.79e9, expires_at: 1.79e9 + 900, status: 'pending'};
@@ -37,7 +29,7 @@ const captured = {page_url: 'https://e.org/文章', title: '文章', body: 'x'.r
 
 const context = vm.createContext({
   URL, Date, JSON,
-  document: {getElementById: element, createElement: () => ({})},
+  document,
   chrome: {
     tabs: {query: async () => [tab]},
     scripting: {executeScript: async ({files}) => { injections += 1; return files ? [{}] : [{result: captured}]; }},

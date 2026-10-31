@@ -25,7 +25,11 @@ button:disabled { opacity:.45; cursor:not-allowed; }
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible { outline:2px solid var(--brand); outline-offset:2px; }
 summary { color:var(--brand); cursor:pointer; }
 .url { overflow-wrap:anywhere; font-size:11px; color:var(--muted); }
-#here .t { font-weight:600; font-size:13px; margin:0 0 4px; line-height:1.5; }
+.t { font-weight:600; font-size:13px; margin:0 0 4px; line-height:1.5; }
+#elsewhere-list { list-style:none; margin:0; padding:0; }
+#elsewhere-list li { padding:10px 0; border-top:1px solid var(--line); }
+#elsewhere-list li:first-child { padding-top:0; border-top:0; }
+#elsewhere-list button { margin-top:8px; }
 #here-state { margin:0 0 6px; }
 #status { color:var(--brand); }
 #status:empty { display:none; }

@@ -19,7 +19,9 @@
     busy = value;
     for (const name of ['act', 'act-page', 'act-selection'])
       element(name).disabled = value || !situation;
-    for (const name of ['connect', 'refresh', 'adopt']) element(name).disabled = value;
+    for (const name of ['connect', 'refresh']) element(name).disabled = value;
+    // 「改用它」有几颗要看服务端交回几个待办,所以从那张列表上现读,不记一份名单。
+    for (const button of element('elsewhere-list').querySelectorAll('button')) button.disabled = value;
   }
 
   function localServer(value) {
@@ -125,16 +127,42 @@
       element('act-page').textContent = '改用这一页的正文';
       element('act-selection').textContent = plan.selection;
     }
-    // 等着的那个待办指着另一个地址 —— **这一项是承重的**。站点按浏览器语言跳转
-    // 时(`openai.com/index/x` → `/zh-Hans-CN/index/x`)按网址一问是「不在库里」,
-    // 只凭这一句就请人收录的话,库里立刻多出一行同一篇文章。把那个待办摆出来、
-    // 给一颗「改用这一页的地址」,他一眼就看出是同一篇。
-    const other = (situation && situation.elsewhere && situation.elsewhere[0]) || null;
-    element('elsewhere').hidden = !other;
-    if (other) {
-      element('elsewhere-title').textContent = other.title;
-      element('elsewhere-url').textContent = plainUrl(other.page_url);
-    }
+    renderElsewhere();
+  }
+
+  //: 等着的、但指着另一页的那些待办 —— **这一项是承重的**。站点按浏览器语言跳转
+  //: 时(`openai.com/index/x` → `/zh-Hans-CN/index/x`)按网址一问是「不在库里」,
+  //: 只凭这一句就请人收录的话,库里立刻多出一行同一篇文章。把那个待办摆出来、
+  //: 给一颗「改用这一页的地址」,他一眼就看出是同一篇。
+  //:
+  //: **有几条就摆几条**(服务端一直交回全部,`here()` 只排掉这一答自己用掉的那个)。
+  //: 原先只画 `elsewhere[0]`、adopt 也只认 `[0]`:两个条目的待办同时指着别处时
+  //: (人把最终网址粘错了),他正站着的这一页偏偏是第二条,那就一颗按钮都对不上 ——
+  //: 只能回采集抽屉里一条条改地址,而扩展这一侧存在的理由恰恰是不必回去。
+  //:
+  //: 每行自己那颗按钮在这里当场绑上:这些行每次重画都是新元素,**按 id 绑一次**的
+  //: 写法重画之后点下去什么都不会发生。标题和网址一律 `textContent` —— 它们来自
+  //: 订阅源,拿 innerHTML 拼等于把源站的字当标记送进弹窗这个有 `chrome.*` 的上下文。
+  function renderElsewhere() {
+    const others = (situation && situation.elsewhere) || [];
+    element('elsewhere').hidden = !others.length;
+    element('elsewhere-list').replaceChildren(...others.map(other => {
+      const row = document.createElement('li');
+      const title = document.createElement('p');
+      title.className = 't';
+      title.textContent = other.title;
+      const address = document.createElement('p');
+      address.className = 'url';
+      address.textContent = plainUrl(other.page_url);
+      const adopt = document.createElement('button');
+      adopt.className = 'secondary';
+      adopt.type = 'button';
+      adopt.disabled = busy;
+      adopt.textContent = '这一页就是这一篇，改用它';
+      adopt.addEventListener('click', () => adoptHere(other.key));
+      row.append(title, address, adopt);
+      return row;
+    }));
   }
 
   // 在那个标签上读一次正文。**补正文和收录共用**:同一个提取器、同一句错误话术。
@@ -243,21 +271,19 @@
     finally { setBusy(false); }
   }
 
-  // 「这一页就是那一篇,改用它」—— 和采集抽屉上那颗「改用这个地址」同一个动作、
+  // 「这一页就是这一篇,改用它」—— 和采集抽屉上那颗「改用这个地址」同一个动作、
   // 同一个 `create`(旧待办由服务端顶掉,不是先取消再发起),只是搬到了人所在的
   // 地方。**不是放行**:正文照旧要过服务端那一整套准入。
-  element('adopt').addEventListener('click', async () => {
-    const other = (situation && situation.elsewhere && situation.elsewhere[0]) || null;
-    if (busy || !here || !other) return;
+  async function adoptHere(key) {
+    if (busy || !here) return;
     setBusy(true);
     try {
-      await api('/here/adopt', {method: 'POST',
-                                body: JSON.stringify({key: other.key, page_url: here.url})});
+      await api('/here/adopt', {method: 'POST', body: JSON.stringify({key, page_url: here.url})});
       await loadHere();
       status('已改用这一页的地址。');
     } catch (error) { status(error.message, true); }
     finally { setBusy(false); }
-  });
+  }
   element('connect').addEventListener('click', async () => {
     if (busy) return;
     setBusy(true);

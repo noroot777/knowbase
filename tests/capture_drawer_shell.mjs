@@ -9,7 +9,9 @@
  *   —— 状态机里那个「只绑一次」的标志会让第二次打开起每一颗按钮都没有监听器:
  *   界面完整、数据也在、点下去什么都不发生。
  * - 扩展没装、密钥没配的人,那一栏网址和「发起采集」对他毫无意义;那一块要是收在
- *   整屏最下面的折叠块里,他只会点下发起,然后等一个永远不来的采集。
+ *   整屏最下面的折叠块里,他只会点下发起,然后等一个永远不来的采集。**而「配过没有」
+ *   只有扩展自己知道** —— 它在页面上留一个 data 属性,这里读那一个;原先问的是服务端
+ *   「全库有没有一张采集回执」,那是另一个范畴的事实,换浏览器、重装扩展都看不出来。
  *
  * 所以这里的假 DOM **照着真实生命周期走**:抽屉 remove 掉,它底下那些元素就跟着
  * 作废。否则第二条根本测不出来 —— 元素留着的话,第一次绑的监听器也还留着。
@@ -44,7 +46,9 @@ let current = 'k1';
 const state = () => ({key: current, title: '文章', url: ITEMS[current], kind: 'rss',
   pending: [], saved: null, saved_error: ''});
 let fetches = 0;
-let usedBefore = true;
+//: 非空 = 扣住 `/setup` 那一答,好检查首次引导的位置是不是已经定下来了。
+let releaseSetup = null;
+let holdSetup = false;
 //: 「发起浏览器采集」那一问:扣住不答,好让人在它在途的时候关掉抽屉。
 let createGate = null;
 const timers = new Map();
@@ -52,7 +56,9 @@ let nextTimer = 1;
 const context = vm.createContext({
   URLSearchParams, Date, JSON, setImmediate,
   window: {}, overlayClosers: {},
-  document: {getElementById: element, createElement: node, body: {append() {}}},
+  document: {getElementById: element, createElement: node, body: {append() {}},
+             //: 扩展留标记的地方(`present.js` 的 `data-knowbase-capture`)。
+             documentElement: {dataset: {}}},
   location: {search: '', origin: 'http://127.0.0.1'},
   navigator: {clipboard: {writeText: async () => {}}},
   toast: () => {}, confirmBox: async () => false,
@@ -60,7 +66,11 @@ const context = vm.createContext({
   clearTimeout(id) { timers.delete(id); },
   apiResponse: async reply => reply,
   fetch: async (url, options = {}) => {
-    if (url.endsWith('/setup')) return {json: async () => ({extension_dir: '/repo/ext', used_before: usedBefore})};
+    if (url.endsWith('/setup')) {
+      const answer = {json: async () => ({extension_dir: '/repo/ext'})};
+      if (!holdSetup) return answer;
+      return new Promise(ok => { releaseSetup = () => ok(answer); });
+    }
     if (url.endsWith('/intents') && options.method === 'POST')
       return new Promise((ok, no) => { createGate = {ok, no}; });
     fetches += 1;
@@ -115,21 +125,40 @@ await settle();
 assert.equal(element('cap-page-url').value, ITEMS.k2, '换一条打开时这一栏要填上新这条的原网址');
 current = 'k1';
 
-// ⑤ 没采成过:装扩展那一块摆在最上面、摊开;采成过:收进底部折叠块。
+// ⑤ 这个浏览器没配过扩展:装扩展那一块摆在最上面、摊开;配过了:收进底部折叠块。
+const mark = context.document.documentElement.dataset;
 context.window.closeCaptureDrawer();
-usedBefore = false;
+delete mark.knowbaseCapture;
 context.window.openCaptureDrawer('k1');
 await settle();
-assert.match(element('cap-setup-slot').innerHTML, /cap-setup/, '首次使用时这一块要摆在最上面');
-assert.doesNotMatch(element('cap-setup-slot').innerHTML, /<details/, '首次使用时不许把它折起来');
-assert.equal(element('cap-setup-folded').innerHTML, '', '首次使用时底部那块应当是空的');
+assert.match(element('cap-setup-slot').innerHTML, /cap-setup/, '没配过时这一块要摆在最上面');
+assert.doesNotMatch(element('cap-setup-slot').innerHTML, /<details/, '没配过时不许把它折起来');
+assert.equal(element('cap-setup-folded').innerHTML, '', '没配过时底部那块应当是空的');
 
 context.window.closeCaptureDrawer();
-usedBefore = true;
+mark.knowbaseCapture = '1.2.0';
 context.window.openCaptureDrawer('k1');
 await settle();
-assert.match(element('cap-setup-folded').innerHTML, /<details/, '用过之后它应当收进折叠块');
-assert.equal(element('cap-setup-slot').innerHTML, '', '用过之后顶部不该再占一大块');
+assert.match(element('cap-setup-folded').innerHTML, /<details/, '配过之后它应当收进折叠块');
+assert.equal(element('cap-setup-slot').innerHTML, '', '配过之后顶部不该再占一大块');
+
+// ⑤b 上面两条的**结构面**:判据既然是本地事实,位置就该在 `/setup` 答之前定下来。
+//     谁再把它挂回某个服务端字段(原先是 `used_before` —— 全库审计表里有没有过一行),
+//     这一条当场红。那张表答的是另一个问题:另一个浏览器采成过一次,这个还没配对的
+//     就看不到引导了;反过来只用「改用这一页的正文」收录的人一直有配对却从不写回执,
+//     引导永远摊在他眼前。`/setup` 那一问只剩一件事:装哪个目录。
+context.window.closeCaptureDrawer();
+delete mark.knowbaseCapture;
+holdSetup = true;
+context.window.openCaptureDrawer('k1');
+await settle();
+assert.match(element('cap-setup-slot').innerHTML, /cap-setup/, '不许等服务端答完才决定摆在哪');
+assert.equal(element('cap-ext-path').textContent, '', '要等那一问的只有「装哪个目录」这一栏');
+releaseSetup();
+await settle();
+assert.equal(element('cap-ext-path').textContent, '/repo/ext', '答回来了就把目录填上');
+holdSetup = false;
+mark.knowbaseCapture = '1.2.0';
 
 // ⑥ **关掉抽屉时正有一个写动作在途**:它回来之后不许把轮询重新排起来。
 //    `stopCapture()` 作废得了在途的那次 `refresh`,作废不了「发起 / 取消 / 改址 /

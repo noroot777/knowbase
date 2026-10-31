@@ -20,8 +20,8 @@
   //: 关掉再打开之后那是**另一个**抽屉,旧续体会往新抽屉里写。
   let generation = 0;
 
-  //: 抽屉里那一整套。`cap-setup` 那一块的位置是会变的:没采成过时它在最上面且摊开
-  //: (见 `renderSetup`),采成过之后收进底部的 <details>。
+  //: 抽屉里那一整套。`cap-setup` 那一块的位置是会变的:这个浏览器还没配过扩展时它
+  //: 在最上面且摊开(见 `renderSetup`),配过之后收进底部的 <details>。
   //:
   //: **不加次级标题,也不复述下面那样东西是什么。** 原先每块都顶着一行标题(「这次
   //: 补哪一篇」「这篇文章正在等待的采集」),每个输入框下面还跟一句说明它行为的小字
@@ -109,31 +109,44 @@
     document.body.append(mask, drawer);
   }
 
-  //: 没采成过 → 摆在最上面、摊开;采成过 → 收进底部那个折叠块。
+  //: **「这个浏览器里装了扩展、而且配过」** —— 只有扩展自己知道,所以它在回环地址
+  //: 的页面上标一个 data 属性(`present.js`),这里读那一个。
+  //:
+  //: 原先问的是服务端 `/setup` 的 `used_before`(审计表里有没有过一行)。那是**另一个
+  //: 范畴的事实**:回执是全库共享的历史,而这里要决定的是此刻这个浏览器要不要看引导。
+  //: 错位出来的两种形态都真会发生 —— 另一个浏览器采成过一次,这个还没配对的就看不到
+  //: 引导了;反过来,只用「改用这一页的正文」收录新链接的人一直有配对,那条路却只写
+  //: `body_provenance`、从不插审计表,引导永远摊在他眼前。
+  const paired = () => !!document.documentElement.dataset.knowbaseCapture;
+
+  //: 没配过 → 摆在最上面、摊开;配过 → 收进底部那个折叠块。
   //: **位置和折叠状态一起变**:只把 <details> 默认打开的话,它还是在整屏最下面,
   //: 而首次使用的人恰恰是最需要先看到它的那一个 —— 扩展没装、密钥没配,上面那栏
   //: 网址和「发起采集」对他毫无意义,点下去只会等一个永远不来的采集。
+  //:
+  //: **位置先定下来,不等服务端那一问。** 判据本来就是本地事实;等 `/setup` 回来再摆
+  //: 的话,这一大块会在首次使用的人眼前跳一下,而那一问只是去取装哪个目录。
   async function renderSetup() {
     const gen = generation;
     const top = document.getElementById('cap-setup-slot');
     const folded = document.getElementById('cap-setup-folded');
     if (!top || !folded) return;
-    let info = {extension_dir: '', used_before: true};
-    try { info = await (await fetch('/api/browser-capture/setup', {cache: 'no-store'})).json(); }
-    catch { /* 读不到就按「用过」办:至少不会在老用户面前把这一大块顶到最上面 */ }
-    if (!current(gen)) return;
-    if (info.used_before) {
+    if (paired()) {
       folded.innerHTML = `<details><summary>装扩展与配对</summary>${SETUP}</details>`;
       top.replaceChildren();
     } else {
       top.innerHTML = `<section class="cap-setup">${SETUP}</section>`;
       folded.replaceChildren();
     }
-    const path = document.getElementById('cap-ext-path');
-    if (path) path.textContent = info.extension_dir || '（读取失败，请改用下载 ZIP）';
     const service = document.getElementById('cap-service-url');
     if (service) service.textContent = location.origin;
     bindSetup(gen);
+    let directory = '';
+    try { directory = (await (await fetch('/api/browser-capture/setup', {cache: 'no-store'})).json()).extension_dir; }
+    catch { /* 下面按读取失败办,改让他下载 ZIP */ }
+    if (!current(gen)) return;
+    const path = document.getElementById('cap-ext-path');
+    if (path) path.textContent = directory || '（读取失败，请改用下载 ZIP）';
   }
 
   function bindSetup(gen) {

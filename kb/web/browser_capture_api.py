@@ -55,7 +55,7 @@ EXTENSION_DIR = ROOT / 'kb/static/browser-extension/knowbase-capture'
 
 @router.get('/api/browser-capture/setup', dependencies=[Depends(app_access)])
 def setup():
-    """装扩展这一步要知道的两件事:装哪个目录,以及这台机器上采成过没有。
+    """装扩展这一步只要知道一件事:装哪个目录。
 
     **目录给的是绝对路径,不是只给一个 ZIP。** 这个扩展是「加载已解压的扩展程序」
     装的,而仓库里本来就躺着那个目录 —— 下载再解压一份等于把同一份代码在磁盘上放
@@ -63,21 +63,22 @@ def setup():
     仓库里这一份,改完在扩展管理页点一次「重新加载」就生效(弹窗头部那个版本号就是
     用来确认这一下点过没有的)。ZIP 留着,给「浏览器不在这台机器上」那种情形。
 
-    `used_before` 只决定首次那一块摆在哪、摊不摊开。判据是审计表里有没有过一行 ——
-    那张回执只有扩展真的采成一次才写得进去,所以它为真就意味着装过也配对过。
-    **边界落在安全那一侧**:配对了、还没采成过的人照旧看到摊开的那一块,而他确实
-    还没走完首次流程。
+    **这里不回答「配过没有」。** 它曾经捎一个 `used_before` 回去(判据是
+    `browser_capture_audit` 里有没有过一行),抽屉据此决定首次引导摆在哪 —— 而那是
+    **另一个范畴的事实**:回执是全库共享的历史,引导问的是此刻**这个浏览器**的配对
+    状态。服务端手上根本没有后者,它只知道密钥存在、以及有人拿着密钥来过 —— 换个
+    浏览器、重装一次扩展,它一个字都看不出来。那一问现在由扩展自己在页面上回答
+    (`present.js` 标一个 data 属性),这张回执表回到它本来的职责:记采集回执。
     """
-    with capture.reg.db() as conn:
-        used = conn.execute('SELECT 1 FROM browser_capture_audit LIMIT 1').fetchone()
-    return {'extension_dir': str(EXTENSION_DIR), 'used_before': bool(used)}
+    return {'extension_dir': str(EXTENSION_DIR)}
 
 
 @router.get('/api/browser-capture/extension.zip', dependencies=[Depends(app_access)])
 def extension_download():
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
-        for name in ('manifest.json', 'popup.html', 'popup.css', 'popup.js', 'api.js', 'extract.js', 'README.md'):
+        for name in ('manifest.json', 'popup.html', 'popup.css', 'popup.js', 'api.js',
+                     'extract.js', 'present.js', 'README.md'):
             bundle.write(EXTENSION_DIR / name,
                          'knowbase-capture/' + name)
     return Response(archive.getvalue(), media_type='application/zip',

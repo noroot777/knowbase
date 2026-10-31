@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Knowbase · 采集此页",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "由你主动读取当前文章，直接采进本机 Knowbase。不扫描其他标签，不读取 Cookie。",
   "permissions": ["activeTab", "scripting", "storage"],
   "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "content_scripts": [{"matches": ["http://127.0.0.1/*", "http://localhost/*"], "js": ["present.js"]}],
   "action": {"default_title": "采集此页到 Knowbase", "default_popup": "popup.html"},
   "commands": {"_execute_action": {"suggested_key": {"default": "Ctrl+Shift+Y", "mac": "Command+Shift+Y"}, "description": "采集当前页面"}}
 }
