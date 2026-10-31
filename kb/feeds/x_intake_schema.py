@@ -3,7 +3,7 @@
 SCHEMA = '''
 CREATE TABLE IF NOT EXISTS x_intake_sources (
  source_id INTEGER PRIMARY KEY, identity TEXT NOT NULL, channel TEXT NOT NULL,
- floor TEXT NOT NULL, latest TEXT NOT NULL DEFAULT '', covered TEXT NOT NULL DEFAULT '',
+ floor TEXT NOT NULL, window_end TEXT NOT NULL DEFAULT '', latest TEXT NOT NULL DEFAULT '', covered TEXT NOT NULL DEFAULT '',
  coverage_end TEXT NOT NULL DEFAULT '',
  discovery TEXT NOT NULL DEFAULT 'unattempted', gap TEXT NOT NULL DEFAULT '',
  scan_at REAL NOT NULL DEFAULT 0, history_at REAL NOT NULL DEFAULT 0,

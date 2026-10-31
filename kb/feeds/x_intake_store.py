@@ -13,6 +13,43 @@ from kb.feeds import x_intake_retention as retention
 from kb.maintenance import maintenance_lock
 
 
+_PHASE_FIELDS = {'discovery': ('scan_at',), 'history': ('history_at',),
+                 'recovery': ('history_at',), 'combined': ('scan_at', 'history_at')}
+
+
+def _phase_fields(phase):
+    if phase not in _PHASE_FIELDS:
+        raise ValueError(f'未知 X 扫描阶段：{phase}')
+    return _PHASE_FIELDS[phase]
+
+
+def _coverage_gap(covered, coverage_end, floor, end):
+    if covered and coverage_end and utc(covered) <= utc(floor) and utc(coverage_end) >= utc(end):
+        return ''
+    return '最近五天仍有历史缺口'
+
+
+def _confirmed_progress(progress, phase, incomplete, observed, boundary, end, proven):
+    fields = _phase_fields(phase)
+    covered, coverage_end = progress['covered'], progress['coverage_end']
+    if proven:
+        if utc(boundary) is None or utc(end) is None or utc(boundary) > utc(end):
+            raise ValueError('X 覆盖证明必须提供有效的连续区间')
+        connected = (covered and coverage_end and utc(boundary) <= utc(coverage_end)
+                     and utc(end) >= utc(covered))
+        if connected:
+            covered = min(covered, boundary, key=utc)
+            coverage_end = max(coverage_end, end, key=utc)
+        elif not coverage_end or utc(end) >= utc(coverage_end):
+            covered, coverage_end = boundary, end
+    gap = _coverage_gap(covered, coverage_end, progress['floor'], progress['window_end'] or end)
+    if gap and 'history_at' in fields and incomplete:
+        gap = incomplete
+    discovery = ('complete' if proven else 'partial') if 'scan_at' in fields else progress['discovery']
+    latest = max(filter(None, [progress['latest'], observed]), key=utc, default='')
+    return covered, coverage_end, gap, discovery, latest
+
+
 def db():
     return reg.db(timeout=0)
 
@@ -82,10 +119,12 @@ def prepare(sources, channel, now):
                 conn.execute('DELETE FROM x_intake_links WHERE source_id=?', (source['id'],))
                 conn.execute('DELETE FROM x_intake_sources WHERE source_id=?', (source['id'],))
                 previous = None
-            conn.execute('''INSERT INTO x_intake_sources(source_id,identity,channel,floor,gap)
-                VALUES(?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
-                floor=excluded.floor,discovery='unattempted',error='' ''',
-                (source['id'], identity(source), channel, floor, '最近五天尚未确认完整覆盖'))
+            conn.execute('''INSERT INTO x_intake_sources(source_id,identity,channel,floor,window_end,gap)
+                VALUES(?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
+                floor=excluded.floor,window_end=excluded.window_end,gap=excluded.gap,discovery='unattempted',error='' ''',
+                (source['id'], identity(source), channel, floor, now.isoformat(),
+                 _coverage_gap(previous['covered'], previous['coverage_end'], floor, now.isoformat())
+                 if previous else '最近五天尚未确认完整覆盖'))
             retention.expire(conn, source['id'], identity(source), floor, now)
             batches.expire(conn, source['id'], identity(source), floor)
             expired = retention.recent(conn, source['id'], identity(source), now)
@@ -118,6 +157,7 @@ def needs_repair(conn, entry):
 
 
 def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary='', end='', batch_id=''):
+    fields = _phase_fields(phase)
     reused = 0
     now = time.time() if now is None else now
     with maintenance_lock(wait=0), db() as conn:
@@ -152,19 +192,16 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
             conn.execute('INSERT OR IGNORE INTO x_intake_links(source_id,identity,post_id) VALUES(?,?,?)',
                          (source['id'], identity(source), identifier))
             batches.add(conn, batch_id, identifier)
-        latest = max(filter(None, [progress['latest'], observed]), default='')
-        covered = progress['covered']
-        gap = incomplete or '时间线响应尚待会话收尾确认'
-        column = 'scan_at' if phase == 'discovery' else 'history_at'
-        discovery = ('partial' if incomplete else 'complete') if phase == 'discovery' else progress['discovery']
-        conn.execute(f'''UPDATE x_intake_sources SET latest=?,covered=?,gap=?,discovery=?,
-            {column}=?,error='' WHERE source_id=?''',
-            (latest, covered, gap, discovery, now, source['id']))
+        columns = ','.join(f'{field}=?' for field in fields)
+        discovery = 'partial' if 'scan_at' in fields else progress['discovery']
+        conn.execute(f'UPDATE x_intake_sources SET {columns},discovery=? WHERE source_id=?',
+                     (*([now] * len(fields)), discovery, source['id']))
     return reused
 
 
 def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end='', coverage_complete=False,
             batch_id=''):
+    fields = _phase_fields(phase)
     with maintenance_lock(wait=0), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
@@ -177,21 +214,13 @@ def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end=
                 conn.execute('UPDATE x_intake_links SET confirmed=1 WHERE source_id=? AND identity=? AND post_id=?',
                              (source['id'], identity(source), post_id(entry)))
         progress = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=?', (source['id'],)).fetchone()
-        covered = progress['covered']
-        coverage_end = progress['coverage_end']
         proven = coverage_complete is True and incomplete == ''
-        if proven:
-            connected = coverage_end and utc(boundary) <= utc(coverage_end)
-            covered = min(filter(None, [covered, boundary])) if connected else boundary
-            coverage_end = max(coverage_end, end or observed or boundary)
-            if phase == 'history' or phase == 'recovery':
-                batches.recover(conn, source['id'], identity(source), boundary, end or observed or boundary)
-        gap = incomplete or ('' if proven and covered and utc(covered) <= utc(progress['floor']) else
-                             '最近五天仍有历史缺口' if proven else '时间线完整性尚未确认')
-        discovery = 'complete' if proven else 'partial' if phase == 'discovery' else progress['discovery']
-        conn.execute('UPDATE x_intake_sources SET covered=?,coverage_end=?,gap=?,discovery=?,latest=? WHERE source_id=?',
-                     (covered, coverage_end, gap, discovery,
-                      max(progress['latest'], observed), source['id']))
+        end = end or observed or boundary
+        state = _confirmed_progress(progress, phase, incomplete, observed, boundary, end, proven)
+        if proven and 'history_at' in fields:
+            batches.recover(conn, source['id'], identity(source), boundary, end)
+        conn.execute("UPDATE x_intake_sources SET covered=?,coverage_end=?,gap=?,discovery=?,latest=?,error='' WHERE source_id=?",
+                     (*state, source['id']))
     return True
 
 
@@ -206,13 +235,14 @@ def progress(source):
 
 
 def attempt(source, phase, reason=''):
-    column = 'scan_at' if phase == 'discovery' else 'history_at'
+    fields = _phase_fields(phase)
     with db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if current(conn, source):
-            conn.execute(f'UPDATE x_intake_sources SET {column}=?,error=? WHERE source_id=? AND identity=?',
-                         (time.time(), reason, source['id'], identity(source)))
-            if phase == 'discovery':
+            columns = ','.join(f'{field}=?' for field in fields)
+            conn.execute(f'UPDATE x_intake_sources SET {columns},error=? WHERE source_id=? AND identity=?',
+                         (*([time.time()] * len(fields)), reason, source['id'], identity(source)))
+            if 'scan_at' in fields:
                 conn.execute("UPDATE x_intake_sources SET discovery='partial' WHERE source_id=?", (source['id'],))
 
 

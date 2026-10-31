@@ -84,6 +84,9 @@ CREATE TABLE IF NOT EXISTS feed_runs (
 # 的 IF NOT EXISTS 对它们不生效,只能逐列 ALTER 补——补不上就不是"少个字段",
 # 而是整个翻译流程在老库上永远报 no such column。
 _ADDED_COLUMNS = {
+    'x_intake_sources': (
+        ('window_end', "TEXT NOT NULL DEFAULT ''"),
+    ),
     # 这一条是新订阅的历史下界(见 `history_floor`)。老库里的订阅补成空串 =
     # 不设下界:它们的存档早就抓完了,回头给它们钉一个下界只会在源站补发旧文
     # 时静默丢内容,挡不住任何已经发生的事。

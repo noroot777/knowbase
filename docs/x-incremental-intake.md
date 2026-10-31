@@ -22,18 +22,20 @@
    单条失败只更新该候选重试次数/到期时间，不重置账号发现，也不增加账号失败账。
 
 `feedgrab` 没有可控的分页/详情拆分接口。它也服从五天过滤、全局预算、账号切片和持久 outbox；
-其上游扫描（可能内部含详情）如实记为一个发现阶段，历史扫描共享该阶段，指标标注
+其上游扫描（可能内部含详情）以 `combined` 明确拥有发现和历史两阶段状态；耗时仍记在发现阶段，历史共享，指标标注
 `timeline_phases_separable=false`。由本项目执行的 Article 补全另外排队；不声称能控制 feedgrab 内部请求。
 
 ## 持久化与一致性
 
 - 持久表包括来源覆盖/尝试账、按 status ID 共享的候选、订阅修订绑定的归属/outbox、最近 30 次阶段统计，
   扫描批次与批次成员两张表，以及按归属记录的过期事件表。
-  仅 `CREATE TABLE/INDEX IF NOT EXISTS`，不删旧表、不改已有正文。
+  新表/索引用 `IF NOT EXISTS`；旧来源表以加列迁移补充 `window_end`，不删旧表、不改已有正文或回执。
 - 来源身份绑定 URL、专用订阅链接和单调修订号；改链接后旧任务不能写进新账号，A→B→A 也不复活旧结果。
-- 候选与暂存进度同事务；时间线消费者保留到会话收尾，迟到核心错误阻止该批归属确认和覆盖推进。
+- 候选、批次成员与尝试元数据同事务；暂存不发布已确认的最新读数、覆盖、历史缺口或发现完成。
+  时间线消费者保留到会话收尾，迟到核心错误阻止该批归属确认和覆盖推进。
   即使确认前进程退出，候选仍在，但不会把未确认成品送入正文库。
-- 覆盖保存连续区间的两端：只有新扫描下界与旧覆盖末端相接才合并。停机数日后，旧“最早读到哪”
+- 覆盖保存连续区间的两端：只有新旧区间相接或重叠才合并，缺口须同时对照本轮冻结的 `floor` 与 `window_end`。
+  discovery 只更新发现状态；history/recovery 不得冒充发现完成，发现提示不得改写历史缺口。停机数日后，旧“最早读到哪”
   不能遮住中间几天缺口；必须重新追补。跨轮过期的在途正文也不能借迟到完成重新变成有效待投递成品。
 - 成品队列直到 `put_items`、水位补丁和 outbox 确认同事务提交才消费。崩溃/本机写失败后仍可再次投递。
 - 只复用当前同版来源和正文完整证明：带展开/Article 欠账的预览不算证明；存量行需匹配当前完整读数或已完成候选回执。
@@ -386,3 +388,88 @@ env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-qFDX-validation/data KB_VAULT_ROO
 真实 X 登录态、远端风控、原生 cursor、51账号八分钟吞吐均未验证；没有读取生产库或调用模型。
 本地替身用时不证明源站性能；未修改测试的兼容回归与全仓回归仍由验收前置命令覆盖，
 本轮没有补跑，也未扩大到报告非阻断事项或擅自增加审查轮数。
+
+## 状态生产层根因修复（2026-10-31）
+
+本轮响应“找根因，不要打补丁”，开工基线 `4c8bdba`。不是另调限流参数、修改页面隐藏规则，
+也没有给同步成功判据再加例外；改动落在产生持久事实的状态转换层。
+
+### 为什么不同症状会反复出现
+
+修改前的全新临时库探针实际观察到三种矛盾：未确认的 `stage` 已推进 `latest` 并把 `gap` 写成
+“等待会话收尾”；只有 history 确认却把 discovery 从 unattempted 改为 complete；已有完整五天覆盖后，
+一次部分 discovery 又把历史缺口改成它自己的滚动上限说明。该修改前探针只留在当时会话输出，
+没有另存可重放的旧代码运行工件，不把下面的修复后证据冒充修改前日志。
+
+共同根因是同一来源投影同时接收**暂存回执与已确认事实**、**发现与历史两个独立阶段**的无归属写入。
+因此加某条错误文案判断、在页面上屏蔽某一种缺口，都无法消除上游自相矛盾的数据。
+
+现在由 `x_intake_store` 统一维护下列不变量，所有生产调用方走同一转换：
+
+- 阶段所有权集中在 `_PHASE_FIELDS`：discovery 拥有发现尝试与完成；history/recovery 只拥有历史尝试；
+  combined 明确拥有两者。未知阶段在候选、批次或状态写入前拒绝。
+- stage 只保存候选、批次归属和尝试元数据；不改已确认的 latest、covered、coverage_end、gap，
+  不宣布发现完成。confirm 才原子确认归属并发布投影；无效区间证明连候选确认一起回滚。
+- 历史缺口由连续覆盖两端相对本轮冻结 `[floor, window_end]` 计算。相接区间才合并，
+  不跨中间空洞；更旧的孤立证明不会毁掉较新覆盖。发现切片说明不能改写历史事实，
+  历史完整也不能宣布发现完成；历史未完整的具体原因只在确有缺口时补充。
+- 新增 window_end 的加列迁移保留旧回执；prepare 冻结当轮上界并从覆盖事实重算缺口，
+  窗口前移后重新暴露真实缺口，不继续相信上一轮遗留提示。
+- feedgrab 改为 combined 的尝试、暂存和确认，不再通过“发现 stage / 历史 confirm”借道。
+  上游无法拆分的耗时仍如实共享，不因此声称原生游标可续抓。
+
+### 本轮限定测试与代码身份
+
+只新增并登记 `tests/test_x_intake_progress.py`，没有运行未修改的旧 X 测试或全仓回归。
+20项涵盖暂存/确认隔离、阶段双向隔离与确认顺序、combined、连续覆盖两端和断档、严格证明、
+事务回滚、旧库加列、真实 collect 历史恢复和 feedgrab 路由。
+
+原始登记命令（不滤输出）：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-root-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-root-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-root-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_x_intake_progress -v
+```
+
+- 实际 cwd：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。
+- 哨兵 `jeKWL23uV5bo`，已读取真实日志 `Ran 20 tests in 0.495s / OK`，退出码0。
+  日志 `/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/jeKWL23uV5bo.log`。
+- 本轮证据目录：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/x-intake-root-cause/`。
+  5份代码/测试的测试前 SHA-256 清单 `tested-code.json`，清单自身摘要
+  `954dc0484b2463506b9915ecbdd50cd7c11b66b7c6e33e7659504d26fc61e427`。
+  通过测试后代码未再修改；静态检查和提交前后逐项核对均以此清单为准。
+- 离线 Ruff、AST/内存编译、700行约束及 `git diff --check` 结果见 `final-static.json`；
+  没有用编译或手工冒烟代替已登记的20项测试。
+
+### 隔离保存、API 和真实页面证据
+
+仓库外 `serve.py` 使用全新临时 KB 数据/笔记/视频目录，禁止外部 socket、禁调度器；
+仅外部 X 会话/时间线/正文/登录就绪/冷却使用替身，实际执行 sync.collect、队列、事务和 API。
+采集时间取当时真实时间并在当轮冻结；直接覆盖证明和 collect 共享同一截止，不用虚构未来证明掩盖缺口。
+
+- 四来源覆盖：历史完整恢复但发现受限；同一冻结窗口历史完整后再部分发现；
+  新候选只暂存不推进已确认读数；发现完整但历史确实未到底。
+- 三来源实际 collect 成功，清旧连接失败/退避，4条成品入 feed_items（含此前已确认的 outbox）；
+  另一个来源的较新未确认候选不入库、latest 不变、待确认计数1。
+  前两来源 discovery 都为 partial 但 gap 为空；真实缺口来源 discovery 为 complete，gap 保留
+  “五天历史实际未到底”。见 `progress-proof.json`、`database-evidence.json`、`subscription-ledgers.json`。
+- 清空预取缓存后，health、social overview、items、intake-care 四个真实 API 都200；
+  另有24路真实 HTTP 并发 overview 全部200。历史问题只归属真实缺口来源，待确认问题只归属暂存来源，
+  见 `api-summary.json`、`api-diagnostics.json`、`http-evidence.json`。
+- 页面4张卡片和两个只读问题详情符合上述独立事实；最近成功与“最新发现未读完”可以诚实并存，
+  没有把发现受限误报历史缺口。阶段耗时与非原生游标说明仍可见；无 JS 异常、横向溢出、外域或非 GET 请求。
+  已查看 `sources.png`、`care-history.png`、`care-unconfirmed.png`；DOM/网络见 `page-evidence.json` 等。
+- 首次页面脚本错误地查找通用历史提示，而实际行显示来源给出的具体原因；保留
+  `page-command-first.log`，按实际已观察文本修正仓库外断言后全程通过，未修改产品代码迎合冒烟。
+
+### 浏览器通道、清理与覆盖留白
+
+本轮重新尝试具名扩展会话“🔎 大V根因修复验证”，`visible:false` 新建后台标签实际返回
+`Capability is not available: visibility`，创建前拒绝。没有省略后台条件再试，才降为独立临时 profile
+的 chrome-headless-shell；始终无头，仅允许本机 GET。只读导航订阅管理、问题与待办及详情，
+没有点击同步/登录/保存/重试或外链；未接管用户 Chrome、普通标签或 cookie，也未激活窗口。
+见 `browser-channel.json`、`page-final-network.json`。
+
+两次自建无头进程/profile、隔离服务和临时数据均已清理，见 `browser-cleanup-first.json`、
+`browser-cleanup.json`、`server-cleanup.json`；没有留下监听服务。
+未访问真实 X、生产库、登录态或模型；原生 cursor、远端风控、51账号八分钟吞吐仍未验证。
+未修改测试的兼容回归与全仓回归留验收，不扩大到其他模块，也未擅自添加复审轮次。

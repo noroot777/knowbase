@@ -22,7 +22,7 @@ def run(intake):
             intake.attempted.add(source['id'])
             intake.announce(f'feedgrab 五天有界扫描（上游未拆分页） · @{handle}')
             try:
-                if not intake.attempt(source, 'discovery'):
+                if not intake.attempt(source, 'combined'):
                     continue
                 result = x_feedgrab.harvest(
                     [(handle, intake.bounds[source['id']].isoformat())],
@@ -33,11 +33,11 @@ def run(intake):
                     account_seconds=seconds('KB_X_FEEDGRAB_ACCOUNT_SECONDS', 25))[handle]
                 if result.get('error') or result.get('skipped'):
                     intake.results[handle] = result
-                    intake.attempt(source, 'discovery', result.get('error') or result['skipped'])
+                    intake.attempt(source, 'combined', result.get('error') or result['skipped'])
                     continue
                 result['coverage_complete'] = result.get('incomplete') == ''
                 batch_id = uuid4().hex
-                reused = store.stage(source, result['entries'], phase='discovery',
+                reused = store.stage(source, result['entries'], phase='combined',
                                      incomplete='等待上游批次收尾确认', batch_id=batch_id,
                                      boundary=intake.bounds[source['id']].isoformat(), end=intake.now.isoformat())
                 if reused is None:
@@ -46,7 +46,7 @@ def run(intake):
                 intake.metrics.count('discovered', len(result['entries']))
                 observed = max((store.utc(entry['published']).isoformat() for entry in result['entries']
                                 if store.utc(entry.get('published'))), default='')
-                intake.scans.append((source, 'history', intake.bounds[source['id']], observed, result, batch_id))
+                intake.scans.append((source, 'combined', intake.bounds[source['id']], observed, result, batch_id))
                 intake.read.add(source['id'])
             except Exception as error:
                 if not local_fault(error):
