@@ -190,11 +190,13 @@ def _wait_state(page: Chrome, handle: str, deadline: float, *, budget_limited=Fa
 
 
 def _harvest_one(page: Chrome, handle: str, floor: datetime | None, *,
-                 deadline=None, max_scrolls=None, should_stop=None, on_ready=None, precise=False) -> tuple[list[dict], str]:
+                 deadline=None, max_scrolls=None, should_stop=None, on_ready=None, precise=False,
+                 account_seconds=None, budget_limited=None) -> tuple[list[dict], str]:
     """Return selected previews and an honest coverage gap, with optional scheduler limits."""
     ready_started = time.monotonic()
-    budget_limited = deadline is not None and deadline < ready_started + ACCOUNT_SECONDS
-    deadline = min(deadline or float('inf'), ready_started + ACCOUNT_SECONDS)
+    account_seconds = min(ACCOUNT_SECONDS, ACCOUNT_SECONDS if account_seconds is None else account_seconds)
+    budget_limited = deadline is not None and deadline < ready_started + account_seconds if budget_limited is None else budget_limited
+    deadline = min(deadline or float('inf'), ready_started + account_seconds)
     effective_seconds = max(0, deadline - ready_started)
     scroll_limit = MAX_SCROLLS if max_scrolls is None else max_scrolls
     navigate(page, f'https://x.com/{handle}')

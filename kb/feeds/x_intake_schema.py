@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS x_intake_sources (
  discovery TEXT NOT NULL DEFAULT 'unattempted', gap TEXT NOT NULL DEFAULT '',
  scan_at REAL NOT NULL DEFAULT 0, history_at REAL NOT NULL DEFAULT 0,
  expired INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', outside TEXT NOT NULL DEFAULT '',
- block TEXT NOT NULL DEFAULT ''
+ block TEXT NOT NULL DEFAULT '', screen_waits TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS x_intake_candidates (
  post_id TEXT PRIMARY KEY, entry TEXT NOT NULL, published TEXT NOT NULL,

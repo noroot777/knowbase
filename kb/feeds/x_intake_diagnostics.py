@@ -65,13 +65,18 @@ PROBLEMS = {
 
 def issues(state):
     result = []
-    if block := state.get('block'):
-        result.append(dict(kind=f"x_intake_{block['kind']}", evidence=block['reason'], retryable=True))
+    observed = state.get('blocks', {'discovery': state.get('block') or {}})
+    for phase, block in observed.items():
+        if block and phase != 'body':
+            result.append(dict(kind=f"x_intake_{block['kind']}", evidence=block['reason'], retryable=True,
+                               phase=phase, step=0 if phase == 'discovery' else 1))
     for field, kind, label in [('unconfirmed', 'x_intake_unconfirmed', '候选待确认'),
                                ('pending', 'x_intake_body', '正文待补'),
                                ('expired', 'x_intake_expired', '最近24小时超窗')]:
         if count := state.get(field, 0):
-            result.append(dict(kind=kind, count=count, evidence=f'{label} {count} 条',
+            reason = observed.get('body', {}).get('reason', '') if field == 'pending' else ''
+            evidence = f'{label} {count} 条' + (f'；正文补全：{reason}' if reason else '')
+            result.append(dict(kind=kind, count=count, evidence=evidence,
                                retryable=field != 'expired'))
     attempted = state.get('discovery') != 'unattempted' or state.get('history_at', 0) > 0
     if state.get('gap') and attempted:

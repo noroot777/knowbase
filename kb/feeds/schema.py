@@ -87,6 +87,7 @@ _ADDED_COLUMNS = {
     'x_intake_sources': (
         ('window_end', "TEXT NOT NULL DEFAULT ''"),
         ('block', "TEXT NOT NULL DEFAULT ''"),
+        ('screen_waits', "TEXT NOT NULL DEFAULT '{}'"),
     ),
     'x_intake_batches': (
         ('block_token', "TEXT NOT NULL DEFAULT ''"),

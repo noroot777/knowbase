@@ -29,7 +29,7 @@
 
 - 持久表包括来源覆盖/尝试账、按 status ID 共享的候选、订阅修订绑定的归属/outbox、最近 30 次阶段统计，
   扫描批次与批次成员两张表，以及按归属记录的过期事件表。
-  新表/索引用 `IF NOT EXISTS`；旧来源表以加列迁移补充 `window_end` 与阻断事实，批次补充阻断令牌，
+  新表/索引用 `IF NOT EXISTS`；旧来源表以加列迁移补充 `window_end`、分阶段阻断与 `screen_waits`，批次补充阻断令牌，
   不删旧表、不改已有正文或回执。
 - 来源身份绑定 URL、专用订阅链接和单调修订号；改链接后旧任务不能写进新账号，A→B→A 也不复活旧结果。
 - 候选、批次成员与尝试元数据同事务；暂存不发布已确认的最新读数、覆盖、历史缺口或发现完成。
@@ -44,8 +44,11 @@
 - 永久排除仍有效；远端明确不可用保留 URL/原因，不再每轮重新排该正文。
 - 成功账只认可本轮确实返回、并完成会话收尾确认的时间线读数。上轮已经证明完整不能替本轮作证；
   上游 skipped、启动限流、切片超时和空的不完整读数不结清旧成功/失败账，旧 outbox 仍可单独投递。
-- 本轮实际接收内容与正文欠账全部持久化、没有未确认候选或当前核心/本机故障时，更新成功并结清旧失败；
+- 本轮实际接收内容与正文欠账全部持久化、没有未确认候选或发现阶段核心/本机故障时，更新成功并结清旧失败；
   五天历史缺口与安全跳过的说明不单独扣留成功，仍保留 `gap` 和提示继续追补。
+- 访问阻断归发现/历史/正文阶段；成功与水位只看发现自己的阻断。正文原话附正文待补问题，
+  历史与正文阻断不抹掉独立确认的发现成功。旧单份记录保守归发现；按阶段令牌确认，清除保留时间回执。
+  专用状态写失败时观测先随结果进入运行摘要，面板按来源身份及通道回放；不能因零等待维护锁丢掉源站事实。
 - 历史覆盖必须显式满足 `coverage_complete=True` 且 `incomplete=''`；缺键、None、上游跳过都不是完整证明。
   真实过期待办才触发窗口外提示，下界只显示上海日期，不把每轮下界滑动冒充丢失内容。
 
@@ -67,6 +70,9 @@ CDP 命令受当前切片截止约束；关闭命令必须能释放自有资源�
 启动接口限流可排尾有限重试；剩余时间不够“等完 + 至少两秒有效工作”则直接留待下轮，不把尾部预算睡光。
 内容源 429、安全关卡、登录失效、会话死亡仍停止相应余批；不把辅助请求错误升级为内容限流。
 未轮到的账号不记连接失败。数据库忙/锁、磁盘满、只读等本机故障也不推账号的失败/退避。
+首屏预算按本阶段配置的账号时限判别，不与原生50秒比较：完整发现8秒/历史20秒仍不可读须报真实错误，
+只有公平分配或全局截止缩短才是预算用尽。连续三轮首屏前用尽缩短预算仍无确认，升级来源失败与退避；
+`screen_waits` 按阶段/运行身份去重计数，确认读取只重置自己的阶段，首屏已读到后的预算耗尽不计入该计数。
 
 ## 统计与页面
 
@@ -559,3 +565,84 @@ env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-gNHc-validation/data KB_VAULT_ROO
 见 `browser-cleanup.json`、`first-browser-cleanup.json`、`server-cleanup.json`。
 本轮未访问真实 X、生产数据、用户登录态或模型；源站实时风控、原生 cursor、51账号八分钟吞吐未验证。
 默认入口新增契约不替代既有 X 族兼容回归：未修改的旧测试及全仓回归仍留验收，不能宣称它们已通过。
+
+## gNHc 第2轮：阻断事件的阶段所有权与可靠交付
+
+本轮基线 `8d03424`，对应报告 `free-review/gNHcRvki9H1R/round-2/report.md`。
+F1—F3 在原自动 X 链路内修根因；非阻断清单不扩展。F4 的既有回归留白属实，但执行阶段必须服从
+“仅本轮新写/修改的测试可执行并登记”的明确协议，不借改动旧测试来解锁整族运行，提交后正式请求裁定。
+
+### 根因与不变量
+
+1. **独立阶段共用一份全来源 block**。旧 `package()` 将正文/历史阻断作为发现成功与水位的否决票。
+   修复在状态生产/确认层而非隐藏 UI：结构化事件按 discovery/history/body 保存；批次冻结自己阶段的令牌，
+   时间线回执只清自己，正文实际完成才清正文，combined 只拥有发现与历史。迟到事件的不同令牌仍受保护。
+   清除保存时间化回执，旧摘要不得复活它；旧单事件兼容为发现，保留原话，不伪造历史阶段。
+   诊断正文原因附正文欠账，发现/历史同类问题的 id 与步骤按阶段区分；卡片直接显示阶段。
+2. **唯一事实依赖一次零等待写盘**。`mark_block` 现在先保留原观测，再尝试专用状态写；本机维护锁争用
+   只警告，不能把远端事实丢掉或转成采集本机故障。所有结果（含 error/skipped）均可带身份/通道绑定的
+   observation；遥测指标之外独立交付到既有 `feed_runs.summary.x_observations`。读状态回放事件，
+   不限于最近30轮指标，不会因31轮无关同步抹掉阻断；实际暂存时合并入来源投影。恢复的清除回执参与回放，
+   改指、订阅修订或切通道不能继承旧观测。
+3. **把默认阶段时限当成外部预算缩短**。原8/20秒恒小于原生50秒，未知账号的错误出口不可达。
+   `_harvest_one` 接收本阶段配置时限及外部缩短身份；公平分配的有效时限与配置时限保持分离。
+   完整切片不可读仍走账号错误；真正缩短才是 `XBudgetExceeded`。另以来源/阶段/UUID运行身份记录首屏等待，
+   连续三轮未确认升级实际失败与退避，防止无限占预算；确认只重置自己的阶段，首屏后的正常预算耗尽不罚。
+
+### 本轮测试登记
+
+只运行有实质修改的 `tests.test_x_intake_review_runtime`（21项）和新增
+`tests.test_x_intake_phase_delivery`（21项）；未运行未改的 `test_x_intake_default_path` 或其他旧套件。
+哨兵 `xauYwXqAP0qP` 真实日志：**41项、1.539秒、全部通过，无跳过**，
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/xauYwXqAP0qP.log`。
+最终逐类核对补齐历史阶段 `XAccountUnavailable` 的同根错误出口：只属于历史的账号/登录异常仍保留
+阶段阻断，不能通过通用 `result.error` 再次否决已确认发现。新增六类历史阻断逐一真实 collect 的反例后，
+登记 `D2NgbEH5Lvl5`，真实日志 **42项、1.702秒、全部通过，无跳过**：
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/D2NgbEH5Lvl5.log`。
+范围涵盖阶段相互隔离、同阶段迟到令牌、实际正文完成、combined、旧记录兼容、真实维护锁争用、
+error结果交付、清缓存回放、31轮无关运行与恢复清除、改指/通道隔离、完整8/20秒与真正缩短、
+三轮升级、同轮去重/阶段重置、老库加列、JS 阶段渲染；52账号夹具使用独立 status ID 和6秒真实等待判据。
+
+实际 cwd：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。未过滤原始命令：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-gNHc2-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-gNHc2-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-gNHc2-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_x_intake_review_runtime tests.test_x_intake_phase_delivery -v
+```
+
+本轮证据根：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/x-intake-review-gNHc-2/`。
+测试前12份代码/测试/JS的 SHA-256 在 `tested-code.json`；清单自身 SHA-256：
+`924188dbbd8d7751178581f6796943f4cc8535f2bc760e9ad988983f554af9ca`。
+41项时的代码清单另存 `tested-code-41.json`，最终代码再次做了下述全新隔离 API/页面点检。
+Ruff、JS语法、AST/内存编译、单代码文件700行上限、diff空白检查均通过。不是全族回归通过声明。
+
+### 真实 collect / API / 页面点检
+
+- 仓库外 `serve.py` 起全新临时 KB 数据/vault/videos，禁调度器并阻断外域 socket；仅远端X/会话/详情、
+  就绪与冷却边界替身，真实执行 `sync.collect`、候选/批次/入库事务、FastAPI 和静态页面。
+  首次脚本漏导入用于核对动作描述的 `actions`，退出且清理临时数据；仅补脚本导入后重跑，产品不改、断言不减。
+  见 `validation-history.json`、`smoke-environment.json`。
+- 五个来源：健康、正文启动429、仅历史访问429、维护锁期间安全验证、完整首屏未知。前3个均成功清旧错误/
+  失败/退避并推进发现水位；正文候选仍待补且原话归正文，历史429仍保留历史问题，不扣留发现成功。
+  实际完成2条入库，正文预览不入库。见 `subscription-ledgers.json`、`sync-summary.json`、`database-evidence.json`。
+- 用真实独立文件描述符持有 `fcntl.flock`，原 `set_block` 确实得到 LockBusy；专用 block 原值为空，
+  运行摘要仍含安全验证原话，清预取缓存后 API 和诊断仍正确显示人工处理，未误报本机采集失败。
+  对未知页面走真实 `_harvest_one`/首屏判因、仅虚拟时间与DOM边界；完整默认切片后 failed_ids/失败1次/未来退避均存在，
+  不再无限预算待续。见 `api-summary.json`、`progress-evidence.json`、`scan-evidence.json`。
+- health/social overview/items/intake-care 均200；24路真实 HTTP 并发 overview 均200。
+  四类详情原话、建议、单来源 rev/scope_sig 与无 extract 阶段已核对，未执行重试。
+  五张订阅卡显示阶段阻断及独立最近成功，四份问题详情分别为正文、历史、写锁安全验证、未知首屏失败；
+  `sources.png`、`care-body.png`、`care-history.png`、`care-lock.png`、`care-unknown.png` 已逐一查看。
+  JS异常、横向溢出、外域/非GET请求均为0，见 `http-evidence.json`、`page-evidence.json`、`page-final-network.json`。
+
+### 浏览器通道、清理与留白
+
+本轮两次新尝试扩展具名会话“🔎 大V阶段根因验证”（含最终代码复核），保持 `visible:false`，均在实际创建前返回
+`Capability is not available: visibility`。未去掉后台要求重试，才降独立临时 profile 的
+chrome-headless-shell；始终无头、仅 localhost GET，不接管用户 Chrome/CDP、普通标签、cookie 或激活窗口。
+只导航订阅管理、问题与待办及详情，未点同步、登录、保存、重试或外链。见 `browser-channel.json`。
+两次自建浏览器进程/profile、服务与临时 KB 根均已清理，48999无监听；见 `browser-cleanup.json`、`server-cleanup.json`
+及保留首次点检的 `first-*` 证据。
+
+真实 X 风控、用户登录态、生产数据、模型、原生cursor和51账号八分钟吞吐未验证。既有 X/历史套件及页面回归
+未补跑，不能用本轮冒烟或42项定点结果冒充旧回归全绿；这些仍是验收前置回归留白。F4请求由用户裁定，
+不会擅自增加审查轮数或执行验收，报告其他非阻断项也未扩展。

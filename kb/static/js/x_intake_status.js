@@ -2,7 +2,12 @@ function xIntakeStatus(source) {
   const state = source.x_intake;
   if (!state) return '';
   const parts = [state.discovery === 'complete' ? '最新发现已完成' : state.discovery === 'partial' ? '最新发现未读完' : '时间线尚未轮到'];
-  if (state.block?.kind) parts.unshift(({throttled: '启动限流，等待冷却', rate: '访问限流，稍后重试', challenge: '安全验证，需人工处理', account: '账号不可用', login: '登录失效', session: '会话不可用'})[state.block.kind] || '访问受阻');
+  const observed = state.blocks || {discovery: state.block};
+  const stages = {discovery: '最新发现', history: '历史追补', body: '正文补全'};
+  const labels = {throttled: '启动限流，等待冷却', rate: '访问限流，稍后重试', challenge: '安全验证，需人工处理', account: '账号不可用', login: '登录失效', session: '会话不可用'};
+  for (const [phase, block] of Object.entries(observed)) {
+    if (block?.kind) parts.unshift(`${stages[phase] || phase}：${labels[block.kind] || '访问受阻'}`);
+  }
   if (state.gap) parts.push(`历史缺口：${state.gap}`);
   if (state.pending) parts.push(`正文待补 ${state.pending} 条`);
   if (state.unconfirmed) parts.push(`候选待确认 ${state.unconfirmed} 条`);

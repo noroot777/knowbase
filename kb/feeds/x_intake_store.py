@@ -157,7 +157,7 @@ def needs_repair(conn, entry):
     return bool(row and any(row[field] != entry.get(field) for field in ('title', 'body', 'x_post_meta', 'body_provenance')))
 
 
-def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary='', end='', batch_id=''):
+def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary='', end='', batch_id='', block_tokens=None):
     fields = _phase_fields(phase)
     reused = 0
     now = time.time() if now is None else now
@@ -166,9 +166,12 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
         if not current(conn, source):
             return None
         progress = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=?', (source['id'],)).fetchone()
+        events = blocks.replay(conn, source['id'], identity(source), progress['channel'], progress['block'])
+        conn.execute('UPDATE x_intake_sources SET block=? WHERE source_id=?',
+                     (json.dumps(events, ensure_ascii=False), source['id']))
         batch_id = batches.begin(conn, source['id'], identity(source), boundary or progress['floor'],
                                  end or datetime.now(timezone.utc).isoformat(), batch_id,
-                                 block_token=blocks.token(progress['block']))
+                                 block_token=json.dumps(blocks.snapshot(events, phase) if block_tokens is None else block_tokens))
         for entry in entries:
             identifier, published = post_id(entry), utc(entry.get('x_observed_at') or entry.get('published'))
             if not identifier or not published or published < utc(progress['floor']):
@@ -223,7 +226,11 @@ def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end=
             batches.recover(conn, source['id'], identity(source), boundary, end)
         conn.execute("UPDATE x_intake_sources SET covered=?,coverage_end=?,gap=?,discovery=?,latest=?,error='' WHERE source_id=?",
                      (*state, source['id']))
-        blocks.resolve(conn, progress, batch_id, proven or bool(observed))
+        blocks.resolve(conn, progress, batch_id, proven or bool(observed), phase)
+        waits = json.loads(progress['screen_waits'])
+        for name in blocks.phases(phase):
+            waits.pop(name, None)
+        conn.execute('UPDATE x_intake_sources SET screen_waits=? WHERE source_id=?', (json.dumps(waits), source['id']))
     return True
 
 
@@ -233,7 +240,7 @@ def progress(source):
                            (source['id'], identity(source))).fetchone()
         result = dict(row) if row else {}
         if row:
-            result['block'] = blocks.decode(row['block'])
+            blocks.project(result, blocks.replay(conn, source['id'], identity(source), row['channel'], row['block']))
             result['unconfirmed'] = batches.count(conn, source['id'], identity(source), row['floor'])
     return result
 
@@ -242,8 +249,29 @@ def set_block(source, block):
     with maintenance_lock(wait=0), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if current(conn, source):
+            row = conn.execute('SELECT block FROM x_intake_sources WHERE source_id=? AND identity=?',
+                               (source['id'], identity(source))).fetchone()
+            if not row:
+                return
+            events = blocks.merge(row['block'], {block.get('phase', 'discovery'): block})
             conn.execute('UPDATE x_intake_sources SET block=? WHERE source_id=? AND identity=?',
-                         (json.dumps(block, ensure_ascii=False), source['id'], identity(source)))
+                         (json.dumps(events, ensure_ascii=False), source['id'], identity(source)))
+
+
+def screen_wait(source, phase, run_started):
+    with maintenance_lock(wait=0), db() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        if not current(conn, source):
+            return 0
+        row = conn.execute('SELECT screen_waits FROM x_intake_sources WHERE source_id=? AND identity=?',
+                           (source['id'], identity(source))).fetchone()
+        waits = json.loads(row['screen_waits'])
+        prior = waits.get(phase, {})
+        count = prior.get('count', 0) + (prior.get('run') != run_started)
+        waits[phase] = dict(count=count, run=run_started)
+        conn.execute('UPDATE x_intake_sources SET screen_waits=? WHERE source_id=? AND identity=?',
+                     (json.dumps(waits), source['id'], identity(source)))
+        return count
 
 
 def attempt(source, phase, reason=''):
@@ -281,12 +309,12 @@ def pending(sources, now=None):
     return result
 
 
-def finish(source, task, entries, unavailable, reason):
+def finish(source, task, entries, unavailable, reason, *, block_tokens=None):
     with maintenance_lock(wait=0), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return
-        progress = conn.execute('SELECT floor FROM x_intake_sources WHERE source_id=? AND identity=?',
+        progress = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=? AND identity=?',
                                 (source['id'], identity(source))).fetchone()
         if not progress or utc(task['published']) < utc(progress['floor']):
             return
@@ -297,11 +325,16 @@ def finish(source, task, entries, unavailable, reason):
             state = 'repair'
             reason = '存量正文缺少同版完整证明，需走版本化回填；未覆盖旧正文'
         failures = task['failures'] + (state == 'pending')
-        conn.execute('''UPDATE x_intake_candidates SET entry=?,state=?,attempted=?,failures=?,
+        changed = conn.execute('''UPDATE x_intake_candidates SET entry=?,state=?,attempted=?,failures=?,
             retry_at=?,reason=? WHERE post_id=? AND entry=? AND state='pending' AND failures=?''',
             (json.dumps(entry, ensure_ascii=False) if entry else task['entry'], state, time.time(), failures,
              time.time() + min(3600, 60 * 2 ** min(failures, 6)) if state == 'pending' else 0,
-             reason[:500], task['post_id'], task['entry'], task['failures']))
+             reason[:500], task['post_id'], task['entry'], task['failures'])).rowcount
+        if changed and state in ('ready', 'unavailable') and block_tokens:
+            conn.execute('UPDATE x_intake_sources SET block=? WHERE source_id=? AND identity=?',
+                         (json.dumps(blocks.clear(progress['block'], block_tokens), ensure_ascii=False),
+                          source['id'], identity(source)))
+        return bool(changed and state in ('ready', 'unavailable'))
 
 
 def delivery(source):
@@ -350,7 +383,9 @@ def statuses(sources, channel='browser'):
                                   ('discovery', 'gap', 'expired', 'error', 'floor', 'scan_at', 'history_at', 'outside')}
             source['x_intake']['pending'] = counts.get((source['id'], identity(source)), 0)
             source['x_intake']['unconfirmed'] = unconfirmed[source['id']]
-            source['x_intake']['block'] = blocks.decode(row['block'])
+            with read_db(timeout=30) as conn:
+                events = blocks.replay(conn, source['id'], identity(source), row['channel'], row['block'])
+            blocks.project(source['x_intake'], events)
             from kb.feeds.x_intake_diagnostics import issues
             source['x_intake']['issues'] = issues(source['x_intake'])
 

@@ -44,9 +44,9 @@ class RuntimeFixture(IntakeBase):
         entry = self.entry()
         batch_id = uuid4().hex
         boundary = store.floor_for(self.source, self.now).isoformat()
-        store.stage(self.source, [entry], phase='history', incomplete='', batch_id=batch_id,
+        store.stage(self.source, [entry], phase='discovery', incomplete='', batch_id=batch_id,
                     boundary=boundary, end=self.now.isoformat())
-        receipt = dict(phase='history', incomplete='', observed=store.observed([entry]),
+        receipt = dict(phase='discovery', incomplete='', observed=store.observed([entry]),
                        boundary=boundary, end=self.now.isoformat(), coverage_complete=True, batch_id=batch_id)
         if not stage_only:
             store.confirm(self.source, [entry], **receipt)
@@ -84,20 +84,31 @@ class BudgetIdentityTests(RuntimeFixture):
             with self.assertRaises(x_page_state.XBrowserError):
                 x_timeline_state.wait_state(object(), 'example', 1, '', budget_limited=True)
 
-    def test_fifty_two_loading_accounts_do_not_all_acquire_failures_and_backoff(self):
+    def test_fifty_two_six_second_pages_do_not_acquire_failures_and_backoff(self):
         for index in range(51):
             self.sub(f'Acct{index}')
         clock = Clock()
+        ready_since = [0]
+        post_ids = {}
+        def scan(page, handle, floor, **options):
+            ready_since[0] = clock.now
+            x_timeline_state.wait_state(page, handle, options['deadline'], '',
+                                       budget_limited=options['budget_limited'])
+            identifier = post_ids.setdefault(handle, str(100 + len(post_ids)))
+            return [self.entry(identifier, handle=handle)], ''
         with patch.object(x_intake, 'time', clock), patch.object(x_browser, 'time', clock), \
              patch.object(x_timeline_state, 'time', clock), patch.object(x_intake_metrics, 'time', clock), \
              patch.object(x_cooldown, 'time', clock), patch.object(reg, 'configuration_error', return_value=''), \
              patch.object(x_browser, 'browser_session', return_value=Session()), \
              patch.object(x_browser, 'release_login_window', return_value=''), \
+             patch.object(x_browser, '_harvest_one', side_effect=scan), \
              patch.object(x_browser, 'navigate'), \
-             patch.object(x_page_state, 'read', return_value=page_state(ready='loading')):
+             patch.object(x_page_state, 'read', side_effect=lambda *args: page_state(
+                 ready='complete' if clock.now - ready_since[0] >= 6 else 'loading',
+                 articles=int(clock.now - ready_since[0] >= 6))):
             summary = sync.collect('social', FetchScope(force=True))
         self.assertEqual(summary['failed_ids'], [])
-        self.assertEqual(summary['added'], 0)
+        self.assertGreater(summary['added'], 0)
         for source in reg.subscriptions('social'):
             self.assertEqual((source['failures'], source['retry_at'], source['last_error']), (0, 0, ''))
 
@@ -218,7 +229,7 @@ class DurableBlockTests(RuntimeFixture):
     def test_a_late_timeline_block_is_attributed_before_packaging(self):
         self.prepare()
         intake = x_intake.Intake([self.source], self.options, budget=480)
-        intake.timelines[self.source['id']] = [SimpleNamespace(blocker=x_page_state.XAccessBlocked('收尾验证墙'))]
+        intake.timelines[self.source['id']] = [('discovery', SimpleNamespace(blocker=x_page_state.XAccessBlocked('收尾验证墙')))]
         result = intake.package()['example']
         self.assertTrue(result['pending'])
         self.assertEqual(store.progress(self.source)['block']['reason'], '收尾验证墙')

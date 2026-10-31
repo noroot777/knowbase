@@ -69,6 +69,8 @@ def local(source, error, summary):
 
 def telemetry(kind, summary):
     from kb.feeds import x_channels
+    if kind == 'social':
+        summary['x_observations'] = [value['observation'] for value in x_channels._harvest.values() if value.get('observation')]
     if kind == 'social' and any(value.get('x_intake') for value in x_channels._harvest.values()):
         summary['x_intake'] = store.latest_metrics()
         if summary['x_intake'] and summary['x_intake'].get('blocked'):

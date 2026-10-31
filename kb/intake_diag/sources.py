@@ -183,8 +183,10 @@ def problems(kind: str) -> list[dict]:
             for issue in source.get('x_intake', {}).get('issues', []):
                 name = issue['kind']
                 actionable = shared['actionable'] and issue['retryable']
-                out.append({**shared, 'id': f"source:{source['id']}:{name}", 'problem': name,
+                suffix = f":{issue['phase']}" if issue.get('phase') else ''
+                out.append({**shared, 'id': f"source:{source['id']}:{name}{suffix}", 'problem': name,
                             'evidence': issue['evidence'], **PROBLEMS[name], 'actionable': actionable,
+                            'step': issue.get('step', PROBLEMS[name]['step']),
                             'blocked': shared['blocked'] or ('' if issue['retryable'] else PROBLEMS[name]['advice'])})
         elif note := (source['last_note'] or ''):
             name = _kind_of_note(note)
