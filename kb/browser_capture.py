@@ -226,6 +226,121 @@ def item_state(key: str) -> dict:
         return dict(public(item), pending=waiting, saved=receipt, saved_error=error)
 
 
+def grab_owing(stored_url: str) -> str:
+    """这一条还欠后半条链的哪一步 —— 一句人话,走完了是空串。
+
+    **只是转手**:`grab_store.known` 问的是导出过没有、vault 里那一篇还在不在、
+    当前那一份进没进索引,`owing` 把它们变成一句话。按**库里那一行自己的 url**
+    问(不是浏览器那个地址),所以这一问和上面按别名找到的那一行永远是同一条。
+    """
+    try:
+        from kb.feeds.grab_store import known, owing
+        seen = known(stored_url)
+    except Exception:
+        return ''
+    return owing(seen) if seen else ''
+
+
+def _page_aliases(raw: str) -> list[str]:
+    """这一页**在库里可能长什么样** —— 两份规范形,都由同一页推出来。
+
+    为什么要两份:库里那一行的 `url` 是**收它的那条路**存下来的。订阅类来源原样
+    存 feed 给的地址(`page_url` 那一套口径),手动收录存的是 `grab.normalize`
+    (它顺手去掉 `utm_*`/`fbclid`/`gclid`、把推文地址收成 `x.com/<handle>/status/<id>`)。
+    只按一份问,另一条路收的那一半永远答「不在库里」—— 而「不在库里」的下一步是
+    **收录**,于是同一篇文章在库里变成两行、两篇 md、检索里两份结果。
+
+    **这不是模糊匹配**:两个候选都是**这一页自己**的规范形,一个字符都不猜。
+    `page_url` 那条底线照旧(「宽的那头只会多认一个同页地址,不会把另一篇认成这
+    一篇」),所以**绝不在这里剥语言前缀、也不读网页自报的 canonical**:剥错一次
+    就是把另一篇的正文写进这一条。真遇上站点按浏览器语言跳转的那一类,出路是
+    `here()` 把等着的待办连同它指的地址一起交回去,由人点一下改用这一页 ——
+    判据仍然在服务端,松的只是「人得自己去地址栏抄一遍」。
+    """
+    names = [page_url(raw)]
+    try:
+        from kb.feeds.grab import normalize
+        alias = normalize(raw)
+    except Exception:
+        alias = ''
+    if alias and alias not in names:
+        names.append(alias)
+    return names
+
+
+#: **「这一条的正文还欠着」** —— 三档正文待办(`body_queued` / `body_held` /
+#: `body_exhausted`)的共同前缀,不是第四份口径:资格那一半原样转
+#: `fulltext._eligible()`,另一半就是「还没抓到过」。
+#:
+#: 刻意**不带** `shelf`(人点过暂缓):那一道管的是「面板上还列不列它」,而此刻
+#: 人正站在那篇文章上点扩展 —— 他自己就是那个决定。
+_OWED = f"({fulltext._eligible()} AND fulltext_at='')"
+
+
+def here(url: str) -> dict:
+    """人**正站在哪一页** → 这一页此刻能做什么。一问一答。
+
+    **这条路存在的理由是把决定搬到人所在的地方。** 原先补一篇正文要跨三个界面
+    走七步:知识库面板 → 补抓页复制密钥 → 核对最终网址 → 发起待办 → 回到文章
+    标签 → 在下拉框里挑出刚才那个待办 → 读取。而「这一页是哪一条、写不写得了」
+    这个问题,扩展站在那一页上本来就问得出来 —— 地址栏里那一行就是答案,下拉框
+    是让人把服务端已经知道的事再回答一遍。
+
+    **待办没有被取消,它退到了幕后**:`situation='fill'` 时这里自己 `create` 一个
+    (扩展拿到的是它的 `id`),于是 `precheck` / `save` 那一整套准入、CAS、回执与
+    审计一个字都不用改 —— 新增的只有「谁来建待办」。`create` 本身幂等:同一
+    (条目, 页面)上已有 pending 就复用它和它的有效期,所以反复开扩展不会堆出一串。
+
+    **只在正文还欠着的时候自动建**(`_OWED`)。正文已经齐了的那一条照旧要人在补抓
+    页上明确说一句「重新采集正文」—— 那是另一件事(「我手上这份是错的」),它自带
+    警示和回执,不该和「把缺的那份补上」挤成同一颗按钮。
+
+    `elsewhere` 交回的是**等着的、但指着另一页的那些待办**。这一项是承重的:站点
+    按浏览器语言跳转时(`openai.com/index/x` → `/zh-Hans-CN/index/x`),人从补抓页
+    发起的待办指着前者、浏览器停在后者,按网址一问「这一页不在库里」—— 要是只凭
+    这一句就请他收录,库里立刻多出一行同一篇文章。把那个待办摆在他眼前、给一颗
+    「改用这一页的地址」,他一眼就看出是同一篇。
+    """
+    page = page_url(url)
+    with _lock:
+        _prune()
+        with reg.db() as conn:
+            aliases = _page_aliases(url)
+            slots = ','.join('?' for name in aliases)
+            row = conn.execute(
+                'SELECT feed_items.*, EXISTS (SELECT 1 FROM feed_item_exclusions'
+                ' WHERE key=feed_items.key) AS capture_excluded,'
+                f' {_OWED} AS owed FROM feed_items'
+                f' WHERE url IN ({slots}) ORDER BY rowid LIMIT 1', aliases).fetchone()
+        def answered(situation: str, detail: str, intent: dict | None = None) -> dict:
+            # **`elsewhere` 一律在最后算。** 上面那个 `_create` 会把同一条目上
+            # 指着别处的旧待办标成 `superseded`,先算就会把刚被顶掉的那个摆出来、
+            # 请人「改用这一页的地址」,而它已经作废了。
+            return dict(ok=True, page_url=page, situation=situation, detail=detail,
+                        item=public(item) if item else None, intent=intent,
+                        elsewhere=[other for other in _pending()
+                                   if other['page_url'] != page])
+
+        item = dict(row) if row else None
+        if not item:
+            return answered('absent', '这一页还不在知识库里。')
+        try:
+            _checked_target(item)
+        except (LookupError, ValueError) as why:
+            return answered('refused', str(why))
+        if not item['owed']:
+            # 「在 `feed_items` 里有这一行」和「知识库里搜得到它」是两件事:导出、
+            # 索引那半条链占不到管道、或者在保存之后服务重启,都会留下一条「在库
+            # 里但搜不到」。那句话**只有 `grab_store.owing` 一份口径**(它自己的
+            # docstring 记着为什么),这里转手,不另编 —— 各写一遍的话其中一处
+            # 迟早把「文件不见了」说成「还在排队」。
+            owed = grab_owing(item['url'])
+            return answered('complete', '这一条已经在知识库里，正文也齐了。'
+                            + (f'不过{owed}。' if owed else ''))
+        intent = _create(item, page)
+        return answered('fill', '知识库里有这一条，但正文还缺着。', intent)
+
+
 def _prune() -> None:
     expired = [identity for identity, intent in _intents.items()
                if time.time() > intent['expires_at']]
@@ -236,25 +351,35 @@ def _prune() -> None:
 def create(key: str, expected_url: str) -> dict:
     expected = page_url(expected_url)
     with _lock:
-        item = target(key)
-        _prune()
-        for intent in _intents.values():
-            if intent['key'] != key or intent['status'] != 'pending':
-                continue
-            if intent['page_url'] == expected and writable(intent, item):
-                return view(intent)
-            intent['status'] = 'superseded'
-        waiting = sorted((other for other in _intents.values() if other['status'] == 'pending'),
-                         key=lambda other: other['created_at'])
-        for extra in waiting[:max(0, len(waiting) + 1 - MAX_PENDING)]:
-            extra['status'] = 'superseded'
-        identity = secrets.token_urlsafe(24)
-        created = time.time()
-        intent = dict(public(item), id=identity, page_url=expected, seen_url='',
-                      content_hash=item['content_hash'], content_rev=item['content_rev'],
-                      created_at=created, expires_at=created + TTL, status='pending', receipt=None)
-        _intents[identity] = intent
-        return view(intent)
+        return _create(target(key), expected)
+
+
+def _create(item: dict, expected: str) -> dict:
+    """建(或复用)一个待办。**调用方必须持 `_lock`,且 `item` 已过 `_checked_target`。**
+
+    拆出来是因为有两个发起方:补抓页上那颗「发起浏览器采集」(`create`,从 key 查
+    条目),和扩展站在文章上那一问(`here`,它手上已经有那一行、也已经检过)。
+    **各写一遍的话复用、顶替、额度那三段就有两份** —— 而那三段决定的是「同一篇
+    文章会不会同时挂着两个待办」。
+    """
+    _prune()
+    for intent in _intents.values():
+        if intent['key'] != item['key'] or intent['status'] != 'pending':
+            continue
+        if intent['page_url'] == expected and writable(intent, item):
+            return view(intent)
+        intent['status'] = 'superseded'
+    waiting = sorted((other for other in _intents.values() if other['status'] == 'pending'),
+                     key=lambda other: other['created_at'])
+    for extra in waiting[:max(0, len(waiting) + 1 - MAX_PENDING)]:
+        extra['status'] = 'superseded'
+    identity = secrets.token_urlsafe(24)
+    created = time.time()
+    intent = dict(public(item), id=identity, page_url=expected, seen_url='',
+                  content_hash=item['content_hash'], content_rev=item['content_rev'],
+                  created_at=created, expires_at=created + TTL, status='pending', receipt=None)
+    _intents[identity] = intent
+    return view(intent)
 
 
 def view(intent: dict) -> dict:
@@ -277,13 +402,25 @@ def get(identity: str) -> dict:
 def pending() -> list[dict]:
     with _lock:
         _prune()
-        waiting = [intent for intent in _intents.values() if intent['status'] == 'pending']
-        if not waiting:
-            return []
-        with reg.db() as conn:
-            items = _items(conn, [intent['key'] for intent in waiting])
-        return [view(intent) for intent in waiting
-                if _refresh_status(intent, items.get(intent['key']))]
+        return _pending()
+
+
+def _pending() -> list[dict]:
+    """还等着的待办。**调用方必须持 `_lock`,且已 `_prune()`。**
+
+    拆出来是因为 `here()` 也要这一份:它要回答「有没有待办指着另一个地址」,
+    而那必须是**还写得进去的**那些 —— `_refresh_status` 这一道不能漏(条目在这
+    期间被同步改过、被排除、被删掉的,照旧要当「没有待办」看)。自己再过一遍
+    `_intents` 就是第二份口径,漏掉那一道的后果是把一个已经作废的待办摆在人
+    眼前、请他「改用这一页的地址」,而点下去只会被拒。
+    """
+    waiting = [intent for intent in _intents.values() if intent['status'] == 'pending']
+    if not waiting:
+        return []
+    with reg.db() as conn:
+        items = _items(conn, [intent['key'] for intent in waiting])
+    return [view(intent) for intent in waiting
+            if _refresh_status(intent, items.get(intent['key']))]
 
 
 def cancel(identity: str) -> dict:

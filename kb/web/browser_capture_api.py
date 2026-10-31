@@ -135,6 +135,38 @@ def extension_pending():
     return {'intents': capture.pending()}
 
 
+class HereRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    url: str = Field(min_length=1, max_length=4096)
+
+
+@router.post('/api/browser-capture/here', dependencies=[Depends(extension_access)])
+def here(body: HereRequest):
+    """扩展开起来的那一下问这一次:**我站着这一页,此刻能做什么。**
+
+    一问一答,替掉原先那个下拉框 —— 「这一页是哪一条」地址栏里就写着,让人再
+    回答一遍是白跑三个界面(前因后果在 `capture.here` 的 docstring)。
+
+    **POST 而不是 GET**,因为正文还欠着的那一档它会顺手把待办建好(`create`
+    幂等,同一(条目, 页面)上已有 pending 就复用)。扩展因此不必先去补抓页。
+    """
+    return invoke(capture.here, body.url)
+
+
+@router.post('/api/browser-capture/here/adopt', dependencies=[Depends(extension_access)])
+def adopt_here(body: IntentRequest):
+    """**「等着的那个待办指着另一个地址,而我正站的这一页就是那一篇」。**
+
+    和补抓页上那颗「改用这个地址」是同一个动作、同一个 `create`(旧待办由服务端
+    顶掉,不是先取消再发起),只是把它搬到了人所在的地方 —— 站点按浏览器语言跳转
+    那一类里,人手上拿着的恰恰就是对的地址。
+
+    **记住:这不是放行。** 改用要人点,正文照旧要过 `_admit_*` 全套、照旧要人核
+    对预览勾确认,所以「扩展不会用另一篇文章静默覆盖」一个字都没松。
+    """
+    return invoke(capture.create, body.key, body.page_url)
+
+
 #: 传输上限,**不是判据** —— 「正文够不够」只有 `capture._admit_body` 一份(按行去重的
 #: 400 字门槛 + 20 万字上限)。这里特意留宽一截:卡在同一个数上的话,越界那一下回的
 #: 是 pydantic 的英文校验话,而不是那句能照着做的中文。
