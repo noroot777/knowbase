@@ -5,10 +5,31 @@ from kb.youtube.ranking import stamp
 from kb.youtube.settings import of
 
 
+def stop_reason(text):
+    text = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('{'))
+    if 'ERROR:' in text:
+        return ''
+    if 'does not pass filter' in text:
+        return 'window'
+    if 'has already been recorded in the archive' in text:
+        return 'archive'
+    return ''
+
+
+def completed(broken):
+    cause = broken.cause
+    if not (isinstance(cause, media.ToolFailure) and cause.returncode == 101 and
+            cause.origin == 'youtube' and cause.code in ('', 'unknown')):
+        return False
+    try:
+        return stop_reason(broken.path.read_text(encoding='utf-8', errors='replace')) == 'window'
+    except OSError:
+        return False
+
+
 def parsed(output, url):
     text = output.read_text(encoding='utf-8', errors='replace')
-    empty_window = ('does not pass filter' in text or 'has already been recorded in the archive' in text)
-    if empty_window and not any(line.startswith('{') for line in text.splitlines()) and 'ERROR:' not in text:
+    if stop_reason(text) and not any(line.startswith('{') for line in text.splitlines()):
         return []
     return media._detailed(output, url)
 
@@ -27,7 +48,7 @@ def fetch(source, settings, deadline, notes=None):
             arguments.extend(['--download-archive', str(archive)])
         arguments.append(media._channel_url(source))
         return media._collect_listing(arguments, output, of(settings)['cookies_browser'], deadline,
-                                      lambda: False, parsed, media._channel_url(source), notes)
+                                      lambda: False, parsed, media._channel_url(source), notes, completed=completed)
     finally:
         if archive is not None:
             media.heed(archive)

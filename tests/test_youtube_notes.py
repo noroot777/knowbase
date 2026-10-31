@@ -69,18 +69,19 @@ class YouTubeNotes(YouTubeFixture):
         self.assertLess(sum(char.isalnum() for char in output),
                         sum(char.isalnum() for char in source) * .30)
         self.assertEqual(output, notes.translated_output(source, output))
-        self.assertIn('不能证明漏译', notes.translation_warnings(source, output)[0])
 
-    def test_tail_numbers_and_acronyms_are_content_warnings_not_format_requirements(self):
-        source = 'We review generated source code. ' * 20 + 'Finally the CPU budget is 64 and the API deadline is 2026.'
-        output = '作者介绍生成代码的审核流程，并讨论限制。'
-        self.assertEqual(output, notes.translated_output(source, output))
-        warnings = '；'.join(notes.translation_warnings(source, output))
-        self.assertIn('64', warnings)
-        self.assertIn('2026', warnings)
-        self.assertIn('CPU', warnings)
-        complete = output + '最后 CPU 预算为64，API 截止年为2026。'
-        self.assertFalse(any('末段' in warning for warning in notes.translation_warnings(source, complete)))
+    def test_natural_chinese_numbers_and_translated_acronyms_do_not_create_quality_claims(self):
+        self.transcript['segments'] = [{'start': 0, 'end': 600,
+            'text': 'Check 3 things in the UI and QA workflow. The API budget is 64.'}]
+        output = '检查界面和质量保证流程中的三件事。接口预算为六十四。'
+
+        def reply(prompt, *rest):
+            return output if prompt.startswith('将以下字幕') else self.reply(prompt, *rest)
+
+        result = self.build(reply)
+        self.assertIn(output, result['body'])
+        self.assertNotIn('翻译核验提示', result['body'])
+        self.assertNotIn('translation_warnings', result)
 
     def test_short_closing_translation_is_not_judged_as_a_long_text_block(self):
         source = 'Thank you very much for watching this video.'
@@ -138,12 +139,12 @@ class YouTubeNotes(YouTubeFixture):
         self.build()
         self.assertEqual(2, sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
 
-    def test_suspect_translation_is_saved_with_visible_warning_and_cached(self):
+    def test_translation_cache_is_reused_without_adding_heuristic_text_to_notes(self):
         self.transcript['segments'][-1]['text'] += ' The final API budget is 64.'
         result = self.build()
-        self.assertTrue(result['translation_warnings'])
-        self.assertIn('翻译核验提示', result['body'])
-        self.assertIn('64', result['body'])
+        self.assertNotIn('translation_warnings', result)
+        self.assertNotIn('翻译核验提示', result['body'])
+        self.assertNotIn('需核对', result['body'])
         self.assertEqual(result, self.build())
 
     def test_short_reduce_tail_may_expand_without_rejecting_the_whole_note(self):

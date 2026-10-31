@@ -23,7 +23,7 @@ def install():
         if prompt.startswith('将以下字幕'):
             source = prompt.split('\n\n', 1)[1]
             return ('作者演示智能体编程，强调每次修改都要测试，不能仅凭生成结果认定正确。' *
-                    max(1, len(source) // 50))
+                    max(1, len(source) // 50)) + '接口预算为六十四。'
         if '只输出 JSON' in prompt:
             return json.dumps({'title': '智能体编程：先验证再采用',
                                'summary': '作者展示智能体编程方法，并强调测试与人工核验的重要性。',

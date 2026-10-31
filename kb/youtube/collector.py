@@ -236,8 +236,7 @@ def process(rows, settings, scope, summary, deadline):
             entry = notes.build(row, transcript, deadline, stopped)
             storage.update(row['video_id'], state='ready', note=json.dumps(entry, ensure_ascii=False),
                            validation=products.certify(row, metadata, transcript, entry), repair_pending=0,
-                           reason='中文内容笔记已完成' + ('；需核对：' + '；'.join(entry['translation_warnings'])
-                               if entry.get('translation_warnings') else ''), retry_at=0, last_error='')
+                           reason='中文内容笔记已完成', retry_at=0, last_error='')
             summary['processed'] += 1
         except media.Interrupted as error:
             for pending in chosen[position:]:

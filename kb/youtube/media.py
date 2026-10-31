@@ -168,7 +168,8 @@ def run(arguments, output, deadline, stopped, partial=False, origin=YOUTUBE):
             raise flooded(state['noise'])
         if process.returncode:
             # **分档在这儿就算完**,算的是完整诊断;异常消息只是给人看的摘要。
-            raise ToolFailure(f'{arguments[0]} 执行失败', state['noise'], state['code'], origin)
+            raise ToolFailure(f'{arguments[0]} 执行失败', state['noise'], state['code'], origin,
+                              returncode=process.returncode)
     except Exception as error:
         # **列表路要的是「已经整行印出来的那几条」,不是进程的退出码**(见 `PartialOutput`)。
         # 按了停止那一下例外:那时不许拿半截结果去固化这一轮的末态。
@@ -231,7 +232,7 @@ def _cap(limit):
     return str(max(1, min(50, int(limit))))
 
 
-def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes):
+def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes, completed=None):
     """列频道共用的「按条目收」适配层。**两条列表路都走这一份。**
 
     **契约和单视频那三条不一样**:yt-dlp 非零退出、或者预算在第 7 条上到点时,已经整行
@@ -251,6 +252,8 @@ def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes
         output = ytdlp(arguments, path, deadline, stopped, spec=spec, playlist=True, partial=True)
     except PartialOutput as broken:
         output, reason, cause = broken.path, broken.reason, broken.cause
+        if completed is not None and completed(broken):
+            reason, cause = '', None
     # 这一份原文还要再分一次档给下面那几抛用。**记那一笔罚不靠这儿** —— 正路是
     # `run` 的完成边界(成功、半截、失败都过),这儿只是冗余带:`trip` 第一笔说了算,
     # 多调一次不会算成两笔。

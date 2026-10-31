@@ -45,10 +45,11 @@ class ToolFailure(RuntimeError):
     默认值写成字面量而不是 `YOUTUBE`,只因为常量定义在这个类下面。
     """
 
-    def __init__(self, summary, diagnostic='', code='', origin='youtube'):
+    def __init__(self, summary, diagnostic='', code='', origin='youtube', returncode=None):
         self.diagnostic = str(diagnostic or '')
         self.code = code
         self.origin = origin
+        self.returncode = returncode
         #: 摘要**自己留一份**。消息是「摘要 + 裁过的诊断」拼出来的、拆不回去,而 `shown`
         #: 要拿原始摘要重新和**未裁**的诊断拼一次(理由见那边),从消息上切是切不对的。
         self.summary = str(summary)

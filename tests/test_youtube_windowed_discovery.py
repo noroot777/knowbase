@@ -1,12 +1,15 @@
 import errno
 import json
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg
-from kb.youtube import collector, discovery, media, notes, ranking, storage, sync_window, throttle
+from kb.youtube import (collector, discovery, media, notes, ranking, storage, sync_window,
+                        throttle, toolchain, windowed_discovery)
 from kb.youtube.diagnosis import ToolFailure
 from tests.youtube_fixture import YouTubeFixture
 
@@ -42,6 +45,85 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
 
     def fetch(self, source=None, timeout=30, notes=None):
         return discovery.fetch(source or self.prepared, self.settings(), timeout, estimates=True, notes=notes)
+
+    def command(self, payloads=(), diagnostic='', returncode=101, delay=0):
+        output = '\n'.join([*(json.dumps(payload) for payload in payloads), diagnostic]) + '\n'
+        script = f'import sys,time;sys.stdout.write({output!r});sys.stdout.flush();time.sleep({delay});sys.exit({returncode})'
+        return [sys.executable, '-u', '-c', script]
+
+    def test_real_date_boundary_exit_101_is_complete_for_entries_and_empty_window(self):
+        diagnostic = '[download] old does not pass filter (upload_date>=?20261028), skipping ..\nAborting remaining downloads'
+        for payloads in ([], [self.payload(1, self.now), self.payload(2, self.now)]):
+            evidence = []
+            with self.subTest(count=len(payloads)), throttle.opened(), patch.object(
+                    toolchain, 'command', return_value=self.command(payloads, diagnostic)), \
+                    patch.object(media.login, 'arguments', return_value=[]):
+                listed = self.fetch(notes=evidence)
+            self.assertEqual(len(payloads), len(listed))
+            self.assertEqual([], evidence)
+
+    def test_real_boundary_completion_does_not_pollute_channel_notices(self):
+        payloads = [self.payload(1, self.now), self.payload(2, self.now)]
+        diagnostic = '[download] old does not pass filter (upload_date>=?20261028), skipping ..\nAborting remaining downloads'
+        with patch.object(toolchain, 'command', return_value=self.command(payloads, diagnostic)), \
+                patch.object(media.login, 'arguments', return_value=[]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(media, 'probe', return_value={'duration': 600}), \
+                patch.object(media, 'obtain', return_value=self.complete_transcript()), \
+                patch.object(notes, 'build', side_effect=self.note):
+            result = collector.collect(self.scope)
+        self.assertEqual(2, result['discovered'])
+        self.assertEqual([], result['partial'])
+        self.assertEqual([], result['failed_ids'])
+        self.assertNotIn('没列完', result['message'])
+        stored = reg.subscription('youtube', self.source['id'])
+        self.assertTrue(stored['last_success'])
+        self.assertFalse(stored['last_notice'])
+
+    def test_real_unexpected_nonzero_exit_still_reports_partial_output(self):
+        for returncode, diagnostic in (
+                (1, 'ERROR: request failed'),
+                (101, 'Aborting remaining downloads'),
+                (101, '[download] old does not pass filter\nERROR: request failed'),
+                (101, '[download] old does not pass filter\nWARNING: Sign in to confirm you are not a bot'),
+                (1, '[download] old does not pass filter')):
+            evidence = []
+            with self.subTest(code=returncode, diagnostic=diagnostic), throttle.opened(), \
+                    patch.object(toolchain, 'command', return_value=self.command(
+                        [self.payload(1, self.now)], diagnostic, returncode)), \
+                    patch.object(media.login, 'arguments', return_value=[]):
+                listed = self.fetch(notes=evidence)
+            self.assertEqual(1, len(listed))
+            self.assertIn('中断', evidence[0])
+
+    def test_real_timeout_after_boundary_text_is_not_misclassified_as_completion(self):
+        command = self.command([self.payload(1, self.now)], '[download] old does not pass filter', delay=10)
+        evidence = []
+        with throttle.opened(), patch.object(toolchain, 'command', return_value=command), \
+                patch.object(media.login, 'arguments', return_value=[]):
+            listed = windowed_discovery.fetch(self.prepared, self.settings(), time.monotonic() + .5, evidence)
+        self.assertEqual(1, len(listed))
+        self.assertIn('中断', evidence[0])
+
+    def test_video_title_cannot_masquerade_as_date_boundary_diagnostic(self):
+        evidence = []
+        payload = {**self.payload(1, self.now), 'title': 'AI: what does not pass filter mean?'}
+        command = self.command([payload], 'Aborting remaining downloads')
+        with throttle.opened(), patch.object(toolchain, 'command', return_value=command), \
+                patch.object(media.login, 'arguments', return_value=[]):
+            listed = self.fetch(notes=evidence)
+        self.assertEqual(1, len(listed))
+        self.assertIn('中断', evidence[0])
+
+    def test_date_boundary_cancellation_does_not_change_other_listing_routes(self):
+        evidence = []
+        command = self.command([self.payload(1, self.now)], '[download] old does not pass filter')
+        with throttle.opened(), patch.object(toolchain, 'command', return_value=command), \
+                patch.object(media.login, 'arguments', return_value=[]):
+            listed = discovery.fetch(self.source, self.settings(), estimates=False, notes=evidence)
+        self.assertEqual(1, len(listed))
+        self.assertIn('中断', evidence[0])
 
     def test_production_route_reads_real_dates_and_enforces_exact_new_entry_boundary(self):
         payloads = [self.payload(1, self.floor - timedelta(seconds=1)),

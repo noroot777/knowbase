@@ -464,9 +464,13 @@ try {
     $('source-reader-body').textContent.includes('完整中文转录') &&
     $('source-reader-body').textContent.includes('不能仅凭生成结果') &&
     !document.querySelector('#source-reader-body a[href*="&t="]')`));
-  check('译文核验提示不阻止入库且在阅读区可见', await evaluate(`
-    $('source-reader-body').textContent.includes('翻译核验提示') &&
-    $('source-reader-body').textContent.includes('64')`));
+  check('自然中文数词正常入库且正文不混入工单提示', await evaluate(`
+    !$('source-reader-body').textContent.includes('翻译核验提示') &&
+    $('source-reader-body').textContent.includes('接口预算为六十四')`));
+  check('候选完成原因不混入翻译误报', await evaluate(`
+    fetch('/api/intake/youtube/ranking').then(response=>response.json()).then(value=>
+      value.items.filter(row=>row.state==='ready').length===1 &&
+      value.items.filter(row=>row.state==='ready').every(row=>row.reason==='中文内容笔记已完成'))`));
   await screenshot('chinese-reader-desktop');
   await click('#subs-switch-rss');
   await wait(`sourceKind === 'rss' && $('source-title').textContent === 'RSS' && !$('source-add').disabled`);

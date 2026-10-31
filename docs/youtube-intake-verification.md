@@ -1,6 +1,35 @@
 # YouTube 低成本接入验证
 
-## 当前审查修复口径（2026-10-31）
+## 当前复修口径（2026-10-31，7Rzxh2K80EXE）
+
+- 日期边界停止与异常中断分开：结构化保存工具退出码，仅日期发现路径在退出 `101`、
+  本次原始输出有明确日期过滤且无 ERROR 或上游错误分类时正常收尾；不产生「频道没列完」及订阅假告警。
+  不从会排除 `[download]` 行的异常诊断摘要猜测边界，也不把视频 JSON 标题中的同名字样当诊断。
+  真实超时、其他错误码或伴随 ERROR 仍保留部分输出和中断原因。
+- 撤回长度比例、末段数字和缩写匹配的启发式，不再生成「翻译核验提示」，也不写入正文、
+  导出、成品 JSON 或候选完成原因。只保留非空中文检查；自然中文数词和术语意译正常通过。
+  v3 译文及内容缓存继续复用，不因此重做翻译；不自动改写生产库既有笔记。
+- 新增用例不再只模拟 `media.ytdlp` 返回文件，而是启动不联网的 Python 子进程输出真实 JSON/诊断、
+  退出 101/1 或超时，经真实 `media.run`、列表适配层及 collector 核对状态和订阅通知。
+  浏览器夹具把 `API budget is 64` 正常译为「接口预算为六十四」，阅读和导出断言正文不混入工单。
+- 仅登记本轮改动的 `tests.test_youtube_notes`、`tests.test_youtube_windowed_discovery`、
+  `tests.test_youtube_browser`。不执行整套回归、未改动模块或真实生产同步。
+- 浏览器通道：先命名 Chrome 扩展会话 `🔎 YouTube边界复修`，再以 `visible:false` 创建后台标签，
+  被拒绝 `Capability is not available: visibility`，没有创建标签。降级独立无头壳及临时 profile，
+  仅访问本地隔离服务、不需要登录态；不激活 Chrome、不接管现有标签、不连接用户 Chrome CDP。
+
+本轮原始命令：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_notes tests.test_youtube_windowed_discovery tests.test_youtube_browser -v
+```
+
+工作目录：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+本轮实际执行结论、哨兵标识、完整日志与截图统一归档至
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-7Rzxh2K80EXE/`。
+仓库文件在最终登记验证前冻结；结果写到该外部目录，避免测后修改文档让代码树对不上证据。
+
+## 上一轮审查修复口径（历史：83edddc）
 
 译文只硬校验非空中文；长度差异及末段数字/大写缩写缺失变为非阻塞核验提示，
 写入候选完成原因、JSON 与阅读/导出正文，不以字符比断言全文语义完整。

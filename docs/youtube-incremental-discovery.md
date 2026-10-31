@@ -18,6 +18,10 @@
 冷启动精确展开比 flat 更慢；保留原有预算和部分输出说明，可能分多轮推进，不保证一轮查完。
 `--no-quiet` 保留工具的「日期过滤/已在 archive」证据；只有明确跳过证据才把空输出视为空窗口。
 无解释空输出、无日期 JSON 或真实错误仍为可重试失败，不能把登录墙记为「没有新内容」。
+日期边界正常取消会让 yt-dlp 退出 `101`，不等于预算中断。工具层保留结构化退出码，
+仅这条日期发现路径在「退出 101 + 原始输出中的日期过滤诊断 + 无 ERROR/上游错误分类」时认可正常结束，
+不记 `partial` 或订阅 `last_notice`。真实超时、其他退出码、有错误或无日期证据仍保留部分完成说明；
+不能只见一行日期提示就把后续真实故障掩掉。其他列表路径不改变非零退出的含义。
 
 ## 首次同步的三天起点（2026-10-31）
 
@@ -35,7 +39,14 @@
 `feed_runs.summary.initial_fetch_at` 记录本轮使用的首次默认起点（可能尚未成功保存），`outside_initial_window` 记录 Python 精确过滤的新条目数，不含工具在边界处已停止的旧视频。没有新增界面次级标签。
 `tests/test_youtube_windowed_discovery.py` 从真实 `discovery.fetch` 和 collector 入口验证，仅替换 yt-dlp 进程边界，不再只拿精确 `discovery.fetch` 替身证明规则生效。测试不访问 YouTube、cookie 或真实模型。
 
-### 当前执行证据
+### 本次复修执行证据
+
+针对 `7Rzxh2K80EXE` 报告，新增真实离线子进程退出 101/1 及超时用例，经
+`media.run` → 列表适配 → collector 验证正常边界无假告警、异常仍可辨。
+仅运行本次修改的 notes、windowed discovery 与 browser 三个测试模块；
+登记命令及实际结果记录于 `youtube-intake-verification.md` 顶部所列证据目录，不运行整套回归。
+
+### 上一轮执行证据（83edddc）
 
 哨兵 `lZ9UfrgEt6YJ` 登记的四个本轮修改/新增测试模块共 43 项通过、无跳过，其中
 `test_youtube_windowed_discovery` 直接覆盖真实发现入口的日期及 archive 路径；无头浏览器 39 项断言通过。
