@@ -39,13 +39,22 @@ class YouTubeModelDeadline(unittest.TestCase):
     def test_request_result_and_shared_absolute_deadline(self):
         original = subprocess.Popen
         selected = SimpleNamespace(provider='openai', model_id='fixture')
-        code = 'import sys,json; json.load(sys.stdin); print(json.dumps({"text":"完整中文结果"}))'
+        code = 'import sys,json; json.load(sys.stdin); print(json.dumps({"text":"完整中文结果","completed":True}))'
         with patch.object(llm_request.subprocess, 'Popen', side_effect=lambda arguments, **values:
                           original([sys.executable, '-c', code], **values)):
             deadline = time.monotonic() + 5
             self.assertEqual('完整中文结果', llm_request.request('fixture', selected, deadline, lambda: False))
             with self.assertRaises(media.Interrupted):
                 llm_request.request('next chunk', selected, time.monotonic() - .1, lambda: False)
+
+    def test_text_without_completion_evidence_cannot_leave_the_process_boundary(self):
+        original = subprocess.Popen
+        selected = SimpleNamespace(provider='openai', model_id='fixture')
+        code = 'import sys,json; json.load(sys.stdin); print(json.dumps({"text":"只有开头一句。"}))'
+        with patch.object(llm_request.subprocess, 'Popen', side_effect=lambda arguments, **values:
+                          original([sys.executable, '-c', code], **values)):
+            with self.assertRaisesRegex(RuntimeError, '完成凭据'):
+                llm_request.request('fixture', selected, time.monotonic() + 5, lambda: False)
 
     def local_model(self, mode):
         requests = []

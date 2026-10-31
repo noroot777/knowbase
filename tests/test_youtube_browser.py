@@ -26,3 +26,4 @@ class YouTubeBrowser(unittest.TestCase):
             self.assertNotIn('&t=', files[0].read_text())
             self.assertNotIn('翻译核验提示', files[0].read_text())
             self.assertIn('接口预算为六十四', files[0].read_text())
+            self.assertNotIn('"translations"', files[0].read_text())

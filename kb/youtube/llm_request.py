@@ -56,6 +56,8 @@ def request(prompt, selected, deadline, stopped):
         result = json.loads(output)
         if result.get('error'):
             raise failed(result['error'])
+        if result.get('completed') is not True:
+            raise failed('模型回复缺少正常完成凭据，未生成中文成品')
         text = result.get('text', '').strip()
         if not text:
             raise failed('模型返回空内容，未生成中文成品')
@@ -71,6 +73,7 @@ def request(prompt, selected, deadline, stopped):
 
 def main():
     from kb import llm
+    from kb.youtube import model_response
     values = json.load(sys.stdin)
     client = None
     try:
@@ -80,12 +83,10 @@ def main():
             raise RuntimeError('模型请求开始前处理预算已用尽')
         client = (llm._anthropic() if provider == 'anthropic' else llm._openai()).with_options(
             timeout=min(180, remaining), max_retries=0)
-        llm._clients[provider] = client
-        text = llm.chat(values['prompt'], llm.Model(provider, values['model']), max_tokens=6000,
-                        timeout=min(180, remaining))
+        text = model_response.complete(client, provider, values['model'], values['prompt'])
         if time.monotonic() >= values['deadline']:
             raise RuntimeError('模型回复超过处理预算')
-        print(json.dumps({'text': text}))
+        print(json.dumps({'text': text, 'completed': True}))
     except Exception as error:
         print(json.dumps({'error': str(error)}))
     finally:

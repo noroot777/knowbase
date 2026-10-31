@@ -8,6 +8,7 @@ from kb.collectors import FetchScope
 from kb.feeds import registry as reg
 from kb.youtube import collector, discovery, media, notes, ranking, storage, transcripts
 from tests.youtube_fixture import YouTubeFixture
+from tests.youtube_translation_fixture import response
 
 
 class YouTubeIntegrity(YouTubeFixture):
@@ -60,6 +61,8 @@ class YouTubeIntegrity(YouTubeFixture):
 
         def reply(prompt, *arguments):
             prompts.append(prompt)
+            if prompt.startswith('将以下字幕'):
+                return response(prompt, translated)
             return json.dumps(payload, ensure_ascii=False) if '只输出 JSON' in prompt else translated
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
@@ -77,8 +80,45 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertEqual(1, len(exported))
         files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
         self.assertEqual(1, len(files))
-        self.assertIn('## 完整中文转录\n\n' + translated, files[0].read_text())
+        self.assertIn('## 中文译文（自动生成）\n\n' + translated, files[0].read_text())
         self.assertNotIn('&t=', files[0].read_text())
+
+    def test_missing_translation_coverage_leaves_no_note_and_recovers_on_retry(self):
+        selected = SimpleNamespace(provider='fixture', model_id='fixture')
+        complete = {'origin': 'uploaded_captions', 'language': 'en', 'segments': [
+            {'start': 0, 'end': 600, 'text': 'Verify every generated change before use. ' * 35}]}
+        prompts = []
+        broken = True
+
+        def reply(prompt, *arguments):
+            prompts.append(prompt)
+            if prompt.startswith('将以下字幕'):
+                payload = json.loads(response(prompt, '每次修改都要独立核验。'))
+                if broken:
+                    payload['translations'].pop()
+                return json.dumps(payload)
+            if '只输出 JSON' in prompt:
+                return json.dumps({'title': '逐项核验生成结果', 'summary': '每次修改需要核验。',
+                                   'body': '## 方法\n使用前独立核验。'})
+            return '作者强调每次修改需要独立核验。'
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value=self.metadata), \
+                patch.object(media, 'obtain', return_value=complete):
+            first = collector.collect(FetchScope(force=True))
+            self.assertEqual((0, 0), (first['processed'], first['added']))
+            self.assertNotEqual('ready', storage.rows()[0]['state'])
+            self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in prompts))
+            self.assertEqual(frozenset(), collector.YouTubeCollector('youtube').materialize())
+            self.assertFalse(list((self.root / 'vault').rglob('*.md')))
+            broken = False
+            recovered = collector.collect(FetchScope(force=True))
+        self.assertEqual((1, 1), (recovered['processed'], recovered['added']))
+        self.assertEqual('ready', storage.rows()[0]['state'])
+        self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
 
     def test_aliases_share_content_and_survive_disable_delete_and_repoint(self):
         alias = reg.save_subscription('youtube', {'name': '别名频道', 'url': 'https://www.youtube.com/@same-channel'})

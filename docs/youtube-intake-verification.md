@@ -1,6 +1,27 @@
 # YouTube 低成本接入验证
 
-## 当前复修口径（2026-10-31，Ruq8xJHCetPt 第一轮）
+## 当前根因修复：模型完成性与源文覆盖契约
+
+- 根因不在展示名称：旧模型调用把 Responses 的 `incomplete`、Chat 的 `length`、Anthropic 的 `max_tokens` 等结束信息压成纯文本；翻译再只验非空中文并缓存，遗漏会沿摘要和成稿固化。
+- YouTube 专用响应适配器在丢弃状态前判正常完成，父子进程之间必须携带完成凭据；不改变无关来源的通用 LLM 行为。
+- 每批源文拆成不超过 450 字符的编号短段，编号绑定顺序和源文；译文编号必须恰好覆盖全部输入，每段非空中文。漏段、重复、未知编号、跨源缓存和损坏缓存均不能发布；短译、中文数词及术语意译不按字符比例误拒。
+- 旧不带覆盖凭据的 v3 译文保留但不冒充新凭据，仅翻译阶段换版；原字幕/ASR 和其他阶段不整体失效。重试复用已验证批次，不重做已完成翻译。历史成品不自动改写。
+- 这是响应正常结束与结构覆盖校验，不宣称已经证明逐句语义完整，保留自动译文标记及完整性限制说明。
+- 浏览器通道：扩展先命名 `🔎 YouTube根因验证`，创建 `visible:false` 后台标签被拒绝 `Capability is not available: visibility`，未创建标签。转独立无头壳、临时 profile、本地隔离服务；不需登录态，不接管已有标签、不激活用户 Chrome、不连用户 Chrome CDP。
+
+仅本轮新增/修改测试模块的登记命令：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_model_response tests.test_youtube_llm_request tests.test_youtube_notes tests.test_youtube_integrity tests.test_youtube_stage_cache tests.test_youtube_browser -v
+```
+
+工作目录：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+原始日志、实际结果、接口协议替身范围、浏览器截图和冻结树统一归档至
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/root-cause-translation/`。
+结果只写外部证据目录，保证测试树与提交树一致；整套及未修改回归留给验收。
+不请求真实模型/YouTube、不读取真实 cookie、不操作生产库或用户服务。
+
+## 历史复修口径（1ad1a90，Ruq8xJHCetPt 第一轮）
 
 - 覆盖完成与条目不可用分开：会员、私有、地区限制等视频错误附跳过说明，只有完整列表结束证据才可在退 1 时推进水位；真实超时、登录墙、未知错误和其他路线仍保持失败/部分完成。
 - 中文正文改称「中文译文（自动生成）」并说明未经逐段完整性核验，不将一句模型输出冒称完整转录，不恢复长度比/数字启发式，不失效付费缓存。

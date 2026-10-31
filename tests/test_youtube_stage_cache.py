@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from kb.youtube import media, notes
 from tests.youtube_fixture import YouTubeFixture
+from tests.youtube_translation_fixture import encoded
 
 
 class YouTubeStageCache(YouTubeFixture):
@@ -48,7 +49,7 @@ class YouTubeStageCache(YouTubeFixture):
 
         product, call = self.build(recovered)
         self.assertEqual(3, call.call_count)
-        self.assertIn('完整中文转录', product['body'])
+        self.assertIn('中文译文（自动生成）', product['body'])
         self.assertNotEqual(failed_block, media.read_json(path)[key])
 
     def test_invalid_stage_outputs_are_not_cached_and_good_stages_survive(self):
@@ -67,7 +68,7 @@ class YouTubeStageCache(YouTubeFixture):
         directory = media.cache_dir(self.row['video_id'])
         cache = {'translation': 'English only', 'note': '{bad json'}
         source = 'The original AI tutorial has important facts.'
-        translation = notes.cached(directory, cache, 'translation', lambda: '中文事实和限制。',
+        translation = notes.cached(directory, cache, 'translation', lambda: encoded(source, '中文事实和限制。'),
                                    lambda output: notes.translated_output(source, output))
         payload = notes.cached(directory, cache, 'note', lambda: json.dumps(self.payload), notes.note_payload)
         self.assertIn('中文', translation)
