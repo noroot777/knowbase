@@ -34,7 +34,11 @@ const context = vm.createContext({
   document,
   window: {closed: 0, close() { this.closed += 1; }},
   chrome: {
-    tabs: {query: async () => [tab], remove: async id => { removed.push(id); }},
+    //: **每次交回一份新快照,不是同一个对象** —— 真实 `chrome.tabs.query` 就是这样。
+    //: 共用一个对象的话,`here`(上一次渲染时问到的那一份)和此刻这一问**永远相等**,
+    //: 于是「标签在这中间跳走了」在这个桩里根本表达不出来:改 `tab.url` 会把历史那
+    //: 一份也一起改掉,按下去那一刻的重新核验恒真。
+    tabs: {query: async () => [{...tab}], remove: async id => { removed.push(id); }},
     scripting: {executeScript: async ({files}) => { injections += 1; return files ? [{}] : [{result: captured}]; }},
     storage: {local: {get: async () => ({server: 'http://127.0.0.1:8787', key: 'k'.repeat(44)}), set: async () => {}}}
   },

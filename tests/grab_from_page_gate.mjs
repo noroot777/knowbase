@@ -43,7 +43,11 @@ const context = vm.createContext({
   //: 页面留在屏幕上,是这颗按钮唯一会留下的后遗症。
   window: {closed: 0, close() { this.closed += 1; }},
   chrome: {
-    tabs: {query: async () => [tab], remove: async id => { removed.push(id); }},
+    //: **每次交回一份新快照,不是同一个对象** —— 真实 `chrome.tabs.query` 就是这样。
+    //: 共用一个对象的话,`here`(上一次渲染时问到的那一份)和此刻这一问**永远相等**,
+    //: 于是「标签在这中间跳走了」在这个桩里根本表达不出来:改 `tab.url` 会把历史那
+    //: 一份也一起改掉,按下去那一刻的重新核验恒真。
+    tabs: {query: async () => [{...tab}], remove: async id => { removed.push(id); }},
     scripting: {executeScript: async ({files, args}) => {
       if (files) return [{}];
       extracted.push(args[0]);
@@ -320,12 +324,56 @@ await element('refresh').click();
 assert.equal(element('close-tab').hidden, false, '照旧露着');
 assert.equal(element('close-tab').focused, false, '已经露着就不许再抢一次焦点');
 
-// 采完之后标签自己跳走了(站内重定向、他自己点开了下一篇):**收回去**。关的是
-// 「刚刚采的那一页」,不是「碰巧现在开着的那一页」—— 关错一个标签不可撤销。
+// 采完之后标签自己跳走了(站内重定向、站点自动翻下一篇、他自己点开了另一条):
+// **收回去**。关的是「刚刚采的那一页」,不是「碰巧现在开着的那一页」—— 关错一个
+// 标签是人正在读的东西没了,不可撤销。
 tab.url = PAGE;
 here = {...here, page_url: PAGE};
 await element('refresh').click();
 assert.equal(element('close-tab').hidden, true, '采的那一页已经不在眼前,就不许再摆');
+
+// **跳走之后不刷新、直接按下去**:这一条才是承重的。上面那条先点了「重新确认」才
+// 断言,而真实形态里没人会先点它 —— 按钮露不露面是**上一次渲染**时算的,标签在这
+// 中间跳走了,屏幕上那颗照旧在,按下去关掉的是他正读着的新页面(实测:关闭接口收
+// 到的是新那一页的标签)。所以许可要在**按下去那一刻**再核一遍。
+tab.id = 7; tab.url = OTHER;
+here = {ok: true, situation: 'complete', page_url: OTHER, intent: null, elsewhere: [],
+        item: {key: 'k9', kind: 'rss', title: '另一篇', url: OTHER},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, false, '先回到露面那一档');
+// 「对不上」有**两个**维度,各钉一条 —— 只比一边的写法在另一边上照旧关错标签。
+// (a) 同一个标签换了一页:站内 SPA 路由、站点采完自动翻下一篇。标签 id 一个字都
+//     没变,单比 id 的写法拦不住。
+tab.url = 'https://example.org/posts/next-one';
+here = {ok: true, situation: 'absent', page_url: tab.url, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+removed.length = 0;
+const closedBefore = context.window.closed;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '同一个标签换了一页,按下去一个都不许关');
+assert.equal(context.window.closed, closedBefore, '更不许把弹窗一起收掉');
+assert.match(element('status').textContent, /不是刚才采的那一篇/,
+  '要说清为什么没关 —— 不然看着就是这颗按钮坏了');
+assert.equal(element('close-tab').hidden, true, '顺手按新这一页重画,这颗按钮自己收回去');
+
+// (b) 地址一样、标签不是那一个:同一篇他开了两个标签(或者采完那一个已经被他关了,
+//     眼前这个是后开的)。地址逐字相等,单比地址的写法会去关另一个标签。
+tab.url = OTHER;
+here = {ok: true, situation: 'complete', page_url: OTHER, intent: null, elsewhere: [],
+        item: {key: 'k9', kind: 'rss', title: '另一篇', url: OTHER},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, false, '回到露面那一档');
+tab.id = 7002;
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '地址一样但不是那个标签,照旧不许关');
+assert.equal(context.window.closed, closedBefore, '也不许收掉弹窗');
+assert.match(element('status').textContent, /不是刚才采的那一篇/, '同样要说清为什么没关');
+// 顺手那次重画也要认出「不是那个标签」—— 记的是哪个标签的哪一页,不是光一个地址。
+assert.equal(element('close-tab').hidden, true, '地址一样也不摆:采的那一页不在这个标签里');
+tab.id = 7;
 
 // 按下去:只关**当前这一个**标签,顺手把弹窗也收掉
 tab.url = OTHER;

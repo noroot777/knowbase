@@ -26,14 +26,32 @@
   //: 抽屉里「同时在新标签打开这一篇」默认勾着,所以它多半是刚刚为这次采集开出来
   //: 的那个标签,人接下来要做的事就是把它关掉。
   //:
-  //: **跟着地址记**,理由同上面 `chosenFor`:标签自己跳走了(站内重定向、推送式
-  //: 改地址)之后,屏幕上那颗「关掉这一页」关的就不是他采过的那一页,而是他此刻
-  //: 正读着的东西。换页就当没采过 —— 服务端那一答 `saved` 另算一条路。
-  let doneFor = '';
+  //: **记的是「哪个标签的哪一页」,不是光一个地址**。标签自己跳走了(站内重定向、
+  //: 推送式改地址、他点开了下一篇)之后,屏幕上那颗「关掉这一页」关的就不是他采过
+  //: 的那一页,而是他此刻正读着的东西;只记地址的话,同一篇文章开了两个标签时还会
+  //: 把另一个标签认成这一个。换页就当没采过 —— 服务端那一答 `saved` 另算一条路。
+  let doneFor = null;
 
   function status(message, error = false) {
     element('status').textContent = message;
     element('status').classList.toggle('error', error);
+  }
+
+  //: 这一轮新冒出来的那颗默认动作,**等不忙了再收焦点**。
+  //:
+  //: 三条成功路径都是 `setBusy(true)` → 写进去 → `loadHere()` 里把按钮放出来 → 最后
+  //: 才 `setBusy(false)`,而按钮在中间那一段是**禁用的**;真实浏览器对 disabled 的元素
+  //: 不给焦点,那一下静默落空 —— 屏幕上按钮好端端地在,回车却没有反应,人只能去点它,
+  //: 而「默认选中」要的正是不必去点。(假 DOM 不管 disabled,所以探针一度看不出来:
+  //: `tests/popup_dom.mjs` 的 `focus()` 现在照真实 DOM 的规矩拒绝。)
+  let wantFocus = '';
+
+  function flushFocus() {
+    if (busy || !wantFocus) return;
+    const target = element(wantFocus);
+    wantFocus = '';
+    // 这中间它可能又藏回去了(刷新读到别的情形)—— 那就不该再把焦点送过去。
+    if (!target.hidden && !target.disabled) target.focus();
   }
 
   function setBusy(value) {
@@ -43,6 +61,7 @@
     for (const name of ['connect', 'refresh', 'close-tab']) element(name).disabled = value;
     // 「改用它」有几颗要看服务端交回几个待办,所以从那张列表上现读,不记一份名单。
     for (const button of element('elsewhere-list').querySelectorAll('button')) button.disabled = value;
+    flushFocus();
   }
 
   function localServer(value) {
@@ -158,7 +177,8 @@
   //: 的人并没有一个「刚开出来、现在没用了」的标签,给他一颗关页按钮等于请他关掉
   //: 自己正在读的东西。
   const captureLanded = () =>
-    !!(situation && situation.situation === 'saved') || (!!here && doneFor === here.url);
+    !!(situation && situation.situation === 'saved')
+    || !!(here && doneFor && doneFor.id === here.id && doneFor.url === here.url);
 
   function renderSituation() {
     const plan = situation ? PLANS[situation.situation] : null;
@@ -174,8 +194,8 @@
     //: 人刚把焦点挪到「重新确认」上就被拽回来了。
     const close = element('close-tab');
     const landed = captureLanded();
-    if (landed && close.hidden) { close.hidden = false; close.focus(); }
-    else if (!landed) close.hidden = true;
+    if (landed && close.hidden) { close.hidden = false; wantFocus = 'close-tab'; flushFocus(); }
+    else if (!landed) { close.hidden = true; if (wantFocus === 'close-tab') wantFocus = ''; }
     if (plan) {
       element('act').textContent = plan.act;
       // 名字一律先写上,**不管这一刻露不露面**:失败那条路上只改 `hidden`,它要是
@@ -272,7 +292,7 @@
       //: **在刷新之前记下「采完的是哪一页」。** `loadHere()` 会重问服务端,而它那
       //: 一答在最常走的那条路上是 `complete`(没点过「改用它」→ 没有身份 → 服务端
       //: 跳过回执查找) —— 光等 `saved` 的话「关掉这一页」在那条路上永远不露面。
-      doneFor = tab.url;
+      doneFor = {id: tab.id, url: tab.url};
       // 已经写进去了。这一问失败只是「状态没刷新」,不该让人以为正文没保存。
       try { await loadHere(); } catch { /* 下面照旧报服务端那句话 */ }
       status(`${captured.title}：${result.detail}（${verified.characters} 字符）`);
@@ -300,7 +320,7 @@
       //: 三条路都算采完(这一条是服务端自己去抓的那条)。判据是**这一页的内容已经
       //: 进知识库了**,不是「这个标签是谁开的」—— 后者扩展根本无从知道,而真要按它
       //: 分流,同一颗按钮会在三条路上时有时无,人看不出规律。
-      doneFor = here.url;
+      doneFor = {id: here.id, url: here.url};
       // 同下面提交那一处:收下之后刷新失败不改变已经收下这件事,更不该把
       // 下面那两颗兜底按钮露出来 —— 那会让人把已入库的这一页再读一遍正文。
       try { await loadHere(); } catch { /* 照旧报「已收下」 */ }
@@ -334,7 +354,7 @@
       const payload = {url: captured.page_url, title: captured.title, body: captured.body};
       const verified = await grabApi('/from-page/precheck', {method: 'POST', body: JSON.stringify(payload)});
       const result = await grabApi('/from-page', {method: 'POST', body: JSON.stringify(payload)});
-      doneFor = here.url;           // 同上:收录成新条目那条路也一样采完了
+      doneFor = {id: here.id, url: here.url};   // 同上:收录成新条目那条路也一样采完了
       // 已经收下了。这一问失败只是「状态没刷新」—— 不该让人以为没收下。
       try { await loadHere(); } catch { /* 下面照旧报「已收下」 */ }
       status(`${verified.title}：${result.detail || '已收下'}（${verified.characters} 字符）`);
@@ -383,9 +403,15 @@
   //:
   //: **关的永远是当前这一个标签,不枚举也不碰别的。** `chrome.tabs.remove` 不需要
   //: 任何额外权限(`tabs` 那一条只管 `url`/`title` 这几个敏感字段),清单一个字不改。
-  //: 现问一次 `currentTab()` 而不是用上面记着的那个 id:这期间标签要是跳走了,
-  //: `captureLanded()` 已经把这颗按钮收起来了,这一道是同一件事的第二遍 —— 而
-  //: 关错一个标签是人正在读的东西没了,不可撤销。
+  //:
+  //: **按下去这一刻重新核一遍身份,对不上就不关。** 这颗按钮露不露面是**上一次
+  //: 渲染**时算的,而关标签不可撤销 —— 两者之间标签完全可能已经不是那一页了:
+  //: 站内 SPA 路由、站点采完自动翻下一篇、他自己点开了另一条。那时屏幕上按钮
+  //: 照旧在(`here` 还是上一次问到的那一份,没人去重问),按下去关掉的是他正读着
+  //: 的新页面。所以现问一次 `currentTab()`,和这一屏算许可时用的那个标签+地址
+  //: 逐一对过;对不上就改为重新问一次服务端(那一下会把这颗按钮自己收回去),
+  //: 并说明为什么没关。**判据是原样字符串相等,不做任何规范化** —— 这里只决定
+  //: 「关不关」,宁可多留一个标签,也不能关错一个。
   //:
   //: 标签一关,弹窗多半跟着就没了(它挂在那个标签的操作上);`window.close()` 管
   //: 它没走的那一种,不然屏幕上会留一个指着不存在的页面的弹窗。
@@ -394,6 +420,11 @@
     setBusy(true);
     try {
       const tab = await currentTab();
+      if (!here || tab.id !== here.id || tab.url !== here.url) {
+        try { await loadHere(); } catch { /* 下面那句话照旧要说 */ }
+        status('这一页已经不是刚才采的那一篇了，没有关掉它。', true);
+        return;
+      }
       await chrome.tabs.remove(tab.id);
       window.close();
     } catch (error) { status(error.message, true); }

@@ -13,9 +13,15 @@ export function node(tag = '') {
     checked: false, disabled: false, hidden: false, open: false, children: [],
     focused: false,
     classList: {toggle() {}, add() {}, remove() {}},
-    // 「关掉这一页」一露面就要接焦点(那一下是采完之后最该点的)。记下来而不是空函数,
-    // 是为了让探针能钉住「露面的同时真的接了焦点」,而不只是「调它不报错」。
-    focus() { this.focused = true; },
+    //: 「关掉这一页」一露面就要接焦点(那一下是采完之后最该点的)。记下来而不是空
+    //: 函数,是为了让探针钉得住「露面的同时真的接了焦点」,而不只是「调它不报错」。
+    //:
+    //: **而且照真实 DOM 的规矩拒绝:disabled 或 hidden 的元素收不了焦点。** 不管这
+    //: 两样的话,这个桩会把一次**静默落空**的调用记成成功 —— 实测过的形态就是这个:
+    //: 三条成功路径都是 `setBusy(true)` → 写进去 → 放出按钮并 `focus()` → 最后才
+    //: `setBusy(false)`,真实 Chromium 在那一刻不给焦点(`document.activeElement` 还是
+    //: body、回车没有反应),而假 DOM 这边一路全绿。
+    focus() { if (!this.disabled && !this.hidden) this.focused = true; },
     append(...kids) { this.children.push(...kids); },
     replaceChildren(...kids) { this.children = kids; },
     querySelectorAll(selector) {
