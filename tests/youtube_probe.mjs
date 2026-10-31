@@ -471,6 +471,17 @@ try {
   check('没列完的频道显示部分同步而不是成功', partialCard.state === '部分同步' &&
     partialCard.text.includes('频道没列完') && partialCard.text.includes('7 条') && !partialCard.notice,
     JSON.stringify(partialCard));
+  check('YouTube覆盖提示说明按窗口重查而非接续位置',
+    partialCard.text.includes('下次按原时间窗口重查并跳过已发现条目') &&
+    !partialCard.text.includes('从上次的位置'), JSON.stringify(partialCard));
+  const backlogCard = statusCards['AI Search'];
+  check('内容积压不伪装成频道覆盖失败', backlogCard.state === '已同步（有跳过）' &&
+    backlogCard.notice.includes('未完成处理') && !backlogCard.text.includes('部分同步') &&
+    !backlogCard.text.includes('从上次的位置'), JSON.stringify(backlogCard));
+  const care = await evaluate(`fetch('/api/intake-care?kind=youtube').then(response=>response.json())`);
+  check('真实待办接口只报告覆盖失败而非内容积压', care.source_problems === 1 &&
+    care.sources.length === 1 && care.sources[0].name === '部分同步测试频道' &&
+    care.sources[0].problem === 'partial', JSON.stringify(care.sources));
   await evaluate(`Array.from(document.querySelectorAll('.source-subscription')).find(card=>
     card.querySelector('h3').textContent==='部分同步测试频道').scrollIntoView({block:'center',behavior:'instant'}); true`);
   await screenshot('subscriptions-status-desktop');

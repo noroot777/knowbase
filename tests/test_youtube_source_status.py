@@ -3,7 +3,8 @@ from unittest.mock import patch
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg
-from kb.youtube import collector, diagnosis, discovery, notes, source_status
+from kb.intake_diag import sources as source_diagnostics
+from kb.youtube import collector, diagnosis, discovery, media, notes, source_status, storage
 from tests.youtube_fixture import YouTubeFixture
 
 
@@ -94,13 +95,42 @@ class YouTubeSourceStatus(YouTubeFixture):
                                partial=[{'source_id': first['id'], 'reason': '仅第一个频道未完成'}])
         self.assertTrue(collector.commit_notes(second, [], summary, pending_failure=True))
         stored = reg.subscription('youtube', second['id'])
-        self.assertNotIn('第一个', stored['last_note'])
-        self.assertEqual('', stored['last_notice'])
-        self.assertTrue(stored['last_note'])
+        self.assertEqual('', stored['last_note'])
+        self.assertNotIn('第一个', stored['last_notice'])
+        self.assertIn('未完成处理', stored['last_notice'])
         collector.commit_successes([second], summary)
         stored = reg.subscription('youtube', second['id'])
         self.assertEqual(('', ''), (stored['last_note'], stored['last_notice']))
         self.assertTrue(stored['last_success'])
+
+    def test_content_backlog_is_not_a_source_coverage_problem(self):
+        source = self.sources[0]
+        entries = [self.entry(number) for number in range(1, 6)]
+        with patch.object(media, 'probe', return_value={'duration': 600}):
+            result = self.collect(lambda selected, *arguments: entries if selected['id'] == source['id'] else [])
+        stored = reg.subscription('youtube', source['id'])
+        self.assertEqual(5, len(storage.rows([source['id']])))
+        self.assertFalse(result['partial'])
+        self.assertEqual('', stored['last_note'])
+        self.assertIn('未完成处理', stored['last_notice'])
+        self.assertFalse(stored['last_error'])
+        self.assertFalse([item for item in source_diagnostics.problems('youtube')
+                          if item['source_id'] == source['id']])
+
+    def test_only_actual_listing_partial_creates_a_source_coverage_problem(self):
+        source = self.sources[0]
+
+        def fetch(selected, settings, timeout, estimates, evidence):
+            if selected['id'] == source['id']:
+                evidence.append('只列到 7 条就中断了：频道预算用尽')
+            return []
+
+        self.collect(fetch)
+        problems = [item for item in source_diagnostics.problems('youtube')
+                    if item['source_id'] == source['id']]
+        self.assertEqual(1, len(problems))
+        self.assertEqual('partial', problems[0]['problem'])
+        self.assertIn('7 条', problems[0]['evidence'])
 
     def test_same_source_warning_is_preserved_but_not_repeated_as_caution(self):
         first, second = self.sources[:2]

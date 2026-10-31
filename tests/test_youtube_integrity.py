@@ -83,17 +83,22 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertIn('## 中文译文（自动生成）\n\n' + translated, files[0].read_text())
         self.assertNotIn('&t=', files[0].read_text())
 
-    def test_literal_translation_unit_can_reach_ready_and_export_unchanged(self):
+    def test_merged_translation_recovers_original_units_then_reaches_ready_and_export(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
         literal = 'python -m unittest tests.test_youtube_notes --verbose'
         source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
         translated = '作者提醒使用前独立审查全部生成的修改，下面的命令必须保持原样。'
+        requested = []
 
         def reply(prompt, *arguments):
             if prompt.startswith('将以下字幕'):
                 segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-                self.assertEqual([source.split('\n\n')[0].strip(), literal], segments)
-                return json.dumps({'translations': [translated, literal]})
+                requested.append(segments)
+                if len(segments) > 1:
+                    self.assertEqual([source.split('\n\n')[0].strip(), literal], segments)
+                    return json.dumps({'translations': [translated + literal]})
+                self.assertIn(segments[0], [source.split('\n\n')[0].strip(), literal])
+                return json.dumps({'translations': [literal if segments[0] == literal else translated]})
             if '只输出 JSON' in prompt:
                 return json.dumps({'title': '独立核验生成结果', 'summary': '运行命令前先审查生成的修改。',
                                    'body': '## 核验步骤\n先审查，再运行测试。'})
@@ -108,6 +113,8 @@ class YouTubeIntegrity(YouTubeFixture):
                     'segments': [{'start': 0, 'end': 600, 'text': source}]}):
             result = collector.collect(FetchScope(force=True))
         self.assertEqual((1, 1), (result['processed'], result['added']), result)
+        self.assertEqual([[source.split('\n\n')[0].strip(), literal],
+                          [source.split('\n\n')[0].strip()], [literal]], requested)
         self.assertEqual('ready', storage.rows()[0]['state'])
         self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
         files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))

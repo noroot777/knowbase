@@ -7,6 +7,11 @@ from kb.youtube import transcripts
 
 
 STAGE = 'translate-coverage-v1'
+INVALID = '中文译文分段覆盖不完整或格式无效，保留原始字幕等待重试'
+
+
+class ShapeError(RuntimeError):
+    pass
 
 
 def units(text):
@@ -24,13 +29,15 @@ def prompt(text):
             '\n\n' + json.dumps({'segments': [unit['text'] for unit in units(text)]}, ensure_ascii=False))
 
 
-def render(text, output):
+def values(text, output):
     try:
         payload = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', output.strip()))
         rows = payload['translations']
         expected = [unit['id'] for unit in units(text)]
-        if not isinstance(rows, list) or len(rows) != len(expected) or not expected:
-            raise ValueError('count')
+        if not isinstance(rows, list) or not expected:
+            raise ValueError('format')
+        if len(rows) != len(expected):
+            raise ShapeError(INVALID)
         if all(isinstance(row, str) for row in rows):
             values = rows
         else:
@@ -43,9 +50,13 @@ def render(text, output):
             values = [translated[identity] for identity in expected]
         if any(not isinstance(value, str) or not value.strip() for value in values):
             raise ValueError('text')
-        rendered = '\n\n'.join(value.strip() for value in values)
-        if text_language(rendered) != 'zh':
-            raise ValueError('language')
-        return rendered
+        return [value.strip() for value in values]
     except (ValueError, TypeError, AttributeError, KeyError):
-        raise RuntimeError('中文译文分段覆盖不完整或格式无效，保留原始字幕等待重试') from None
+        raise RuntimeError(INVALID) from None
+
+
+def render(text, output):
+    rendered = '\n\n'.join(values(text, output))
+    if text_language(rendered) != 'zh':
+        raise RuntimeError(INVALID)
+    return rendered

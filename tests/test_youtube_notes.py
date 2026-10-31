@@ -54,6 +54,98 @@ class YouTubeNotes(YouTubeFixture):
                 self.build(lambda *args: output)
         self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-cache.json').exists())
 
+    def test_batch_shape_failures_recover_by_translating_each_original_unit(self):
+        literal = 'https://example.test/tools/agent/install?version=latest'
+        source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
+        expected = [unit['text'] for unit in translation.units(source)]
+        translated = '使用前必须独立审查生成的修改，下面保留原始网址。'
+        for extra in (False, True):
+            requested = []
+
+            def reply(prompt, *arguments):
+                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
+                requested.append(segments)
+                if len(segments) > 1:
+                    values = [translated, literal, '额外总结。'] if extra else [translated + literal]
+                else:
+                    self.assertIn(segments[0], expected)
+                    values = [literal if segments[0] == literal else translated]
+                return json.dumps({'translations': values})
+
+            with self.subTest(extra=extra), patch.object(notes, 'call', side_effect=reply):
+                self.assertEqual(translated + '\n\n' + literal,
+                                 notes.translate(source, self.selected, self.deadline, lambda: False))
+                self.assertEqual([expected, *[[unit] for unit in expected]], requested)
+
+    def test_atomic_recovery_reuses_completed_units_without_publishing_a_missing_one(self):
+        literal = 'python -m unittest tests.test_youtube_notes --verbose'
+        source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
+        expected = [unit['text'] for unit in translation.units(source)]
+        self.transcript['segments'] = [{'text': source}]
+        requested = []
+        broken = True
+
+        def reply(prompt, *arguments):
+            if not prompt.startswith('将以下字幕'):
+                return self.reply(prompt, *arguments)
+            segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
+            requested.append(segments)
+            if len(segments) > 1:
+                values = ['合并后的中文译文，不直接使用这份覆盖未知的输出。']
+            elif segments[0] == literal:
+                values = [] if broken else [literal]
+            else:
+                self.assertEqual(expected[0], segments[0])
+                values = ['使用前必须独立审查所有生成的修改，随后运行原文命令。']
+            return json.dumps({'translations': values})
+
+        with self.assertRaisesRegex(RuntimeError, '覆盖'):
+            self.build(reply)
+        self.assertFalse(self.prompts)
+        cache = media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json')
+        unit_key = notes.signature('translate-unit-v1', self.selected, expected[0])
+        self.assertEqual({unit_key}, set(cache))
+        broken = False
+        result = self.build(reply)
+        self.assertIn(literal, result['body'])
+        self.assertNotIn('覆盖未知', result['body'])
+        self.assertEqual([expected, [expected[0]], [literal], expected, [literal]], requested)
+        calls = len(requested), len(self.prompts)
+        self.assertEqual(result, self.build(reply))
+        self.assertEqual(calls, (len(requested), len(self.prompts)))
+
+    def test_non_chinese_atomic_results_do_not_poison_recovery_cache(self):
+        literal = 'https://example.test/tools/agent/install?version=latest'
+        source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
+        self.transcript['segments'] = [{'text': source}]
+        expected = [unit['text'] for unit in translation.units(source)]
+        requested = []
+        broken = True
+
+        def reply(prompt, *arguments):
+            if not prompt.startswith('将以下字幕'):
+                return self.reply(prompt, *arguments)
+            segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
+            requested.append(segments)
+            if len(segments) > 1:
+                values = []
+            elif broken or segments[0] == literal:
+                values = [segments[0]]
+            else:
+                values = ['使用前必须独立核验所有生成的修改，随后访问原文网址。']
+            return json.dumps({'translations': values})
+
+        with self.assertRaisesRegex(RuntimeError, '覆盖'):
+            self.build(reply)
+        self.assertFalse(self.prompts)
+        self.assertEqual({}, media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json'))
+        broken = False
+        result = self.build(reply)
+        self.assertIn('必须独立核验', result['body'])
+        self.assertIn(literal, result['body'])
+        sequence = [expected, *[[unit] for unit in expected]]
+        self.assertEqual(sequence + sequence, requested)
+
     def test_translation_accepts_natural_paragraphs_without_timestamp_alignment(self):
         source = ('[00:00:00] The AI agent builds code.\n'
                   '[00:00:02] It still needs review.\n'

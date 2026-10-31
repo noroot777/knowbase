@@ -1,6 +1,6 @@
 import re
 
-from kb.youtube import login, media
+from kb.youtube import media
 from kb.youtube.settings import of
 
 
@@ -8,7 +8,7 @@ def unavailable(text):
     items = []
     for line in text.splitlines():
         matched = re.match(r'ERROR: \[youtube\] ([A-Za-z0-9_-]{11}): (.+)', line)
-        if matched and login.classify(matched[2]) not in login.AUTH_CODES:
+        if matched:
             items.append({'video_id': matched[1], 'reason': matched[2]})
     return items
 

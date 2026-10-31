@@ -56,10 +56,33 @@ def translate(text, selected, deadline, stopped):
     return translated_output(text, translation_request(text, selected, deadline, stopped))
 
 
-def translation_request(text, selected, deadline, stopped):
+def translation_request(text, selected, deadline, stopped, directory=None, cache=None):
     if text_language(text) == 'zh':
         return text
-    return call(translation.prompt(text), selected, deadline, stopped)
+    output = call(translation.prompt(text), selected, deadline, stopped)
+    try:
+        translation.render(text, output)
+    except translation.ShapeError:
+        translated = []
+        for unit in translation.units(text):
+            block = unit['text']
+            create = lambda block=block: call(translation.prompt(block), selected, deadline, stopped)
+            validate = lambda output, block=block: translation.values(block, output)[0]
+            if directory is not None and cache is not None:
+                key = signature('translate-unit-v1', selected, block)
+                translated.append(cached(directory, cache, key, create, validate))
+            else:
+                translated.append(validate(create()))
+        output = json.dumps({'translations': translated}, ensure_ascii=False)
+        try:
+            translation.render(text, output)
+        except RuntimeError:
+            if directory is not None and cache is not None:
+                for unit in translation.units(text):
+                    cache.pop(signature('translate-unit-v1', selected, unit['text']), None)
+                media.save_json(directory / 'notes-cache.json', cache)
+            raise
+    return output
 
 
 def translated_output(text, output):
@@ -110,7 +133,8 @@ def build(row, transcript, deadline, stopped):
         stage = 'translate' if text_language(block) == 'zh' else translation.STAGE
         key = signature(stage, translator, block)
         translated.append(cached(directory, cache, key,
-                                 lambda block=block: translation_request(block, translator, deadline, stopped),
+                                 lambda block=block: translation_request(block, translator, deadline, stopped,
+                                                                        directory, cache),
                                  lambda output, block=block: translated_output(block, output)))
     facts = []
     for block in translated:

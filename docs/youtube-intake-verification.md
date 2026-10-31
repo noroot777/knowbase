@@ -1,6 +1,26 @@
 # YouTube 低成本接入验证
 
-## 当前续修：有界发现、逐频道状态与可调回看窗口
+## 当前复修：覆盖状态、逐片错误与翻译形态恢复（L_HwbCHfGp3X）
+
+- `last_note` 仅用于实际列表未列完，内容积压留在 `last_notice`；真实订阅卡片与 `/api/intake-care` 同时验证，避免把内容排队变成来源连接待办。YouTube 的重试文案说明按窗口重查，不承诺不存在的位置游标。
+- 完整列表结束证据与逐片错误分类解耦：所有带严格视频 ID 的 ERROR 都不否定频道覆盖，bot/cookie/JS/429 等仍独立记警告；全局/tab 错误、超时仍阻断。真实本地子进程连续三轮覆盖有 JSON 和归档后零 JSON 两侧。
+- 批次译文条数不符时改为逐个原始短段请求，再由程序按原序组装；不发布缺段，也不引入长度比/数字启发式。成功短段独立缓存，坏单段仍阻止摘要、入库和导出，恢复后可发布；整批语种不合格时清除关联短段缓存，避免坏译文固化、重试无效。模型合并段落或多写总结不再只能重试同一批。异常批次会多调用模型，正常缓存不失效；结构覆盖仍不等于语义完整。
+- 第 1 条性能担忧仍成立：900/180 秒预算没有改变，不能承诺冷启动 48 个长频道当天全部检查。固定条数、首个旧条目或连续 N 个旧条目早停会遗漏乱序尾部，不能同时拿它们宣称完整覆盖。本轮不偷偷采用该取舍，单独提交边界裁定，不宣称整份报告已修完。
+- 浏览器扩展先命名 `🔎 YouTube覆盖状态审查修复`，创建 `visible:false` 后台标签被拒绝 `Capability is not available: visibility`，没有创建标签。转项目独立无头壳、临时 profile、本地隔离服务；不需登录态，不接管、导航或激活用户标签，不连接用户 Chrome CDP。
+
+仅本轮修改测试模块的登记命令：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_source_status tests.test_youtube_windowed_discovery tests.test_youtube_notes tests.test_youtube_integrity tests.test_youtube_browser -v
+```
+
+工作目录：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+原始日志、实际结果、冻结树、留白及本轮截图归档至
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-L_HwbCHfGp3X/`。
+结果只写外部证据，保持测试树与提交树一致；整套及未修改回归留给验收。
+不请求真实模型/YouTube，不读取真实 cookie，不操作生产库或用户服务。
+
+## 历史续修：有界发现、逐频道状态与可调回看窗口
 
 - 普通发现恢复 900 秒整轮上限，单频道仍最多 180 秒，频道间隔在预算内预留；显式补抓仍为 90/1800 秒。最久未尝试优先，未轮到的不写尝试账，下轮继续。保留乱序尾部/archive 续扫，不恢复固定条数或遇旧即停。
 - 在订阅写库边界按 source_id 生成 note/notice，不再把全局消息复制给所有卡片。同名频道也隔离；未列完写 last_note 并扣留成功，完整恢复才清旧提示。局部失败的原错误、退避和水位不伪清理。
