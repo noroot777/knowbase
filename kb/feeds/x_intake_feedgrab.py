@@ -32,7 +32,7 @@ def run(intake):
                     should_stop=intake.should_stop, complete_articles=False,
                     account_seconds=seconds('KB_X_FEEDGRAB_ACCOUNT_SECONDS', 25))[handle]
                 if result.get('error') or result.get('skipped'):
-                    intake.results[handle] = result
+                    intake.outcome(source, 'combined', error=result.get('error', ''), skipped=result.get('skipped', ''))
                     intake.attempt(source, 'combined', result.get('error') or result['skipped'])
                     continue
                 result['coverage_complete'] = result.get('incomplete') == ''

@@ -182,12 +182,13 @@ def problems(kind: str) -> list[dict]:
         if automatic_x:
             for issue in source.get('x_intake', {}).get('issues', []):
                 name = issue['kind']
+                metadata = PROBLEMS.get(name) or dict(state='需检查', label=name, explanation='', advice='', step=0)
                 actionable = shared['actionable'] and issue['retryable']
                 suffix = f":{issue['phase']}" if issue.get('phase') else ''
                 out.append({**shared, 'id': f"source:{source['id']}:{name}{suffix}", 'problem': name,
-                            'evidence': issue['evidence'], **PROBLEMS[name], 'actionable': actionable,
-                            'step': issue.get('step', PROBLEMS[name]['step']),
-                            'blocked': shared['blocked'] or ('' if issue['retryable'] else PROBLEMS[name]['advice'])})
+                            'evidence': issue['evidence'], **metadata, 'actionable': actionable,
+                            'step': issue.get('step', metadata['step']),
+                            'blocked': shared['blocked'] or ('' if issue['retryable'] else metadata['advice'])})
         elif note := (source['last_note'] or ''):
             name = _kind_of_note(note)
             out.append({**shared, 'id': f"source:{source['id']}:{name}",

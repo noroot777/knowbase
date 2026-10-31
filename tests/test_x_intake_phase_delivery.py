@@ -267,25 +267,37 @@ class ScreenTimeoutTests(RuntimeFixture):
         self.assertGreater(source['retry_at'], 0)
         self.assertIn('未能判出原因', source['last_error'])
 
-    def test_three_separate_short_history_rounds_escalate_and_persist_backoff(self):
+    def test_four_short_history_rounds_escalate_only_history_and_keep_delivering(self):
         original, seconds = x_browser._harvest_one, x_intake.seconds
+        discovered = []
         def scan(page, handle, floor, **options):
             if options['max_scrolls'] == 2:
                 options['on_ready'](0.01)
-                return [self.entry()], ''
+                entry = self.entry(str(101 + len(discovered)), age=1 - len(discovered) / 10)
+                discovered.append(entry)
+                return [entry], ''
             return original(page, handle, floor, **options)
         def limit(name, default):
             return 8.5 if name == 'KB_X_HISTORY_SECONDS' else seconds(name, default)
+        self.old_failure()
         with self.clocked(), patch.object(x_intake, 'seconds', side_effect=limit):
-            first = self.collect_runtime(scan)
-            second = self.collect_runtime(scan)
-            third = self.collect_runtime(scan)
-        self.assertEqual(first['failed_ids'], [])
-        self.assertEqual(second['failed_ids'], [])
-        self.assertEqual(third['failed_ids'], [str(self.source['id'])])
+            for count in range(1, 5):
+                summary = self.collect_runtime(scan)
+                source = reg.subscription('social', self.source['id'])
+                self.assertEqual(summary['failed_ids'], [])
+                self.assertEqual(summary['added'], 1)
+                self.assertEqual(summary['succeeded_ids'], [str(source['id'])])
+                self.assertEqual((source['last_error'], source['failures'], source['retry_at']), ('', 0, 0))
+                self.assertEqual(store.delivery(source)[0], [])
+                self.assertEqual(x_channels.watermark(source, 'browser'), discovered[-1]['x_observed_at'])
+                self.assertIn('五天历史追补', source['last_note'])
+                if count >= 3:
+                    self.assertIn(f'连续{count}轮首屏未确认', source['last_note'])
+                    self.assertIn('history', x_channels._harvest['example']['phase_errors'])
         source = reg.subscription('social', self.source['id'])
-        self.assertIn('连续3轮', source['last_error'])
-        self.assertGreater(source['retry_at'], 0)
+        self.assertEqual(json.loads(store.progress(source)['screen_waits'])['history']['count'], 4)
+        with reg.read_db() as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM feed_items').fetchone()[0], 4)
 
     def test_wait_counter_is_once_per_round_and_resets_only_its_confirmed_phase(self):
         self.prepare()

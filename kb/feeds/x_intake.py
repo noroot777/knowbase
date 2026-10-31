@@ -30,6 +30,7 @@ class Intake:
         self.started = reg.now()
         self.run_id = uuid4().hex
         self.results, self.scans, self.attempted, self.local = {}, [], set(), {}
+        self.outcomes = {}
         self.read = set()
         self.timelines = {}
         self.recovery = set()
@@ -117,6 +118,9 @@ class Intake:
     def block_events(self, source, progress):
         return blocks.merge(progress.get('block_events', {}), self.observations.get(source['id'], {}))
 
+    def outcome(self, source, phase, *, error='', skipped=''):
+        self.outcomes.setdefault(source['id'], {})[phase] = dict(error=error, skipped=skipped)
+
     def screen_budget(self, source, phase, error):
         try:
             count = store.screen_wait(source, phase, self.run_id)
@@ -126,10 +130,11 @@ class Intake:
             self.local_error(source, fault, phase)
             return
         self.attempt(source, phase, str(error))
+        reason = ''
         if count >= 3:
             from kb.feeds import x_channels
             reason = f'@{x_channels._handle(source)} 连续{count}轮首屏未确认，未能判出原因；请检查账号或页面结构：{error}'
-            self.results[x_channels._handle(source)] = dict(entries=[], error=reason)
+        self.outcome(source, phase, error=reason, skipped=str(error))
 
     def wait(self, deadline, phase):
         remaining = self.cool.remaining()
@@ -150,7 +155,7 @@ class Intake:
             if source['id'] in self.local or not self.wait(deadline, phase):
                 continue
             handle = x_channels._handle(source)
-            if self.results.get(handle, {}).get('error'):
+            if self.outcomes.get(source['id'], {}).get(phase, {}).get('error'):
                 continue
             bound = self.bounds[source['id']]
             prior = self.progress(source, phase)
@@ -228,12 +233,12 @@ class Intake:
             except (x_page_state.XRateLimited, x_page_state.XAccessBlocked, x_post.PostSessionUnavailable) as error:
                 self.blocked = str(error)
                 self.mark_block(source, error, phase)
-                self.results[handle] = dict(entries=[], error='', skipped=self.blocked)
+                self.outcome(source, phase, skipped=self.blocked)
             except x_account.XAccountUnavailable as error:
                 self.mark_block(source, error, phase)
                 if error.state == 'login':
                     self.blocked = str(error)
-                self.results[handle] = dict(entries=[], error=str(error) if phase == 'discovery' else '', skipped=str(error))
+                self.outcome(source, phase, error=str(error), skipped=str(error))
             except Exception as error:
                 if local_fault(error):
                     self.local_error(source, error, phase)
@@ -244,7 +249,7 @@ class Intake:
                         self.screen_budget(source, phase, error)
                 elif isinstance(error, (x_page_state.XBrowserError, CdpError)):
                     self.attempt(source, phase, str(error))
-                    self.results[handle] = dict(entries=[], error=str(error))
+                    self.outcome(source, phase, error=str(error))
                 else:
                     raise
 
@@ -350,8 +355,13 @@ class Intake:
                     self.local_error(source, error, '确认进度')
         for source in self.sources:
             handle = x_channels._handle(source)
-            if self.results.get(handle, {}).get('error'):
-                continue
+            outcomes = self.outcomes.get(source['id'], {})
+            phase_errors = {phase: value['error'] for phase, value in outcomes.items() if value.get('error')}
+            source_error = next((reason for phase, reason in phase_errors.items()
+                                 if 'discovery' in blocks.phases(phase)), '')
+            labels = dict(discovery='最新发现', history='五天历史追补', combined='时间线扫描', body='正文补全')
+            phase_notes = [f'{labels.get(phase, phase)}：{value["error"] or value["skipped"]}'
+                           for phase, value in outcomes.items() if value['error'] or value['skipped']]
             try:
                 entries, pending, unavailable, expired = store.delivery(source)
                 progress = store.progress(source)
@@ -361,7 +371,7 @@ class Intake:
                 self.local_error(source, error, '读取待办')
                 entries, pending, unavailable, expired, progress = [], 0, [], 0, {}
             read = source['id'] in self.read & confirmed
-            reason = self.results.get(handle, {}).get('skipped') or progress.get('error', '')
+            reason = progress.get('error', '')
             blocks.project(progress, self.block_events(source, progress))
             core_error = next((timeline.incomplete for phase, timeline in self.timelines.get(source['id'], [])
                                if phase == 'discovery' and getattr(timeline, 'incomplete', '')), '')
@@ -369,19 +379,20 @@ class Intake:
                 usable.discard(source['id'])
             notes = [progress.get('gap', ''), f'{pending} 条正文待补' if pending else '',
                      f"{progress['unconfirmed']} 条候选待确认" if progress.get('unconfirmed') else '',
-                     self.local.get(source['id'], ''), reason, core_error]
+                     self.local.get(source['id'], ''), reason, core_error, *phase_notes]
             if not read:
                 notes.append('本轮时间线未读到，保留原有成功和失败账')
             notice = '；'.join(filter(None, [progress.get('outside', ''), self.notices.get(source['id'], ''),
                                              x_post.unavailable_note(unavailable)]))
-            result = dict(entries=entries, error='', incomplete='；'.join(dict.fromkeys(filter(None, notes))),
+            result = dict(entries=entries, error=source_error, phase_errors=phase_errors,
+                          incomplete='；'.join(dict.fromkeys(filter(None, notes))),
                           note=notice, unavailable=unavailable, unavailable_count=len(unavailable), x_intake=True,
                           local_error=self.local.get(source['id'], ''),
                           pending=not read or source['id'] not in usable or bool(progress.get('unconfirmed') or self.local.get(source['id'])
                                   or progress.get('blocks', {}).get('discovery') or self.stop()), deadline=self.metrics.deadline)
             result.update(run_started=self.started, run_monotonic=self.metrics.started)
-            if not read and not entries and source['id'] not in self.local:
-                result['skipped'] = reason or ('已按停止请求中断' if self.stop() else
+            if not read and not entries and not source_error and source['id'] not in self.local:
+                result['skipped'] = reason or '；'.join(phase_notes) or ('已按停止请求中断' if self.stop() else
                                      '本轮未轮到，待下轮' if source['id'] not in self.attempted else '本轮未读到，待下轮')
             if read and not core_error and not progress.get('blocks', {}).get('discovery') and progress.get('discovery') == 'complete' and progress.get('latest'):
                 result['watermark'] = progress['latest']

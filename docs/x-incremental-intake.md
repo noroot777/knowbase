@@ -587,7 +587,8 @@ F1—F3 在原自动 X 链路内修根因；非阻断清单不扩展。F4 的既
 3. **把默认阶段时限当成外部预算缩短**。原8/20秒恒小于原生50秒，未知账号的错误出口不可达。
    `_harvest_one` 接收本阶段配置时限及外部缩短身份；公平分配的有效时限与配置时限保持分离。
    完整切片不可读仍走账号错误；真正缩短才是 `XBudgetExceeded`。另以来源/阶段/UUID运行身份记录首屏等待，
-   连续三轮未确认升级实际失败与退避，防止无限占预算；确认只重置自己的阶段，首屏后的正常预算耗尽不罚。
+   连续三轮未确认升级所属阶段真实故障，防止无限占预算；只有发现故障升级来源失败与退避，
+   历史故障保留阶段提示但不否决发现投递。确认只重置自己的阶段，首屏后的正常预算耗尽不罚。
 
 ### 本轮测试登记
 
@@ -646,3 +647,75 @@ chrome-headless-shell；始终无头、仅 localhost GET，不接管用户 Chrom
 真实 X 风控、用户登录态、生产数据、模型、原生cursor和51账号八分钟吞吐未验证。既有 X/历史套件及页面回归
 未补跑，不能用本轮冒烟或42项定点结果冒充旧回归全绿；这些仍是验收前置回归留白。F4请求由用户裁定，
 不会擅自增加审查轮数或执行验收，报告其他非阻断项也未扩展。
+
+## P0g 首轮审查：阶段结论在出库边界隔离（2026-10-31）
+
+本轮完整读取 `free-review/P0gZuUe0mZf5/round-1/report.md`（268行），接受两条阻断，
+只修自动 X 的阶段结论/投递出口及诊断元数据消费；不扩大报告列出的非阻断项。
+
+### 根因与不可回退的不变量
+
+1. **阶段异常与来源结果共用一个字典**。上一轮仅在部分异常分支判断 phase，通用页面/CDP异常及
+   首屏三轮升级仍写来源 error，package 再因 error 跳过持久投递，令健康发现被历史故障永久扣留。
+   现在异常生产者统一写 `outcomes[source_id][phase]`，浏览器与 feedgrab 共用同一个入口；
+   `results` 只由 package 生成。来源 error 仅从拥有 discovery 的阶段错误升级，combined 明确拥有发现。
+   package 无条件读取持久 delivery，即使真实发现失败也组装 entries，且不提前消费出库资格。
+   历史阶段 error 不升级来源失败，原话以 `phase_errors` 和带阶段名的 note 保留，进入持久 last_note；
+   已确认发现的成品、成功清账及水位照常提交。真实发现错误、三轮发现首屏升级仍进入失败与退避。
+2. **把展示字典当成完整枚举**。采集器交付未知 kind 时，诊断直接索引 `PROBLEMS[name]` 导致整页500。
+   消费边界现在用 get 和通用模板降级：标题为原始 kind，建议为空，原始证据、阶段及来源范围不变。
+   六类已知阻断继续使用 owner 的同一份元数据，未新增分类副本、路由或执行射程。
+
+### 本轮定点测试及静态校验
+
+仅运行本轮实质修改的 `tests.test_x_intake_phase_delivery`（21项）和新增
+`tests.test_x_intake_outcomes`（11项）。登记哨兵 `yCW3Ea-erVb9` 的真实日志为
+**32项、1.025秒、全部通过，无跳过**：
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/yCW3Ea-erVb9.log`。
+其中包含连续四轮真实 collect：发现逐轮独立新推文，历史走真实 `_harvest_one`/首屏轮询、虚拟时间和
+8.5秒外部切片；第三、四轮诚实报历史故障，但每轮新增1条、清旧失败/退避、推进水位，最终4条入库且无出库积压。
+另含历史页面/CDP故障与发现反例、出库始终读取、combined失败、阶段 skipped 不覆盖发现 error、
+未知新/旧格式阻断的真实 API 与单来源动作描述、六类已知元数据、未知不可重试条目的空建议。
+
+首次登记 `ymJ6_NPyrB3A`：32项、1.194秒，3个断言失败和3个子例错误；原因是新测试把原始观测水位
+与本地化发布时间比较，以及误传 `scope_of(problem_id=...)`。分别改为 `x_observed_at` 与实际 `problem` 参数，
+不改业务实现、不删减业务断言。首轮日志及 `validation-history.json` 保留原结果。
+
+实际 cwd：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。原始登记命令：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-P0g-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-P0g-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-P0g-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_x_intake_phase_delivery tests.test_x_intake_outcomes -v
+```
+
+本轮证据根：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/x-intake-review-P0g/`。
+5份代码/测试 SHA-256 位于 `tested-code.json`；清单自身 SHA-256：
+`2907afc5adabc3e5b08af6386eb901f3f366fff2c7f1eed54e781801aa9934d0`。
+Ruff、AST/内存编译、700行上限、diff空白检查通过；本轮未改 JS。
+最终提交与代码哈希、最终 HEAD 的真实测试登记单独存本证据根，不以旧树结果冒充新树结果。
+
+### 隔离 collect、API 和真实页面
+
+- `serve.py` 使用全新临时数据/vault/videos，禁调度器、外域 socket；远端 X/会话、就绪和冷却边界替身，
+  但运行真实 collect、候选/批次确认、入库事务、API 和项目静态页面。不访问生产数据或真实登录态。
+- 六来源包括健康、历史页面/CDP故障、四轮历史首屏未确认、未知阶段阻断、未知旧版阻断、已知安全验证。
+  前三者共7条成品入库，错误/失败次数/退避清零，发现水位推进，已确认出库无滞留；历史原话留在 last_note。
+  对未知种类持久写入新/旧格式，清空预取缓存后诊断仍200；未知标题为原 kind、建议为空，已知安全验证建议保留。
+  三份动作描述仍点名单来源 rev/sig，不带 extract，未执行动作。见 `sync-summary.json`、
+  `subscription-ledgers.json`、`database-evidence.json`、`progress-evidence.json`、`api-summary.json`。
+- health/social overview/items/intake-care 四接口均200；24路真实并发 HTTP GET 均200。
+  六张订阅卡显示7条已收录、独立最近成功、历史错误原话；未知新/旧种类与已知安全验证三份详情可读。
+  `sources.png`、`care-future-phase.png`、`care-future-legacy.png`、`care-known.png` 已逐一实际查看。
+  JS异常、横向溢出、外域和非GET请求均0；见 `http-evidence.json`、`page-evidence.json`、`page-final-network.json`。
+
+### 浏览器通道、清理及留白
+
+本审查轮重新尝试扩展具名后台会话“🔎 大V出库根因验证”，`visible:false` 在实际建标签前被拒：
+`Capability is not available: visibility`。未去掉后台要求或接管普通标签，才降独立临时 profile 的
+chrome-headless-shell；始终无头，仅本机 GET。未连接用户 Chrome/CDP、cookie，未激活窗口或切验证标签。
+页面只导航订阅管理、问题与待办和详情，未点同步、登录、保存、重试或源站链接；见 `browser-channel.json`。
+自建无头进程55018及临时 profile 已清理，服务51413正常停止且临时 KB 根已删除，48999无监听；
+见 `browser-cleanup.json`、`server-cleanup.json`。
+
+既有未修改 X/历史套件和全量回归未运行，统一留验收前置执行；不把32项定点测试或本轮冒烟称为全族通过。
+真实 X 风控、用户登录态、模型、生产数据、原生游标及51账号八分钟吞吐未验证。
+报告其余非阻断项不改，不自行追加审查轮次或执行验收。
