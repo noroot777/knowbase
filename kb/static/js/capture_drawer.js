@@ -19,7 +19,18 @@
   //: 和状态机那边同一个办法:每次打开是新的一代。外壳这边的异步续体是读扩展目录
   //: 那一问和「显示 / 复制配对密钥」—— 它们回来时只问「现在有没有抽屉」是不够的,
   //: 关掉再打开之后那是**另一个**抽屉,旧续体会往新抽屉里写。
+  //: **这个号码认的是「现在摆在屏幕上的那一套引导 DOM」,不是「这一次抽屉」。**
+  //: 凡是让那套 DOM 失效的事都推一格:开抽屉(重建)、标记变了重绘、关抽屉(拆掉)。
+  //: 下面每一处异步续写都在动那套 DOM 里的东西(`select()` 一个输入框、往占位里写
+  //: 路径、把密钥摊出来),只认抽屉那一层就漏掉了中间这一种 —— 人在同一个抽屉里把
+  //: 配对做完,引导收进折叠块、整套 DOM 换了一遍,而上一次渲染里那句迟到的复制失败
+  //: 照旧 `select()` 一个早就 remove 掉的输入框,屏幕上「请复制选中的配对密钥」指着
+  //: 一处什么都没选中的地方。
   let generation = 0;
+  //: 「现在这一套是按哪一种配对状态摆的」。标记被重写成同一个值时(`present.js` 每次
+  //: 重读都写一遍版本号)不许白拆一遍 —— 位置根本没变,而重绘会把摊开的密钥收回去、
+  //: 把正在等的那次复制作废。关抽屉时复位,再打开照旧从头摆一次。
+  let laid = null;
 
   //: 抽屉里那一整套。`cap-setup` 那一块的位置是会变的:这个浏览器还没配过扩展时它
   //: 在最上面且摊开(见 `renderSetup`),配过之后收进底部的 <details>。
@@ -135,7 +146,9 @@
   //: **位置先定下来,不等服务端那一问。** 判据本来就是本地事实;等 `/setup` 回来再摆
   //: 的话,这一大块会在首次使用的人眼前跳一下,而那一问只是去取装哪个目录。
   async function renderSetup() {
-    const gen = generation;
+    if (paired() === laid) return;
+    const gen = (generation += 1);
+    laid = paired();
     const top = document.getElementById('cap-setup-slot');
     const folded = document.getElementById('cap-setup-folded');
     if (!top || !folded) return;
@@ -190,8 +203,8 @@
         await navigator.clipboard.writeText(field.value);
         if (current(gen)) toast('密钥已复制，只粘贴到你安装的 Knowbase 扩展中。', {type: 'ok', key: 'cap-copy'});
       } catch {
-        // 同上。失败这一支还会**动 DOM**:迟到之后 `select()` 选的是早就 remove 掉的
-        // 那个输入框,而屏幕上那句「请复制选中的配对密钥」指着一处什么都没选中的地方。
+        // 同上,而且失败这一支还会**动 DOM**(`select()`)—— 这也是 `generation` 要
+        // 认「哪一套引导 DOM」而不是「哪一次抽屉」的原因,见文件开头那段。
         if (!current(gen)) return;
         field.type = 'text';
         field.select();
@@ -218,6 +231,7 @@
   function closeCaptureDrawer() {
     if (!drawer) return;
     generation += 1;
+    laid = null;
     //: 跟轮询一样要停:底下那一页还活着,不断开的话这个已经没了的抽屉还会在每次
     //: 标记变化时跑一遍 `renderSetup`(白打一次 `/setup`,再往早就 remove 掉的那套
     //: DOM 里写),开过几次就是几个。

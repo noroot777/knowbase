@@ -16,7 +16,12 @@
   //:
   //: 所以它是模块级的,不是 `adoptHere` 里的一个局部变量:人点一下「重新确认」也要
   //: 带着它去问,否则那一下就把他的选择抹掉了。
+  //: 跟着记下**是在哪一页上点的**。服务端对「带了身份却兑现不了」一律不代选,所以
+  //: 标签这期间自己跳走了(站内重定向、推送式改地址)之后再带着它去问,屏幕上会写着
+  //: 「你选的那个失效了」—— 其实什么都没失效,他只是站到了另一页上,而那时摆出来的
+  //: 候选属于上一页,点下去是把这一页认给了另一篇。换页就当他没点过。
   let chosen = '';
+  let chosenFor = '';
 
   function status(message, error = false) {
     element('status').textContent = message;
@@ -121,6 +126,7 @@
       return;
     }
     element('here-url').textContent = plainUrl(here.url);
+    if (chosenFor !== here.url) chosen = chosenFor = '';
     situation = await api('/here', {method: 'POST',
                                     body: JSON.stringify({url: here.url, intent_id: chosen})});
     renderSituation();
@@ -228,7 +234,7 @@
       const result = await api('/upload', {method: 'POST', body: JSON.stringify({...captured, intent_id: intent.id})});
       // 这一个待办已经用掉了,下一问不该再指名它(指名一个用掉的会被答成
       // `undecided`,而人此刻只想看见刚写进去那张回执)。
-      chosen = '';
+      chosen = chosenFor = '';
       // 已经写进去了。这一问失败只是「状态没刷新」,不该让人以为正文没保存。
       try { await loadHere(); } catch { /* 下面照旧报服务端那句话 */ }
       status(`${captured.title}：${result.detail}（${verified.characters} 字符）`);
@@ -305,6 +311,7 @@
       const adopted = await api('/here/adopt', {method: 'POST',
                                                 body: JSON.stringify({key, page_url: here.url})});
       chosen = adopted.id;
+      chosenFor = here.url;
       await loadHere();
       status('已改用这一页的地址。');
     } catch (error) { status(error.message, true); }

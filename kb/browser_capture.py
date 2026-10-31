@@ -348,12 +348,15 @@ def here(url: str, intent_id: str = '') -> dict:
         # 人点过的那一下优先,而且是**唯一**的依据。
         picked = next((one for one in bound if one['id'] == intent_id), None) if intent_id else None
         if not picked:
-            # 他点过、那个却已经失效了(过期 / 被顶掉 / 条目变了),而这一页上还有别的
-            # 在等 —— 让另一个顶上就是拿别人的正文覆盖这一篇。宁可请他重新点一下。
-            undecided = bool(bound) if intent_id else len({one['key'] for one in bound}) > 1
+            # **带了显式身份、却兑现不了 —— 一律不代选。** 判据不许挂在「这一页还剩
+            # 几个待办」上:一个不剩时下面那条按网址查找会命中另一篇、再给它新建一个
+            # 合法待办,而 precheck/CAS/upload 验的只是「这个新待办写得了」,没有一道
+            # 在验「它还是人刚才选的那一篇」。形态见 docs/decisions/browser-capture.md。
+            undecided = bool(intent_id) or len({one['key'] for one in bound}) > 1
             if undecided:
                 return answered('undecided',
-                                '你选的那个采集请求已经失效了，在下面重新点一下要补的那一篇。'
+                                '你选的那个采集请求已经失效了。下面还在等的条目里点一下'
+                                '要补的那一篇；一个都没有就回采集抽屉里重新发起。'
                                 if intent_id else
                                 f'有 {len(bound)} 个条目都在等这一页的正文，'
                                 '点一下你要补的那一篇。')

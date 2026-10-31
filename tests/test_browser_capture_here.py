@@ -250,6 +250,57 @@ class CaptureHereTests(CaptureCase):
         self.assertEqual([mine['id']], [one['id'] for one in state['elsewhere']],
                          '剩下那个照旧摆出来,但不许自己顶上')
 
+    def test_a_pick_that_went_stale_with_nothing_left_is_not_answered_by_url(self):
+        """上一条的另一头:他点过的那个失效了,而这一页上**一个待办都不剩**。
+
+        判据不许挂在「还剩几个」上。一个不剩时按网址查找会命中另一篇欠正文的条目、
+        再给它新建一个合法待办,而 precheck、CAS、upload 验的都是「这个新待办写得了」,
+        没有一道在验「它还是人刚才选的那一篇」—— 点下去正文就落在了那一篇身上。
+        同一支还会把「你选的那个没了」说成另外两件事(这一页不在库里 / 正文已齐),
+        前一种在下一条用例里单独钉。
+        """
+        page = 'https://e.org/post'
+        later = self.put(url='https://e.org/post-two')
+        mine = self.intent(page_url=page)
+        adopted = self.here(path='/here/adopt', payload={'key': later, 'page_url': page}).json()
+        before = self.row(self.key)
+        for identity in (mine['id'], adopted['id']):
+            self.assertEqual(200, self.client.delete(
+                '/api/browser-capture/intents/' + identity).status_code)
+
+        state = self.here(payload={'url': page, 'intent_id': adopted['id']}).json()
+        # **先断后果**:它交不出任何写得了的待办 —— 拿这一答交回的东西去写,一定写不
+        # 进,那一篇的正文一个字都不会变。只看形状的话,「代选了另一篇」和「老实说选
+        # 不出来」在某些字段上长得很像,而真正不可恢复的是库里那一行。
+        saved = self.upload(state['intent'] or {'id': adopted['id']}, page_url=page)
+        self.assertNotEqual(200, saved.status_code, '不许交出一个写得了的待办')
+        self.assertEqual(before['body'], self.row(self.key)['body'], '那一篇一个字都没动')
+        self.assertEqual(before['content_rev'], self.row(self.key)['content_rev'])
+
+        self.assertEqual('undecided', state['situation'])
+        self.assertIsNone(state['item'], '不许把另一篇摆成主目标')
+        self.assertIsNone(state['intent'], '更不许给它新建一个写得了的待办')
+        self.assertEqual([], state['elsewhere'], '一个都不剩就老实说一个都不剩')
+
+    def test_a_stale_pick_is_not_turned_into_a_brand_new_link(self):
+        """同一支的另一副面目:他点过的那个失效了,而这一页在库里**压根没有对应行**。
+
+        回落到按网址查找的那一版在这里答 `absent`,而那一档的出路是「采集」——
+        只交地址让服务端自己去抓,于是库里多出第二行同一篇文章,他要补的那一篇
+        仍旧缺正文。单独钉一条:上一条在第一个断言就红了,这一副面目要自己能红。
+        """
+        page = 'https://e.org/nowhere'
+        adopted = self.here(path='/here/adopt',
+                            payload={'key': self.key, 'page_url': page}).json()
+        self.assertEqual(200, self.client.delete(
+            '/api/browser-capture/intents/' + adopted['id']).status_code)
+
+        state = self.here(payload={'url': page, 'intent_id': adopted['id']}).json()
+        self.assertEqual('undecided', state['situation'],
+                         '不许把它说成「这一页还不在知识库里」、把人引去收录新链接')
+        self.assertIsNone(state['item'])
+        self.assertIsNone(state['intent'])
+
     def test_a_bound_request_does_not_bypass_a_single_admission_check(self):
         """**先兑现**不等于**放行**:待办指着这一页,但条目这期间被排除了。
 

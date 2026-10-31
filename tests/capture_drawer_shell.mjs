@@ -24,7 +24,7 @@ let elements = new Map();
 function element(id) {
   if (!elements.has(id)) elements.set(id, {
     value: '', textContent: '', dataset: {}, hidden: false, disabled: false, innerHTML: '',
-    type: '', select() {},
+    type: '', selected: false, select() { this.selected = true; },
     classList: {toggle() {}, add() {}, remove() {}},
     querySelectorAll: () => [], append() {},
     //: 真 DOM 的 `replaceChildren()` 会把这个元素腾空,**这里必须照做** —— 空实现的话
@@ -281,5 +281,40 @@ toasts.length = 0;
 clipboardGate.ok();
 await settle();
 assert.equal(toasts.length, 1, '抽屉还开着时「已复制」照旧要说一句');
+
+// ⑧b 同一个抽屉里的那条边界:他在扩展弹窗里把配对做完了,引导整套 DOM 换了一遍(收进
+//     底部折叠块),而上一次渲染里那次复制还在等。抽屉一次都没关过 —— 只认「这一次
+//     抽屉」的号码在这里恒绿,而迟到的失败照旧 `select()` 一个早就 remove 掉的输入框,
+//     屏幕上那句「请复制选中的配对密钥」指着一处什么都没选中的地方。
+await markChanged(null);
+element('cap-copy-key').click();
+await settle();
+await markChanged('1.2.1');
+toasts.length = 0;
+element('cap-pairing-key').selected = false;
+clipboardGate.no(new Error('剪贴板被拒'));
+await settle();
+assert.deepEqual(toasts, [], '引导重绘之后,上一套 DOM 上那次复制的迟到失败不许再说话');
+assert.equal(element('cap-pairing-key').selected, false,
+  '更不许去选一个早就 remove 掉的输入框');
+
+// 反过来钉一边:中间没有重绘的话,那一句照旧要出来、那行密钥照旧要选上。
+element('cap-copy-key').click();
+await settle();
+toasts.length = 0;
+clipboardGate.no(new Error('剪贴板被拒'));
+await settle();
+assert.equal(toasts.length, 1, '没重绘时「请复制选中的配对密钥」照旧要说');
+assert.equal(element('cap-pairing-key').selected, true, '也照旧要把那行密钥选上');
+
+// 再钉一边:标记被重写成**同一个值**(`present.js` 每次重读都写一遍版本号)不算重绘。
+// 当成重绘的话,位置根本没变,却把摊开的密钥收回去、把正在等的那次复制一起作废。
+element('cap-copy-key').click();
+await settle();
+await markChanged('1.2.1');
+toasts.length = 0;
+clipboardGate.ok();
+await settle();
+assert.equal(toasts.length, 1, '同一个值再写一遍不算重绘,等着的那次复制照旧有回应');
 
 console.log('capture drawer shell: passed');

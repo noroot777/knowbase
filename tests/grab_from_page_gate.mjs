@@ -9,8 +9,8 @@
  * 不许报成提交失败;⑦正文已齐的那一页一颗按钮都不给;⑧**有待办指着别的地址时有几条
  * 就摆几条**(站点按浏览器语言跳转那一类,只说一句「不在库里」会让人收录出第二行同一
  * 篇文章),逐行那颗「改用它」交的是这一页的地址和**那一行**的条目,**而他点中的那个
- * 身份要带进后面每一问**(丢了就会被按创建时间代选成另一篇),服务端说不出是哪一篇时
- * 一颗采集按钮都不给;⑨配对密钥用一次不依赖当前标签的调用验;⑩结构上不许按失败文案
+ * 身份要带进后面每一问**(丢了就会被按创建时间代选成另一篇)、而且**只对他点的那一页
+ * 有效**,服务端说不出是哪一篇时一颗采集按钮都不给;⑨配对密钥用一次不依赖当前标签的调用验;⑩结构上不许按失败文案
  * 分流,预览那一支也不许回来。
  * 硬约束见 docs/decisions/link-grab.md 与 browser-capture.md。
  */
@@ -209,6 +209,24 @@ for (const one of calls.filter(c => c.path === '/api/browser-capture/precheck'))
 // 看见刚写进去那张回执。
 assert.equal(calls.filter(c => c.path === '/api/browser-capture/here').at(-1).sent.intent_id, '',
   '用掉之后不该再指名它');
+
+// 身份只对**他点的那一页**有效。再点一次候选,然后让标签自己跳走(站内重定向、推送式
+// 改地址):还带着它去问的话,服务端对「带了身份却兑现不了」一律答「你选的那个失效
+// 了」—— 其实什么都没失效,他只是站到了另一页上,而那时摆出来的候选属于上一页,点下去
+// 是把这一页认给了另一篇。
+here = {ok: true, situation: 'absent', detail: '这一页还不在知识库里。', page_url: PAGE,
+        item: null, intent: null,
+        elsewhere: [{id: 'i1', key: 'k7', title: '那一篇', page_url: 'https://example.org/en/x'}]};
+await element('refresh').click();
+await element('elsewhere-list').querySelectorAll('button')[0].click();
+calls.length = 0;
+await element('refresh').click();
+assert.equal(calls.at(-1).sent.intent_id, 'i9', '还站在原地,照旧带着它');
+tab.url = PAGE + '?utm=1';
+calls.length = 0;
+await element('refresh').click();
+assert.equal(calls.at(-1).sent.intent_id, '', '标签自己跳走了就当他没点过');
+tab.url = PAGE;
 
 // 服务端说不出这一页是哪一篇(同页两个条目都在等、他还没点):**一颗采集按钮都不给**。
 // 给了就是让他按一下赌一把,而赌错是正文被另一篇覆盖、不可恢复;出路全在候选列表里。
