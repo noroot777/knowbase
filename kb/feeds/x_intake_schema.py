@@ -31,4 +31,9 @@ CREATE TABLE IF NOT EXISTS x_intake_batch_posts (
 CREATE TABLE IF NOT EXISTS x_intake_runs (
  id INTEGER PRIMARY KEY AUTOINCREMENT, started TEXT NOT NULL, metrics TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS x_intake_expirations (
+ source_id INTEGER NOT NULL, identity TEXT NOT NULL, post_id TEXT NOT NULL, expired_at TEXT NOT NULL,
+ PRIMARY KEY(source_id,identity,post_id)
+);
+CREATE INDEX IF NOT EXISTS x_intake_expirations_at ON x_intake_expirations(expired_at);
 '''

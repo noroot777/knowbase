@@ -325,7 +325,9 @@ class SchedulingTests(IntakeBase):
         other = self.sub('Other')
         result = self.run_intake(lambda *args, **kwargs: (_ for _ in ()).throw(XRateLimited('内容源429')), [self.source, other])
         self.assertTrue(all(not value.get('error') for value in result.values()))
-        self.assertIn('429', result['other']['skipped'])
+        self.assertIn('429', result['example']['skipped'])
+        self.assertNotIn('429', result['other']['skipped'])
+        self.assertIn('429', store.latest_metrics()['blocked'])
         self.assertEqual(store.latest_metrics()['counts']['accounts_unattempted'], 1)
 
     def test_typed_local_write_failure_preserves_account_backoff(self):
@@ -478,14 +480,13 @@ class IntegrationTests(IntakeBase):
         self.assertGreaterEqual(store.utc(options[0][0][0][1]), self.now - timedelta(days=5, seconds=1))
         self.assertFalse(store.latest_metrics()['timeline_phases_separable'])
 
-    def test_expired_global_deadline_keeps_outbox_unacknowledged(self):
+    def test_expired_network_deadline_still_commits_certified_outbox(self):
         self.prepare()
         self.stage([self.entry()])
         meta = dict(etag='', modified='', resolved_url='', x_intake=True, x_deadline=time.monotonic() - 1)
-        from kb.feeds.fetching import CollectionBudgetExceeded
-        with self.assertRaises(CollectionBudgetExceeded):
-            sync._save_result(self.source, (store.delivery(self.source)[0], meta), FetchScope())
-        self.assertEqual(len(store.delivery(self.source)[0]), 1)
+        sync._save_result(self.source, (store.delivery(self.source)[0], meta), FetchScope())
+        self.assertEqual(store.delivery(self.source)[0], [])
+        self.assertEqual(len(reg.items('social')['items']), 1)
 
     def test_telemetry_counts_wait_as_subset_not_an_extra_stage(self):
         metrics = Metrics(10)

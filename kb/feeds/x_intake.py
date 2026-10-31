@@ -49,6 +49,56 @@ class Intake:
         self.local[source['id']] = reason
         self.metrics.data['local_errors'].append(dict(source_id=source['id'], phase=phase, reason=reason))
 
+    def progress(self, source, phase):
+        try:
+            return store.progress(source)
+        except Exception as error:
+            if not local_fault(error):
+                raise
+            self.local_error(source, error, phase)
+            return None
+
+    def ordered(self, phase):
+        field = 'scan_at' if phase == 'discovery' else 'history_at'
+        ranked = []
+        for source in self.sources:
+            if source['id'] in self.local:
+                continue
+            progress = self.progress(source, phase)
+            if progress is not None:
+                ranked.append((source['id'] not in self.recovery if phase == 'history' else False,
+                               progress.get(field, 0), source['id'], source))
+        return [item[-1] for item in sorted(ranked, key=lambda item: item[:3])]
+
+    def pending_jobs(self):
+        groups, seen = [], set()
+        for source in self.sources:
+            if source['id'] in self.local:
+                continue
+            try:
+                groups.append(store.pending([source]))
+            except Exception as error:
+                if not local_fault(error):
+                    raise
+                self.local_error(source, error, '读取正文待办')
+        while any(groups):
+            for group in groups:
+                if group:
+                    source, task = group.pop(0)
+                    if task['post_id'] not in seen:
+                        seen.add(task['post_id'])
+                        yield source, task
+
+    def attempt(self, source, phase, reason=''):
+        try:
+            store.attempt(source, phase, reason)
+            return True
+        except Exception as error:
+            if not local_fault(error):
+                raise
+            self.local_error(source, error, phase)
+            return False
+
     def wait(self, deadline, phase):
         remaining = self.cool.remaining()
         if self.stop() or time.monotonic() + remaining + MIN_USEFUL >= deadline:
@@ -61,10 +111,7 @@ class Intake:
 
     def scan(self, page, phase, deadline):
         from kb.feeds import x_channels
-        field = 'scan_at' if phase == 'discovery' else 'history_at'
-        queue = sorted(self.sources, key=lambda source: (
-            source['id'] not in self.recovery if phase == 'history' else False,
-            store.progress(source).get(field, 0), source['id']))
+        queue = self.ordered(phase)
         retried = set()
         while queue and not self.blocked and not self.over(deadline):
             source = queue.pop(0)
@@ -74,7 +121,9 @@ class Intake:
             if self.results.get(handle, {}).get('error'):
                 continue
             bound = self.bounds[source['id']]
-            prior = store.progress(source)
+            prior = self.progress(source, phase)
+            if prior is None:
+                continue
             if phase == 'history' and source['id'] not in self.recovery and prior.get('covered') and store.utc(prior['covered']) <= bound:
                 fresh = [scan for scan in self.scans if scan[0]['id'] == source['id'] and scan[1] == 'discovery']
                 if (fresh and not fresh[-1][4].get('incomplete') and prior.get('coverage_end') and
@@ -94,7 +143,8 @@ class Intake:
             hits = self.cool.hits
             try:
                 with self.metrics.storage(phase):
-                    store.attempt(source, phase)
+                    if not self.attempt(source, phase):
+                        continue
                 block = self.metrics.data['phases'].setdefault(phase, {})
                 def ready(elapsed):
                     block['page_ready_seconds'] = block.get('page_ready_seconds', 0) + elapsed
@@ -125,7 +175,7 @@ class Intake:
                     self.cool.cleared()
             except x_page_state.XSessionThrottled as error:
                 self.cool.throttled()
-                store.attempt(source, phase, str(error))
+                self.attempt(source, phase, str(error))
                 if source['id'] not in retried:
                     queue.append(source)
                     retried.add(source['id'])
@@ -140,15 +190,15 @@ class Intake:
                 if local_fault(error):
                     self.local_error(source, error, phase)
                 elif isinstance(error, XBudgetExceeded):
-                    store.attempt(source, phase, str(error))
+                    self.attempt(source, phase, str(error))
                 elif isinstance(error, (x_page_state.XBrowserError, CdpError)):
-                    store.attempt(source, phase, str(error))
+                    self.attempt(source, phase, str(error))
                     self.results[handle] = dict(entries=[], error=str(error))
                 else:
                     raise
 
     def bodies(self, page, deadline):
-        for source, task in store.pending(self.sources):
+        for source, task in self.pending_jobs():
             if self.blocked or self.over(deadline):
                 break
             if source['id'] in self.local:
@@ -160,7 +210,7 @@ class Intake:
             unavailable = []
             self.announce(f'正文补全 · {entry["url"]}')
             try:
-                with store.db() as conn:
+                with store.read_db() as conn:
                     blocked, cached = store.excluded(conn, entry), store.existing(conn, entry)
                 if blocked or cached:
                     entries, note = [cached] if cached else [], '永久排除' if blocked else ''
@@ -188,14 +238,14 @@ class Intake:
             self.announce(x_browser.release_login_window(self.profile) or '准备 X 浏览器会话')
         session = x_browser.browser_session(self.profile, self.settings.get('x_chrome_path', ''),
                                              attach=self.channel == 'attach')
-        session._x_deadline = self.metrics.deadline - 5
+        session._x_deadline = self.metrics.network_deadline - 5
         with session as page:
-            page._x_deadline = self.metrics.deadline - 5
+            page._x_deadline = self.metrics.network_deadline - 5
             page.open_page('about:blank')
             self.cool = x_cooldown.of(page)
             self.metrics.data['phases']['startup'] = dict(wall_seconds=time.monotonic() - started)
             for phase, limit in [('discovery', 240), ('history', 120), ('body', 120)]:
-                deadline = min(self.metrics.deadline - 5, time.monotonic() + seconds(f'KB_X_{phase.upper()}_SECONDS', limit))
+                deadline = min(self.metrics.network_deadline - 5, time.monotonic() + seconds(f'KB_X_{phase.upper()}_SECONDS', limit))
                 if self.blocked or self.over(deadline):
                     continue
                 with self.metrics.phase(phase):
@@ -214,7 +264,6 @@ class Intake:
         confirmed, usable = set(), set()
         for source, phase, bound, observed, result, batch_id in self.scans:
             if result.get('error'):
-                self.blocked = self.blocked or result['error']
                 continue
             if source['id'] not in self.local:
                 try:
@@ -245,22 +294,23 @@ class Intake:
             reason = self.results.get(handle, {}).get('skipped') or progress.get('error', '')
             core_error = next((timeline.incomplete for timeline in self.timelines.get(source['id'], [])
                                if getattr(timeline, 'incomplete', '')), '')
+            if core_error:
+                usable.discard(source['id'])
             notes = [progress.get('gap', ''), f'{pending} 条正文待补' if pending else '',
                      f"{progress['unconfirmed']} 条候选待确认" if progress.get('unconfirmed') else '',
-                     self.local.get(source['id'], ''), self.blocked, reason, core_error]
+                     self.local.get(source['id'], ''), reason, core_error]
             if not read:
                 notes.append('本轮时间线未读到，保留原有成功和失败账')
-            notice = f'{expired} 条待办已超出自动五天窗口，未冒充完成' if expired else ''
-            notice = '；'.join(filter(None, [notice, progress.get('outside', ''), self.notices.get(source['id'], ''),
+            notice = '；'.join(filter(None, [progress.get('outside', ''), self.notices.get(source['id'], ''),
                                              x_post.unavailable_note(unavailable)]))
             result = dict(entries=entries, error='', incomplete='；'.join(dict.fromkeys(filter(None, notes))),
                           note=notice, unavailable=unavailable, unavailable_count=len(unavailable), x_intake=True,
                           local_error=self.local.get(source['id'], ''),
                           pending=not read or source['id'] not in usable or bool(progress.get('unconfirmed') or self.local.get(source['id'])
-                                  or self.blocked or core_error or self.stop()), deadline=self.metrics.deadline)
+                                  or self.stop()), deadline=self.metrics.deadline)
             result.update(run_started=self.started, run_monotonic=self.metrics.started)
             if not read and not entries and source['id'] not in self.local:
-                result['skipped'] = reason or self.blocked or ('已按停止请求中断' if self.stop() else
+                result['skipped'] = reason or ('已按停止请求中断' if self.stop() else
                                      '本轮未轮到，待下轮' if source['id'] not in self.attempted else '本轮未读到，待下轮')
             if read and not core_error and progress.get('discovery') == 'complete' and progress.get('latest'):
                 result['watermark'] = progress['latest']
@@ -274,16 +324,17 @@ class Intake:
         return self.results
 
     def run(self):
-        try:
-            with self.metrics.phase('prepare'):
-                store.prepare(self.sources, 'browser' if self.channel == 'attach' else self.channel, self.now)
-                self.recovery = {source['id'] for source in self.sources if store.progress(source).get('unconfirmed')}
-        except Exception as error:
-            if not local_fault(error):
-                raise
+        with self.metrics.phase('prepare'):
             for source in self.sources:
-                self.local_error(source, error, '准备待办')
-        if not self.stop() and not self.over(self.metrics.deadline):
+                try:
+                    store.prepare([source], 'browser' if self.channel == 'attach' else self.channel, self.now)
+                    if (progress := self.progress(source, '准备待办')) and progress.get('unconfirmed'):
+                        self.recovery.add(source['id'])
+                except Exception as error:
+                    if not local_fault(error):
+                        raise
+                    self.local_error(source, error, '准备待办')
+        if not self.stop() and not self.over(self.metrics.network_deadline):
             try:
                 if self.channel == 'feedgrab':
                     from kb.feeds.x_intake_feedgrab import run
@@ -300,6 +351,7 @@ class Intake:
                     raise
         with self.metrics.phase('finalize'):
             result = self.package()
+        self.metrics.data['blocked'] = self.blocked
         try:
             store.save_metrics(self.started, self.metrics.finish(self.cool))
         except Exception as error:

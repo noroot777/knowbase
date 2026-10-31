@@ -13,8 +13,8 @@ def run(intake):
     intake.metrics.data['cursor'] = 'feedgrab_bounded_rescan'
     intake.metrics.data['timeline_phases_separable'] = False
     with intake.metrics.phase('discovery'):
-        deadline = min(intake.metrics.deadline - 5, time.monotonic() + seconds('KB_X_DISCOVERY_SECONDS', 240))
-        sources = sorted(intake.sources, key=lambda source: (store.progress(source).get('scan_at', 0), source['id']))
+        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + seconds('KB_X_DISCOVERY_SECONDS', 240))
+        sources = intake.ordered('discovery')
         for source in sources:
             if intake.over(deadline):
                 break
@@ -22,7 +22,8 @@ def run(intake):
             intake.attempted.add(source['id'])
             intake.announce(f'feedgrab 五天有界扫描（上游未拆分页） · @{handle}')
             try:
-                store.attempt(source, 'discovery')
+                if not intake.attempt(source, 'discovery'):
+                    continue
                 result = x_feedgrab.harvest(
                     [(handle, intake.bounds[source['id']].isoformat())],
                     binary=intake.settings.get('x_feedgrab_bin', ''),
@@ -32,7 +33,7 @@ def run(intake):
                     account_seconds=seconds('KB_X_FEEDGRAB_ACCOUNT_SECONDS', 25))[handle]
                 if result.get('error') or result.get('skipped'):
                     intake.results[handle] = result
-                    store.attempt(source, 'discovery', result.get('error') or result['skipped'])
+                    intake.attempt(source, 'discovery', result.get('error') or result['skipped'])
                     continue
                 result['coverage_complete'] = result.get('incomplete') == ''
                 batch_id = uuid4().hex
@@ -53,8 +54,8 @@ def run(intake):
                 intake.local_error(source, error, '发现')
     intake.metrics.data['phases']['history'] = dict(wall_seconds=0, shared_with='discovery')
     with intake.metrics.phase('body'):
-        deadline = min(intake.metrics.deadline - 5, time.monotonic() + seconds('KB_X_BODY_SECONDS', 120))
-        for source, task in store.pending(intake.sources):
+        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + seconds('KB_X_BODY_SECONDS', 120))
+        for source, task in intake.pending_jobs():
             if intake.over(deadline):
                 break
             if source['id'] in intake.local:

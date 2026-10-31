@@ -192,8 +192,10 @@ def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
 def _harvest_one(page: Chrome, handle: str, floor: datetime | None, *,
                  deadline=None, max_scrolls=None, should_stop=None, on_ready=None, precise=False) -> tuple[list[dict], str]:
     """Return selected previews and an honest coverage gap, with optional scheduler limits."""
-    deadline = min(deadline or float('inf'), time.monotonic() + ACCOUNT_SECONDS)
     ready_started = time.monotonic()
+    deadline = min(deadline or float('inf'), ready_started + ACCOUNT_SECONDS)
+    effective_seconds = max(0, deadline - ready_started)
+    scroll_limit = MAX_SCROLLS if max_scrolls is None else max_scrolls
     navigate(page, f'https://x.com/{handle}')
     state = _wait_state(page, handle, deadline)
     if on_ready:
@@ -202,9 +204,9 @@ def _harvest_one(page: Chrome, handle: str, floor: datetime | None, *,
     page.eval(_RESET_JS)
     seen_articles = parsed = 0
     items: list[dict] = []
-    incomplete = '滚动次数用完,没有读到上次的位置' if floor else ''
+    incomplete = f'本次 {scroll_limit} 次滚动用完,没有读到上次的位置' if floor else ''
     dry = 0                                        # 连着几次"滚完没长出新东西"
-    for _ in range(MAX_SCROLLS if max_scrolls is None else max_scrolls):
+    for _ in range(scroll_limit):
         if should_stop and should_stop():
             incomplete = '已按停止请求中断,时间线未读完'
             break
@@ -218,7 +220,7 @@ def _harvest_one(page: Chrome, handle: str, floor: datetime | None, *,
             break
         if time.monotonic() > deadline:
             if floor:
-                incomplete = f'单个账号的 {int(ACCOUNT_SECONDS)} 秒用完,没有读到上次的位置'
+                incomplete = f'单个账号的 {effective_seconds:.3g} 秒用完,没有读到上次的位置'
             break
         before = len(items)
         bottom = json.loads(page.eval(_SCROLL_JS))['bottom']

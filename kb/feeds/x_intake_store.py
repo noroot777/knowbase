@@ -9,11 +9,16 @@ from zoneinfo import ZoneInfo
 
 from kb.feeds import registry as reg, x_article, x_body, x_post, x_post_meta
 from kb.feeds import x_intake_batches as batches
+from kb.feeds import x_intake_retention as retention
 from kb.maintenance import maintenance_lock
 
 
 def db():
     return reg.db(timeout=0)
+
+
+def read_db(timeout=0):
+    return reg.read_db(timeout=timeout)
 
 
 def utc(value):
@@ -62,6 +67,7 @@ def observed(entries):
 def prepare(sources, channel, now):
     with maintenance_lock(wait=0), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
+        retention.prune(conn, now)
         for source in sources:
             if not current(conn, source):
                 continue
@@ -72,6 +78,7 @@ def prepare(sources, channel, now):
                 conn.execute('''DELETE FROM x_intake_batch_posts WHERE batch_id IN
                     (SELECT id FROM x_intake_batches WHERE source_id=?)''', (source['id'],))
                 conn.execute('DELETE FROM x_intake_batches WHERE source_id=?', (source['id'],))
+                conn.execute('DELETE FROM x_intake_expirations WHERE source_id=?', (source['id'],))
                 conn.execute('DELETE FROM x_intake_links WHERE source_id=?', (source['id'],))
                 conn.execute('DELETE FROM x_intake_sources WHERE source_id=?', (source['id'],))
                 previous = None
@@ -79,17 +86,10 @@ def prepare(sources, channel, now):
                 VALUES(?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
                 floor=excluded.floor,discovery='unattempted',error='' ''',
                 (source['id'], identity(source), channel, floor, '最近五天尚未确认完整覆盖'))
-            conn.execute('''UPDATE x_intake_candidates SET state='expired',reason='超出自动追补五天窗口'
-                WHERE (state IN ('pending','repair') OR state='ready' AND NOT EXISTS
-                (SELECT 1 FROM x_intake_links l WHERE l.post_id=x_intake_candidates.post_id AND l.confirmed=1))
-                AND published < ?''', ((now - timedelta(days=5)).isoformat(),))
+            retention.expire(conn, source['id'], identity(source), floor, now)
             batches.expire(conn, source['id'], identity(source), floor)
-            expired = conn.execute('''SELECT count(*) FROM x_intake_links l
-                JOIN x_intake_candidates p USING(post_id) WHERE l.source_id=? AND l.identity=?
-                AND (p.state='expired' OR p.state='ready' AND l.confirmed=0 AND p.published<?)''',
-                                   (source['id'], identity(source), floor)).fetchone()[0]
-            date = utc(floor).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d')
-            outside = f'{date} 以前的 {expired} 条待办已超出自动窗口，未计为完成' if expired else ''
+            expired = retention.recent(conn, source['id'], identity(source), now)
+            outside = retention.notice(utc(floor), expired)
             conn.execute('UPDATE x_intake_sources SET expired=?,outside=? WHERE source_id=?',
                          (expired, outside, source['id']))
 
@@ -196,7 +196,7 @@ def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end=
 
 
 def progress(source):
-    with db() as conn:
+    with read_db() as conn:
         row = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=? AND identity=?',
                            (source['id'], identity(source))).fetchone()
         result = dict(row) if row else {}
@@ -219,7 +219,7 @@ def attempt(source, phase, reason=''):
 def pending(sources, now=None):
     allowed = {(source['id'], identity(source)): source for source in sources}
     now = time.time() if now is None else now
-    with db() as conn:
+    with read_db() as conn:
         rows = conn.execute('''SELECT p.*,l.source_id,l.identity FROM x_intake_candidates p
             JOIN x_intake_links l USING(post_id) JOIN x_intake_sources s ON s.source_id=l.source_id
             AND s.identity=l.identity WHERE p.state='pending' AND p.retry_at<=?
@@ -263,21 +263,18 @@ def finish(source, task, entries, unavailable, reason):
 
 
 def delivery(source):
-    with db() as conn:
+    with read_db() as conn:
         rows = conn.execute('''SELECT p.*,l.delivered,l.confirmed FROM x_intake_candidates p
             JOIN x_intake_links l USING(post_id) WHERE l.source_id=? AND l.identity=?''',
             (source['id'], identity(source))).fetchall()
-        progress = conn.execute('SELECT floor FROM x_intake_sources WHERE source_id=? AND identity=?',
+        progress = conn.execute('SELECT floor,expired FROM x_intake_sources WHERE source_id=? AND identity=?',
                                 (source['id'], identity(source))).fetchone()
-        floor = progress['floor'] if progress else ''
-    entries, pending_count, unavailable, expired = [], 0, [], 0
+    entries, pending_count, unavailable, expired = [], 0, [], progress['expired'] if progress else 0
     for row in rows:
         entry = json.loads(row['entry'])
         if row['state'] == 'ready' and row['confirmed'] and not row['delivered'] and complete(entry):
             entries.append(entry)
         pending_count += row['state'] in ('pending', 'repair')
-        expired += row['state'] == 'expired' or bool(row['state'] == 'ready' and not row['confirmed']
-                                                     and floor and row['published'] < floor)
         if row['state'] == 'unavailable':
             unavailable.append(dict(url=entry['url'], reason=row['reason']))
     return entries, pending_count, unavailable, expired
@@ -293,7 +290,7 @@ def acknowledge(conn, source, entries):
 
 
 def statuses(sources, channel='browser'):
-    with db() as conn:
+    with read_db(timeout=30) as conn:
         rows = {row['source_id']: dict(row) for row in conn.execute('SELECT * FROM x_intake_sources')}
         counts = {(row['source_id'], row['identity']): row['pending'] for row in conn.execute('''
             SELECT l.source_id,l.identity,count(*) AS pending FROM x_intake_links l
@@ -301,13 +298,18 @@ def statuses(sources, channel='browser'):
             GROUP BY l.source_id,l.identity''')}
         unconfirmed = {source_id: batches.count(conn, source_id, row['identity'], row['floor'])
                        for source_id, row in rows.items()}
+        for source_id, row in rows.items():
+            row['expired'] = retention.recent(conn, source_id, row['identity'], datetime.now(timezone.utc))
+            row['outside'] = retention.notice(utc(row['floor']), row['expired'])
     for source in sources:
         row = rows.get(source['id'])
         if row and row['identity'] == identity(source) and row['channel'] == ('browser' if channel == 'attach' else channel):
             source['x_intake'] = {key: row[key] for key in
-                                  ('discovery', 'gap', 'expired', 'error', 'floor', 'scan_at', 'outside')}
+                                  ('discovery', 'gap', 'expired', 'error', 'floor', 'scan_at', 'history_at', 'outside')}
             source['x_intake']['pending'] = counts.get((source['id'], identity(source)), 0)
             source['x_intake']['unconfirmed'] = unconfirmed[source['id']]
+            from kb.feeds.x_intake_diagnostics import issues
+            source['x_intake']['issues'] = issues(source['x_intake'])
 
 
 def save_metrics(started, metrics):
@@ -318,7 +320,7 @@ def save_metrics(started, metrics):
 
 
 def latest_metrics(channel=None):
-    with db() as conn:
+    with read_db(timeout=30) as conn:
         row = conn.execute('SELECT * FROM x_intake_runs ORDER BY id DESC LIMIT 1').fetchone()
     metrics = dict(started=row['started'], **json.loads(row['metrics'])) if row else None
     return metrics if metrics and (channel is None or metrics.get('channel') == channel) else None

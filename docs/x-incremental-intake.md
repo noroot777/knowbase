@@ -28,7 +28,7 @@
 ## 持久化与一致性
 
 - 持久表包括来源覆盖/尝试账、按 status ID 共享的候选、订阅修订绑定的归属/outbox、最近 30 次阶段统计，
-  以及扫描批次与批次成员两张表。
+  扫描批次与批次成员两张表，以及按归属记录的过期事件表。
   仅 `CREATE TABLE/INDEX IF NOT EXISTS`，不删旧表、不改已有正文。
 - 来源身份绑定 URL、专用订阅链接和单调修订号；改链接后旧任务不能写进新账号，A→B→A 也不复活旧结果。
 - 候选与暂存进度同事务；时间线消费者保留到会话收尾，迟到核心错误阻止该批归属确认和覆盖推进。
@@ -48,8 +48,9 @@
 
 ## 预算与限流
 
-默认整轮 480 秒；发现/历史/正文分别最多 240/120/120 秒，不是再加启动、冷却、保存和关闭时间。
-关闭预留 5 秒，所有阶段取全局剩余预算；投递时也检查同一个绝对截止时刻，来不及的成品留在 outbox。
+默认整轮预算 480 秒，先保留 30 秒收尾（小预算取20%）；发现/历史/正文分别最多 240/120/120 秒，
+共享提前后的联网截止，不是三个阶段都能用满。关闭另保留 5 秒，不挤占那份本地收尾窗口。
+已确认持久成品的投递只有本地事务，不再被联网截止拒绝；即使关闭超时跨过总截止仍投递，超支如实记录。
 维护锁和队列 SQLite 写锁不长期等：拿不到立即报本机待续，不把 15 分钟维护锁等待塞入预算。
 CDP 命令受当前切片截止约束；关闭命令必须能释放自有资源。操作系统/关闭本身不可硬实时中止，
 `overrun_seconds` 如实记录超时尾部，不把它伪装成零，不承诺 51 个账号都在八分钟完成。
@@ -300,3 +301,88 @@ env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-review2-validation/data KB_VAULT_
 未抓真实 X、未读取生产库或 cookie、未调用模型；本地替身耗时不证明真实源站吞吐。
 真实账号风控、原生 cursor、51 账号八分钟吞吐与未修改文件的兼容回归未验证，仍留专门验证或验收。
 二轮报告的非阻断事项未顺带修改，没有擅自追加审查轮数或执行验收。
+
+## 新逻辑审查六项修复（qFDXLbqYsLQ4，第 1 轮）
+
+修复基线 `47d91d5`，日期 2026-10-31。六项必修均接受，只处理本任务 X 自动采集链路：
+
+1. **账号结果隔离**：整轮限流仍立即停止后续联网，原因保留在本轮统计和汇总；不再复制进其他账号的
+   `pending` 或 `last_note`。已真实读到且完成确认、持久化与投递的健康账号照常记成功、清旧失败账。
+   当前来源自己的核心错误仍阻止它取得成功，未轮到的来源不借别人的读数清账。
+2. **超窗提示有期限，终态回执有清理**：按来源身份/推文记录过期事件，只显示最近24小时事件数；
+   API 即使没有新同步也会重新计算，使提示自然归零。来源卡片只显示一份超窗说明。
+   候选/归属/批次成员在五天资格范围外再保留 `pipeline_retention.history_keep_days()` 天后清理，
+   删除订阅的关联账也清理；已确认但未投递的完整 outbox 与正式 `feed_items` 不被删掉。
+3. **读库不抢写锁，本机故障按账号隔离**：初始化后的读取使用只读 SQLite URI 与 `query_only`，
+   不执行迁移或 `BEGIN IMMEDIATE`；面板读取等待30秒，队列读取即时失败后记该账号本机说明。
+   prepare、排序用进度、扫描重读、尝试登记和正文队列读取都在逐账号异常边界内，
+   browser 与 feedgrab 复用同一份安全排序和轮转队列，不再由一个账号的库忙终止整轮。
+4. **联网截止与本地投递分离**：480秒预算默认预留30秒收尾，小预算预留20%；三阶段服从更早的
+   联网截止。已经确认、已经持久化的成品即使遇到关闭变慢、跨过总截止，也继续完成纯本地提交。
+   因此480秒是调度预算而非不可突破的硬实时上限，实际超支仍记录，不能再把本地成品推迟一天。
+5. **问题分类由事实生产者给出**：自动 X 输出历史缺口、正文待补、候选待确认、最近超窗四类
+   结构化问题；不按任意 `last_note` 猜成“覆盖未完成”。历史尝试凭据也支持只有历史阶段的读取。
+   正文提示明确独立冷却，强制同步不绕过单条正文冷却；超窗禁用普通重试并建议显式历史区间。
+   原有执行端点、身份票、无 extract 阶段边界保留，其他来源分类不变。
+6. **有效限制如实显示**：browser 的超时秒数取本次实际截止，滚动次数取本次传入上限，
+   不再总写模块默认50秒/40次。与此前已修 feedgrab 超时口径一致。
+
+### 本轮限定测试与静态证据
+
+只运行本轮修改的 `tests/test_x_intake.py` 和新增的 `tests/test_x_intake_isolation.py`，
+未运行其他文件或全仓回归。通过 ash 回归哨兵登记的原始命令：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-qFDX-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-qFDX-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-qFDX-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_x_intake tests.test_x_intake_isolation -v
+```
+
+- 实际 cwd：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。
+- 最终哨兵 `FuISngIgk2tJ`，实际日志 `Ran 58 tests in 1.383s / OK`，退出码0；
+  日志 `/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/FuISngIgk2tJ.log` 已读取。
+- 首次哨兵 `lakjCVcZqc4C` 有2处断言失败：旧限流断言要求污染另一个未访问账号，已按新契约反向约束；
+  新历史分类夹具缺少真实 `attempt` 凭据，补齐并让结构化状态带上 `history_at`。
+- 15份实现/测试/JS 的测试前 SHA-256 清单：证据目录 `tested-code.json`，清单自身 SHA-256
+  `c93895ee7283e610c4759e5217ce1d43adeda0c926683ef3edebc063f825567b`。
+  后续 API/UI 冒烟没有修改这15份代码，提交时逐项核对。
+- 14份变更 Python 的离线 Ruff、AST/内存编译、JS `node --check`、700行约束及
+  `git diff --check` 均通过。命令、退出码及行数见证据目录 `final-static.json`。
+
+### 本轮真实保存、API 与页面
+
+本轮证据目录：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/x-intake-review-qFDX/`。
+
+- 仓库外 `serve.py` 使用全新临时 KB 数据/笔记/视频目录，禁止对外 socket 并关闭调度器；
+  只替代外部 X 会话、时间线、正文、登录就绪和冷却等待。实际调用 `sync.collect`、队列、事务与 API。
+- 4个来源实际同步：前3个真实读取后，第4个抛出会话限流。2条成品正常进入 `feed_items`，
+  健康、正文欠账、历史缺口三个来源均记本轮成功，旧错误/失败次数/退避清空，均不带另号429；
+  正文预览保留在独立待办、不进入正式内容库；受限来源保留自己的旧成功账。汇总仍显示限流原因。
+  见 `sync-summary.json`、`subscription-ledgers.json`、`database-evidence.json`。
+- 另用真实 stage/prepare 产生一个未确认候选、一个近期过期事件、一个25小时前过期事件。
+  清空预取内存缓存后 API 仍显示待确认1条、近期超窗1条、旧事件超窗0条。
+  `GET /api/health`、`/api/intake/social`、`/api/intake/social/items?limit=100`、
+  `/api/intake-care?kind=social` 均200；24路真实 HTTP 并发 overview 也全部200。
+  见 `api-summary.json`、`http-evidence.json`，限定测试另核对持写锁时只读不抢锁。
+- 实际页面7张订阅卡片：前三个来源有本轮最近成功、无旧连接错误和另号429；
+  正文待补与成功并存，待确认数量可见，近期超窗只显示一次，旧超窗不再显示；分阶段耗时仍可见。
+  “问题与待办”四档分别显示独立正文冷却、五天有界重扫、完整收尾确认、显式历史补抓建议；
+  超窗的普通重试按钮禁用。无 JS 异常、无横向溢出、无外域或非 GET 请求。
+  `sources.png`、`care-body.png`、`care-history.png`、`care-unconfirmed.png`、`care-expired.png`
+  均已查看；DOM/网络见 `sources-evidence.json`、`care-*.json`、`page-evidence.json`。
+- 仓库外冒烟初次把“旧超窗归零”误写成“该来源没有任何问题”；实际上该夹具还保留已尝试的真实历史缺口，
+  只应断言没有超窗问题、没有从普通说明猜出的通用 partial，已修正检查，未改产品代码。
+  页面点检首次已全部通过，但脚本等待一个被 `unref` 的浏览器退出事件导致 Node 返回13；
+  修正仓库外退出等待后再次点检，返回0，清理记录确认无进程/profile残留。
+
+### 浏览器通道、清理与留白
+
+本审查轮重新尝试扩展具名会话“🔎 大V逻辑修复验证”，以 `visible:false` 新建后台标签，实际返回
+`Capability is not available: visibility`，创建前被拒。没有省略后台约束重试，
+随后才降到独立临时 profile 的 `chrome-headless-shell`，始终无头、仅允许本机服务 GET。
+只点击订阅管理、问题与待办及四个只读问题详情；没有点击同步、登录、保存、重试或外链。
+只连接自己启动的无头进程，未接管用户 Chrome/普通标签、未激活窗口、未读取 cookie。
+见 `browser-channel.json`、`page-final-network.json`。自建无头进程/profile与隔离服务/临时数据均已清理，
+见 `browser-cleanup.json`、`server-cleanup.json`。
+
+真实 X 登录态、远端风控、原生 cursor、51账号八分钟吞吐均未验证；没有读取生产库或调用模型。
+本地替身用时不证明源站性能；未修改测试的兼容回归与全仓回归仍由验收前置命令覆盖，
+本轮没有补跑，也未扩大到报告非阻断事项或擅自增加审查轮数。

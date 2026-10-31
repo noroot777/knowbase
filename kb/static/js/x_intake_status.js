@@ -5,8 +5,8 @@ function xIntakeStatus(source) {
   if (state.gap) parts.push(`历史缺口：${state.gap}`);
   if (state.pending) parts.push(`正文待补 ${state.pending} 条`);
   if (state.unconfirmed) parts.push(`候选待确认 ${state.unconfirmed} 条`);
-  if (state.expired) parts.push(`超出五天自动窗口 ${state.expired} 条（未计完成）`);
   if (state.outside) parts.push(state.outside);
+  else if (state.expired) parts.push(`最近24小时超出五天自动窗口 ${state.expired} 条（未计完成）`);
   if (state.error) parts.push(state.error);
   return `<p class="source-row-meta x-intake-status">${esc(parts.join(' · '))}</p>`;
 }

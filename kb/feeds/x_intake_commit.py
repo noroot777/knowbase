@@ -8,7 +8,7 @@ from kb.youtube.faults import local_fault, record_local
 
 def check_budget(validators):
     from kb.feeds.fetching import CollectionBudgetExceeded
-    if validators.get('x_deadline') and time.monotonic() >= validators['x_deadline']:
+    if not validators.get('x_intake') and validators.get('x_deadline') and time.monotonic() >= validators['x_deadline']:
         raise CollectionBudgetExceeded('X 整轮预算用完，已持久化的成品留待下轮投递')
 
 
@@ -71,3 +71,5 @@ def telemetry(kind, summary):
     from kb.feeds import x_channels
     if kind == 'social' and any(value.get('x_intake') for value in x_channels._harvest.values()):
         summary['x_intake'] = store.latest_metrics()
+        if summary['x_intake'] and summary['x_intake'].get('blocked'):
+            summary['message'] = summary.get('message') or summary['x_intake']['blocked']

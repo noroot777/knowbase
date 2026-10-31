@@ -16,8 +16,11 @@ class Metrics:
     def __init__(self, budget):
         self.started = time.monotonic()
         self.deadline = self.started + max(0.1, budget)
+        reserve = min(30.0, max(0.1, budget) * 0.2)
+        self.network_deadline = self.deadline - reserve
         self.data = dict(budget_seconds=budget, cursor='bounded_dom_rescan',
-                         native_cursor_verified=False, phases={}, counts={}, local_errors=[])
+                         native_cursor_verified=False, finalize_reserve_seconds=reserve,
+                         phases={}, counts={}, local_errors=[])
 
     @contextmanager
     def phase(self, name):

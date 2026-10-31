@@ -188,6 +188,8 @@ def _source_scope(problem: dict) -> dict:
                       '它会重新打开来源页从头读那之后的范围，按原文链接去重，'
                       '**不是**从上次停下的位置接着滚。同样的预算或加载障碍下，'
                       '这一次仍然可能读不完。')
+    if problem['problem'].startswith('x_intake_'):
+        detail.extend([problem['explanation'], problem['advice']])
     return {
         'endpoint': f'/api/intake/{problem["kind"]}/sync',
         # 同 `_translate_scope`:阶段清单是本面板自己那一份,不含 `extract`。
@@ -203,8 +205,8 @@ def _source_scope(problem: dict) -> dict:
         # 口径重算,对不上就作废这一条,不许按编号认领当前版本(审查第 2 轮 R3
         # 只修到入口,第 1 轮自由审查 R2 实测:确认文字点名 A,采集器访问了 B)。
         'expect': {str(problem['source_id']): _source_fingerprint(problem)},
-        'title': '冷却后重试这一个账号' if cooling else
-                 '重试此范围' if coverage else '重试这一个来源',
+        'title': problem.get('retry_title') or ('冷却后重试这一个账号' if cooling else
+                 '重试此范围' if coverage else '重试这一个来源'),
         'confirm': '开始重试',
         'picked': 1,
         'detail': '\n'.join(detail),
