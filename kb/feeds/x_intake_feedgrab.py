@@ -1,6 +1,7 @@
 """feedgrab is an opaque timeline scanner, not a replayable native-cursor interface."""
 import json
 import time
+from uuid import uuid4
 
 from kb.feeds import x_article, x_channels, x_feedgrab
 from kb.feeds import x_intake_store as store
@@ -34,15 +35,17 @@ def run(intake):
                     store.attempt(source, 'discovery', result.get('error') or result['skipped'])
                     continue
                 result['coverage_complete'] = result.get('incomplete') == ''
+                batch_id = uuid4().hex
                 reused = store.stage(source, result['entries'], phase='discovery',
-                                     incomplete='等待上游批次收尾确认')
+                                     incomplete='等待上游批次收尾确认', batch_id=batch_id,
+                                     boundary=intake.bounds[source['id']].isoformat(), end=intake.now.isoformat())
                 if reused is None:
                     continue
                 intake.metrics.count('reused', reused or 0)
                 intake.metrics.count('discovered', len(result['entries']))
                 observed = max((store.utc(entry['published']).isoformat() for entry in result['entries']
                                 if store.utc(entry.get('published'))), default='')
-                intake.scans.append((source, 'discovery', intake.bounds[source['id']], observed, result))
+                intake.scans.append((source, 'history', intake.bounds[source['id']], observed, result, batch_id))
                 intake.read.add(source['id'])
             except Exception as error:
                 if not local_fault(error):

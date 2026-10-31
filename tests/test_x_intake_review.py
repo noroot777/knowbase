@@ -6,8 +6,8 @@ from unittest.mock import patch
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_browser, x_cooldown, x_feedgrab, x_post
 from kb.feeds import x_intake_store as store
-from kb.feeds.x_cdp import CdpError
-from kb.feeds.x_page_state import XBrowserError, XSessionThrottled
+from kb.feeds.x_cdp import XBudgetExceeded
+from kb.feeds.x_page_state import XSessionThrottled
 from tests.test_x_intake import IntakeBase, Session
 
 
@@ -41,12 +41,12 @@ class CurrentRunTests(IntakeBase):
 
     def test_zero_reads_after_prior_coverage_never_clear_ledger_for_browser_or_attach(self):
         for channel in ('browser', 'attach'):
-            for error in (CdpError, XBrowserError):
+            for error in (XBudgetExceeded,):
                 with self.subTest(channel=channel, error=error.__name__):
                     self.options = self.settings(channel)
                     before = self.seed()
                     with patch.dict('os.environ', {'KB_X_ACCOUNT_SECONDS': '0.1'}):
-                        summary = self.collect_browser(lambda *args, **kwargs: (_ for _ in ()).throw(error('切片超时')))
+                        summary = self.collect_browser(lambda *args, **kwargs: (_ for _ in ()).throw(error('本阶段预算用完')))
                     self.assertEqual(self.ledger(), before)
                     self.assertEqual(summary['succeeded_ids'], [])
                     self.assertEqual(summary['failed_ids'], [])
@@ -65,7 +65,7 @@ class CurrentRunTests(IntakeBase):
     def test_saved_outbox_can_deliver_without_claiming_a_current_remote_read(self):
         before = self.seed()
         with patch.dict('os.environ', {'KB_X_ACCOUNT_SECONDS': '0.1'}):
-            summary = self.collect_browser(lambda *args, **kwargs: (_ for _ in ()).throw(CdpError('预算超时')))
+            summary = self.collect_browser(lambda *args, **kwargs: (_ for _ in ()).throw(XBudgetExceeded('预算超时')))
         self.assertEqual(summary['added'], 1)
         self.assertEqual(summary['succeeded_ids'], [])
         self.assertEqual(self.ledger(), before)
@@ -88,7 +88,7 @@ class CurrentRunTests(IntakeBase):
 
         def scan(*args, **kwargs):
             if kwargs['max_scrolls'] == 2:
-                raise CdpError('发现切片超时')
+                raise XBudgetExceeded('发现切片超时')
             return [self.entry('301')], ''
 
         with patch.dict('os.environ', {'KB_X_ACCOUNT_SECONDS': '0.1'}):
@@ -122,12 +122,12 @@ class CurrentRunTests(IntakeBase):
         self.assertEqual(self.ledger()['last_error'], '')
         self.assertIn('引用推', reg.subscription('social', self.source['id'])['last_note'])
 
-    def test_pending_body_still_keeps_old_failure_even_when_latest_read_succeeds(self):
-        before = self.seed()
+    def test_pending_body_is_independent_of_current_discovery_success(self):
+        self.seed()
         with patch.object(x_post, 'complete', return_value=([], '详情尚未补全')):
             summary = self.collect_browser(lambda *args, **kwargs: ([self.entry('502', truncated=True)], '历史缺口'))
-        self.assertEqual(summary['succeeded_ids'], [])
-        self.assertEqual(self.ledger(), before)
+        self.assertEqual(summary['succeeded_ids'], [str(self.source['id'])])
+        self.assertEqual((self.ledger()['last_error'], self.ledger()['failures'], self.ledger()['retry_at']), ('', 0, 0))
         self.assertEqual(store.delivery(self.source)[1], 1)
         self.assertEqual(store.pending([self.source]), [])
 

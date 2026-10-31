@@ -20,6 +20,14 @@ CREATE TABLE IF NOT EXISTS x_intake_links (
  PRIMARY KEY(source_id,identity,post_id)
 );
 CREATE INDEX IF NOT EXISTS x_intake_links_post ON x_intake_links(post_id);
+CREATE TABLE IF NOT EXISTS x_intake_batches (
+ id TEXT PRIMARY KEY, source_id INTEGER NOT NULL, identity TEXT NOT NULL,
+ boundary TEXT NOT NULL, end TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending'
+);
+CREATE INDEX IF NOT EXISTS x_intake_batches_source ON x_intake_batches(source_id,identity,state);
+CREATE TABLE IF NOT EXISTS x_intake_batch_posts (
+ batch_id TEXT NOT NULL, post_id TEXT NOT NULL, PRIMARY KEY(batch_id,post_id)
+);
 CREATE TABLE IF NOT EXISTS x_intake_runs (
  id INTEGER PRIMARY KEY AUTOINCREMENT, started TEXT NOT NULL, metrics TEXT NOT NULL
 );

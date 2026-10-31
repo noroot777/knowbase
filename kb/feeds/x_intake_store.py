@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from kb.feeds import registry as reg, x_article, x_body, x_post, x_post_meta
+from kb.feeds import x_intake_batches as batches
 from kb.maintenance import maintenance_lock
 
 
@@ -68,6 +69,9 @@ def prepare(sources, channel, now):
             previous = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=?',
                                     (source['id'],)).fetchone()
             if previous and (previous['identity'], previous['channel']) != (identity(source), channel):
+                conn.execute('''DELETE FROM x_intake_batch_posts WHERE batch_id IN
+                    (SELECT id FROM x_intake_batches WHERE source_id=?)''', (source['id'],))
+                conn.execute('DELETE FROM x_intake_batches WHERE source_id=?', (source['id'],))
                 conn.execute('DELETE FROM x_intake_links WHERE source_id=?', (source['id'],))
                 conn.execute('DELETE FROM x_intake_sources WHERE source_id=?', (source['id'],))
                 previous = None
@@ -76,10 +80,14 @@ def prepare(sources, channel, now):
                 floor=excluded.floor,discovery='unattempted',error='' ''',
                 (source['id'], identity(source), channel, floor, '最近五天尚未确认完整覆盖'))
             conn.execute('''UPDATE x_intake_candidates SET state='expired',reason='超出自动追补五天窗口'
-                WHERE state IN ('pending','repair') AND published < ?''', ((now - timedelta(days=5)).isoformat(),))
+                WHERE (state IN ('pending','repair') OR state='ready' AND NOT EXISTS
+                (SELECT 1 FROM x_intake_links l WHERE l.post_id=x_intake_candidates.post_id AND l.confirmed=1))
+                AND published < ?''', ((now - timedelta(days=5)).isoformat(),))
+            batches.expire(conn, source['id'], identity(source), floor)
             expired = conn.execute('''SELECT count(*) FROM x_intake_links l
                 JOIN x_intake_candidates p USING(post_id) WHERE l.source_id=? AND l.identity=?
-                AND p.state='expired' ''', (source['id'], identity(source))).fetchone()[0]
+                AND (p.state='expired' OR p.state='ready' AND l.confirmed=0 AND p.published<?)''',
+                                   (source['id'], identity(source), floor)).fetchone()[0]
             date = utc(floor).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d')
             outside = f'{date} 以前的 {expired} 条待办已超出自动窗口，未计为完成' if expired else ''
             conn.execute('UPDATE x_intake_sources SET expired=?,outside=? WHERE source_id=?',
@@ -109,7 +117,7 @@ def needs_repair(conn, entry):
     return bool(row and any(row[field] != entry.get(field) for field in ('title', 'body', 'x_post_meta', 'body_provenance')))
 
 
-def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary=''):
+def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary='', end='', batch_id=''):
     reused = 0
     now = time.time() if now is None else now
     with maintenance_lock(wait=0), db() as conn:
@@ -117,6 +125,8 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
         if not current(conn, source):
             return None
         progress = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=?', (source['id'],)).fetchone()
+        batch_id = batches.begin(conn, source['id'], identity(source), boundary or progress['floor'],
+                                 end or datetime.now(timezone.utc).isoformat(), batch_id)
         for entry in entries:
             identifier, published = post_id(entry), utc(entry.get('x_observed_at') or entry.get('published'))
             if not identifier or not published or published < utc(progress['floor']):
@@ -141,6 +151,7 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
                     (identifier, json.dumps(entry, ensure_ascii=False), published.isoformat(), state))
             conn.execute('INSERT OR IGNORE INTO x_intake_links(source_id,identity,post_id) VALUES(?,?,?)',
                          (source['id'], identity(source), identifier))
+            batches.add(conn, batch_id, identifier)
         latest = max(filter(None, [progress['latest'], observed]), default='')
         covered = progress['covered']
         gap = incomplete or '时间线响应尚待会话收尾确认'
@@ -152,14 +163,19 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
     return reused
 
 
-def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end='', coverage_complete=False):
+def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end='', coverage_complete=False,
+            batch_id=''):
     with maintenance_lock(wait=0), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return False
-        for entry in entries:
-            conn.execute('UPDATE x_intake_links SET confirmed=1 WHERE source_id=? AND identity=? AND post_id=?',
-                         (source['id'], identity(source), post_id(entry)))
+        if batch_id:
+            if not batches.confirm(conn, source['id'], identity(source), batch_id):
+                return False
+        else:
+            for entry in entries:
+                conn.execute('UPDATE x_intake_links SET confirmed=1 WHERE source_id=? AND identity=? AND post_id=?',
+                             (source['id'], identity(source), post_id(entry)))
         progress = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=?', (source['id'],)).fetchone()
         covered = progress['covered']
         coverage_end = progress['coverage_end']
@@ -168,6 +184,8 @@ def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end=
             connected = coverage_end and utc(boundary) <= utc(coverage_end)
             covered = min(filter(None, [covered, boundary])) if connected else boundary
             coverage_end = max(coverage_end, end or observed or boundary)
+            if phase == 'history' or phase == 'recovery':
+                batches.recover(conn, source['id'], identity(source), boundary, end or observed or boundary)
         gap = incomplete or ('' if proven and covered and utc(covered) <= utc(progress['floor']) else
                              '最近五天仍有历史缺口' if proven else '时间线完整性尚未确认')
         discovery = 'complete' if proven else 'partial' if phase == 'discovery' else progress['discovery']
@@ -181,7 +199,10 @@ def progress(source):
     with db() as conn:
         row = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=? AND identity=?',
                            (source['id'], identity(source))).fetchone()
-    return dict(row) if row else {}
+        result = dict(row) if row else {}
+        if row:
+            result['unconfirmed'] = batches.count(conn, source['id'], identity(source), row['floor'])
+    return result
 
 
 def attempt(source, phase, reason=''):
@@ -190,7 +211,7 @@ def attempt(source, phase, reason=''):
         conn.execute('BEGIN IMMEDIATE')
         if current(conn, source):
             conn.execute(f'UPDATE x_intake_sources SET {column}=?,error=? WHERE source_id=? AND identity=?',
-                         (time.time(), reason[:500], source['id'], identity(source)))
+                         (time.time(), reason, source['id'], identity(source)))
             if phase == 'discovery':
                 conn.execute("UPDATE x_intake_sources SET discovery='partial' WHERE source_id=?", (source['id'],))
 
@@ -246,13 +267,17 @@ def delivery(source):
         rows = conn.execute('''SELECT p.*,l.delivered,l.confirmed FROM x_intake_candidates p
             JOIN x_intake_links l USING(post_id) WHERE l.source_id=? AND l.identity=?''',
             (source['id'], identity(source))).fetchall()
+        progress = conn.execute('SELECT floor FROM x_intake_sources WHERE source_id=? AND identity=?',
+                                (source['id'], identity(source))).fetchone()
+        floor = progress['floor'] if progress else ''
     entries, pending_count, unavailable, expired = [], 0, [], 0
     for row in rows:
         entry = json.loads(row['entry'])
         if row['state'] == 'ready' and row['confirmed'] and not row['delivered'] and complete(entry):
             entries.append(entry)
         pending_count += row['state'] in ('pending', 'repair')
-        expired += row['state'] == 'expired'
+        expired += row['state'] == 'expired' or bool(row['state'] == 'ready' and not row['confirmed']
+                                                     and floor and row['published'] < floor)
         if row['state'] == 'unavailable':
             unavailable.append(dict(url=entry['url'], reason=row['reason']))
     return entries, pending_count, unavailable, expired
@@ -274,12 +299,15 @@ def statuses(sources, channel='browser'):
             SELECT l.source_id,l.identity,count(*) AS pending FROM x_intake_links l
             JOIN x_intake_candidates p USING(post_id) WHERE p.state IN ('pending','repair')
             GROUP BY l.source_id,l.identity''')}
+        unconfirmed = {source_id: batches.count(conn, source_id, row['identity'], row['floor'])
+                       for source_id, row in rows.items()}
     for source in sources:
         row = rows.get(source['id'])
         if row and row['identity'] == identity(source) and row['channel'] == ('browser' if channel == 'attach' else channel):
             source['x_intake'] = {key: row[key] for key in
                                   ('discovery', 'gap', 'expired', 'error', 'floor', 'scan_at', 'outside')}
             source['x_intake']['pending'] = counts.get((source['id'], identity(source)), 0)
+            source['x_intake']['unconfirmed'] = unconfirmed[source['id']]
 
 
 def save_metrics(started, metrics):

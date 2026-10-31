@@ -27,7 +27,8 @@
 
 ## 持久化与一致性
 
-- 新增四张表：来源覆盖/尝试账、按 status ID 共享的候选表、订阅修订绑定的归属/outbox、最近 30 次阶段统计。
+- 持久表包括来源覆盖/尝试账、按 status ID 共享的候选、订阅修订绑定的归属/outbox、最近 30 次阶段统计，
+  以及扫描批次与批次成员两张表。
   仅 `CREATE TABLE/INDEX IF NOT EXISTS`，不删旧表、不改已有正文。
 - 来源身份绑定 URL、专用订阅链接和单调修订号；改链接后旧任务不能写进新账号，A→B→A 也不复活旧结果。
 - 候选与暂存进度同事务；时间线消费者保留到会话收尾，迟到核心错误阻止该批归属确认和覆盖推进。
@@ -40,7 +41,7 @@
 - 永久排除仍有效；远端明确不可用保留 URL/原因，不再每轮重新排该正文。
 - 成功账只认可本轮确实返回、并完成会话收尾确认的时间线读数。上轮已经证明完整不能替本轮作证；
   上游 skipped、启动限流、切片超时和空的不完整读数不结清旧成功/失败账，旧 outbox 仍可单独投递。
-- 本轮实际接收的内容全部写入、没有正文待补或当前核心/本机故障时，更新成功并结清旧失败；
+- 本轮实际接收内容与正文欠账全部持久化、没有未确认候选或当前核心/本机故障时，更新成功并结清旧失败；
   五天历史缺口与安全跳过的说明不单独扣留成功，仍保留 `gap` 和提示继续追补。
 - 历史覆盖必须显式满足 `coverage_complete=True` 且 `incomplete=''`；缺键、None、上游跳过都不是完整证明。
   真实过期待办才触发窗口外提示，下界只显示上海日期，不把每轮下界滑动冒充丢失内容。
@@ -139,7 +140,7 @@ Python AST、`git diff --check` 与 700 行限制均通过；最大文件 `sync.
 离线模拟的毫秒级耗时不是源站吞吐测量，不承诺真实 51 账号八分钟完成；
 远端原生 cursor 捕获/重放、真实风控与长期运行效果未验证。全仓回归留给验收阶段。
 
-## 第 1 轮审查修复（14SfRWnTYU8-）
+## 第 1 轮审查修复记录（14SfRWnTYU8-，提交 ad337a9）
 
 报告五条必修全部接受，范围限于本次 X 自动增量链路，未改 YouTube、通用 RSS 或显式区间采集判据。
 
@@ -217,3 +218,85 @@ env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-review1-validation/data KB_VAULT_
 本轮 6 份 Python 文件 Ruff、AST、700 行上限及 `git diff --check` 均通过。
 未抓真实 X、未读取生产库或 cookie、未调用模型；隔离耗时不是实际源站吞吐数据。
 真实账号风控、远端游标、51 账号八分钟吞吐及其他未修改文件的兼容回归均未验证，留给专门验证或验收。
+
+## 第 2 轮审查修复（14SfRWnTYU8-）
+
+三条必修均在本次 X 自动增量链路内，接受修复；第 1 轮的正文欠账拦清账判据由本节替代。
+非阻断清单没有顺带扩展修复，未改变其他来源的采集/清账规则。
+
+1. 候选与批次成员同事务写入新增的 `x_intake_batches` / `x_intake_batch_posts`，扫描回执按批次号确认，
+   不依赖会话收尾后可能被清空的 entry 列表。收尾失败保持未确认，API/卡片显示“候选待确认 N 条”。
+   下轮优先为已有未确认候选的来源重扫五天历史，不能被旧覆盖证明跳过；新的完整区间收尾证明
+   才可恢复区间内先前已持久化但未重现的候选。部分区间不得借此放行；旧库无批次记录的孤儿同样可恢复。
+   未确认 ready 也会在五天后过期；被别的订阅确认的共享成品不被此路径改成过期。
+2. `XBudgetExceeded` 是明确预算耗尽；仅发送前预算截止、或已由预算缩短的命令收到结构化响应超时，
+   才使用这个类型。DOM 改版、未识别账号页、协议错误及非预算命令超时仍为真实失败，不再按异常发生时
+   还剩几秒去猜。两支都将原始诊断保存到来源状态；pipe/attach 使用同一结构化超时口径。
+3. 本轮已读取、收尾确认、候选及欠账持久化，并实际完成投递事务后，即可更新发现成功和清旧连接失败。
+   已确认的正文 pending/repair 只是独立待办，不再无限扣留 `last_success` / `succeeded_ids`；
+   预览仍不进正文库，正文失败仍按候选冷却重试。零读取、未确认批次、当前真故障、本机故障或停止仍不清账。
+
+本轮修改两份已有 X 测试以反映明确预算类型与正文欠账独立的新契约，新增 `tests/test_x_intake_receipts.py`，
+覆盖批次成员原子性、迟到限流后跨轮恢复、旧库孤儿、恢复优先级、部分覆盖不放行、过期、真实故障原文，
+以及 pipe/attach 超时类型和连续正文欠账的独立清账。
+
+### 二轮限定测试与代码摘要（2026-10-31）
+
+- 仅登记并运行本轮修改的 `tests/test_x_intake.py`（36 项）、`tests/test_x_intake_review.py`（22 项）
+  与新增的 `tests/test_x_intake_receipts.py`（18 项），没有运行其他既有测试文件或全仓回归。
+- 登记哨兵 `WEC-pGBZJfGE`，已读取真实日志：`Ran 76 tests in 2.077s / OK`，退出码 0。
+  日志：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/WEC-pGBZJfGE.log`。
+  这次结果对应二轮代码，不用首版或首轮结果代替。
+
+实际工作目录：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。未过滤的原始命令：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-review2-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-review2-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-review2-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_x_intake tests.test_x_intake_review tests.test_x_intake_receipts -v
+```
+
+本轮 7 份 Python 实现、3 份测试和 1 份 JS 的 SHA-256 清单：
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/x-intake-review-2/tested-code.json`，
+清单自身 SHA-256：`09442c0a7253fda8b6fc48ef98ee4c0a10fa977996f1a95062f32ad96682b905`。
+测试通过后这 11 份代码未再改动；收尾只补充文档和仓库外证据，提交前后逐项核对代码摘要。
+
+### 二轮隔离 API 与页面点检
+
+证据目录：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/x-intake-review-2/`。
+
+- `serve.py` 使用全新临时数据/笔记/视频目录，阻断对外 socket、禁用调度器。
+  只替代外部 X 会话、时间线、正文、登录就绪和冷却等待；实际调用 `sync.collect`、队列、保存事务与 API。
+- 两个来源先分别真实执行迟到收尾限流：候选已经 stage，会话收尾把结果字典清空后写入 429 错误，
+  均保留旧成功/失败账，`unconfirmed=1`，不入正文库。清空预取缓存后再次采集，其中一个没有重现旧推文，
+  仍优先执行五天历史扫描；完整区间收尾成功后，三天前的旧候选确认、投递并更新来源成功账。
+  另一个来源本轮遇到明确预算耗尽，仍保留待确认候选和旧账，不能借别的来源的收尾放行。
+  证据 `late-receipts.json`、`scan-evidence.json`、`database-evidence.json`。
+- 再次真实采集 6 个来源，落库 2 条成品（三天前候选与健康来源），成功 ID 仅为恢复、正文待补、健康三个来源。
+  正文待补来源的 `last_error` 清空、失败次数及退避归零、成功时间更新，持久正文欠账仍为 1；预览不进 `feed_items`。
+  真实 DOM 故障在账号切片结束后抛出，仍保留“X 可能改版了”原文，失败次数从 2 增到 3，并进入未来退避；
+  `failed_ids` 仅有该来源。明确预算异常保留原始切片诊断，原成功/失败/退避账不变。
+  证据 `sync-summary.json`、`subscription-ledgers.json`、`api-summary.json`。
+- 另一个来源的未确认完整候选已超过 120 小时，经过真实 `prepare` 后过期，不再计入待确认，
+  卡片显示上海日期和“未计完成”；共享候选保护、旧库孤儿及部分扫描不放行另由本轮限定测试覆盖。
+- 清空预取缓存后，实际服务 GET `/api/health`、`/api/intake/social`、
+  `/api/intake/social/items?limit=100` 均 HTTP 200，见 `http-evidence.json`。
+- 真实页面共 7 张卡片：待确认 1 条可见，三天前候选显示本轮成功；真实 DOM 原因和重试时间可见，
+  预算来源保留原始说明与旧账；正文待补 1 条与本轮成功同时可见，不再残留旧连接失败详情。
+  分阶段耗时可见，无横向溢出、无 JS 异常。截图 `sources.png` 已人工查看，
+  DOM/执行证据见 `page-evidence.json`、`page-visible.txt`、`page-command.log`。
+  页面冒烟最初把既有“1 条”文案误写为“已入库 1”，并假设页面显示失败次数；
+  按实际 DOM 修正仓库外检查，次数仍由真实 API/账本核对，没有为匹配冒烟改动产品代码。
+
+本轮重新尝试扩展具名会话“🔎 大V二轮修复验证”，以 `visible:false` 新建后台标签，真实返回
+`Capability is not available: visibility`，在创建前被拒，未省略后台限制重试。
+因此按通道顺序降到独立临时 profile 的 `chrome-headless-shell`，始终无头，只允许 localhost GET，
+拦截外域及非 GET 请求。只点击订阅管理和三张卡片的只读失败详情，不点击同步、登录、保存或外链。
+只连接自己启动的无头进程，没有接管用户 Chrome、读取 cookie 或打开有头窗口。
+通道记录 `browser-channel.json`；无头进程/profile、隔离服务/临时数据均已清理，
+见 `browser-cleanup.json`、`server-cleanup.json`。
+
+### 二轮静态与留白
+
+本轮 10 份 Python 文件 Ruff、AST、700 行限制、JS 语法及 `git diff --check` 均通过。
+未抓真实 X、未读取生产库或 cookie、未调用模型；本地替身耗时不证明真实源站吞吐。
+真实账号风控、原生 cursor、51 账号八分钟吞吐与未修改文件的兼容回归未验证，仍留专门验证或验收。
+二轮报告的非阻断事项未顺带修改，没有擅自追加审查轮数或执行验收。

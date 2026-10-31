@@ -402,7 +402,7 @@ class IntegrationTests(IntakeBase):
         self.assertTrue(data['x_intake'])
         self.assertNotIn('x_intake', data['last_run']['summary'])
 
-    def test_real_collect_pending_body_does_not_clear_old_failure(self):
+    def test_real_collect_pending_body_does_not_block_discovery_success(self):
         with reg.db() as conn:
             conn.execute("UPDATE subscriptions SET failures=2,last_error='旧错',last_success='旧成功' WHERE id=?",
                          (self.source['id'],))
@@ -412,12 +412,14 @@ class IntegrationTests(IntakeBase):
              patch.object(x_browser, '_harvest_one', return_value=([self.entry(truncated=True)], '')), \
              patch.object(x_post, 'complete', return_value=([], '正文未补到')):
             summary = sync.collect('social', FetchScope(force=True))
-        self.assertEqual(summary['succeeded_ids'], [])
+        self.assertEqual(summary['succeeded_ids'], [str(self.source['id'])])
         self.assertEqual(summary['failed_ids'], [])
-        self.assertGreater(summary['deferred'], 0)
+        self.assertEqual(summary['deferred'], 0)
         self.assertTrue(summary['x_intake'])
         source = reg.subscriptions('social')[0]
-        self.assertEqual((source['last_success'], source['last_error'], source['failures']), ('旧成功', '旧错', 2))
+        self.assertNotEqual(source['last_success'], '旧成功')
+        self.assertEqual((source['last_error'], source['failures']), ('', 0))
+        self.assertEqual(store.delivery(self.source)[1], 1)
 
     def test_local_failure_keeps_old_error_and_exposes_current_note_after_cache_reset(self):
         with reg.db() as conn:

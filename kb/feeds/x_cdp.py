@@ -88,6 +88,14 @@ class CdpTransportError(CdpError):
     """The shared transport cannot safely send or receive another command."""
 
 
+class CdpResponseTimeout(CdpError):
+    """The command response timed out without a protocol or transport failure."""
+
+
+class XBudgetExceeded(CdpError):
+    """An explicit X collection deadline, not evidence of a broken page."""
+
+
 def find_chrome(explicit: str = '') -> str:
     """定位 Chrome 可执行文件。找不到时的文案要能指到下一步。"""
     if explicit:
@@ -163,10 +171,12 @@ class Session:
         deadline,写不动就报错,而不是替调用方把时间花在那儿。
         """
         deadline = time.monotonic() + timeout
+        budget_limited = False
         if method not in {'Browser.close', 'Target.closeTarget'} and (bound := getattr(self, '_x_deadline', None)):
+            budget_limited = bound <= deadline
             deadline = min(deadline, bound)
             if deadline <= time.monotonic():
-                raise CdpError('X 本阶段时间预算用完,留待下轮')
+                raise XBudgetExceeded('X 本阶段时间预算用完,留待下轮')
         try:
             want = self._send(method, params, sid, deadline)
             while True:
@@ -179,6 +189,10 @@ class Session:
                 if 'error' in msg:
                     raise CdpError(f"{method} 失败:{msg['error'].get('message', '')}")
                 return msg.get('result', {})
+        except CdpResponseTimeout as error:
+            if budget_limited:
+                raise XBudgetExceeded(str(error)) from error
+            raise
         finally:
             for observer in self._call_observers:
                 observer(method)
@@ -419,7 +433,7 @@ class Chrome(Session):
         while b'\0' not in self._buf:
             left = deadline - time.monotonic()
             if left <= 0:
-                raise CdpError('浏览器没有在预期时间内响应')
+                raise CdpResponseTimeout('浏览器没有在预期时间内响应')
             if not select.select([self._r], [], [], left)[0]:
                 continue
             chunk = os.read(self._r, 1 << 16)

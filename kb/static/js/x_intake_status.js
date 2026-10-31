@@ -4,6 +4,7 @@ function xIntakeStatus(source) {
   const parts = [state.discovery === 'complete' ? '最新发现已完成' : state.discovery === 'partial' ? '最新发现未读完' : '时间线尚未轮到'];
   if (state.gap) parts.push(`历史缺口：${state.gap}`);
   if (state.pending) parts.push(`正文待补 ${state.pending} 条`);
+  if (state.unconfirmed) parts.push(`候选待确认 ${state.unconfirmed} 条`);
   if (state.expired) parts.push(`超出五天自动窗口 ${state.expired} 条（未计完成）`);
   if (state.outside) parts.push(state.outside);
   if (state.error) parts.push(state.error);

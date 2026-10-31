@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 import time
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 
 from kb.feeds import x_account, x_browser, x_cooldown, x_page_state, x_post
 from kb.feeds import x_intake_store as store
-from kb.feeds.x_cdp import CdpError
+from kb.feeds.x_cdp import CdpError, XBudgetExceeded
 from kb.feeds.x_intake_metrics import Metrics, seconds
 from kb.youtube.faults import local_fault
 
@@ -27,6 +28,7 @@ class Intake:
         self.results, self.scans, self.attempted, self.local = {}, [], set(), {}
         self.read = set()
         self.timelines = {}
+        self.recovery = set()
         self.notices = {}
         self.blocked, self.cool = '', None
         self.profile = str(x_channels.BROWSER_PROFILE)
@@ -60,16 +62,20 @@ class Intake:
     def scan(self, page, phase, deadline):
         from kb.feeds import x_channels
         field = 'scan_at' if phase == 'discovery' else 'history_at'
-        queue = sorted(self.sources, key=lambda source: (store.progress(source).get(field, 0), source['id']))
+        queue = sorted(self.sources, key=lambda source: (
+            source['id'] not in self.recovery if phase == 'history' else False,
+            store.progress(source).get(field, 0), source['id']))
         retried = set()
         while queue and not self.blocked and not self.over(deadline):
             source = queue.pop(0)
             if source['id'] in self.local or not self.wait(deadline, phase):
                 continue
             handle = x_channels._handle(source)
+            if self.results.get(handle, {}).get('error'):
+                continue
             bound = self.bounds[source['id']]
             prior = store.progress(source)
-            if phase == 'history' and prior.get('covered') and store.utc(prior['covered']) <= bound:
+            if phase == 'history' and source['id'] not in self.recovery and prior.get('covered') and store.utc(prior['covered']) <= bound:
                 fresh = [scan for scan in self.scans if scan[0]['id'] == source['id'] and scan[1] == 'discovery']
                 if (fresh and not fresh[-1][4].get('incomplete') and prior.get('coverage_end') and
                         fresh[-1][2] <= store.utc(prior['coverage_end'])):
@@ -103,15 +109,17 @@ class Intake:
                 if timeline := getattr(page, '_x_timeline', None):
                     timeline.finalize(result, bound.isoformat())
                     self.timelines.setdefault(source['id'], []).append(timeline)
+                batch_id = uuid4().hex
                 with self.metrics.storage(phase):
                     reused = store.stage(source, entries, phase=phase,
-                                         incomplete=missing or '等待会话收尾确认', observed=observed)
+                                         incomplete=missing or '等待会话收尾确认', observed=observed,
+                                         boundary=bound.isoformat(), end=self.now.isoformat(), batch_id=batch_id)
                 if reused is None:
                     continue
                 self.metrics.count('reused', reused)
                 self.metrics.count('discovered', len(entries))
                 self.metrics.count(f'{phase}_candidates', len(entries))
-                self.scans.append((source, phase, bound, observed, result))
+                self.scans.append((source, phase, bound, observed, result, batch_id))
                 self.read.add(source['id'])
                 if hits == self.cool.hits:
                     self.cool.cleared()
@@ -131,11 +139,11 @@ class Intake:
             except Exception as error:
                 if local_fault(error):
                     self.local_error(source, error, phase)
+                elif isinstance(error, XBudgetExceeded):
+                    store.attempt(source, phase, str(error))
                 elif isinstance(error, (x_page_state.XBrowserError, CdpError)):
-                    if self.over(end):
-                        store.attempt(source, phase, '本阶段预算用完,尚未读完')
-                    else:
-                        self.results[handle] = dict(entries=[], error=str(error))
+                    store.attempt(source, phase, str(error))
+                    self.results[handle] = dict(entries=[], error=str(error))
                 else:
                     raise
 
@@ -204,7 +212,7 @@ class Intake:
     def package(self):
         from kb.feeds import x_channels
         confirmed, usable = set(), set()
-        for source, phase, bound, observed, result in self.scans:
+        for source, phase, bound, observed, result, batch_id in self.scans:
             if result.get('error'):
                 self.blocked = self.blocked or result['error']
                 continue
@@ -213,7 +221,7 @@ class Intake:
                     if store.confirm(source, result['entries'], phase=phase,
                                      incomplete=result.get('incomplete'), observed=observed,
                                      boundary=bound.isoformat(), end=self.now.isoformat(),
-                                     coverage_complete=result.get('coverage_complete') is True):
+                                     coverage_complete=result.get('coverage_complete') is True, batch_id=batch_id):
                         confirmed.add(source['id'])
                         if result['entries'] or result.get('coverage_complete') is True:
                             usable.add(source['id'])
@@ -238,6 +246,7 @@ class Intake:
             core_error = next((timeline.incomplete for timeline in self.timelines.get(source['id'], [])
                                if getattr(timeline, 'incomplete', '')), '')
             notes = [progress.get('gap', ''), f'{pending} 条正文待补' if pending else '',
+                     f"{progress['unconfirmed']} 条候选待确认" if progress.get('unconfirmed') else '',
                      self.local.get(source['id'], ''), self.blocked, reason, core_error]
             if not read:
                 notes.append('本轮时间线未读到，保留原有成功和失败账')
@@ -247,7 +256,7 @@ class Intake:
             result = dict(entries=entries, error='', incomplete='；'.join(dict.fromkeys(filter(None, notes))),
                           note=notice, unavailable=unavailable, unavailable_count=len(unavailable), x_intake=True,
                           local_error=self.local.get(source['id'], ''),
-                          pending=not read or source['id'] not in usable or bool(pending or self.local.get(source['id'])
+                          pending=not read or source['id'] not in usable or bool(progress.get('unconfirmed') or self.local.get(source['id'])
                                   or self.blocked or core_error or self.stop()), deadline=self.metrics.deadline)
             result.update(run_started=self.started, run_monotonic=self.metrics.started)
             if not read and not entries and source['id'] not in self.local:
@@ -257,6 +266,7 @@ class Intake:
                 result['watermark'] = progress['latest']
             self.results[handle] = result
             self.metrics.count('pending', pending)
+            self.metrics.count('unconfirmed', progress.get('unconfirmed', 0))
             self.metrics.count('expired', expired)
             self.metrics.count('gaps', bool(progress.get('gap')))
         self.metrics.count('accounts_attempted', len(self.attempted))
@@ -267,6 +277,7 @@ class Intake:
         try:
             with self.metrics.phase('prepare'):
                 store.prepare(self.sources, 'browser' if self.channel == 'attach' else self.channel, self.now)
+                self.recovery = {source['id'] for source in self.sources if store.progress(source).get('unconfirmed')}
         except Exception as error:
             if not local_fault(error):
                 raise
