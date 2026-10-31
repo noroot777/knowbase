@@ -96,16 +96,27 @@
     认给了另一篇。换页就当他没点过。
   - **「这一档有没有主动作」只由 `PLANS` 答一处**(`popup.js` 的 `actionable()`,三个按钮
     的处理器都过它)。藏起来不等于按不到(程序化点击、辅助技术、以后某次改动忘了藏),而
-    `complete` / `refused` / `undecided` 这三档按下去会落进 `absent` 那一支 —— 那是拿
+    `complete` / `refused` / `undecided` / `saved` 这几档按下去会落进 `absent` 那一支 —— 那是拿
     `/api/grab` 把同一篇**收成第二行**,正是候选列表存在要防的事。钉在
     `tests/grab_from_page_gate.mjs` ⑧:`undecided` 那一档按三颗按钮,**一个请求都不许发**。
-  - **用掉之后要把身份放掉**(`upload` 成功之后 `chosen = ''`)—— 指名一个已经用掉的
-    待办会被答成 `undecided`,而人此刻只想看见刚写进去那张回执。
+  - **这条管到这一次操作做完为止:写成功之后身份不许放掉**(`popup.js` 的 `read()` 不
+    动 `chosen`),服务端认那张回执(`situation='saved'`,`PLANS` 里也是 `null`)。
+    **实测形态**:两篇都指着这一页,保存完他选的那一篇、不做任何重新选择再按一下
+    「采集」,正文就写进了**另一篇**(那一篇 `content_rev` 0→1、正文是这一页的),而
+    屏幕上只是标题换了一行 —— 放掉身份之后,下一问只能按网址和「还剩哪几个待办」重
+    判,同一颗按钮于是被另一篇接管了。
+    `saved` 的回执由 `saved()` 从 `browser_capture_audit` 读,**不是内存里那一份**:
+    服务重启、上传那一答在路上丢了,带着同一个身份再问照旧认得,而不是把已经写进去
+    的说成「你选的那个失效了」。保存之后正文又被别人改过时 `saved()` 抛 ValueError,
+    这里转成 `refused` 原样说那句话(口径仍只有它一份)。要换另一篇得他自己在候选
+    列表里点一下 —— 那正是这颗按钮不该替他决定的事。
   - 回归 `tests/test_browser_capture_here.py` 的
     `test_the_item_a_person_picked_is_the_item_that_gets_written`(**判据落在库里哪一行
     变了**,不是某个标志位)、`..._is_not_decided_by_sort_order`、
     `..._does_not_quietly_hand_over_another_item`、`..._with_nothing_left_is_not_answered_by_url`
-    (零待办那一头,**连同 `absent` 那种面目**),以及 `tests/grab_from_page_gate.mjs` ⑧。
+    (零待办那一头,**连同 `absent` 那种面目**)、
+    `..._keeps_answering_for_the_item_it_wrote`(写完那一头,外加清掉内存里那几个
+    再问一次),以及 `tests/grab_from_page_gate.mjs` ⑧。
 
 - **`elsewhere` 有几条就摆几条,每行自带那颗「改用它」。**
   服务端一直交回全部,弹窗原先只画 `elsewhere[0]`、adopt 也只认 `[0]`。两个条目的待办同时

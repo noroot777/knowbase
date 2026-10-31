@@ -102,13 +102,16 @@
     //: 都不给**:这一档没有「哪一篇」这个答案,给了就是让他按一下赌一把,而赌错是
     //: 正文被另一篇覆盖。出路在下面那张候选列表里,点哪一行就是选哪一篇。
     undecided: null,
+    //: `saved` = 这一次操作已经写进去了。同样一颗按钮都不给:这一档的意思是「做完
+    //: 了」,摆一颗「采集」等于请他再写一遍,而他此刻只需要看见那张回执。
+    saved: null,
     refused: null,
   };
 
   //: **「这一档有没有主动作」只由 `PLANS` 答一处。** 按钮藏起来了不等于按不到
   //: (程序化点击、辅助技术、以后某次改动忘了藏),而 `complete` / `refused` /
-  //: `undecided` 这三档按下去会落进 `absent` 那一支 —— 那是拿 `/api/grab` 把同一篇
-  //: 收成第二行,正是候选列表存在要防的事。
+  //: `undecided` / `saved` 这几档按下去会落进 `absent` 那一支 —— 那是拿 `/api/grab`
+  //: 把同一篇收成第二行,正是候选列表存在要防的事。
   const actionable = () => !!(situation && PLANS[situation.situation]);
 
   // 人点开扩展最先想知道的事:**这一页此刻能做什么。** 一问一答 ——
@@ -232,9 +235,12 @@
       const verified = await api('/precheck', {method: 'POST', body: JSON.stringify(
         {intent_id: intent.id, page_url: captured.page_url, body: captured.body, method: mode})});
       const result = await api('/upload', {method: 'POST', body: JSON.stringify({...captured, intent_id: intent.id})});
-      // 这一个待办已经用掉了,下一问不该再指名它(指名一个用掉的会被答成
-      // `undecided`,而人此刻只想看见刚写进去那张回执)。
-      chosen = chosenFor = '';
+      //: **写成功之后不许把身份放掉。** 放掉之后下一问只按网址和「还剩哪几个待办」
+      //: 重判,同一颗「采集」会被另一篇接管:实测两篇都指着这一页,保存完他选的那一
+      //: 篇、不做任何重新选择再按一下,正文就写进了另一篇(那一篇 content_rev 0→1、
+      //: 正文是这一页的)。服务端认得这张回执(`saved` 那一档),所以带着它去问得到
+      //: 的是「这一次采集已经写进这一条了」,而不是「你选的那个失效了」。要换另一篇
+      //: 得他自己在候选列表里点一下 —— 那正是这颗按钮不该替他决定的事。
       // 已经写进去了。这一问失败只是「状态没刷新」,不该让人以为正文没保存。
       try { await loadHere(); } catch { /* 下面照旧报服务端那句话 */ }
       status(`${captured.title}：${result.detail}（${verified.characters} 字符）`);

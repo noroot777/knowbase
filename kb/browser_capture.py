@@ -280,11 +280,9 @@ _OWED = f"({fulltext._eligible()} AND fulltext_at='')"
 def here(url: str, intent_id: str = '') -> dict:
     """人**正站在哪一页** → 这一页此刻能做什么。一问一答。
 
-    **这条路存在的理由是把决定搬到人所在的地方。** 原先补一篇正文要跨三个界面
-    走七步:知识库面板 → 采集抽屉复制密钥 → 核对最终网址 → 发起待办 → 回到文章
-    标签 → 在下拉框里挑出刚才那个待办 → 读取。而「这一页是哪一条、写不写得了」
-    这个问题,扩展站在那一页上本来就问得出来 —— 地址栏里那一行就是答案,下拉框
-    是让人把服务端已经知道的事再回答一遍。
+    **这条路存在的理由是把决定搬到人所在的地方。** 「这一页是哪一条、写不写得了」
+    扩展站在那一页上本来就问得出来 —— 地址栏里那一行就是答案,而原先那个下拉框是
+    让人把服务端已经知道的事再答一遍(退场前那七步见决策文档)。
 
     **待办没有被取消,它退到了幕后**:`situation='fill'` 时这里自己 `create` 一个
     (扩展拿到的是它的 `id`),于是 `precheck` / `save` 那一整套准入、CAS、回执与
@@ -299,26 +297,21 @@ def here(url: str, intent_id: str = '') -> dict:
     有两个答案源:`feed_items.url`,和人自己指过的最终网址。只问前者的话,
     「发起浏览器采集」「改用这一页的地址」「重新采集正文」这三条路发出的待办在
     扩展那一侧**一次都不会被认到** —— 而它们存在的全部理由恰恰是「这一页的地址
-    和库里那一行不一样」或者「正文已经齐了、但我手上这份是错的」。
-    两种实测形态:①按语言跳转的站点上发起(或 adopt)之后再问一次,答的是
-    `absent`,主按钮于是走 `/api/grab` **把同一篇收成第二行**;②正文齐了的那一条
-    点过「重新采集正文」并发起,答的是 `complete`、`intent=null`,弹窗一颗按钮都
-    不给 —— 而撤掉预览之后,那正是唯一的事后纠错出口。
+    和库里那一行不一样」或者「正文已经齐了、但我手上这份是错的」。两种实测形态见
+    `docs/decisions/browser-capture.md` 的硬约束一节。
 
-    **人点过「这一页就是这一篇」的话,那一下就是答案,不许再按别的规则重判一次。**
+    **人点过「这一页就是这一篇」的话,那一下就是答案,不许再按别的规则重判一次 ——
+    一路管到这一次操作做完为止**(`saved`:那张回执就是答案,见下面那一段)。
     `intent_id` 就是那一下的身份(`/here/adopt` 把待办交回扩展,扩展带着它再问)。
     **选不出来就不代选**(`undecided`,不带 `intent`,扩展于是一颗采集按钮都不给):
-    同一页上不止一个条目在等而人没点过,或者他点的那个已经失效而别的还在等。
+    同一页上不止一个条目在等而人没点过,或者他点的那个已经失效。
     准入那几道门证明的是「这一条写得了」,**证明不了「人刚才选的就是这一条」**。
     丢掉身份、或者按创建时间代选的实测后果(正文写进另一篇、不可恢复)见
     `docs/decisions/browser-capture.md`。
 
     `elsewhere` 交回的是**除这一答用掉的那个之外、还等着的所有待办**(指着别页的,
-    和同一页上没被选中的)。这一项是承重的:站点按浏览器语言跳转时
-    (`openai.com/index/x` → `/zh-Hans-CN/index/x`),人从采集抽屉发起的待办指着前者、
-    浏览器停在后者,按网址一问「这一页不在库里」—— 要是只凭这一句就请他收录,库里
-    立刻多出一行同一篇文章。把那些待办摆在他眼前、各给一颗「改用这一页的地址」,
-    他一眼就看出是同一篇;而 `undecided` 那一档全靠它把候选交出去。
+    和同一页上没被选中的)。这一项是承重的 —— 按语言跳转的站点只凭「这一页不在库
+    里」就请人收录会多出一行同一篇,而 `undecided` 全靠它把候选交出去;见决策文档。
     """
     page = page_url(url)
     columns = ('SELECT feed_items.*, EXISTS (SELECT 1 FROM feed_item_exclusions'
@@ -326,24 +319,33 @@ def here(url: str, intent_id: str = '') -> dict:
                f' {_OWED} AS owed FROM feed_items')
     with _lock:
         _prune()
-        # 指着**这一页**、而且还写得进去的那些待办。`_pending()` 这一道不能自己
-        # 再写一遍:来源许可、排除、CAS 全在它的 `_refresh_status` 里,绕过去就是
-        # 把一个已经作废的待办当成「人明确发起过」来兑现。
+        # 指着**这一页**、而且还写得进去的那些待办。挑待办只许走 `_pending()`
+        # (「兑现不等于放行」,见决策文档)。
         bound = sorted((one for one in _pending() if one['page_url'] == page),
                        key=lambda one: one['created_at'])
 
         def answered(situation: str, detail: str,
                      item: dict | None = None, intent: dict | None = None) -> dict:
-            # **`elsewhere` 一律在最后算。** 下面那个 `_create` 会把同一条目上
-            # 指着别处的旧待办标成 `superseded`,先算就会把刚被顶掉的那个摆出来、
-            # 请人「改用这一页的地址」,而它已经作废了。
-            #
-            # 排掉的只有**这一答用的那一个**:同一页上另一个条目的待办必须摆出来 ——
-            # `undecided` 那一档就是靠它把候选交出去的,而人正要在里头点一下。
+            # **`elsewhere` 一律在最后算**(下面那个 `_create` 会把同一条目上指着
+            # 别处的旧待办标成 `superseded`,先算就把刚作废的那个摆出来了),而且
+            # **排掉的只有这一答用的那一个** —— 同一页上另一个条目的待办必须摆出
+            # 来,`undecided` 那一档正是靠它把候选交出去的。
             return dict(ok=True, page_url=page, situation=situation, detail=detail,
                         item=public(item) if item else None, intent=intent,
                         elsewhere=[other for other in _pending()
                                    if other['id'] != (intent['id'] if intent else None)])
+
+        # **这一次操作已经写进去了:那张回执就是答案**,不许回到按网址、按「还剩哪
+        # 几个待办」重判(实测后果见决策文档)。`saved()` 读审计表,所以服务重启、
+        # 上传那一答在路上丢了,带着同一个身份再问照旧认得。
+        try:
+            done = saved(intent_id) if intent_id else None
+        except ValueError as changed:
+            return answered('refused', str(changed))   # 写进去之后又被别人改过了
+        except LookupError:
+            done = None     # 条目这期间被删了,下面「兑现不了就不代选」接住
+        if done and done['page_url'] == page:
+            return answered('saved', f"这一次采集已经写进这一条了。{done['receipt']['detail']}。", done)
 
         # 人点过的那一下优先,而且是**唯一**的依据。
         picked = next((one for one in bound if one['id'] == intent_id), None) if intent_id else None

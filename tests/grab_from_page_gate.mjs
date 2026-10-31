@@ -200,15 +200,31 @@ here = {ok: true, situation: 'fill', detail: '知识库里有这一条，但正�
         intent: {id: 'i9', key: 'k8', title: '另一篇', page_url: PAGE}, elsewhere: []};
 calls.length = 0;
 await element('refresh').click();
+// 写成功之后那一问的答复:**做完了**。要在点「采集」之前换上 —— `read()` 用的是上一次
+// 渲染里那个待办,只有写完之后那一问才会读到这一份。
+here = {ok: true, situation: 'saved', page_url: PAGE, intent: null,
+        detail: '这一次采集已经写进这一条了。正文已补入原条目；翻译、导出与索引仍待执行，不代表已经完成入库。',
+        item: {key: 'k8', kind: 'rss', title: '另一篇', url: PAGE},
+        elsewhere: [{id: 'i1', key: 'k7', title: '那一篇', page_url: PAGE}]};
 await element('act').click();
 assert.equal(calls.find(c => c.path === '/api/browser-capture/upload').sent.intent_id, 'i9',
   '写进去用的是他点中那个待办');
 for (const one of calls.filter(c => c.path === '/api/browser-capture/precheck'))
   assert.equal(one.sent.intent_id, 'i9', '两次预检也都用它');
-// 用掉之后要把身份放掉:再指名一个已经用掉的待办会被答成「选不出来」,而人此刻只想
-// 看见刚写进去那张回执。
-assert.equal(calls.filter(c => c.path === '/api/browser-capture/here').at(-1).sent.intent_id, '',
-  '用掉之后不该再指名它');
+// **写成功之后不许把身份放掉。** 放掉之后下一问只按网址和「还剩哪几个待办」重判,同一
+// 颗「采集」就被另一篇接管:实测保存完他选的那一篇、不做任何重新选择再按一下,正文就
+// 写进了另一篇(那一篇 content_rev 0→1、正文是这一页的),而屏幕上只是标题换了一行。
+assert.equal(calls.filter(c => c.path === '/api/browser-capture/here').at(-1).sent.intent_id,
+  'i9', '写完之后那一问照旧带着他选的那个身份');
+assert.equal(element('here-actions').hidden, true, '做完了这一档不许摆采集按钮');
+assert.match(element('here-state').textContent, /已经写进这一条/, '原样显示服务端那句话');
+calls.length = 0;
+await element('act').click();
+await element('act-page').click();
+await element('act-selection').click();
+assert.deepEqual(calls, [], '做完了之后再按一下,一个请求都不许发');
+assert.equal(element('elsewhere-list').children.length, 1,
+  '另一篇只作为候选摆着,不许接管那颗按钮');
 
 // 身份只对**他点的那一页**有效。再点一次候选,然后让标签自己跳走(站内重定向、推送式
 // 改地址):还带着它去问的话,服务端对「带了身份却兑现不了」一律答「你选的那个失效

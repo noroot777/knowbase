@@ -1,6 +1,6 @@
 """「我站着这一页,此刻能做什么」——  扩展开起来那一问(`POST /api/browser-capture/here`)。
 
-服务端答五档(`fill` / `absent` / `complete` / `refused` / `undecided`)连同那句给人看
+服务端答六档(`fill` / `absent` / `complete` / `refused` / `undecided` / `saved`)连同那句给人看
 的话,扩展一个字都不自己编。硬约束见 `docs/decisions/browser-capture.md`;这一组从
 `test_browser_capture.py` 拆出来,共用的脚手架在 `browser_capture_case.py`。
 """
@@ -249,6 +249,45 @@ class CaptureHereTests(CaptureCase):
         self.assertIsNone(state['intent'])
         self.assertEqual([mine['id']], [one['id'] for one in state['elsewhere']],
                          '剩下那个照旧摆出来,但不许自己顶上')
+
+    def test_a_finished_capture_keeps_answering_for_the_item_it_wrote(self):
+        """写成功之后再问一次:答的是**刚写进去那一条**,不是另一篇。
+
+        「人点过的那一下就是答案」这条要**一路管到这一次操作做完为止**。写完就把身份
+        放掉、回到按网址和「还剩哪几个待办」重判的实测后果:两篇都指着这一页,保存完
+        他选的那一篇、不做任何重新选择再按一下「采集」,正文就写进了另一篇(那一篇
+        `content_rev` 0→1、正文是这一页的),而屏幕上只是标题换了一行。
+        回执在审计表里,所以服务重启、上传那一答在路上丢了也照旧认得 —— 不能把已经
+        写进去的说成「你选的那个失效了」。
+        """
+        page = 'https://e.org/shared'
+        later = self.put(url='https://e.org/post-two')
+        rival = self.intent(page_url=page)
+        adopted = self.here(path='/here/adopt',
+                            payload={'key': later, 'page_url': page}).json()
+        self.assertEqual(200, self.precheck(adopted, body=BODY, page_url=page).status_code)
+        self.assertEqual(200, self.upload(adopted, page_url=page).status_code)
+        untouched = self.row(self.key)
+
+        state = self.here(payload={'url': page, 'intent_id': adopted['id']}).json()
+        # **先断后果**:它交不出任何能写另一篇的待办 —— 拿这一答交回的东西再按一下,
+        # 另一篇一个字都不会变(交回 None 时退回那个已经用掉的身份:`save` 认得它,
+        # 按幂等重放交回同一张回执,不会产生第二次写入)。
+        self.upload(state['intent'] or {'id': adopted['id']}, page_url=page)
+        self.assertEqual(untouched['body'], self.row(self.key)['body'], '另一篇一个字都不许动')
+        self.assertEqual(untouched['content_rev'], self.row(self.key)['content_rev'])
+
+        self.assertEqual('saved', state['situation'])
+        self.assertEqual(later, state['item']['key'], '答的是刚写进去那一条')
+        self.assertIsNone(state['intent'], '不许再交出一个写得了的待办')
+        self.assertIn('正文已补入原条目', state['detail'], '那句话只有回执一份口径')
+        self.assertEqual([rival['id']], [one['id'] for one in state['elsewhere']],
+                         '另一篇只作为候选摆着,不许接管那颗按钮')
+
+        capture._intents.clear()
+        self.assertEqual('saved', self.here(payload={'url': page,
+                                                     'intent_id': adopted['id']}).json()['situation'],
+                         '回执在审计表里,重启丢掉内存里那几个也照旧认得')
 
     def test_a_pick_that_went_stale_with_nothing_left_is_not_answered_by_url(self):
         """上一条的另一头:他点过的那个失效了,而这一页上**一个待办都不剩**。
