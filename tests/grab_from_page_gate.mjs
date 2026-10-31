@@ -375,6 +375,46 @@ assert.match(element('status').textContent, /不是刚才采的那一篇/, '同�
 assert.equal(element('close-tab').hidden, true, '地址一样也不摆:采的那一页不在这个标签里');
 tab.id = 7;
 
+// (c) **确认那一问失败时,许可不许留在上一页上。** 这一条是上面两条的承重墙:
+//     刷新这件事是「清掉上一答 → 把身份换成当前标签 → 问服务端」,中间那一步换完了
+//     身份,而那一问完全可能当场失败(503、断网、超时、401)。拿「最近一次查到的
+//     当前标签」当参照的写法在这里会**两两相等地放行** —— 实测形态:第一下说「没有
+//     关掉它」,第二下就把那个还没采的新页面关掉了(第一下那句话顺手又刷了一次,
+//     把参照也换成了新页)。凭据只在真采成那一刻写下来,所以它不跟着跑。
+tab.id = 7; tab.url = OTHER;
+here = {ok: true, situation: 'complete', page_url: OTHER, intent: null, elsewhere: [],
+        item: {key: 'k9', kind: 'rss', title: '另一篇', url: OTHER},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, false, '回到露面那一档');
+// 站点自己翻到了下一篇,而这一问从这里开始失败
+tab.id = 7001; tab.url = 'https://example.org/posts/next-one';
+hereReply = {status: 503, detail: '服务暂不可用'};
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '确认失败时第一下不许关');
+assert.equal(element('close-tab').hidden, true, '第一下之后这颗按钮就该收回去');
+await element('close-tab').click();
+assert.deepEqual(removed, [], '第二下照旧不许关 —— 参照不许跟着那次失败的刷新换掉');
+assert.equal(context.window.closed, closedBefore, '两下都不许收掉弹窗');
+
+// 同一个洞的另一个入口:他自己先点「重新确认」,那一问失败
+tab.id = 7; tab.url = OTHER;
+hereReply = null;
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, false, '先回到露面那一档');
+tab.id = 7001; tab.url = 'https://example.org/posts/next-one';
+hereReply = {status: 503, detail: '服务暂不可用'};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, true, '身份已经换了,这颗按钮不许留在上一页的许可上');
+assert.match(element('status').textContent, /服务暂不可用/, '那一问为什么失败照旧要说');
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '手动刷新失败之后按下去,照旧一个都不许关');
+assert.equal(context.window.closed, closedBefore, '也不许收掉弹窗');
+hereReply = null;
+tab.id = 7;
+
 // 按下去:只关**当前这一个**标签,顺手把弹窗也收掉
 tab.url = OTHER;
 here = {...here, page_url: OTHER};
@@ -383,6 +423,29 @@ removed.length = 0;
 await element('close-tab').click();
 assert.deepEqual(removed, [tab.id], '只关当前这一个标签,一个都不许多关');
 assert.equal(context.window.closed, 1, '标签没了,弹窗不许留在屏幕上');
+
+// (d) **服务端那一答 `saved` 是凭据的第二个来源**,它也得落下来、也得带标签身份。
+//     走到这一档的是:这个弹窗刚上传完、那一答在路上丢了(或服务重启了),人点一下
+//     「重新确认」—— 服务端读审计表认得那张回执。只在当下看一眼 `situation` 的写法
+//     在这里会摆出**一颗按不动的按钮**:动作边界只认凭据,而凭据那时还是空的。
+const SAVED = 'https://example.org/posts/saved-one';
+tab.id = 8; tab.url = SAVED;
+here = {ok: true, situation: 'saved', page_url: SAVED, intent: null, elsewhere: [],
+        item: {key: 'k8', kind: 'rss', title: '补过的那一篇', url: SAVED},
+        detail: '这一次采集已经写进这一条了。正文已补入原条目。'};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, false, '服务端说这一次已经写进去了,照样给出口');
+removed.length = 0;
+const closedSoFar = context.window.closed;
+await element('close-tab').click();
+assert.deepEqual(removed, [8], '按下去真的关得掉 —— 不许摆一颗按不动的按钮');
+assert.equal(context.window.closed, closedSoFar + 1, '标签没了,弹窗照旧跟着收');
+// 反过来钉一边:这一档也一样跟标签身份绑着,跳走之后不许关。
+tab.id = 8001; tab.url = 'https://example.org/posts/after-saved';
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], 'saved 那一档也一样:跳走之后按下去一个都不许关');
+tab.id = 7;
 tab.url = PAGE;
 
 // ⑪ 结构:不许按失败文案分流。**钉形态,不钉关键词** —— 按词表匹配会连注释
