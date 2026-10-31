@@ -76,10 +76,12 @@ for payload in payloads:
     if 'youtube ' + payload['id'] in known:
         print('[download] ' + payload['id'] + ' has already been recorded in the archive')
     else:
+        if '--break-match-filters' in arguments and payload['timestamp'] < {self.now.timestamp()} - 3 * 86400:
+            print('[download] old does not pass filter, skipping ..')
+            print('Aborting remaining downloads')
+            sys.exit(101)
         print(json.dumps(payload))
-print('[download] old does not pass filter, skipping ..')
-print('Aborting remaining downloads')
-sys.exit(101)
+print('[download] Finished downloading playlist: fixture')
 '''
         return [sys.executable, '-u', '-c', script]
 
@@ -101,10 +103,9 @@ sys.exit(101)
                     raise media.PartialOutput(output, str(cause), cause)
                 clock.sleep(seconds_per_item)
                 emitted.append(json.dumps(payload))
-            emitted.append('[download] old does not pass filter, skipping ..')
+            emitted.append('[download] Finished downloading playlist: fixture')
             output.write_text('\n'.join(emitted))
-            cause = media.ToolFailure('日期边界取消', returncode=101)
-            raise media.PartialOutput(output, str(cause), cause)
+            return output
         return listed
 
     def origin(self):
@@ -175,3 +176,35 @@ sys.exit(101)
 
     def test_partial_existing_window_does_not_advance_success_until_the_tail_is_discovered(self):
         self.assert_partial_catchup((self.now - timedelta(days=2)).isoformat())
+
+    def test_old_prefix_cannot_hide_new_videos_beyond_the_first_twenty_positions(self):
+        payloads = self.payloads(40)
+        for payload in payloads[:35]:
+            payload['timestamp'] = (self.now - timedelta(days=30)).timestamp()
+        result = self.collect_using(command=self.command(payloads), configured=False)
+        self.assertEqual(5, result['discovered'])
+        self.assertEqual([], result['partial'])
+        self.assertEqual({payload['id'] for payload in payloads[35:]},
+                         {row['video_id'] for row in storage.rows()})
+        with reg.db() as connection:
+            self.assertEqual(35, connection.execute('SELECT count(*) FROM youtube_discovery_history').fetchone()[0])
+        repeated = self.collect_using(command=self.command(payloads), configured=False)
+        self.assertEqual(0, repeated['discovered'])
+        self.assertEqual([], repeated['partial'])
+
+    def test_timeout_among_old_entries_resumes_before_new_tail_without_advancing_watermark(self):
+        payloads = self.payloads(12)
+        for payload in payloads[:9]:
+            payload['timestamp'] = (self.now - timedelta(days=30)).timestamp()
+        clock = ListingClock()
+        first = self.collect_using(listing=self.listing(payloads, clock, seconds_per_item=20), clock=clock)
+        self.assertEqual(0, first['discovered'])
+        self.assertEqual(1, len(first['partial']))
+        self.assertFalse(reg.subscription('youtube', self.source['id'])['last_success'])
+        self.assertEqual([], storage.rows())
+        second = self.collect_using(listing=self.listing(payloads, clock, seconds_per_item=20), clock=clock)
+        self.assertEqual(3, second['discovered'])
+        self.assertEqual([], second['partial'])
+        self.assertIn(str(self.source['id']), second['succeeded_ids'])
+        self.assertEqual({payload['id'] for payload in payloads[9:]},
+                         {row['video_id'] for row in storage.rows()})

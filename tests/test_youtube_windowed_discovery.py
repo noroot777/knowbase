@@ -96,6 +96,65 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
             self.assertEqual(1, len(listed))
             self.assertIn('中断', evidence[0])
 
+    def test_item_unavailability_does_not_make_a_proven_complete_scan_partial(self):
+        for message in ('Private video', 'Join this channel to get access to members-only content',
+                        'The uploader has not made this video available in your country'):
+            for payloads in ([], [self.payload(1, self.now)]):
+                for returncode, ending in (
+                        (101, '[download] old does not pass filter\nAborting remaining downloads'),
+                        (1, '[download] Finished downloading playlist: fixture')):
+                    diagnostic = f'ERROR: [youtube] 00000000999: {message}\n{ending}'
+                    evidence = []
+                    with self.subTest(message=message, count=len(payloads), code=returncode), \
+                            throttle.opened(), patch.object(toolchain, 'command', return_value=self.command(
+                                payloads, diagnostic, returncode)), \
+                            patch.object(media.login, 'arguments', return_value=[]):
+                        listed = self.fetch(notes=evidence)
+                    self.assertEqual(len(payloads), len(listed))
+                    self.assertEqual([], evidence)
+                    self.assertEqual('00000000999', self.prepared['discovery_unavailable'][0]['video_id'])
+
+    def test_unavailable_video_converges_and_remains_a_notice_over_repeated_rounds(self):
+        diagnostic = ('ERROR: [youtube] 00000000999: Join this channel to get access to members-only content\n'
+                      '[download] Finished downloading playlist: fixture')
+        for round_number in range(3):
+            payloads = [self.payload(1, self.now)] if round_number == 0 else []
+            with self.subTest(round=round_number), patch.object(toolchain, 'command', return_value=self.command(
+                    payloads, diagnostic, 1)), patch.object(media.login, 'arguments', return_value=[]), \
+                    patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                    patch.object(notes, 'available', return_value=(True, '')), \
+                    patch.object(media, 'probe', return_value={'duration': 600}), \
+                    patch.object(media, 'obtain', return_value=self.complete_transcript()), \
+                    patch.object(notes, 'build', side_effect=self.note):
+                result = collector.collect(self.scope)
+            self.assertEqual([], result['partial'])
+            self.assertEqual([], result['failed_ids'])
+            self.assertIn(str(self.source['id']), result['succeeded_ids'])
+            self.assertEqual(1, result['notices'][0]['count'])
+            source = reg.subscription('youtube', self.source['id'])
+            self.assertTrue(source['last_success'])
+            self.assertFalse(source['last_error'])
+            self.assertEqual(0, source['failures'])
+            self.assertIn('1 条视频无法读取', source['last_notice'])
+        self.assertEqual('ready', storage.rows()[0]['state'])
+
+    def test_playlist_end_does_not_mask_source_errors_or_unfinished_process(self):
+        for diagnostic, returncode, delay in (
+                ('ERROR: request failed\n[download] Finished downloading playlist: fixture', 1, 0),
+                ('ERROR: [youtube] 00000000999: Video unavailable. Sign in to confirm you are not a bot\n'
+                 '[download] Finished downloading playlist: fixture', 1, 0),
+                ('ERROR: [youtube] 00000000999: Private video', 1, 0),
+                ('ERROR: [youtube] 00000000999: Private video\n'
+                 '[download] Finished downloading playlist: fixture', 1, 10)):
+            evidence = []
+            with self.subTest(diagnostic=diagnostic, delay=delay), throttle.opened(), patch.object(
+                    toolchain, 'command', return_value=self.command([self.payload(1, self.now)], diagnostic,
+                                                                 returncode, delay)), \
+                    patch.object(media.login, 'arguments', return_value=[]):
+                listed = windowed_discovery.fetch(self.prepared, self.settings(), time.monotonic() + .5, evidence)
+            self.assertEqual(1, len(listed))
+            self.assertIn('中断', evidence[0])
+
     def test_normal_date_completion_keeps_warnings_without_incomplete_listing_claim(self):
         for warning, code in (
                 ('WARNING: failed to decrypt cookies', 'cookie_unreadable'),
@@ -155,8 +214,7 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         accepted = sync_window.recent(self.prepared, listed, self.scope)
         self.assertEqual(['00000000002', '00000000003'], [entry['video_id'] for entry in accepted])
         arguments = self.calls[0]['arguments']
-        day = self.floor.astimezone(timezone.utc).strftime('%Y%m%d')
-        self.assertEqual(f'upload_date>=?{day}', arguments[arguments.index('--break-match-filters') + 1])
+        self.assertNotIn('--break-match-filters', arguments)
         self.assertNotIn('--playlist-end', arguments)
         self.assertIn('--no-quiet', arguments)
         self.assertNotIn('--flat-playlist', arguments)
@@ -228,7 +286,8 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         fresh = self.payload(2, self.now)
         first = self.transport([fresh, old])
         repeated = self.transport(diagnostic='[download] 00000000002 has already been recorded in the archive\n'
-                                  '[download] Old video does not pass filter (upload_date>=?20261027), skipping ..')
+                                  '[download] 00000000001 has already been recorded in the archive\n'
+                                  '[download] Finished downloading playlist: fixture')
         call_count = 0
 
         def boundary(*arguments, **options):
@@ -245,16 +304,25 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         self.assertEqual(1, result['outside_initial_window'])
         self.assertEqual(0, again['discovered'])
         self.assertEqual(1, again['ranked'])
-        self.assertEqual('youtube 00000000002\n', self.calls[-1]['known'])
+        self.assertEqual('youtube 00000000001\nyoutube 00000000002\n', self.calls[-1]['known'])
         self.assertEqual(['00000000002'], [row['video_id'] for row in storage.rows()])
+        with reg.db() as connection:
+            self.assertEqual(['00000000001'], [row['video_id'] for row in connection.execute(
+                'SELECT video_id FROM youtube_discovery_history WHERE source_id=?', (self.source['id'],))])
 
-    def test_listing_failure_does_not_persist_initial_origin(self):
+    def test_listing_failure_retains_initial_origin_without_claiming_success(self):
         with patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
                 patch.object(media, 'ytdlp', side_effect=ToolFailure('模拟网络失败')):
             result = collector.collect(self.scope)
         self.assertEqual([str(self.source['id'])], result['failed_ids'])
         with reg.db() as connection:
-            self.assertEqual(0, connection.execute('SELECT count(*) FROM youtube_sync_origins').fetchone()[0])
+            origin = connection.execute('SELECT initial_fetch_at FROM youtube_sync_origins').fetchone()[0]
+        self.assertEqual(self.prepared['initial_fetch_at'], origin)
+        source = reg.subscription('youtube', self.source['id'])
+        self.assertFalse(source['last_success'])
+        self.assertIn('模拟网络失败', source['last_error'])
+        self.assertEqual(origin, sync_window.prepare(source, self.scope,
+                         self.now + timedelta(days=5))['initial_fetch_at'])
 
     def test_prior_success_uses_one_day_overlap_without_reinterpreting_queued_entries(self):
         previous = self.now - timedelta(hours=3)

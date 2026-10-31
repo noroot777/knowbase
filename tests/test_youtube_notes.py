@@ -34,7 +34,8 @@ class YouTubeNotes(YouTubeFixture):
 
     def test_full_translation_and_note_cached_without_frames(self):
         result = self.build()
-        self.assertIn('完整中文转录', result['body'])
+        self.assertIn('中文译文（自动生成）', result['body'])
+        self.assertNotIn('完整中文转录', result['body'])
         self.assertIn('未分析视频画面', result['body'])
         self.assertNotIn('&t=', result['body'])
         self.assertNotRegex('\n'.join(self.prompts), r'\[\d{2}:\d{2}:\d{2}\]')
@@ -69,6 +70,20 @@ class YouTubeNotes(YouTubeFixture):
         self.assertLess(sum(char.isalnum() for char in output),
                         sum(char.isalnum() for char in source) * .30)
         self.assertEqual(output, notes.translated_output(source, output))
+
+    def test_one_sentence_cannot_be_published_as_verified_complete_transcription(self):
+        def reply(prompt, *rest):
+            return '中文摘要。' if prompt.startswith('将以下字幕') else self.reply(prompt, *rest)
+
+        result = self.build(reply)
+        self.assertIn('中文摘要。', result['body'])
+        self.assertIn('中文译文（自动生成）', result['body'])
+        self.assertIn('未经逐段完整性核验', result['body'])
+        self.assertNotIn('完整中文转录', result['body'])
+        self.assertNotIn('翻译核验提示', result['body'])
+        with patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call') as call:
+            self.assertEqual(result, notes.build(self.row, self.transcript, self.deadline, lambda: False))
+        call.assert_not_called()
 
     def test_natural_chinese_numbers_and_translated_acronyms_do_not_create_quality_claims(self):
         self.transcript['segments'] = [{'start': 0, 'end': 600,

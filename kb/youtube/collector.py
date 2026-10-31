@@ -415,6 +415,10 @@ def _round(scope):
                 entries = sync_window.recent(source, listed, scope)
                 summary['outside_initial_window'] += len(listed) - len(entries)
             storage.discover(source, entries)
+            if unavailable := source.get('discovery_unavailable'):
+                notice = f'{len(unavailable)} 条视频无法读取（会员、私有或地区限制等），其余条目照常同步'
+                summary['notices'].append({'title': source['name'], 'reason': notice,
+                                          'count': len(unavailable), 'items': unavailable})
             summary['discovered'] += len(entries)
             succeeded.append(source)
             if told:
@@ -492,6 +496,8 @@ def _round(scope):
                           'metadata_seconds': round(processing_started - metadata_started, 2)}
     summary['timings']['processing_seconds'] = round(time.monotonic() - processing_started, 2)
     summary['stopped'] |= stopped()
+    for notice in summary['notices']:
+        summary['message'] += ('；' if summary['message'] else '') + notice['reason']
     # **「取到了,但…」和「卡住了」分开说**:前者这一轮确实带回了东西,后者没有。
     # 混成一句会把一条 cookie 警告说得像整个频道失败了(口径见 `caution`)。
     # **要在落库之前归并**:订阅那条提醒(`last_notice`)取的就是这一刻的 `message`,

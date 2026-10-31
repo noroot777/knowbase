@@ -453,15 +453,17 @@ try {
   await click('#source-view-items');
   await wait(`!!document.querySelector('.source-entry')`);
   await click('.source-entry');
-  await wait(`$('source-reader-body').textContent.includes('完整中文转录')`);
+  await wait(`$('source-reader-body').textContent.includes('中文译文（自动生成）')`);
   check('排名预算只准入一条中文成品', await evaluate(`
     fetch('/api/intake/youtube/ranking').then(response=>response.json()).then(value=>value.counts.ready===1)`));
-  check('阅读区展示中文标题、完整译文及画面边界', await evaluate(`
+  check('阅读区展示中文标题、自动译文及画面边界', await evaluate(`
     $('source-reader-title').textContent.includes('智能体编程') &&
     $('source-reader-body').textContent.includes('未分析视频画面') &&
     $('source-reader-body').textContent.includes('不能仅凭生成结果')`));
-  check('完整中文转录不依赖时间戳链接', await evaluate(`
-    $('source-reader-body').textContent.includes('完整中文转录') &&
+  check('自动译文不承诺未经核验的完整性且不依赖时间戳链接', await evaluate(`
+    $('source-reader-body').textContent.includes('中文译文（自动生成）') &&
+    $('source-reader-body').textContent.includes('未经逐段完整性核验') &&
+    !$('source-reader-body').textContent.includes('完整中文转录') &&
     $('source-reader-body').textContent.includes('不能仅凭生成结果') &&
     !document.querySelector('#source-reader-body a[href*="&t="]')`));
   check('自然中文数词正常入库且正文不混入工单提示', await evaluate(`

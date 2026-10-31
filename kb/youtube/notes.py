@@ -139,7 +139,8 @@ def build(row, transcript, deadline, stopped):
     complete = '\n\n'.join(translated)
     body = (payload['summary'] + '\n\n' + payload['body'] +
             f'\n\n> 内容依据：{origin}；已进行中文整理，未分析视频画面。字幕和语音识别可能有误。'
-            + '\n\n## 完整中文转录\n\n' + complete)
+            '自动译文未经逐段完整性核验，请结合原视频核对。'
+            + '\n\n## 中文译文（自动生成）\n\n' + complete)
     return {'url': row['entry']['url'], 'title': payload['title'], 'body': body,
             'published': row['entry']['published'], 'author': row['channel'],
             'content_kind': 'markdown', 'body_provenance': 'youtube:' + transcript['origin']}

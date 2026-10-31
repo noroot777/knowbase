@@ -1,6 +1,27 @@
 # YouTube 低成本接入验证
 
-## 当前复修口径（2026-10-31，7Rzxh2K80EXE 第二轮）
+## 当前复修口径（2026-10-31，Ruq8xJHCetPt 第一轮）
+
+- 覆盖完成与条目不可用分开：会员、私有、地区限制等视频错误附跳过说明，只有完整列表结束证据才可在退 1 时推进水位；真实超时、登录墙、未知错误和其他路线仍保持失败/部分完成。
+- 中文正文改称「中文译文（自动生成）」并说明未经逐段完整性核验，不将一句模型输出冒称完整转录，不恢复长度比/数字启发式，不失效付费缓存。
+- 首次尝试前保存三天起点，完全失败后跨日重试不前滑，不伪写成功、尝试或错误账。
+- 移除基于远端排序的日期早停，真实日期只裁剪新候选。窗口外已检查条目单独持久化供下轮 archive 续扫；不增加固定条数截断，未扫完不推成功水位。
+- 这是有界时间内的可恢复扫描，不承诺冷启动只请求三天视频；大频道首次可能需要多轮检查历史元数据，旧视频不下载、不调用内容模型。
+- 浏览器通道：扩展会话先命名 `🔎 YouTube覆盖修复`，以 `visible:false` 新建后台标签被拒绝 `Capability is not available: visibility`，未创建标签。改用项目独立无头壳、临时 profile 和本地隔离夹具；无需登录态，不接管已有标签、不激活用户 Chrome、不连接用户 Chrome CDP。
+
+本轮登记命令（只包含本轮修改的测试模块）：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_notes tests.test_youtube_initial_window tests.test_youtube_windowed_discovery tests.test_youtube_window_coverage tests.test_youtube_browser -v
+```
+
+工作目录：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+原始日志、实际结果、浏览器截图与冻结树登记在外部目录
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-Ruq8xJHCetPt/`。
+执行结果只写外部证据，保持最终提交树与测试树一致；整套及其他未改动回归留给验收。
+未运行真实 YouTube/模型请求、未读取 cookie、未操作生产库或重启用户服务。
+
+## 历史复修口径（bf8e8cd，7Rzxh2K80EXE 第二轮，已由上节替代）
 
 - 精确窗口移除固定 20 条截断，以日期边界收口；已知 ID 的 archive 不再挡住第 21 条以后的新视频。
 - 单频道预算改为 180 秒，整轮按全部待查频道与间隔计额，不套用 flat 的 30 秒/900 秒限额。
