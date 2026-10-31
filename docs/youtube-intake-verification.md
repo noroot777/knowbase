@@ -1,5 +1,16 @@
 # YouTube 低成本接入验证
 
+## 当前审查复修：单片错误与友好翻译协议
+
+- 完整播放列表结束与单片可读性分开，不再用七条错误文案白名单决定覆盖；预告直播、年龄限制及未知单片错误均带原始原因保留为跳过项。真正登录墙、429、cookie/JS 错误、全局错误和超时仍不能冒充完成。
+- 机器人分类收窄为明确的 `not a bot`，不再让年龄确认污染频道失败与告警。归档后零新增有独立空集凭据，不依赖停止原因枚举。
+- 新翻译请求使用按原文顺序的字符串数组，不要求模型回传哈希编号；整批中文检查允许其中的代码/URL/命令行段原样保留。缺段、多段、空段、整批非中文仍拒绝发布；不以连续失败次数为由降级发布缺段成品。
+- `translate-coverage-v1` 不变，旧的源文绑定编号缓存仍校验并复用；新数组缓存键绑定源文、模型与版本，命中照常重验。不新增整批付费重译或改写历史成品。
+- 本轮仅后端完成判定和内部模型协议改动，无页面与文案变更，未操作浏览器、未使用登录态；真实收录/导出通过本地隔离流程断言，不复用旧浏览器截图冒充本轮证据。
+- 本轮修改测试命令：`/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_login tests.test_youtube_windowed_discovery tests.test_youtube_notes tests.test_youtube_integrity -v`，工作目录为本任务 worktree。
+- 原始日志、实际计数、冻结树、范围裁定依据归档至 `/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-cHa65zgAdf3H/`；测试后不再修改仓库文档，保证提交树等于测试树。
+- 发现预算/早停与回看设置语义、基线既有逐源通知问题不在本轮顺手改动，按审查争议机制提交用户裁定。
+
 ## 当前根因修复：模型完成性与源文覆盖契约
 
 - 根因不在展示名称：旧模型调用把 Responses 的 `incomplete`、Chat 的 `length`、Anthropic 的 `max_tokens` 等结束信息压成纯文本；翻译再只验非空中文并缓存，遗漏会沿摘要和成稿固化。

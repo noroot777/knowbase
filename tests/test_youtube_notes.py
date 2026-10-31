@@ -205,6 +205,46 @@ class YouTubeNotes(YouTubeFixture):
         with self.assertRaisesRegex(RuntimeError, '覆盖'):
             notes.translated_output(source.replace('64', '65'), translated)
 
+    def test_ordered_translation_accepts_literal_units_and_keeps_legacy_cache_compatible(self):
+        for literal in ('https://example.test/tools/agent/install?version=latest',
+                        'python -m unittest tests.test_youtube_notes --verbose'):
+            source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
+            segments = translation.units(source)
+            values = ['使用前需要独立审查所有生成的修改，随后执行原文中的命令或访问原网址。', literal]
+            with self.subTest(literal=literal):
+                self.assertEqual(2, len(segments))
+                manifest = json.loads(translation.prompt(source).split('\n\n', 1)[1])['segments']
+                self.assertEqual([segment['text'] for segment in segments], manifest)
+                rendered = notes.translated_output(source, json.dumps({'translations': values}))
+                self.assertEqual('\n\n'.join(values), rendered)
+                legacy = {'translations': [{'id': segment['id'], 'text': value}
+                                           for segment, value in zip(segments, values)]}
+                self.assertEqual(rendered, notes.translated_output(source, json.dumps(legacy)))
+
+    def test_ordered_translation_still_rejects_missing_extra_empty_or_non_chinese_blocks(self):
+        source = 'Review generated changes before use. ' * 40
+        values = ['每次修改都需要核验。'] * len(translation.units(source))
+        invalid = [values[:-1], values + ['额外的总结。'], ['', *values[1:]],
+                   ['English only'] * len(values), [{'text': value} for value in values],
+                   [123, *values[1:]]]
+        for output in invalid:
+            with self.subTest(output=output), self.assertRaisesRegex(RuntimeError, '覆盖'):
+                notes.translated_output(source, json.dumps({'translations': output}))
+
+    def test_ordered_translation_cache_remains_bound_to_source_and_model(self):
+        source = 'Verify every generated change before use. ' * 20
+        key = notes.signature(translation.STAGE, self.selected, source)
+        cache = {key: response(translation.prompt(source), '每次修改都需要独立核验。')}
+        with patch.object(notes, 'call') as call:
+            actual = notes.cached(media.cache_dir(self.row['video_id']), cache, key,
+                                  lambda: notes.translation_request(source, self.selected, self.deadline, lambda: False),
+                                  lambda value: notes.translated_output(source, value))
+        call.assert_not_called()
+        self.assertIn('独立核验', actual)
+        self.assertNotEqual(key, notes.signature(translation.STAGE, self.selected, source + ' Another fact.'))
+        self.selected.model_id = 'another-model'
+        self.assertNotEqual(key, notes.signature(translation.STAGE, self.selected, source))
+
     def test_translation_cache_is_reused_without_adding_heuristic_text_to_notes(self):
         self.transcript['segments'][-1]['text'] += ' The final API budget is 64.'
         result = self.build()

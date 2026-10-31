@@ -10,5 +10,4 @@ def encoded(text, value):
 
 def response(prompt, value):
     segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-    return json.dumps({'translations': [{'id': segment['id'], 'text': value}
-                                       for segment in segments]}, ensure_ascii=False)
+    return json.dumps({'translations': [value] * len(segments)}, ensure_ascii=False)

@@ -83,6 +83,37 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertIn('## 中文译文（自动生成）\n\n' + translated, files[0].read_text())
         self.assertNotIn('&t=', files[0].read_text())
 
+    def test_literal_translation_unit_can_reach_ready_and_export_unchanged(self):
+        selected = SimpleNamespace(provider='fixture', model_id='fixture')
+        literal = 'python -m unittest tests.test_youtube_notes --verbose'
+        source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
+        translated = '作者提醒使用前独立审查全部生成的修改，下面的命令必须保持原样。'
+
+        def reply(prompt, *arguments):
+            if prompt.startswith('将以下字幕'):
+                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
+                self.assertEqual([source.split('\n\n')[0].strip(), literal], segments)
+                return json.dumps({'translations': [translated, literal]})
+            if '只输出 JSON' in prompt:
+                return json.dumps({'title': '独立核验生成结果', 'summary': '运行命令前先审查生成的修改。',
+                                   'body': '## 核验步骤\n先审查，再运行测试。'})
+            return '作者要求独立审查生成的代码，然后运行测试命令。'
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value=self.metadata), \
+                patch.object(media, 'obtain', return_value={'origin': 'uploaded_captions', 'language': 'en',
+                    'segments': [{'start': 0, 'end': 600, 'text': source}]}):
+            result = collector.collect(FetchScope(force=True))
+        self.assertEqual((1, 1), (result['processed'], result['added']), result)
+        self.assertEqual('ready', storage.rows()[0]['state'])
+        self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+        files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
+        self.assertEqual(1, len(files))
+        self.assertIn(translated + '\n\n' + literal, files[0].read_text())
+
     def test_missing_translation_coverage_leaves_no_note_and_recovers_on_retry(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
         complete = {'origin': 'uploaded_captions', 'language': 'en', 'segments': [
@@ -108,12 +139,14 @@ class YouTubeIntegrity(YouTubeFixture):
                 patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
                 patch.object(media, 'probe', return_value=self.metadata), \
                 patch.object(media, 'obtain', return_value=complete):
-            first = collector.collect(FetchScope(force=True))
-            self.assertEqual((0, 0), (first['processed'], first['added']))
-            self.assertNotEqual('ready', storage.rows()[0]['state'])
-            self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in prompts))
-            self.assertEqual(frozenset(), collector.YouTubeCollector('youtube').materialize())
-            self.assertFalse(list((self.root / 'vault').rglob('*.md')))
+            for attempt in range(3):
+                prompts.clear()
+                first = collector.collect(FetchScope(force=True))
+                self.assertEqual((0, 0), (first['processed'], first['added']))
+                self.assertNotEqual('ready', storage.rows()[0]['state'])
+                self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in prompts))
+                self.assertEqual(frozenset(), collector.YouTubeCollector('youtube').materialize())
+                self.assertFalse(list((self.root / 'vault').rglob('*.md')))
             broken = False
             recovered = collector.collect(FetchScope(force=True))
         self.assertEqual((1, 1), (recovered['processed'], recovered['added']))

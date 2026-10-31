@@ -98,7 +98,10 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
 
     def test_item_unavailability_does_not_make_a_proven_complete_scan_partial(self):
         for message in ('Private video', 'Join this channel to get access to members-only content',
-                        'The uploader has not made this video available in your country'):
+                        'The uploader has not made this video available in your country',
+                        'This live event will begin in 3 hours.', 'Sign in to confirm your age',
+                        'This video is available to Music Premium members only',
+                        'An unfamiliar error restricted to this individual video'):
             for payloads in ([], [self.payload(1, self.now)]):
                 for returncode, ending in (
                         (101, '[download] old does not pass filter\nAborting remaining downloads'),
@@ -115,9 +118,10 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
                     self.assertEqual('00000000999', self.prepared['discovery_unavailable'][0]['video_id'])
 
     def test_unavailable_video_converges_and_remains_a_notice_over_repeated_rounds(self):
-        diagnostic = ('ERROR: [youtube] 00000000999: Join this channel to get access to members-only content\n'
-                      '[download] Finished downloading playlist: fixture')
         for round_number in range(3):
+            message = ('This live event will begin in 3 hours.', 'Sign in to confirm your age',
+                       'This video is available to Music Premium members only')[round_number]
+            diagnostic = f'ERROR: [youtube] 00000000999: {message}\n[download] Finished downloading playlist: fixture'
             payloads = [self.payload(1, self.now)] if round_number == 0 else []
             with self.subTest(round=round_number), patch.object(toolchain, 'command', return_value=self.command(
                     payloads, diagnostic, 1)), patch.object(media.login, 'arguments', return_value=[]), \
@@ -135,6 +139,7 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
             self.assertTrue(source['last_success'])
             self.assertFalse(source['last_error'])
             self.assertEqual(0, source['failures'])
+            self.assertNotIn('bot_wall', result['cautions'])
             self.assertIn('1 条视频无法读取', source['last_notice'])
         self.assertEqual('ready', storage.rows()[0]['state'])
 
@@ -142,6 +147,14 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         for diagnostic, returncode, delay in (
                 ('ERROR: request failed\n[download] Finished downloading playlist: fixture', 1, 0),
                 ('ERROR: [youtube] 00000000999: Video unavailable. Sign in to confirm you are not a bot\n'
+                 '[download] Finished downloading playlist: fixture', 1, 0),
+                ('ERROR: [youtube] 00000000999: HTTP Error 429: Too Many Requests\n'
+                 '[download] Finished downloading playlist: fixture', 1, 0),
+                ('ERROR: [youtube] 00000000999: failed to decrypt cookies\n'
+                 '[download] Finished downloading playlist: fixture', 1, 0),
+                ('ERROR: [youtube] 00000000999: Please sign in to view this video\n'
+                 '[download] Finished downloading playlist: fixture', 1, 0),
+                ('ERROR: [youtube] 00000000999: n challenge solving failed\n'
                  '[download] Finished downloading playlist: fixture', 1, 0),
                 ('ERROR: [youtube] 00000000999: Private video', 1, 0),
                 ('ERROR: [youtube] 00000000999: Private video\n'
@@ -251,6 +264,27 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
                     media, 'ytdlp', side_effect=self.transport(diagnostic=diagnostic)):
                 with self.assertRaises(Exception):
                     self.fetch()
+
+    def test_empty_archived_listing_does_not_require_a_stop_reason(self):
+        diagnostic = '[download] 00000000001 has already been recorded in the archive'
+        with throttle.opened(), patch.object(windowed_discovery, 'stop_reason', return_value=''), \
+                patch.object(media, 'ytdlp', side_effect=self.transport(diagnostic=diagnostic)):
+            self.assertEqual([], self.fetch())
+
+    def test_source_error_with_no_new_json_still_fails_after_playlist_end(self):
+        for message, code in (('Sign in to confirm you are not a bot', 'bot_wall'),
+                              ('HTTP Error 429: Too Many Requests', 'rate_limited'),
+                              ('failed to decrypt cookies', 'cookie_unreadable'),
+                              ('Please sign in to view this video', 'not_logged_in')):
+            diagnostic = f'ERROR: [youtube] 00000000999: {message}\n[download] Finished downloading playlist: fixture'
+            with self.subTest(message=message), throttle.opened(), patch.object(
+                    toolchain, 'command', return_value=self.command([], diagnostic, 1)), \
+                    patch.object(media.login, 'arguments', return_value=[]):
+                with self.assertRaises(discovery.FeedError) as failed:
+                    self.fetch()
+                self.assertEqual(code, failed.exception.code)
+                self.assertEqual('youtube', failed.exception.origin)
+                self.assertIn(message, failed.exception.diagnostic)
 
     def test_partial_precise_output_keeps_valid_entries_and_exposes_interruption(self):
         evidence = []

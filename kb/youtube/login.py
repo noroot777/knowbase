@@ -255,7 +255,7 @@ def arguments(spec: str) -> list[str]:
 # **机器人验证单独一档,不归「没登录」。** 那道墙是出口 IP 级的:实测同一分钟里
 # 两个 yt-dlp 版本撞的是同一道,换版本无效、带 cookie 才过;已经登录的人照样可能撞上。
 # 归成「没登录」会把他送去反复登录,而问题在出口那一头。
-_BOT = ('sign in to confirm', 'confirm you', 'not a bot')
+_BOT = ('not a bot',)
 # **「这个视频是私有的」也不归「没登录」。** 已经登录、只是没拿到这一条的授权时
 # yt-dlp 报的是同一句 —— 而第一个启用频道的最新一条恰好受限,就会被当成整个账号的状态。
 _PRIVATE = ('this video is private', 'private video', 'members-only', 'join this channel')

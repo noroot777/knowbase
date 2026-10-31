@@ -97,6 +97,13 @@ class Classification(unittest.TestCase):
             'WARNING: Your yt-dlp version (2026.06.09) is older than 90 days! | '
             'WARNING: [youtube] Unable to download webpage: HTTP Error 429: Too Many Requests'))
 
+    def test_age_confirmation_is_not_evidence_of_a_bot_wall(self):
+        for message in ('Sign in to confirm your age', 'Sign in to confirm', 'Please confirm your age'):
+            with self.subTest(message=message):
+                self.assertEqual('unknown', login.classify(message))
+                self.assertNotIn('bot_wall', login.matched(message))
+        self.assertEqual('bot_wall', login.classify('Sign in to confirm you are not a bot'))
+
     def test_unfamiliar_and_empty_output_admit_ignorance(self):
         """**判不准一律 unknown。** 猜一个具体原因比承认不知道更坏:用户会照着那条错的做。"""
         for text in ('', None, 'ERROR: HTTP Error 503: Service Unavailable', '随便一句没见过的话'):

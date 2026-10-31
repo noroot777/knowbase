@@ -6,28 +6,30 @@ from kb.youtube.settings import of
 
 def unavailable(text):
     items = []
-    pattern = (r'private video|members.only|join this channel|not available in your country|'
-               r'not made this video available in your country|'
-               r'video (?:is )?(?:unavailable|not available)|has been removed|has been deleted')
     for line in text.splitlines():
         matched = re.match(r'ERROR: \[youtube\] ([A-Za-z0-9_-]{11}): (.+)', line)
-        if (matched and login.classify(matched[2]) not in login.AUTH_CODES and
-                re.search(pattern, matched[2], re.I)):
+        if matched and login.classify(matched[2]) not in login.AUTH_CODES:
             items.append({'video_id': matched[1], 'reason': matched[2]})
     return items
 
 
-def stop_reason(text):
-    text = '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('{'))
+def diagnostics(text):
+    return '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('{'))
+
+
+def blocked(text):
     errors = [line for line in text.splitlines() if 'ERROR:' in line]
-    if len(errors) != len(unavailable(text)):
+    return len(errors) != len(unavailable(text))
+
+
+def stop_reason(text):
+    text = diagnostics(text)
+    if blocked(text):
         return ''
     if re.search(r'^\[download\] Finished downloading playlist:', text, re.M):
         return 'playlist'
     if re.search(r'^\[download\] .*does not pass filter', text, re.M):
         return 'window'
-    if 'has already been recorded in the archive' in text:
-        return 'archive'
     return ''
 
 
@@ -41,7 +43,10 @@ def completed(output, returncode):
 
 def parsed(output, url):
     text = output.read_text(encoding='utf-8', errors='replace')
-    if stop_reason(text) and not any(line.startswith('{') for line in text.splitlines()):
+    noise = diagnostics(text)
+    archived = re.search(r'^\[download\] .*has already been recorded in the archive', noise, re.M)
+    if (not any(line.lstrip().startswith('{') for line in text.splitlines()) and
+            not blocked(noise) and (archived or stop_reason(noise))):
         return []
     return media._detailed(output, url)
 
