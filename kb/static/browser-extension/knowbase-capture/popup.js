@@ -73,10 +73,15 @@
   //:
   //: `fill` 那一档**一开始就摆出「改用所选文字」**:会落到这一档的多半是自动补抓
   //: 已经试过并失败的页面(要登录、脚本渲染、403),扩展自己的识别同样可能认不出
-  //: 正文,而人站在那一页上选一段是现成的出路。
+  //: 正文,而人站在那一页上选一段是现成的出路。`absent` 那一档等服务端先自己去抓,
+  //: 抓不到才露出来 —— **露不露面和叫什么是两件事**,各占一个字段。
+  //:
+  //: 合成一个字段(空串 = 一开始不显示)的后果实测过:`absent` 失败之后那颗按钮
+  //: 只被 `hidden = false` 放出来,名字还是空串 —— 屏幕上是一颗 26×36 的空白小方块,
+  //: 而 `extract.js` 回的那句「请选好全文再读一次」正指着它。
   const PLANS = {
-    absent: {act: '采集', selection: ''},
-    fill: {act: '采集', selection: '改用所选文字'},
+    absent: {act: '采集', selection: '改用所选文字', selectionAtFirst: false},
+    fill: {act: '采集', selection: '改用所选文字', selectionAtFirst: true},
     complete: null,
     refused: null,
   };
@@ -112,9 +117,11 @@
     element('here-title').hidden = !title;
     element('here-actions').hidden = !plan;
     element('act-page').hidden = true;
-    element('act-selection').hidden = !(plan && plan.selection);
+    element('act-selection').hidden = !(plan && plan.selectionAtFirst);
     if (plan) {
       element('act').textContent = plan.act;
+      // 名字一律先写上,**不管这一刻露不露面**:失败那条路上只改 `hidden`,它要是
+      // 还指望那时候补名字,放出来的就是一颗没有字的按钮。
       element('act-page').textContent = '改用这一页的正文';
       element('act-selection').textContent = plan.selection;
     }

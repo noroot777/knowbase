@@ -45,6 +45,8 @@ const state = () => ({key: current, title: '文章', url: ITEMS[current], kind: 
   pending: [], saved: null, saved_error: ''});
 let fetches = 0;
 let usedBefore = true;
+//: 「发起浏览器采集」那一问:扣住不答,好让人在它在途的时候关掉抽屉。
+let createGate = null;
 const timers = new Map();
 let nextTimer = 1;
 const context = vm.createContext({
@@ -57,8 +59,10 @@ const context = vm.createContext({
   setTimeout(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
   clearTimeout(id) { timers.delete(id); },
   apiResponse: async reply => reply,
-  fetch: async url => {
+  fetch: async (url, options = {}) => {
     if (url.endsWith('/setup')) return {json: async () => ({extension_dir: '/repo/ext', used_before: usedBefore})};
+    if (url.endsWith('/intents') && options.method === 'POST')
+      return new Promise((ok, no) => { createGate = {ok, no}; });
     fetches += 1;
     return state();
   }
@@ -126,5 +130,44 @@ context.window.openCaptureDrawer('k1');
 await settle();
 assert.match(element('cap-setup-folded').innerHTML, /<details/, '用过之后它应当收进折叠块');
 assert.equal(element('cap-setup-slot').innerHTML, '', '用过之后顶部不该再占一大块');
+
+// ⑥ **关掉抽屉时正有一个写动作在途**:它回来之后不许把轮询重新排起来。
+//    `stopCapture()` 作废得了在途的那次 `refresh`,作废不了「发起 / 取消 / 改址 /
+//    继续处理」这些写动作的后半段 —— 它们 `await` 完回来还要自己 `refresh()` 一次,
+//    而那一次会在 `finally` 里排下一轮 `setTimeout`。实测形态:发起后立刻关掉,
+//    几秒后冒出一次 `GET /target/null`,再隔 2 秒又来一次 —— 本该停掉的轮询被一个
+//    已经关掉的抽屉重新点着了。
+context.window.closeCaptureDrawer();
+context.window.openCaptureDrawer('k1');
+await settle();
+element('cap-page-url').value = ITEMS.k1;
+element('cap-create').click();            // 不 await:它卡在 /intents 上
+await settle();
+const beforeRace = fetches;
+context.window.closeCaptureDrawer();
+createGate.ok({ok: true});                // 迟到的成功
+await settle();
+await tick();
+await tick();
+assert.equal(fetches, beforeRace, '关掉之后,那次发起的迟到回包不许把轮询重新排起来');
+
+// ⑦ 迟到的**失败**不许落在下一篇头上。A 的网址填错、发起后立刻关掉、打开 B:
+//    B 的标题网址都对、待办也正常,顶上却突然红字写着 A 那一次的拒绝理由,而且
+//    被 `actionError` 留着不走。两条分开钉:上面那条即使这条坏了也会绿。
+context.window.openCaptureDrawer('k1');
+await settle();
+element('cap-page-url').value = 'not-a-valid-url';
+element('cap-create').click();
+await settle();
+context.window.closeCaptureDrawer();
+current = 'k2';
+context.window.openCaptureDrawer('k2');
+await settle();
+const clean = element('cap-message').textContent;
+createGate.no(new Error('请使用不含账号密码的完整 HTTP / HTTPS 文章网址'));
+await settle();
+await settle();
+assert.equal(element('cap-message').textContent, clean,
+  '上一篇那次发起的迟到错误不许写到这一篇头上');
 
 console.log('capture drawer shell: passed');

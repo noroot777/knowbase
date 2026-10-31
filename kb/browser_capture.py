@@ -291,9 +291,19 @@ def here(url: str) -> dict:
     审计一个字都不用改 —— 新增的只有「谁来建待办」。`create` 本身幂等:同一
     (条目, 页面)上已有 pending 就复用它和它的有效期,所以反复开扩展不会堆出一串。
 
-    **只在正文还欠着的时候自动建**(`_OWED`)。正文已经齐了的那一条照旧要人在补抓
-    页上明确说一句「重新采集正文」—— 那是另一件事(「我手上这份是错的」),它自带
+    **只在正文还欠着的时候自动建**(`_OWED`)。正文已经齐了的那一条照旧要人在采集
+    抽屉里明确说一句「重新采集正文」—— 那是另一件事(「我手上这份是错的」),它自带
     警示和回执,不该和「把缺的那份补上」挤成同一颗按钮。
+
+    **但人明确发起过的那一个要先兑现,排在库里那一行前面。** 「这一页是哪一条」
+    有两个答案源:`feed_items.url`,和人自己指过的最终网址。只问前者的话,
+    「发起浏览器采集」「改用这一页的地址」「重新采集正文」这三条路发出的待办在
+    扩展那一侧**一次都不会被认到** —— 而它们存在的全部理由恰恰是「这一页的地址
+    和库里那一行不一样」或者「正文已经齐了、但我手上这份是错的」。
+    两种实测形态:①按语言跳转的站点上发起(或 adopt)之后再问一次,答的是
+    `absent`,主按钮于是走 `/api/grab` **把同一篇收成第二行**;②正文齐了的那一条
+    点过「重新采集正文」并发起,答的是 `complete`、`intent=null`,弹窗一颗按钮都
+    不给 —— 而撤掉预览之后,那正是唯一的事后纠错出口。
 
     `elsewhere` 交回的是**等着的、但指着另一页的那些待办**。这一项是承重的:站点
     按浏览器语言跳转时(`openai.com/index/x` → `/zh-Hans-CN/index/x`),人从采集抽屉
@@ -302,24 +312,37 @@ def here(url: str) -> dict:
     「改用这一页的地址」,他一眼就看出是同一篇。
     """
     page = page_url(url)
+    columns = ('SELECT feed_items.*, EXISTS (SELECT 1 FROM feed_item_exclusions'
+               ' WHERE key=feed_items.key) AS capture_excluded,'
+               f' {_OWED} AS owed FROM feed_items')
     with _lock:
         _prune()
+        # 指着**这一页**、而且还写得进去的那些待办。`_pending()` 这一道不能自己
+        # 再写一遍:来源许可、排除、CAS 全在它的 `_refresh_status` 里,绕过去就是
+        # 把一个已经作废的待办当成「人明确发起过」来兑现。
+        bound = sorted((one for one in _pending() if one['page_url'] == page),
+                       key=lambda one: one['created_at'])
         with reg.db() as conn:
-            aliases = _page_aliases(url)
-            slots = ','.join('?' for name in aliases)
-            row = conn.execute(
-                'SELECT feed_items.*, EXISTS (SELECT 1 FROM feed_item_exclusions'
-                ' WHERE key=feed_items.key) AS capture_excluded,'
-                f' {_OWED} AS owed FROM feed_items'
-                f' WHERE url IN ({slots}) ORDER BY rowid LIMIT 1', aliases).fetchone()
+            if bound:
+                row = conn.execute(columns + ' WHERE key=?', (bound[0]['key'],)).fetchone()
+            else:
+                aliases = _page_aliases(url)
+                slots = ','.join('?' for name in aliases)
+                row = conn.execute(columns + f' WHERE url IN ({slots})'
+                                   ' ORDER BY rowid LIMIT 1', aliases).fetchone()
         def answered(situation: str, detail: str, intent: dict | None = None) -> dict:
-            # **`elsewhere` 一律在最后算。** 上面那个 `_create` 会把同一条目上
+            # **`elsewhere` 一律在最后算。** 下面那个 `_create` 会把同一条目上
             # 指着别处的旧待办标成 `superseded`,先算就会把刚被顶掉的那个摆出来、
             # 请人「改用这一页的地址」,而它已经作废了。
+            #
+            # 排掉的是**这一答用的那一个**,不是「所有指着这一页的」:两个不同条目
+            # 的待办同时指着这一页时(人把地址粘错了),上面只认了最早那个,另一个
+            # 必须摆出来 —— 否则这一页到底算哪一篇,人在界面上无从改。
+            picked = intent['id'] if intent else None
             return dict(ok=True, page_url=page, situation=situation, detail=detail,
                         item=public(item) if item else None, intent=intent,
                         elsewhere=[other for other in _pending()
-                                   if other['page_url'] != page])
+                                   if other['page_url'] != page or other['id'] != picked])
 
         item = dict(row) if row else None
         if not item:
@@ -328,6 +351,14 @@ def here(url: str) -> dict:
             _checked_target(item)
         except (LookupError, ValueError) as why:
             return answered('refused', str(why))
+        if bound:
+            # 人明确发起过:照它答,**不再按「正文欠不欠」重判一次**。正文已经齐了
+            # 的那一条正是「重新采集正文」会走到的形态,按 owed 降级成「齐了,没有
+            # 可做的事」就把那条出路堵死了。准入一道没少:这个待办要能走到这里,
+            # 上面 `_pending()` 的 `writable` 已经过了来源、排除和 CAS。
+            return answered('fill', '知识库里有这一条，但正文还缺着。' if item['owed']
+                            else '你为这一条发起过重新采集，这一页就是它指的那一篇。',
+                            bound[0])
         if not item['owed']:
             # 「在 `feed_items` 里有这一行」和「知识库里搜得到它」是两件事:导出、
             # 索引那半条链占不到管道、或者在保存之后服务重启,都会留下一条「在库

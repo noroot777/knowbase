@@ -37,10 +37,15 @@ class CaptureCase(FullTextCase):
         self.auth = {'Authorization': 'Bearer ' + capture.pairing_key(),
                      'Origin': 'chrome-extension://fixture'}
 
-    def intent(self):
+    def intent(self, page_url='https://e.org/post', key=None):
+        """人在采集抽屉里按下「发起浏览器采集」的那一下。
+
+        `page_url` 可以**和库里那一行的 url 不一样** —— 那正是这颗按钮存在的理由
+        (让某一条去认一个和它自己网址不同的最终网址)。
+        """
         result = self.client.post('/api/browser-capture/intents',
-                                  json={'key': self.key, 'page_url': 'https://e.org/post'})
-        self.assertEqual(200, result.status_code)
+                                  json={'key': key or self.key, 'page_url': page_url})
+        self.assertEqual(200, result.status_code, result.text)
         return result.json()
 
     def precheck(self, intent, body='', method='article', **overrides):

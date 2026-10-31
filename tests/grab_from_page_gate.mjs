@@ -82,6 +82,8 @@ assert.equal(element('act').textContent, '采集');
 assert.equal(element('here-state').textContent, here.detail, '那句话原样显示,不自己另编');
 assert.equal(element('act-page').hidden, true, '没失败之前不该提前给兜底那一颗');
 assert.equal(element('act-selection').hidden, true);
+// 藏着的时候名字就已经写好了:放出来那一刻只改 `hidden`,没人再补名字。
+assert.equal(element('act-selection').textContent, '改用所选文字');
 
 // ② 点收录:只交地址,正文一个字都不交 —— 内容由服务端自己去抓
 calls.length = 0;
@@ -103,6 +105,13 @@ for (const detail of ['这一页没找到正文。先在浏览器里打开一次
   await element('act').click();
   assert.equal(element('act-page').hidden, false, `失败原因「${detail}」也该给兜底出口`);
   assert.equal(element('act-selection').hidden, false, `失败原因「${detail}」也该给选文字那一颗`);
+  // **露出来的按钮必须有名字。** 「一开始不显示」和「叫什么」合成一个字段
+  //(`selection: ''`)的话,失败那条路上只把 `hidden` 改掉 —— 屏幕上是一颗
+  // 26×36 的空白小方块,而 `extract.js` 回的那句「请选好全文再读一次」正指着它。
+  assert.equal(element('act-page').textContent, '改用这一页的正文',
+    `失败原因「${detail}」露出来的兜底按钮不许没有名字`);
+  assert.equal(element('act-selection').textContent, '改用所选文字',
+    `失败原因「${detail}」露出来的选段按钮不许没有名字`);
   assert.match(element('status').textContent, new RegExp(detail.slice(0, 6)));
 }
 

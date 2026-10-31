@@ -15,6 +15,15 @@
   let drafting = false;
   let continued = '';
   let loadVersion = 0;
+  //: **每次打开抽屉是新的一代。** `loadVersion` 只作废在途的那一次 `refresh`,
+  //: 作废不了「发起 / 取消 / 改址 / 继续处理」这些**写动作**的后半段:它们
+  //: `await` 完回来还要读 `itemKey`、写 `actionError`、调 `render()`、再 `refresh()`
+  //: 排下一轮轮询 —— 而那时人可能已经关掉抽屉、甚至打开了另一篇。
+  //: 实测两种形态:①发起后立刻关掉,4 秒后冒出 `GET /target/null`,还把本该停掉
+  //: 的轮询重新排了起来;②A 的网址填错、发起后立刻关掉并打开 B,A 那个迟到的 409
+  //: 把 B 顶上改成红字「请使用完整文章网址」,而 B 的网址是对的。
+  let generation = 0;
+  const current = gen => gen === generation;
   let pendingSignature = '';
   let loadError = '';
   let actionError = '';
@@ -186,20 +195,22 @@
       // 不弹确认框,为的正是这件事。发起失败时多开一个标签不要紧:勾这个框的意思
       // 本来就是「我这就要去那一页」,而扩展也得在那一页上才点得动。
       if (element('cap-also-open').checked && target) window.open(target, '_blank', 'noopener');
+      const gen = generation;
       processing = true;
       actionError = '';
       render();
       try {
         await api('/intents', {method: 'POST', body: JSON.stringify({key: itemKey, page_url: target})});
-        await refresh();
-      } catch (error) { actionError = error.message; }
-      finally { processing = false; render(); }
+        if (current(gen)) await refresh();
+      } catch (error) { if (current(gen)) actionError = error.message; }
+      finally { if (current(gen)) { processing = false; render(); } }
     });
 
     element('cap-pending-list').addEventListener('click', async event => {
       const cancel = event.target.closest('[data-cancel-intent]');
       const reuse = event.target.closest('[data-use-url]');
       if (processing || (!cancel && !reuse)) return;
+      const gen = generation;
       processing = true;
       actionError = '';
       render();
@@ -208,15 +219,19 @@
         // 顶掉,所以不必先取消再发起(中间那一下谁都接不住)。
         if (reuse) await api('/intents', {method: 'POST', body: JSON.stringify({key: itemKey, page_url: reuse.dataset.useUrl})});
         else await api(`/intents/${encodeURIComponent(cancel.dataset.cancelIntent)}`, {method: 'DELETE'});
-        await refresh();
-      } catch (error) { actionError = error.message; }
-      finally { processing = false; render(); }
+        if (current(gen)) await refresh();
+      } catch (error) { if (current(gen)) actionError = error.message; }
+      finally { if (current(gen)) { processing = false; render(); } }
     });
 
     element('cap-restart').addEventListener('click', async () => {
       if (processing || !snapshot?.saved) return;
+      const gen = generation;
       processing = true;
       const confirmed = await confirmBox({title: '重新采集正文？', body: '已保存的正文和回执不会被撤销，只有再采一次并通过服务端核验才会替换。', ok: '重新采集'});
+      // 确认框开着的时候抽屉可能已经被关掉、或者换了一条:那一下的「是」不属于
+      // 现在屏幕上这一篇。
+      if (!current(gen)) return;
       processing = false;
       if (confirmed) drafting = true;
       render();
@@ -227,10 +242,12 @@
     element('cap-continue').addEventListener('click', async () => {
       if (processing || !snapshot?.saved) return;
       const identity = snapshot.saved.id;
+      const gen = generation;
       processing = true;
       // 话必须跟 `browser_capture_api.CONTINUE_STAGES` 对得上:`extract` 不在那份清单里,
       // 所以这里不许再承诺会买一轮条目化提取 —— 上面那两行警告同理。
       const confirmed = await confirmBox({title: '继续导出与索引？', body: '跑的是导出与索引两段：同类来源其他待办会一起导出，可能补抓别的文章并调用翻译模型，索引会检查全库。条目化提取不在这一步。', ok: '开始处理'});
+      if (!current(gen)) return;
       if (!confirmed) { processing = false; render(); return; }
       if (snapshot.saved?.id !== identity) {
         processing = false;
@@ -241,14 +258,17 @@
       render();
       try {
         const result = await api(`/intents/${encodeURIComponent(identity)}/continue`, {method: 'POST', body: '{}'});
+        if (!current(gen)) return;
         continued = identity;
         element('cap-run-note').textContent = `${result.detail} · 批次 ${result.run}`;
         element('cap-run-note').classList.remove('error');
       } catch (error) {
+        if (!current(gen)) return;
         await refresh();
+        if (!current(gen)) return;
         element('cap-run-note').textContent = `${error.message}。请核对当前条目后再操作。`;
         element('cap-run-note').classList.add('error');
-      } finally { processing = false; render(); }
+      } finally { if (current(gen)) { processing = false; render(); } }
     });
   }
 
@@ -256,6 +276,8 @@
   //: 上一条的 snapshot、草稿态、自动填入基准留着就会在新条目上显示旧数据 ——
   //: 而那一栏网址一旦带着上一篇的值,发起的就是指着另一篇的待办。
   function startCapture(key) {
+    generation += 1;
+    loadVersion += 1;
     itemKey = key;
     snapshot = null;
     processing = false;
@@ -278,7 +300,9 @@
 
   //: 关抽屉。`++loadVersion` 让在途的那次 `refresh` 回来时自己作废 —— 只清
   //: `timer` 不够:请求已经发出去的那一次会在 `finally` 里再排下一轮。
+  //: `++generation` 管的是另一半:写动作的后半段(见上面那段)。
   function stopCapture() {
+    generation += 1;
     clearTimeout(timer);
     timer = null;
     loadVersion += 1;

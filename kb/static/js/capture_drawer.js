@@ -15,6 +15,10 @@
   'use strict';
   let drawer = null;
   let mask = null;
+  //: 和状态机那边同一个办法:每次打开是新的一代。外壳这边的异步续体是读扩展目录
+  //: 那一问和「显示 / 复制配对密钥」—— 它们回来时只问「现在有没有抽屉」是不够的,
+  //: 关掉再打开之后那是**另一个**抽屉,旧续体会往新抽屉里写。
+  let generation = 0;
 
   //: 抽屉里那一整套。`cap-setup` 那一块的位置是会变的:没采成过时它在最上面且摊开
   //: (见 `renderSetup`),采成过之后收进底部的 <details>。
@@ -91,6 +95,7 @@
   //: display 它看不见;而 body 的 childList 它盯着,所以建删这条路上 `syncOverlays`
   //: 照旧会跑 —— 焦点陷阱、inert、Esc 关闭链全靠它。先例是 `egress.js` 那一块。
   function build() {
+    generation += 1;
     mask = document.createElement('div');
     mask.id = 'cap-mask';
     mask.addEventListener('click', closeCaptureDrawer);
@@ -109,13 +114,14 @@
   //: 而首次使用的人恰恰是最需要先看到它的那一个 —— 扩展没装、密钥没配,上面那栏
   //: 网址和「发起采集」对他毫无意义,点下去只会等一个永远不来的采集。
   async function renderSetup() {
+    const gen = generation;
     const top = document.getElementById('cap-setup-slot');
     const folded = document.getElementById('cap-setup-folded');
     if (!top || !folded) return;
     let info = {extension_dir: '', used_before: true};
     try { info = await (await fetch('/api/browser-capture/setup', {cache: 'no-store'})).json(); }
     catch { /* 读不到就按「用过」办:至少不会在老用户面前把这一大块顶到最上面 */ }
-    if (!drawer || !drawer.isConnected) return;
+    if (!current(gen)) return;
     if (info.used_before) {
       folded.innerHTML = `<details><summary>装扩展与配对</summary>${SETUP}</details>`;
       top.replaceChildren();
@@ -127,10 +133,10 @@
     if (path) path.textContent = info.extension_dir || '（读取失败，请改用下载 ZIP）';
     const service = document.getElementById('cap-service-url');
     if (service) service.textContent = location.origin;
-    bindSetup();
+    bindSetup(gen);
   }
 
-  function bindSetup() {
+  function bindSetup(gen) {
     const copyPath = document.getElementById('cap-copy-path');
     if (copyPath) copyPath.addEventListener('click', async () => {
       const value = document.getElementById('cap-ext-path').textContent;
@@ -146,10 +152,13 @@
       try {
         const response = await fetch('/api/browser-capture/pairing', {cache: 'no-store'});
         const pairing = await apiResponse(response, '读取配对密钥失败');
+        // 人关掉抽屉就是收回了「把密钥显示出来」那一下:这一答迟到之后不许自己
+        // 摊在下一次打开的抽屉上(它可能已经在别人眼前了)。
+        if (!current(gen)) return;
         document.getElementById('cap-pairing-key').type = 'password';
         document.getElementById('cap-pairing-key').value = pairing.key;
         document.getElementById('cap-pairing').hidden = false;
-      } catch (error) { toast(error.message, {key: 'cap-pairing'}); }
+      } catch (error) { if (current(gen)) toast(error.message, {key: 'cap-pairing'}); }
     });
     const copyKey = document.getElementById('cap-copy-key');
     if (copyKey) copyKey.addEventListener('click', async () => {
@@ -164,6 +173,8 @@
       }
     });
   }
+
+  const current = gen => gen === generation;
 
   function openCaptureDrawer(itemKey) {
     if (drawer) closeCaptureDrawer();
@@ -180,6 +191,7 @@
   //: 变成几条并行的链。
   function closeCaptureDrawer() {
     if (!drawer) return;
+    generation += 1;
     window.stopCapture();
     mask.remove();
     drawer.remove();

@@ -126,6 +126,84 @@ class CaptureHereTests(CaptureCase):
         self.assertNotEqual(stale['id'], landed['intent']['id'], '指着另一个地址,该另建一个')
         self.assertEqual([], landed['elsewhere'], '刚被顶掉的那个不许摆出来')
 
+    def test_a_request_bound_to_this_very_page_wins_over_what_the_url_says(self):
+        """人明确指过的最终网址**排在库里那一行前面**,否则改址那条路整条是死的。
+
+        事故形态(实测):库里那一行是 `https://e.org/post`,人在采集抽屉里按原样
+        发起、但把最终网址填成站点按语言跳转后的那一个。扩展站在那一页上一问,
+        `here()` 只按 `feed_items.url` 查 —— 答「这一页还不在知识库里」,而主按钮
+        在这一档走的是 `/api/grab`:**同一篇文章在库里变成第二行**。更糟的是这个
+        待办的 `page_url` 正好等于当前页,连 `elsewhere` 那条出路都把它过滤掉了,
+        屏幕上一点痕迹都没有。adopt 之后扩展立刻再问一次,走的也是这一条路。
+
+        判据落在**后果**上:答出来的那个 intent 要真能拿去写(precheck 200),
+        而不只是「situation 变成 fill 了」。
+        """
+        landed = 'https://e.org/zh-Hans-CN/post'
+        mine = self.intent(page_url=landed)
+        state = self.here(landed).json()
+        self.assertEqual('fill', state['situation'])
+        self.assertEqual(mine['id'], state['intent']['id'], '要兑现人发起的那一个,不另建')
+        self.assertEqual(self.key, state['item']['key'])
+        self.assertEqual([], state['elsewhere'], '这一答用掉的那个不该再摆成「别处」')
+        self.assertEqual(200, self.precheck(state['intent'], body=BODY,
+                                            page_url=landed).status_code)
+        # 反过来钉一边:**没人发起过**的另一个地址照旧答「不在库里」,
+        # 不许因为上面这条就对所有地址模糊认亲。
+        self.assertEqual('absent', self.here('https://e.org/fr/post').json()['situation'])
+
+    def test_an_explicit_recapture_still_has_a_way_in_after_the_body_is_settled(self):
+        """「我手上这份是错的」那条路:正文已经齐了,**但人明确发起过重新采集**。
+
+        撤掉读完之后那道人工核对以后,登录墙、摘要页只要过得了去重门槛就会被写
+        进去,而事后纠错的出口只剩这一个。`here()` 按 `_OWED` 一刀切的话,这一条
+        答的是 `complete` / `intent=null`,弹窗一颗按钮都不给 —— 抽屉那边却还写着
+        「等待浏览器采集」,两块屏幕互相打脸,而那条出路实际上已经堵死。
+
+        反过来钉一边:**没发起过**的那一条照旧答「齐了」
+        (`test_a_settled_body_is_not_quietly_offered_for_refilling`),这里再钉一次
+        顺序 —— 先确认它是 complete,发起之后才变。
+        """
+        with reg.db() as conn:
+            conn.execute("UPDATE feed_items SET fulltext_at=? WHERE key=?", (reg.now(), self.key))
+        self.assertEqual('complete', self.here().json()['situation'], '没发起过就还是「齐了」')
+        mine = self.intent()
+        state = self.here().json()
+        self.assertEqual('fill', state['situation'])
+        self.assertEqual(mine['id'], state['intent']['id'])
+        self.assertIn('重新采集', state['detail'], '话要说清这是哪一件事,别写成「正文还缺着」')
+        self.assertEqual(200, self.precheck(state['intent'], body=BODY).status_code)
+
+    def test_two_requests_on_the_same_page_leave_the_second_one_reachable(self):
+        """两个不同条目的待办同时指着这一页:认最早那个,**另一个必须还摆得出来**。
+
+        人把最终网址粘错时就是这个形态。只认一个而把另一个连同 `elsewhere` 一起
+        吞掉的话,这一页到底算哪一篇在界面上**无从改** —— 而写进去是不可逆的。
+        """
+        other = self.put(url='https://e.org/post-two')
+        first = self.intent(page_url='https://e.org/shared')
+        second = self.intent(page_url='https://e.org/shared', key=other)
+        state = self.here('https://e.org/shared').json()
+        self.assertEqual(first['id'], state['intent']['id'], '认最早发起的那一个')
+        self.assertEqual([second['id']], [one['id'] for one in state['elsewhere']],
+                         '另一个要摆在人眼前,他才改得了')
+
+    def test_a_bound_request_does_not_bypass_a_single_admission_check(self):
+        """**先兑现**不等于**放行**:待办指着这一页,但条目这期间被排除了。
+
+        这一条钉的是「兑现」走的仍是 `_pending()` 那一份(来源许可、排除、CAS 都在
+        它的 `_refresh_status` 里)。自己另写一遍挑待办的判据,就会把一个已经作废的
+        待办当成「人明确发起过」兑现,而点下去只会在服务端被拒。
+        """
+        landed = 'https://e.org/zh-Hans-CN/post'
+        self.intent(page_url=landed)
+        with reg.db() as conn:
+            conn.execute('INSERT INTO feed_item_exclusions(key,kind,url,created_at) VALUES (?,?,?,?)',
+                         (self.key, 'rss', 'https://e.org/post', reg.now()))
+        state = self.here(landed).json()
+        self.assertEqual('absent', state['situation'], '作废的待办不许被当成人发起过的那个')
+        self.assertIsNone(state['intent'])
+
     def test_the_page_question_needs_the_pairing_key(self):
         """两个新端点都由调用方指定地址,所以鉴权和 `/upload` 同一档。
 
