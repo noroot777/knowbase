@@ -24,8 +24,13 @@ let elements = new Map();
 function element(id) {
   if (!elements.has(id)) elements.set(id, {
     value: '', textContent: '', dataset: {}, hidden: false, disabled: false, innerHTML: '',
+    type: '', select() {},
     classList: {toggle() {}, add() {}, remove() {}},
-    querySelectorAll: () => [], replaceChildren() {}, append() {},
+    querySelectorAll: () => [], append() {},
+    //: 真 DOM 的 `replaceChildren()` 会把这个元素腾空,**这里必须照做** —— 空实现的话
+    //: 「抽屉开着时引导换位置」那几条测的是桩而不是代码(不关掉重开,旧的那一大块
+    //: 还留在 `innerHTML` 里)。
+    replaceChildren() { this.innerHTML = ''; },
     addEventListener(name, callback) { this[name] = callback; }
   });
   return elements.get(id);
@@ -53,6 +58,17 @@ let holdSetup = false;
 let createGate = null;
 const timers = new Map();
 let nextTimer = 1;
+//: 剪贴板那一问:扣住不答,好让人在它在途的时候关掉抽屉。
+let clipboardGate = null;
+const toasts = [];
+//: 真浏览器里是 MutationObserver。照它的契约做:**只有还连着的才会被叫**,这样
+//: 「关掉之后有没有断开」才问得出来。
+const watching = new Set();
+class FakeObserver {
+  constructor(callback) { this.callback = callback; }
+  observe() { watching.add(this); }
+  disconnect() { watching.delete(this); }
+}
 const context = vm.createContext({
   URLSearchParams, Date, JSON, setImmediate,
   window: {}, overlayClosers: {},
@@ -60,8 +76,9 @@ const context = vm.createContext({
              //: 扩展留标记的地方(`present.js` 的 `data-knowbase-capture`)。
              documentElement: {dataset: {}}},
   location: {search: '', origin: 'http://127.0.0.1'},
-  navigator: {clipboard: {writeText: async () => {}}},
-  toast: () => {}, confirmBox: async () => false,
+  navigator: {clipboard: {writeText: () => new Promise((ok, no) => { clipboardGate = {ok, no}; })}},
+  toast: text => { toasts.push(text); }, confirmBox: async () => false,
+  MutationObserver: FakeObserver,
   setTimeout(callback) { const id = nextTimer++; timers.set(id, callback); return id; },
   clearTimeout(id) { timers.delete(id); },
   apiResponse: async reply => reply,
@@ -160,6 +177,33 @@ assert.equal(element('cap-ext-path').textContent, '/repo/ext', '答回来了就�
 holdSetup = false;
 mark.knowbaseCapture = '1.2.0';
 
+// ⑤c 抽屉**开着的时候**配对完成:引导要自己收起来。配对是在另一个窗口(扩展弹窗)
+//     里做的 —— 不盯着那个标记的话,他回到这一页看到的还是整块摊开的引导,刚做完的
+//     事在界面上没有任何回应,得关掉再打开才看得出来。反过来一边同样钉上(密钥被清
+//     掉、改了服务地址),那时引导必须自己回到顶上。
+async function markChanged(value) {
+  if (value === null) delete mark.knowbaseCapture; else mark.knowbaseCapture = value;
+  for (const one of [...watching]) one.callback([], one);
+  await settle();
+}
+context.window.closeCaptureDrawer();
+await markChanged(null);
+context.window.openCaptureDrawer('k1');
+await settle();
+assert.match(element('cap-setup-slot').innerHTML, /cap-setup/);
+await markChanged('1.2.0');
+assert.match(element('cap-setup-folded').innerHTML, /<details/, '开着的时候配好了就该自己收起来');
+assert.equal(element('cap-setup-slot').innerHTML, '', '顶上那一大块要让出来');
+await markChanged(null);
+assert.match(element('cap-setup-slot').innerHTML, /cap-setup/, '反过来一边:配不上了要自己回到顶上');
+
+// ⑤d 关掉之后要断开。不断的话这个已经没了的抽屉还会在每次标记变化时跑一遍
+//     `renderSetup`(白打一次 `/setup`,再往早就 remove 掉的那套 DOM 里写),开过几次
+//     就是几个。
+context.window.closeCaptureDrawer();
+assert.equal(watching.size, 0, '关掉抽屉要把标记那个观察器一起断开');
+mark.knowbaseCapture = '1.2.0';
+
 // ⑥ **关掉抽屉时正有一个写动作在途**:它回来之后不许把轮询重新排起来。
 //    `stopCapture()` 作废得了在途的那次 `refresh`,作废不了「发起 / 取消 / 改址 /
 //    继续处理」这些写动作的后半段 —— 它们 `await` 完回来还要自己 `refresh()` 一次,
@@ -198,5 +242,44 @@ await settle();
 await settle();
 assert.equal(element('cap-message').textContent, clean,
   '上一篇那次发起的迟到错误不许写到这一篇头上');
+
+// ⑧ 复制路径 / 复制密钥那两处的迟到反馈同理。剪贴板那一问可以迟迟不决(权限弹窗、
+//    系统忙),人这时关掉抽屉、打开下一篇,旧的那句「已复制」就冒在新抽屉上;失败
+//    那一支更进一步 —— 它还会 `select()` 一个早就 remove 掉的输入框,而屏幕上那句
+//    「请复制选中的配对密钥」指着一处什么都没选中的地方。
+context.window.closeCaptureDrawer();
+context.window.openCaptureDrawer('k1');
+await settle();
+element('cap-copy-path').click();
+await settle();
+context.window.closeCaptureDrawer();
+current = 'k2';
+context.window.openCaptureDrawer('k2');
+await settle();
+toasts.length = 0;
+clipboardGate.ok();
+await settle();
+assert.deepEqual(toasts, [], '上一个抽屉那次复制的迟到回答不许冒在这一篇上');
+
+// 失败那一支单独钉一次:它和成功那一支是两条分支,只守住一条的话另一条照旧会写。
+element('cap-copy-key').click();
+await settle();
+context.window.closeCaptureDrawer();
+current = 'k1';
+context.window.openCaptureDrawer('k1');
+await settle();
+toasts.length = 0;
+clipboardGate.no(new Error('剪贴板被拒'));
+await settle();
+assert.deepEqual(toasts, [], '迟到的复制失败同理');
+
+// 反过来钉一边:抽屉还开着时那句话照旧要出来 —— 否则上面两条在「反馈整个没了」
+// 的时候同样全绿。
+element('cap-copy-path').click();
+await settle();
+toasts.length = 0;
+clipboardGate.ok();
+await settle();
+assert.equal(toasts.length, 1, '抽屉还开着时「已复制」照旧要说一句');
 
 console.log('capture drawer shell: passed');

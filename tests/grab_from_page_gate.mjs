@@ -8,8 +8,10 @@
  * 文字」真的把 `selection` 交给 `extract.js`,也照样直接收录;⑥收下之后刷新失败
  * 不许报成提交失败;⑦正文已齐的那一页一颗按钮都不给;⑧**有待办指着别的地址时有几条
  * 就摆几条**(站点按浏览器语言跳转那一类,只说一句「不在库里」会让人收录出第二行同一
- * 篇文章),逐行那颗「改用它」交的是这一页的地址和**那一行**的条目;⑨配对密钥用一次
- * 不依赖当前标签的调用验;⑩结构上不许按失败文案分流,预览那一支也不许回来。
+ * 篇文章),逐行那颗「改用它」交的是这一页的地址和**那一行**的条目,**而他点中的那个
+ * 身份要带进后面每一问**(丢了就会被按创建时间代选成另一篇),服务端说不出是哪一篇时
+ * 一颗采集按钮都不给;⑨配对密钥用一次不依赖当前标签的调用验;⑩结构上不许按失败文案
+ * 分流,预览那一支也不许回来。
  * 硬约束见 docs/decisions/link-grab.md 与 browser-capture.md。
  */
 import assert from 'node:assert/strict';
@@ -53,6 +55,8 @@ const context = vm.createContext({
     if (path === '/api/browser-capture/here') return hereReply || {status: 200, data: here};
     if (path === '/api/browser-capture/here/adopt') return {status: 200, data: {ok: true, id: 'i9'}};
     if (path.endsWith('/pending')) return pendingReply || {status: 200, data: {intents: []}};
+    if (path === '/api/browser-capture/precheck') return {status: 200, data: {ok: true, characters: 1200}};
+    if (path === '/api/browser-capture/upload') return {status: 200, data: {ok: true, detail: '正文已补入原条目'}};
     if (path === '/api/grab/from-page/precheck') return {status: 200, data: {ok: true, title: '服务端定的标题', characters: 880}};
     if (path === '/api/grab/from-page') return {status: 200, data: {ok: true, detail: '已收下，正在写入知识库'}};
     if (path === '/api/grab') return grabReply;
@@ -68,7 +72,9 @@ await new Promise(resolve => setImmediate(resolve));
 // ① 不在库里:主按钮写「采集」,兜底两颗还藏着,那句话是服务端那一份
 assert.ok(calls.some(c => c.path === '/api/browser-capture/here' && c.method === 'POST'),
   '该一问一答地问服务端这一页是什么情形');
-assert.deepEqual(calls.find(c => c.path === '/api/browser-capture/here').sent, {url: PAGE});
+// 还没点过任何候选,所以身份那一栏是空的 —— 下面 ⑧ 钉的是点过之后它必须跟着走。
+assert.deepEqual(calls.find(c => c.path === '/api/browser-capture/here').sent,
+  {url: PAGE, intent_id: ''});
 assert.equal(element('here-actions').hidden, false);
 assert.equal(element('act').textContent, '采集');
 assert.equal(element('here-state').textContent, here.detail, '那句话原样显示,不自己另编');
@@ -177,6 +183,50 @@ const adopted = calls.find(c => c.path === '/api/browser-capture/here/adopt');
 assert.ok(adopted, '「改用它」该走 adopt');
 assert.deepEqual(adopted.sent, {key: 'k8', page_url: PAGE},
   '交的是点中那一行的条目,和这一页的地址');
+
+// 点完那一下之后的**每一问**都要带着他选中的那个身份。丢掉它的后果实测过:服务端
+// 只收到一个网址,于是在同页那几个待办里按创建时间代选了最早那个 —— 「采集」把这一
+// 页的正文写进了另一篇(前者 content_rev 0→1、正文是后者的,后者仍然缺正文)。
+assert.equal(calls.filter(c => c.path === '/api/browser-capture/here').at(-1).sent.intent_id,
+  'i9', 'adopt 交回的身份要带进下一问');
+calls.length = 0;
+await element('refresh').click();
+assert.equal(calls.at(-1).sent.intent_id, 'i9', '「重新确认」那一下也不许把他的选择抹掉');
+
+// 接着真走一遍采集:**写进去用的必须是他点中的那个待办**。这是客户端这一侧的端到端
+// 判据 —— 上面那两条只证明身份发出去了,这一条才证明它一直走到了写入那一步。
+here = {ok: true, situation: 'fill', detail: '知识库里有这一条，但正文还缺着。', page_url: PAGE,
+        item: {key: 'k8', kind: 'rss', title: '另一篇', url: PAGE},
+        intent: {id: 'i9', key: 'k8', title: '另一篇', page_url: PAGE}, elsewhere: []};
+calls.length = 0;
+await element('refresh').click();
+await element('act').click();
+assert.equal(calls.find(c => c.path === '/api/browser-capture/upload').sent.intent_id, 'i9',
+  '写进去用的是他点中那个待办');
+for (const one of calls.filter(c => c.path === '/api/browser-capture/precheck'))
+  assert.equal(one.sent.intent_id, 'i9', '两次预检也都用它');
+// 用掉之后要把身份放掉:再指名一个已经用掉的待办会被答成「选不出来」,而人此刻只想
+// 看见刚写进去那张回执。
+assert.equal(calls.filter(c => c.path === '/api/browser-capture/here').at(-1).sent.intent_id, '',
+  '用掉之后不该再指名它');
+
+// 服务端说不出这一页是哪一篇(同页两个条目都在等、他还没点):**一颗采集按钮都不给**。
+// 给了就是让他按一下赌一把,而赌错是正文被另一篇覆盖、不可恢复;出路全在候选列表里。
+here = {ok: true, situation: 'undecided', page_url: PAGE, item: null, intent: null,
+        detail: '有 2 个条目都在等这一页的正文，点一下你要补的那一篇。',
+        elsewhere: [{id: 'i1', key: 'k7', title: '那一篇', page_url: PAGE},
+                    {id: 'i2', key: 'k8', title: '另一篇', page_url: PAGE}]};
+await element('refresh').click();
+assert.equal(element('here-actions').hidden, true, '这一档不许摆采集按钮');
+assert.match(element('here-state').textContent, /点一下你要补的那一篇/, '原样显示服务端那句话');
+assert.equal(element('elsewhere-list').children.length, 2, '候选是唯一的出路,必须摆出来');
+// 藏起来不等于按不到(程序化点击、辅助技术)。这一档按下去**一个请求都不许发** ——
+// 落进 `absent` 那一支的话,它会拿 `/api/grab` 把同一篇收成第二行。
+calls.length = 0;
+await element('act').click();
+await element('act-page').click();
+await element('act-selection').click();
+assert.deepEqual(calls, [], '这一档的按钮按下去不许做任何事');
 
 // ⑧ 反过来钉一边:没有这种待办时那一块不露面
 here = {...here, elsewhere: []};

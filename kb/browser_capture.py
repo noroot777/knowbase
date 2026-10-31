@@ -277,7 +277,7 @@ def _page_aliases(raw: str) -> list[str]:
 _OWED = f"({fulltext._eligible()} AND fulltext_at='')"
 
 
-def here(url: str) -> dict:
+def here(url: str, intent_id: str = '') -> dict:
     """人**正站在哪一页** → 这一页此刻能做什么。一问一答。
 
     **这条路存在的理由是把决定搬到人所在的地方。** 原先补一篇正文要跨三个界面
@@ -305,11 +305,20 @@ def here(url: str) -> dict:
     点过「重新采集正文」并发起,答的是 `complete`、`intent=null`,弹窗一颗按钮都
     不给 —— 而撤掉预览之后,那正是唯一的事后纠错出口。
 
-    `elsewhere` 交回的是**等着的、但指着另一页的那些待办**。这一项是承重的:站点
-    按浏览器语言跳转时(`openai.com/index/x` → `/zh-Hans-CN/index/x`),人从采集抽屉
-    发起的待办指着前者、浏览器停在后者,按网址一问「这一页不在库里」—— 要是只凭
-    这一句就请他收录,库里立刻多出一行同一篇文章。把那个待办摆在他眼前、给一颗
-    「改用这一页的地址」,他一眼就看出是同一篇。
+    **人点过「这一页就是这一篇」的话,那一下就是答案,不许再按别的规则重判一次。**
+    `intent_id` 就是那一下的身份(`/here/adopt` 把待办交回扩展,扩展带着它再问)。
+    **选不出来就不代选**(`undecided`,不带 `intent`,扩展于是一颗采集按钮都不给):
+    同一页上不止一个条目在等而人没点过,或者他点的那个已经失效而别的还在等。
+    准入那几道门证明的是「这一条写得了」,**证明不了「人刚才选的就是这一条」**。
+    丢掉身份、或者按创建时间代选的实测后果(正文写进另一篇、不可恢复)见
+    `docs/decisions/browser-capture.md`。
+
+    `elsewhere` 交回的是**除这一答用掉的那个之外、还等着的所有待办**(指着别页的,
+    和同一页上没被选中的)。这一项是承重的:站点按浏览器语言跳转时
+    (`openai.com/index/x` → `/zh-Hans-CN/index/x`),人从采集抽屉发起的待办指着前者、
+    浏览器停在后者,按网址一问「这一页不在库里」—— 要是只凭这一句就请他收录,库里
+    立刻多出一行同一篇文章。把那些待办摆在他眼前、各给一颗「改用这一页的地址」,
+    他一眼就看出是同一篇;而 `undecided` 那一档全靠它把候选交出去。
     """
     page = page_url(url)
     columns = ('SELECT feed_items.*, EXISTS (SELECT 1 FROM feed_item_exclusions'
@@ -322,43 +331,57 @@ def here(url: str) -> dict:
         # 把一个已经作废的待办当成「人明确发起过」来兑现。
         bound = sorted((one for one in _pending() if one['page_url'] == page),
                        key=lambda one: one['created_at'])
+
+        def answered(situation: str, detail: str,
+                     item: dict | None = None, intent: dict | None = None) -> dict:
+            # **`elsewhere` 一律在最后算。** 下面那个 `_create` 会把同一条目上
+            # 指着别处的旧待办标成 `superseded`,先算就会把刚被顶掉的那个摆出来、
+            # 请人「改用这一页的地址」,而它已经作废了。
+            #
+            # 排掉的只有**这一答用的那一个**:同一页上另一个条目的待办必须摆出来 ——
+            # `undecided` 那一档就是靠它把候选交出去的,而人正要在里头点一下。
+            return dict(ok=True, page_url=page, situation=situation, detail=detail,
+                        item=public(item) if item else None, intent=intent,
+                        elsewhere=[other for other in _pending()
+                                   if other['id'] != (intent['id'] if intent else None)])
+
+        # 人点过的那一下优先,而且是**唯一**的依据。
+        picked = next((one for one in bound if one['id'] == intent_id), None) if intent_id else None
+        if not picked:
+            # 他点过、那个却已经失效了(过期 / 被顶掉 / 条目变了),而这一页上还有别的
+            # 在等 —— 让另一个顶上就是拿别人的正文覆盖这一篇。宁可请他重新点一下。
+            undecided = bool(bound) if intent_id else len({one['key'] for one in bound}) > 1
+            if undecided:
+                return answered('undecided',
+                                '你选的那个采集请求已经失效了，在下面重新点一下要补的那一篇。'
+                                if intent_id else
+                                f'有 {len(bound)} 个条目都在等这一页的正文，'
+                                '点一下你要补的那一篇。')
+            picked = bound[0] if bound else None
+
         with reg.db() as conn:
-            if bound:
-                row = conn.execute(columns + ' WHERE key=?', (bound[0]['key'],)).fetchone()
+            if picked:
+                row = conn.execute(columns + ' WHERE key=?', (picked['key'],)).fetchone()
             else:
                 aliases = _page_aliases(url)
                 slots = ','.join('?' for name in aliases)
                 row = conn.execute(columns + f' WHERE url IN ({slots})'
                                    ' ORDER BY rowid LIMIT 1', aliases).fetchone()
-        def answered(situation: str, detail: str, intent: dict | None = None) -> dict:
-            # **`elsewhere` 一律在最后算。** 下面那个 `_create` 会把同一条目上
-            # 指着别处的旧待办标成 `superseded`,先算就会把刚被顶掉的那个摆出来、
-            # 请人「改用这一页的地址」,而它已经作废了。
-            #
-            # 排掉的是**这一答用的那一个**,不是「所有指着这一页的」:两个不同条目
-            # 的待办同时指着这一页时(人把地址粘错了),上面只认了最早那个,另一个
-            # 必须摆出来 —— 否则这一页到底算哪一篇,人在界面上无从改。
-            picked = intent['id'] if intent else None
-            return dict(ok=True, page_url=page, situation=situation, detail=detail,
-                        item=public(item) if item else None, intent=intent,
-                        elsewhere=[other for other in _pending()
-                                   if other['page_url'] != page or other['id'] != picked])
-
         item = dict(row) if row else None
         if not item:
             return answered('absent', '这一页还不在知识库里。')
         try:
             _checked_target(item)
         except (LookupError, ValueError) as why:
-            return answered('refused', str(why))
-        if bound:
+            return answered('refused', str(why), item)
+        if picked:
             # 人明确发起过:照它答,**不再按「正文欠不欠」重判一次**。正文已经齐了
             # 的那一条正是「重新采集正文」会走到的形态,按 owed 降级成「齐了,没有
             # 可做的事」就把那条出路堵死了。准入一道没少:这个待办要能走到这里,
             # 上面 `_pending()` 的 `writable` 已经过了来源、排除和 CAS。
             return answered('fill', '知识库里有这一条，但正文还缺着。' if item['owed']
                             else '你为这一条发起过重新采集，这一页就是它指的那一篇。',
-                            bound[0])
+                            item, picked)
         if not item['owed']:
             # 「在 `feed_items` 里有这一行」和「知识库里搜得到它」是两件事:导出、
             # 索引那半条链占不到管道、或者在保存之后服务重启,都会留下一条「在库
@@ -367,9 +390,8 @@ def here(url: str) -> dict:
             # 迟早把「文件不见了」说成「还在排队」。
             owed = grab_owing(item['url'])
             return answered('complete', '这一条已经在知识库里，正文也齐了。'
-                            + (f'不过{owed}。' if owed else ''))
-        intent = _create(item, page)
-        return answered('fill', '知识库里有这一条，但正文还缺着。', intent)
+                            + (f'不过{owed}。' if owed else ''), item)
+        return answered('fill', '知识库里有这一条，但正文还缺着。', item, _create(item, page))
 
 
 def _prune() -> None:

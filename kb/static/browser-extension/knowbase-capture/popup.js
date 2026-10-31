@@ -9,6 +9,14 @@
   //: 下拉框,要人把服务端已经知道的事再回答一遍。
   let here = null;
   let situation = null;
+  //: **人点过「这一页就是这一篇」之后,那一下的身份要留在这儿。** 丢掉它的后果实测
+  //: 过:两个条目填了同一个最终网址,点了后一篇那行的「改用它」、界面也说「已改用」,
+  //: 可下一问只按网址发出去,服务端在同页那几个待办里按创建时间代选了最早那个 ——
+  //: 于是「采集」把**后一篇的正文写进了前一篇**,而后一篇仍然缺正文。
+  //:
+  //: 所以它是模块级的,不是 `adoptHere` 里的一个局部变量:人点一下「重新确认」也要
+  //: 带着它去问,否则那一下就把他的选择抹掉了。
+  let chosen = '';
 
   function status(message, error = false) {
     element('status').textContent = message;
@@ -85,8 +93,18 @@
     absent: {act: '采集', selection: '改用所选文字', selectionAtFirst: false},
     fill: {act: '采集', selection: '改用所选文字', selectionAtFirst: true},
     complete: null,
+    //: `undecided` = 同一页上不止一个条目在等、而服务端不肯替人代选。**一颗采集按钮
+    //: 都不给**:这一档没有「哪一篇」这个答案,给了就是让他按一下赌一把,而赌错是
+    //: 正文被另一篇覆盖。出路在下面那张候选列表里,点哪一行就是选哪一篇。
+    undecided: null,
     refused: null,
   };
+
+  //: **「这一档有没有主动作」只由 `PLANS` 答一处。** 按钮藏起来了不等于按不到
+  //: (程序化点击、辅助技术、以后某次改动忘了藏),而 `complete` / `refused` /
+  //: `undecided` 这三档按下去会落进 `absent` 那一支 —— 那是拿 `/api/grab` 把同一篇
+  //: 收成第二行,正是候选列表存在要防的事。
+  const actionable = () => !!(situation && PLANS[situation.situation]);
 
   // 人点开扩展最先想知道的事:**这一页此刻能做什么。** 一问一答 ——
   // 原先是「问 grab 这一页在不在库里」加一个「补回哪个待办」的下拉框,两份口径
@@ -103,7 +121,8 @@
       return;
     }
     element('here-url').textContent = plainUrl(here.url);
-    situation = await api('/here', {method: 'POST', body: JSON.stringify({url: here.url})});
+    situation = await api('/here', {method: 'POST',
+                                    body: JSON.stringify({url: here.url, intent_id: chosen})});
     renderSituation();
     // 这一行**清空**:标题那一行就是服务端对这一页的答复,再在下面补一句「已连接」
     // 只是噪声(界面底线:让布局本身解释界面,不加次级描述)。`#status` 留给动作
@@ -207,6 +226,9 @@
       const verified = await api('/precheck', {method: 'POST', body: JSON.stringify(
         {intent_id: intent.id, page_url: captured.page_url, body: captured.body, method: mode})});
       const result = await api('/upload', {method: 'POST', body: JSON.stringify({...captured, intent_id: intent.id})});
+      // 这一个待办已经用掉了,下一问不该再指名它(指名一个用掉的会被答成
+      // `undecided`,而人此刻只想看见刚写进去那张回执)。
+      chosen = '';
       // 已经写进去了。这一问失败只是「状态没刷新」,不该让人以为正文没保存。
       try { await loadHere(); } catch { /* 下面照旧报服务端那句话 */ }
       status(`${captured.title}：${result.detail}（${verified.characters} 字符）`);
@@ -224,7 +246,7 @@
   // - `absent`(不在库里)→ 先让服务端自己去抓(走完整的八道准入,还能取到标题、
   //   作者、日期),抓不到才轮到下面那两颗兜底。
   element('act').addEventListener('click', async () => {
-    if (busy || !situation) return;
+    if (busy || !actionable()) return;
     if (situation.situation === 'fill') return read('article');
     // 下面是 `absent` 那一档。**不在这里判是为什么抓不到**:无论登录墙、关卡
     // 还是脚本渲染,人的下一步都一样,而他正看着这一页。
@@ -248,11 +270,11 @@
     finally { setBusy(false); }
   });
 
-  element('act-page').addEventListener('click', () => collect('article'));
+  element('act-page').addEventListener('click', () => actionable() && collect('article'));
   // 这一颗在两档里都有,各归各家:`fill` 走补回原条目(`/upload`),`absent` 走
   // 收录成新条目(`/from-page`)。**判据仍在服务端** —— 这里只是按它那一答选路。
   element('act-selection').addEventListener('click', () =>
-    (situation && situation.situation === 'fill' ? read : collect)('selection'));
+    actionable() && (situation.situation === 'fill' ? read : collect)('selection'));
 
   // 用这一页的正文收录。和补正文那条路同一套:先问服务端(不通过就一个字都不读
   // 第二遍)、字数用服务端那一份、读完直接收录。
@@ -278,7 +300,11 @@
     if (busy || !here) return;
     setBusy(true);
     try {
-      await api('/here/adopt', {method: 'POST', body: JSON.stringify({key, page_url: here.url})});
+      // **接住交回来的那个待办。** 它就是「他选了哪一篇」的身份凭证;扔掉它、转头
+      // 只按网址再问一次,服务端就只能在同页那几个待办里代选 —— 见 `chosen` 那段。
+      const adopted = await api('/here/adopt', {method: 'POST',
+                                                body: JSON.stringify({key, page_url: here.url})});
+      chosen = adopted.id;
       await loadHere();
       status('已改用这一页的地址。');
     } catch (error) { status(error.message, true); }

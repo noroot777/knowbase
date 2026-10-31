@@ -1,7 +1,7 @@
 """「我站着这一页,此刻能做什么」——  扩展开起来那一问(`POST /api/browser-capture/here`)。
 
-服务端答四档(`fill` / `absent` / `complete` / `refused`)连同那句给人看的话,扩展
-一个字都不自己编。硬约束见 `docs/decisions/browser-capture.md`;这一组从
+服务端答五档(`fill` / `absent` / `complete` / `refused` / `undecided`)连同那句给人看
+的话,扩展一个字都不自己编。硬约束见 `docs/decisions/browser-capture.md`;这一组从
 `test_browser_capture.py` 拆出来,共用的脚手架在 `browser_capture_case.py`。
 """
 
@@ -174,19 +174,81 @@ class CaptureHereTests(CaptureCase):
         self.assertIn('重新采集', state['detail'], '话要说清这是哪一件事,别写成「正文还缺着」')
         self.assertEqual(200, self.precheck(state['intent'], body=BODY).status_code)
 
-    def test_two_requests_on_the_same_page_leave_the_second_one_reachable(self):
-        """两个不同条目的待办同时指着这一页:认最早那个,**另一个必须还摆得出来**。
+    def test_the_item_a_person_picked_is_the_item_that_gets_written(self):
+        """**人点中的那一篇就是写进去的那一篇** —— 从「改用它」一路钉到库里哪一行变了。
 
-        人把最终网址粘错时就是这个形态。只认一个而把另一个连同 `elsewhere` 一起
-        吞掉的话,这一页到底算哪一篇在界面上**无从改** —— 而写进去是不可逆的。
+        两个条目填了同一个最终网址(人把网址粘错,或者两篇真共用一个跳转页)。实测过
+        的事故:点了后一篇那行的「改用它」、界面也说「已改用」,可下一问只按网址发出
+        去,服务端在同页那几个待办里**按创建时间代选了最早那个** —— 于是「采集」把后
+        一篇的正文写进了前一篇(前者 `content_rev` 0→1、正文是后者的,后者仍然缺正文)。
+        准入那几道门一道没拦住:它们证明「这一条写得了」,**证明不了「人刚才选的就是
+        这一条」**。
+
+        所以判据落在整条链上,不是某一环的标志位:`/here/adopt` 交回身份 → `/here` 带着
+        它问 → 那一答里的 `intent` → `precheck` / `upload` → **库里哪一行变了**。
         """
+        page = 'https://e.org/shared'
+        later = self.put(url='https://e.org/post-two')
+        earlier = self.intent(page_url=page)
+        self.intent(page_url=page, key=later)
+        untouched = self.row(self.key)
+        adopted = self.here(path='/here/adopt', payload={'key': later, 'page_url': page}).json()
+
+        state = self.here(payload={'url': page, 'intent_id': adopted['id']}).json()
+        self.assertEqual('fill', state['situation'])
+        # **先断后果**:拿这一答给的那个待办照常走完,然后看库里哪一行变了。代选回来
+        # 时这里就是红的 —— 而先问「答的是哪一篇」的话,红会停在那一句上,落库这一步
+        # 根本走不到,等于只验了过程。
+        self.assertEqual(200, self.precheck(state['intent'], body=BODY, page_url=page).status_code)
+        saved = self.upload(state['intent'], page_url=page)
+        self.assertEqual(200, saved.status_code, saved.text)
+        self.assertEqual(BODY, self.row(later)['body'], '正文要落在人点中的那一行上')
+        self.assertEqual(untouched['body'], self.row(self.key)['body'], '另一条一个字都不许动')
+        self.assertEqual(untouched['content_rev'], self.row(self.key)['content_rev'])
+        # 诊断用:上面红了的时候这两句说清是哪一环把身份换掉的。
+        self.assertEqual(later, state['item']['key'], '答的是人点中那一篇,不是最早那个待办')
+        self.assertNotEqual(earlier['id'], state['intent']['id'])
+
+    def test_the_same_page_wanted_by_two_items_is_not_decided_by_sort_order(self):
+        """同一页上两个条目都在等、而人没点过:**不代选**,把候选交出去让他点。
+
+        按创建时间挑一个是在赌,赌错那一下是正文被另一篇覆盖、**不可恢复**;而问一句
+        的代价只是他在列表里点一下。**反过来钉一边**:只有一个在等时照旧直接答
+        `fill` —— 这道闸不许把正常那一条也扣住。
+        """
+        page = 'https://e.org/shared'
         other = self.put(url='https://e.org/post-two')
-        first = self.intent(page_url='https://e.org/shared')
-        second = self.intent(page_url='https://e.org/shared', key=other)
-        state = self.here('https://e.org/shared').json()
-        self.assertEqual(first['id'], state['intent']['id'], '认最早发起的那一个')
-        self.assertEqual([second['id']], [one['id'] for one in state['elsewhere']],
-                         '另一个要摆在人眼前,他才改得了')
+        alone = self.intent(page_url=page)
+        state = self.here(page).json()
+        self.assertEqual('fill', state['situation'], '只有一个在等就别问')
+        self.assertEqual(alone['id'], state['intent']['id'])
+
+        second = self.intent(page_url=page, key=other)
+        state = self.here(page).json()
+        self.assertEqual('undecided', state['situation'])
+        self.assertIsNone(state['intent'], '这一档不许带着一个代选出来的待办')
+        self.assertIsNone(state['item'])
+        self.assertEqual({alone['id'], second['id']},
+                         {one['id'] for one in state['elsewhere']}, '两个都要摆出来,他才点得到')
+
+    def test_a_pick_that_went_stale_does_not_quietly_hand_over_another_item(self):
+        """人点过的那个失效了(过期 / 被顶掉 / 条目变了),而这一页上还有别的在等。
+
+        让另一个顶上就是拿这一页的正文覆盖另一篇,所以这里**也不代选**。宁可多问
+        一次:误问的代价是一次点击,漏判的代价是写错一篇、不可恢复。
+        """
+        page = 'https://e.org/shared'
+        other = self.put(url='https://e.org/post-two')
+        mine = self.intent(page_url=page)
+        adopted = self.here(path='/here/adopt', payload={'key': other, 'page_url': page}).json()
+        self.assertEqual(200, self.client.delete(
+            '/api/browser-capture/intents/' + adopted['id']).status_code)
+
+        state = self.here(payload={'url': page, 'intent_id': adopted['id']}).json()
+        self.assertEqual('undecided', state['situation'])
+        self.assertIsNone(state['intent'])
+        self.assertEqual([mine['id']], [one['id'] for one in state['elsewhere']],
+                         '剩下那个照旧摆出来,但不许自己顶上')
 
     def test_a_bound_request_does_not_bypass_a_single_admission_check(self):
         """**先兑现**不等于**放行**:待办指着这一页,但条目这期间被排除了。

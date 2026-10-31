@@ -156,6 +156,10 @@ def extension_pending():
 class HereRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     url: str = Field(min_length=1, max_length=4096)
+    #: 人点过「这一页就是这一篇」之后带回来的那一下(`/here/adopt` 交回的待办 id)。
+    #: **这不是个可选的优化** —— 丢掉它,下一问就只能按创建时间在同页的几个待办里
+    #: 代选,而选错那一下是把这一页的正文写进另一篇(见 `capture.here`)。
+    intent_id: str = Field(default='', max_length=100)
 
 
 @router.post('/api/browser-capture/here', dependencies=[Depends(extension_access)])
@@ -167,8 +171,12 @@ def here(body: HereRequest):
 
     **POST 而不是 GET**,因为正文还欠着的那一档它会顺手把待办建好(`create`
     幂等,同一(条目, 页面)上已有 pending 就复用)。扩展因此不必先去采集抽屉。
+
+    带上 `intent_id` 就是「我已经点过要哪一篇了」。**这一问到 `precheck` / `upload`
+    之间,那个身份要一路不掉** —— 中间任何一次按别的规则重选,写进去的就可能是另
+    一篇,而那不可恢复。
     """
-    return invoke(capture.here, body.url)
+    return invoke(capture.here, body.url, body.intent_id)
 
 
 @router.post('/api/browser-capture/here/adopt', dependencies=[Depends(extension_access)])
@@ -179,8 +187,12 @@ def adopt_here(body: IntentRequest):
     顶掉,不是先取消再发起),只是把它搬到了人所在的地方 —— 站点按浏览器语言跳转
     那一类里,人手上拿着的恰恰就是对的地址。
 
-    **记住:这不是放行。** 改用要人点,正文照旧要过 `_admit_*` 全套、照旧要人核
-    对预览勾确认,所以「扩展不会用另一篇文章静默覆盖」一个字都没松。
+    **记住:这不是放行。** 改用要人点,正文照旧要过 `_admit_*` 全套,所以「扩展不会
+    用另一篇文章静默覆盖」一个字都没松。
+
+    **交回的那个待办就是「他选了哪一篇」的身份凭证,调用方必须接住。** 扩展扔掉它、
+    转头只按网址再问一次的后果实测过:下一问在同页的几个待办里按创建时间代选,
+    于是「采集」把这一页的正文写进了另一篇。
     """
     return invoke(capture.create, body.key, body.page_url)
 

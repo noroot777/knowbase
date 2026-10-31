@@ -49,6 +49,8 @@ const context = vm.createContext({
   location: {search: '?item=fixture', origin: 'http://127.0.0.1'},
   navigator: {clipboard: {writeText: async () => { throw new Error('Permission denied'); }}},
   toast: (text, options) => notices.push({text, options}),
+  //: 这一条不碰首次引导,所以观察器只要存在就行(抽屉 `build()` 会挂一个)。
+  MutationObserver: class { observe() {} disconnect() {} },
   confirmBox: () => new Promise(resolve => { resolveConfirmation = resolve; }),
   setTimeout(callback) { scheduled = callback; return 1; }, clearTimeout() {},
   apiResponse: async response => response,

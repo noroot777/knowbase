@@ -15,6 +15,7 @@
   'use strict';
   let drawer = null;
   let mask = null;
+  let watcher = null;
   //: 和状态机那边同一个办法:每次打开是新的一代。外壳这边的异步续体是读扩展目录
   //: 那一问和「显示 / 复制配对密钥」—— 它们回来时只问「现在有没有抽屉」是不够的,
   //: 关掉再打开之后那是**另一个**抽屉,旧续体会往新抽屉里写。
@@ -107,6 +108,13 @@
     drawer.innerHTML = TEMPLATE;
     drawer.querySelector('.cap-close').addEventListener('click', closeCaptureDrawer);
     document.body.append(mask, drawer);
+    //: **配对是在另一个窗口里完成的**(扩展弹窗),而这一块引导的位置正按它摆。不盯着
+    //: 那个标记的话,人配完回到这一页,引导还整块摊在顶上 —— 他刚做完的事在界面上
+    //: 没有任何回应,得关掉再打开才看得出来。反过来一边同理(密钥被清掉、改了服务
+    //: 地址),那时引导必须自己回到顶上。
+    watcher = new MutationObserver(renderSetup);
+    watcher.observe(document.documentElement,
+                    {attributes: true, attributeFilter: ['data-knowbase-capture']});
   }
 
   //: **「这个浏览器里装了扩展、而且配过」** —— 只有扩展自己知道,所以它在回环地址
@@ -155,9 +163,11 @@
       const value = document.getElementById('cap-ext-path').textContent;
       try {
         await navigator.clipboard.writeText(value);
-        toast('路径已复制，在扩展管理页「加载已解压的扩展程序」里粘贴。', {type: 'ok', key: 'cap-path'});
+        // 剪贴板那一问可以迟迟不决(权限弹窗、系统忙)。人这时关掉抽屉、打开下一篇,
+        // 这句迟到的提示就落在了下一篇头上 —— 和写动作同一道闸。
+        if (current(gen)) toast('路径已复制，在扩展管理页「加载已解压的扩展程序」里粘贴。', {type: 'ok', key: 'cap-path'});
       } catch {
-        toast('无法自动复制，请手动选中上面那行路径。', {type: 'info', key: 'cap-path'});
+        if (current(gen)) toast('无法自动复制，请手动选中上面那行路径。', {type: 'info', key: 'cap-path'});
       }
     });
     const pair = document.getElementById('cap-pair');
@@ -178,8 +188,11 @@
       const field = document.getElementById('cap-pairing-key');
       try {
         await navigator.clipboard.writeText(field.value);
-        toast('密钥已复制，只粘贴到你安装的 Knowbase 扩展中。', {type: 'ok', key: 'cap-copy'});
+        if (current(gen)) toast('密钥已复制，只粘贴到你安装的 Knowbase 扩展中。', {type: 'ok', key: 'cap-copy'});
       } catch {
+        // 同上。失败这一支还会**动 DOM**:迟到之后 `select()` 选的是早就 remove 掉的
+        // 那个输入框,而屏幕上那句「请复制选中的配对密钥」指着一处什么都没选中的地方。
+        if (!current(gen)) return;
         field.type = 'text';
         field.select();
         toast('无法自动复制，请复制选中的配对密钥。', {type: 'info', detail: '按 Cmd-C（Windows 为 Ctrl-C）复制已选中的文字。', key: 'cap-copy'});
@@ -205,6 +218,11 @@
   function closeCaptureDrawer() {
     if (!drawer) return;
     generation += 1;
+    //: 跟轮询一样要停:底下那一页还活着,不断开的话这个已经没了的抽屉还会在每次
+    //: 标记变化时跑一遍 `renderSetup`(白打一次 `/setup`,再往早就 remove 掉的那套
+    //: DOM 里写),开过几次就是几个。
+    watcher.disconnect();
+    watcher = null;
     window.stopCapture();
     mask.remove();
     drawer.remove();

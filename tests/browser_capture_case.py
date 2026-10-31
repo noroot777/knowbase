@@ -65,4 +65,3 @@ class CaptureCase(FullTextCase):
         return self.client.post('/api/browser-capture' + path,
                                 json=payload if payload is not None else {'url': url},
                                 headers=self.auth if auth else {})
-
