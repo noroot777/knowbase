@@ -19,12 +19,12 @@
 // `export-only-api.json`)。真正只对抓取有效的是**订阅名单和日期段**
 // (`FetchScope` 收它们,`materialize()` 压根不收),所以那两块单独禁、来源那块不禁。
 const PIPE_STAGE_DEFS = [
-  { k: 'crawl', name: '抓取内容', d: '从所选来源收集文章' },
-  { k: 'export', name: '导出文章', d: '保存到本地知识库' },
-  { k: 'index', name: '建立索引', d: '让新内容能被搜到' },
-  { k: 'extract', name: '提取要点', d: '模型读一遍，写摘要和标签', cost: 1 },
-  { k: 'projects', name: '整理工具', d: '把文章里提到的工具拆成图鉴条目', cost: 1, slow: 1 },
-  { k: 'wiki', name: '更新 Wiki', d: '双链、汇总页、三张关系图谱', cost: 1, slow: 1 },
+  { k: 'crawl', name: '抓取内容' },
+  { k: 'export', name: '导出文章' },
+  { k: 'index', name: '建立索引' },
+  { k: 'extract', name: '提取要点', cost: 1 },
+  { k: 'projects', name: '整理工具', cost: 1, slow: 1 },
+  { k: 'wiki', name: '更新 Wiki', cost: 1, slow: 1 },
 ];
 // 日报那一轮自己排的步骤(`daily_run.FETCH_STAGES` + `DIGEST_STAGES`)。这里是
 // **照着念给人看**,不是传给后端的参数 —— 真正跑哪几段由 `daily_run` 定。
@@ -106,8 +106,7 @@ function renderPipeStages() {
   const on = pipeStageList();
   $('pipe-stage-list').innerHTML = PIPE_STAGE_DEFS.map(s => `<label class="pipe-channel">
       <input type="checkbox" data-stage="${s.k}"${on.includes(s.k) ? ' checked' : ''}${daily ? ' disabled' : ''}>
-      <span><b>${s.name}${s.cost ? '<i class="pipe-chip">烧额度</i>' : ''}${s.slow ? '<i class="pipe-chip">几十分钟</i>' : ''}</b>
-      <small>${s.d}</small></span></label>`).join('');
+      <span><b>${s.name}${s.cost ? '<i class="pipe-chip">烧额度</i>' : ''}${s.slow ? '<i class="pipe-chip">几十分钟</i>' : ''}</b></span></label>`).join('');
   $('pipe-stage-count').textContent = `已选 ${on.length} / ${PIPE_STAGE_DEFS.length}`;
   $('pipe-stage-all').textContent = on.length === PIPE_STAGE_DEFS.length ? '清空选择' : '全选';
   $('pipe-stage-all').disabled = daily;

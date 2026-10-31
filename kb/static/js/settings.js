@@ -137,17 +137,24 @@ function stageOptions(st, providers) {
   return auto + html;
 }
 
-function stageNow(st) {
+// 选中的那个模型 id 选择框自己就写着(或者写着「跟随默认」),所以这一行只说它读不
+// 出来的东西:「跟随」时真正落到哪个模型、环境变量压过来的那个变量名、没配 key 那条
+// 红字,以及**只在真有歧义时**才说的供应商 —— 同一个 id 两家中转站都可能有(这正是
+// 下拉的 value 要带 provider 的原因,见 stageOptions),不重名时念一句「openai」只是
+// 在选择框旁边再摆一个词。全都没有可说的就整行不画(`.stage-now:empty`)。
+function stageNow(st, providers) {
   if (!st.model) {
     return `<div class="stage-now warn">没有可用模型:这步只能用 ${esc(st.providers.join('/'))},那家还没配 key</div>`;
   }
-  const note = st.source === 'config' ? '已指定'
-    : `跟随${STAGE_SRC_NOTE[st.source] || st.source}`
-      + (st.source === 'env' ? `(${esc(st.env)})` : '');
-  const warn = st.ready ? '' : ' warn';
-  const tail = st.ready ? '' : ' · 该供应商还没配 API key,这步会报错';
-  return `<div class="stage-now${warn}">当前:<b>${esc(st.model)}</b>`
-    + ` · ${esc(st.provider)} · ${note}${tail}</div>`;
+  const allow = st.providers.length ? st.providers : providers.map(p => p.key);
+  const sameId = providers.filter(p => allow.includes(p.key) && p.models.includes(st.model));
+  const parts = [];
+  if (st.source !== 'config') parts.push(`<b>${esc(st.model)}</b>`);
+  if (st.source !== 'config' || sameId.length > 1) parts.push(esc(st.provider));
+  if (st.source === 'env') parts.push(esc(st.env));
+  else if (st.source !== 'config') parts.push(esc(STAGE_SRC_NOTE[st.source] || st.source));
+  if (!st.ready) parts.push('该供应商还没配 API key,这步会报错');
+  return `<div class="stage-now${st.ready ? '' : ' warn'}">${parts.join(' · ')}</div>`;
 }
 
 // 推荐那行:后端按「档位」在当前实际可选的模型里挑出来的具体 id + 一句为什么。
@@ -181,7 +188,7 @@ function stageRow(st, providers) {
             title="${locked ? '环境变量已指定,选了也会被它压过' : ''}">
       ${stageOptions(st, providers)}
     </select>
-    ${stageNow(st)}
+    ${stageNow(st, providers)}
     ${stageRec(st)}
   </div>`;
 }

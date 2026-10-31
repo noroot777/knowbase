@@ -11,7 +11,7 @@
 // 计划的跳过名单念到这一轮头上。
 const PIPE_FLOW_GROUPS = [['ingest', '入库处理', ['index', 'extract']],
   ['daily', '生成日报', ['generate']], ['tidy', '整理工具与 Wiki', ['projects', 'wiki']]];
-const PIPE_FLOW_GENERATE = { name: '生成日报', desc: '汇总今天入库的内容，写成一份日报' };
+const PIPE_FLOW_GENERATE = { name: '生成日报' };
 const PIPE_FLOW_SKIP_WHY = {
   src: '跳过之后这一类这次不抓，下次同步接着抓，多半只是晚一轮进库；只给最近若干条的订阅源，隔得太久可能补不全。',
   ingest: '跳过之后，这一轮新抓的内容搜不到，日报也取不到它们（日报从入了库的内容里取材）。抓取期间已经在做的存量提取会照常收尾，做完的结果保留。',
@@ -364,7 +364,7 @@ function pipeFlowGenerateRow(model, node) {
   const st = pipeFlowStep(model, node, 'generate');
   const status = pipeHasFailure(st) ? 'error' : st.status || '';
   return `<div class="pipe-stage" data-status="${esc(status)}"><span class="pipe-stage-number">1</span>`
-    + `<div><h3>${PIPE_FLOW_GENERATE.name}</h3><p class="pipe-stage-desc">${PIPE_FLOW_GENERATE.desc}</p>`
+    + `<div><h3>${PIPE_FLOW_GENERATE.name}</h3>`
     + `<p class="pipe-stage-detail">${esc(st.detail || '')}</p></div>`
     + `<span class="pipe-stage-status">${esc(PIPE_STATUS[status] || '状态未知')}</span></div>`;
 }
@@ -384,9 +384,11 @@ async function pipeFlowAct(action) {
   pipeAction = 'flow'; renderPipeButtons();
   try {
     await pipePost('/api/pipeline/flow', { owner: model.plan.owner, node: node.key, action });
-    const said = { skip: [`${node.label} 这次跳过`, '轮到它之前都可以点「恢复执行」改回来。'],
-      unskip: [`${node.label} 恢复执行`, ''], cut: [`已请求结束 ${node.label}`, '手上这一步停下后接着下一类。'] }[action];
-    toast(said[0], { key: 'pipeline', type: 'ok', detail: said[1] });
+    // 三条 detail 都去掉了:那一行自己的 facts 已经写着「轮到它之前都可以改回来」,
+    // 「恢复执行」那颗按钮也就在同一行上;结束那一条的射程刚在确认框里说过。
+    const said = { skip: `${node.label} 这次跳过`,
+      unskip: `${node.label} 恢复执行`, cut: `已请求结束 ${node.label}` }[action];
+    toast(said, { key: 'pipeline', type: 'ok' });
   } catch (e) {
     toast('没有受理', { key: 'pipeline', detail: e.message });
   } finally {

@@ -6,14 +6,16 @@ from datetime import datetime, timedelta, timezone
 from kb.collectors import Coverage
 from kb.collectors.feeds import FeedCollector
 from kb.feeds import registry as reg
-from kb.feeds.sync import FAILURE_CAP, _claim_write, _save_failure, _within_history
+from kb.feeds.sync import FAILURE_CAP, _claim_write, _repointed, _save_failure, _within_history
 from kb.maintenance import maintenance_lock
 from kb.pipeline_flow import halted
 from kb.pipeline_segments import note_retry_targets
 from kb.pipeline_state import _stage
-from kb.youtube import diagnosis, discovery, login, media, notes, products, ranking, storage, throttle
+from kb.youtube import (candidate_metadata, diagnosis, discovery, login, media, notes,
+                        products, ranking, storage, throttle)
 from kb.youtube.admission import TEMPORARY, UNDATED, calibrate, gate
 from kb.youtube.channels import config
+from kb.youtube.faults import local_fault, record_local
 from kb.youtube.settings import of
 
 
@@ -22,17 +24,10 @@ def stopped():
     return halted()
 
 
-#: 单个频道的发现预算。两条路按 `discovery.DETAIL_SHARE` 分这一份:带登录态逐条解析
-#: 拿大头(单频道半分钟一档),估算列举拿剩下那点。
-DISCOVERY_PER_SOURCE = 90.0
-#: **两个频道之间歇这么久。借的是 daily-report 的参数**
-#: (`fetch_yt_channels_v2.py` 的 `time.sleep(1)  # Rate limit`):那份每天跑 48 个频道、
-#: 每个频道逐条解析 20 条,从没撞过 429。
+DISCOVERY_PER_SOURCE = 30.0
 DISCOVERY_SPACING = 1.0
-#: 整轮发现的上限。**串行之后同样的 900 秒只够 ~20 个频道**(实测单频道 10 条约 43 秒),
-#: 一轮覆盖不到一半 —— 翻到 1800 秒按实测能覆盖 ~40 个。剩下的照旧记进 `skipped`,
-#: 下一轮接着查(`pending` 按 `last_attempt` 排序,轮着来;按 URL 去重,不会重复入库)。
-DISCOVERY_CEILING = 1800.0
+DISCOVERY_CEILING = 900.0
+RANGE_DISCOVERY_CEILING = 1800.0
 
 
 class _Told(RuntimeError):
@@ -125,15 +120,17 @@ def heeded(summary, source_ids):
             caution(summary, source_ids, ledger, conclusion)
 
 
-def discovery_budget(count):
+def discovery_budget(count, per_source=None, ceiling=None):
     """这一轮发现的总额度。**歇的那几拍要算进去,不是只算频道自己的时间。**
 
     不算的话额度正好卡在 `count * DISCOVERY_PER_SOURCE` 上,而真实耗时还要多出
     `(count - 1)` 拍 —— 于是每一轮固定有最后几个频道被那道闸拦掉、静默进 `skipped`,
-    而它们本该轮得到。`max(90.0, ...)` 是只有一两个频道那一轮的地板,
+    而它们本该轮得到。至少留够一个频道的额度,
     `DISCOVERY_CEILING` 是上限(超出的下一轮接着查)。
     """
-    return min(DISCOVERY_CEILING, max(90.0, count * (DISCOVERY_PER_SOURCE + DISCOVERY_SPACING)))
+    per_source = DISCOVERY_PER_SOURCE if per_source is None else per_source
+    ceiling = DISCOVERY_CEILING if ceiling is None else ceiling
+    return min(ceiling, max(per_source, count * (per_source + DISCOVERY_SPACING)))
 
 
 def process(rows, settings, scope, summary, deadline):
@@ -152,10 +149,13 @@ def process(rows, settings, scope, summary, deadline):
     attempts = 0
     probes = 0
     for position, row in enumerate(chosen):
+        affected = row.get('eligible_sources', [row['source_id']])
+        if any(str(source_id) in summary.get('local_ids', []) for source_id in affected):
+            continue
         if storage.permanently_excluded(row):
             continue
-        if stopped() or time.monotonic() >= deadline:
-            summary['stopped'] = stopped()
+        if summary['stopped'] or stopped() or time.monotonic() >= deadline:
+            summary['stopped'] |= stopped()
             summary['message'] = '视频处理已停止或时间预算用尽，未完成的内容留待下轮'
             for pending in chosen[position:]:
                 storage.update(pending['video_id'], state='deferred', reason=summary['message'])
@@ -180,8 +180,8 @@ def process(rows, settings, scope, summary, deadline):
             # (`heeded` 的 `finally`):一本账跨两步的话同一条警告会被后面那一步再记一遍
             # (归并按频道去重,但档数不去重)。
             with heeded(summary, row.get('eligible_sources', [row['source_id']])):
-                metadata = media.probe(row, settings, deadline, stopped,
-                                       scope.force or row['gate_code'] in TEMPORARY)
+                metadata = row.get('_metadata') or media.probe(
+                    row, settings, deadline, stopped, scope.force or row['gate_code'] in TEMPORARY)
             if decision := gate(metadata, policy, row):
                 storage.update(row['video_id'], state=decision.state, reason=decision.reason,
                                gate_code=decision.code, retry_at=time.time() + decision.retry_seconds)
@@ -242,7 +242,7 @@ def process(rows, settings, scope, summary, deadline):
             for pending in chosen[position:]:
                 storage.update(pending['video_id'], state='deferred', reason=str(error))
             summary['message'] = str(error)
-            summary['stopped'] = stopped()
+            summary['stopped'] |= stopped()
             break
         except throttle.NotAttempted as error:
             # **「这一次没发出去」不是这条视频的失败。** 不记 attempts、不推退避、不进
@@ -256,6 +256,9 @@ def process(rows, settings, scope, summary, deadline):
                 storage.update(deferred['video_id'], state='deferred', reason=notice)
             break
         except Exception as error:
+            if local_fault(error):
+                record_local(summary, error, affected)
+                continue
             storage.failed(row, error)
             affected = row.get('eligible_sources', [row['source_id']])
             wall(summary, affected, error)
@@ -281,7 +284,7 @@ def process(rows, settings, scope, summary, deadline):
     return failures
 
 
-def commit_notes(source, completed, summary, pending_failure=False, ranged=False):
+def commit_notes(source, completed, summary, pending_failure=False, ranged=False, record_success=True):
     with maintenance_lock():
         entries = [json.loads(row['note']) for row in completed]
         if not ranged:
@@ -299,14 +302,46 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
                 if row['entry']['url'] in urls or linked:
                     summary['added'] += products.publish(connection, source, row)
                     storage.mark_committed(connection, source, row['video_id'])
+            summary['stopped'] = summary.get('stopped', False) or stopped()
+            pending_failure |= summary['stopped']
             if pending_failure:
+                notice = summary['message'] or '视频仍有未完成处理或待重试错误'
                 connection.execute('UPDATE subscriptions SET last_attempt=?,last_notice=? WHERE id=?',
-                                   (reg.now(), summary['message'] or '视频仍有未完成处理或待重试错误', source['id']))
+                                   (reg.now(), notice, source['id']))
+            elif not record_success:
+                connection.execute('UPDATE subscriptions SET last_attempt=? WHERE id=?', (reg.now(), source['id']))
             else:
                 connection.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
                     failures=0,retry_at=0,last_notice=? WHERE id=?''',
                                    (reg.now(), reg.now(), summary['message'], source['id']))
     return True
+
+
+def commit_successes(sources, summary):
+    """成功覆盖集中落在同一事务；收尾中断时不清除任何频道的错误账。"""
+    summary['stopped'] |= stopped()
+    if not sources:
+        return
+    completed = []
+    with maintenance_lock(), reg.db() as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        summary['stopped'] |= stopped()
+        if not summary['stopped']:
+            for source in sources:
+                current = connection.execute('SELECT enabled FROM subscriptions WHERE id=?',
+                                             (source['id'],)).fetchone()
+                if _repointed(connection, source) or not current or not current['enabled']:
+                    summary['repointed'] += 1
+                    continue
+                connection.execute('''UPDATE subscriptions SET last_success=?,last_error='',
+                    failures=0,retry_at=0,last_notice=? WHERE id=?''', (reg.now(), summary['message'], source['id']))
+                completed.append(str(source['id']))
+            summary['stopped'] |= stopped()
+        if summary['stopped']:
+            connection.rollback()
+            summary['deferred'] += len(sources)
+    if not summary['stopped']:
+        summary['succeeded_ids'].extend(completed)
 
 
 def collect(scope):
@@ -347,20 +382,10 @@ def _round(scope):
                                ('youtube', started, reg.now(), json.dumps(summary, ensure_ascii=False)))
         return summary
     succeeded = []
-    # **一个频道一个频道地查,两个之间歇一拍 —— 不许并发。** 这条是撞过 429 之后按
-    # daily-report 改的:它那份 `fetch_yt_channels.py` 起先也是 8 路并发(拿 RSS 地址),
-    # 后来整个换成 `fetch_yt_channels_v2.py` 的串行 + `time.sleep(1)  # Rate limit`,
-    # 自此每天 48 个频道、每个逐条解析 20 条都跑得通。我们这边原先 4 路并发、频道之间
-    # 不歇,量比它小却撞上了 429 —— YouTube 限的是**出口的瞬时请求速率**,不是一天的总量,
-    # 所以快不起来的地方只能用等来换。**不要为了快改回并发**:429 的报错落在登录态检查上
-    # (见 `login.classify` 的 `rate_limited`),从面板上看像是「没登录」,追起来要绕一大圈。
-    #
-    # **发现的预算按主路真实的速度定。** 全程登录态之后每一轮都是逐条解析:单频道半分钟
-    # 一档(实测每条约 4.3 秒,`discovery.DETAIL_LIMIT` 封在 10 条)。预算卡在 90 秒就只有
-    # 头几个频道轮得到,其余静默进 `skipped`(面板上看不出区别)—— 所以按待查频道数算一个
-    # 够用的额度(连歇的那几拍一起算进去),再用 `DISCOVERY_CEILING` 封顶。
-    per_source = DISCOVERY_PER_SOURCE
-    discovery_deadline = time.monotonic() + discovery_budget(len(pending))
+    per_source = 90.0 if scope.ranged else DISCOVERY_PER_SOURCE
+    discovery_started = time.monotonic()
+    ceiling = RANGE_DISCOVERY_CEILING if scope.ranged else DISCOVERY_CEILING
+    discovery_deadline = discovery_started + discovery_budget(len(pending), per_source, ceiling)
     while pending and not stopped():
         # **第一个频道无条件放行。** 「剩下的时间够不够再查一个」这道闸只能拦后续的:
         # 额度正好是 `len(pending) * (per_source + spacing)` 时,这个判断在第一个上就差
@@ -400,11 +425,15 @@ def _round(scope):
             pending = [source, *pending]
             break
         except Exception as error:
-            wall(summary, [source['id']], error)
-            _save_failure(source, _Told(error), summary)
-            throttle.caught(error)
+            if local_fault(error):
+                record_local(summary, error, [source['id']])
+                summary['deferred'] += 1
+            else:
+                wall(summary, [source['id']], error)
+                _save_failure(source, _Told(error), summary)
+                throttle.caught(error)
         summary['checked'] += 1
-        _stage('crawl', 'running', f"YouTube · 轻量检查 {summary['checked']}/{len(sources)} 个频道")
+        _stage('crawl', 'running', f"YouTube · 频道列表 {summary['checked']}/{len(sources)} 个频道")
         # **撞上 429 就当场收手这一轮。** 限的是**出口**不是这个频道:接着查下去的话,
         # 剩下的频道每一个都再去撞一次同样的墙 —— 惩罚被这一轮自己加深、拖长,面板上
         # 多出几十条不是它们自己毛病的失败,它们还一起进了退避(下一轮想试都试不了)。
@@ -417,10 +446,45 @@ def _round(scope):
         if throttle.tripped(throttle.YOUTUBE):
             break
     summary['skipped'] += len(pending)
-    rows = storage.rows([source['id'] for source in succeeded])
-    ranked = ranking.score(rows, of(settings), scope)
-    summary['ranked'] = len(ranked)
-    failures = process(ranked, settings, scope, summary, time.monotonic() + of(settings)['run_seconds'])
+    discovery_seconds = time.monotonic() - discovery_started
+    metadata_started = time.monotonic()
+    processing_started = None
+    prepared, failures, waiting_metadata = {'unfinished_ids': set()}, {}, set()
+    summary['metadata'] = {'reused': 0, 'refreshed': 0, 'pending': 0, 'failed': 0,
+                           'ttl_seconds': candidate_metadata.TTL_SECONDS}
+    try:
+        rows = storage.rows([source['id'] for source in succeeded])
+        _stage('crawl', 'running', f"YouTube · 频道列表完成 {summary['checked']}/{len(sources)}，增量更新元数据")
+        prepared = candidate_metadata.refresh(
+            rows, settings, scope, metadata_started + candidate_metadata.RUN_SECONDS, stopped,
+            observe=lambda row: heeded(summary, [owner['source_id'] for owner in row['owners']]),
+            progress=lambda done, total: _stage('crawl', 'running', f'YouTube · 元数据更新 {done}/{total}'))
+        summary['metadata'] = prepared['stats']
+        summary['stopped'] |= prepared['stopped']
+        for row, error in prepared.get('local_errors', []):
+            record_local(summary, error, [owner['source_id'] for owner in row['owners']])
+        for source_id, errors in prepared['source_errors'].items():
+            for error in errors:
+                wall(summary, [source_id], error)
+                failures.setdefault(source_id, []).append(login.evidence(error, 500))
+        ranked = ranking.score(prepared['rows'], of(settings), scope)
+        summary['ranked'] = len(ranked)
+        processing_started = time.monotonic()
+        selected_ids = {row['video_id'] for row in ranking.select(ranked, of(settings), scope.force)}
+        waiting_metadata = prepared['not_reached_ids'] - selected_ids
+        for source_id, reasons in process(ranked, settings, scope, summary,
+                                          processing_started + of(settings)['run_seconds']).items():
+            failures.setdefault(source_id, []).extend(reasons)
+    except Exception as error:
+        if not local_fault(error):
+            raise
+        record_local(summary, error, [source['id'] for source in succeeded])
+    if processing_started is None:
+        processing_started = time.monotonic()
+    summary['timings'] = {'discovery_seconds': round(discovery_seconds, 2),
+                          'metadata_seconds': round(processing_started - metadata_started, 2)}
+    summary['timings']['processing_seconds'] = round(time.monotonic() - processing_started, 2)
+    summary['stopped'] |= stopped()
     # **「取到了,但…」和「卡住了」分开说**:前者这一轮确实带回了东西,后者没有。
     # 混成一句会把一条 cookie 警告说得像整个频道失败了(口径见 `caution`)。
     # **要在落库之前归并**:订阅那条提醒(`last_notice`)取的就是这一刻的 `message`,
@@ -438,27 +502,42 @@ def _round(scope):
             continue
         summary['message'] += ('；' if summary['message'] else '') + \
             f"{len(unsaid)} 个频道这一轮发出过请求，" + login.cautioned(code, gateway['browser'])
+    completed_sources = []
     for source in succeeded:
-        outstanding = any(not row['excluded'] and (row['last_error'] or row['state'] in ('deferred', 'processing'))
-                          for row in storage.rows([source['id']]))
-        completed = storage.ready(source)
-        if scope.ranged:
-            completed = [row for row in completed if scope.since <= row['entry']['published'][:10] <= scope.until]
         try:
-            if not commit_notes(source, completed, summary, outstanding, scope.ranged):
+            outstanding = (summary['stopped'] or source['id'] in failures or
+                       str(source['id']) in summary.get('local_ids', []) or
+                       any(not row['excluded'] and
+                           (row['last_error'] or row['state'] in ('failed', 'processing') or
+                            row['state'] not in ('ready', 'excluded', 'filtered') and
+                            (row.get('metadata_pending') or row['video_id'] in prepared['unfinished_ids'] or
+                             row['state'] == 'deferred' and row['video_id'] not in waiting_metadata))
+                           for row in storage.rows([source['id']])))
+            completed = storage.ready(source)
+            if scope.ranged:
+                completed = [row for row in completed if scope.since <= row['entry']['published'][:10] <= scope.until]
+            if not commit_notes(source, completed, summary, outstanding, scope.ranged, record_success=False):
                 summary['repointed'] += 1
                 continue
             if source['id'] in failures:
                 _save_failure(source, _Told(RuntimeError('；'.join(failures[source['id']]))), summary)
-            elif outstanding:
+            elif outstanding or summary['stopped']:
                 summary['deferred'] += 1
             else:
-                summary['succeeded_ids'].append(str(source['id']))
+                completed_sources.append(source)
         except Exception as error:
-            wall(summary, [source['id']], error)
-            _save_failure(source, _Told(error), summary)
-            throttle.caught(error)
-    summary['stopped'] |= stopped()
+            if local_fault(error):
+                record_local(summary, error, [source['id']])
+                summary['deferred'] += 1
+            else:
+                wall(summary, [source['id']], error)
+                _save_failure(source, _Told(error), summary)
+                throttle.caught(error)
+    try:
+        commit_successes(completed_sources, summary)
+    except Exception as error:
+        record_local(summary, error, [source['id'] for source in completed_sources], phase='保存成功结果')
+        summary['deferred'] += len(completed_sources)
     # **同一个原因不要在面板上重复一遍又一遍。** 登录态失效时每个频道都会报同样那句话,
     # 逐条读完才明白是一个问题 —— 这里归并成一句带频道数的话,逐条明细照旧留在 errors 里。
     # 按 `AUTH_CODES` 整个集合判,并且**按真正出现的那一档说话** —— 机器人验证、
@@ -484,11 +563,16 @@ def _round(scope):
     note_retry_targets('youtube', summary['failed_ids'], reg.now())
     message = (f"YouTube · 检查 {summary['checked']}/{len(sources)} 个频道，"
                f"排名 {summary['ranked']} 条，处理 {summary['processed']} 条，入库 {summary['added']} 条")
+    timing, metadata = summary['timings'], summary['metadata']
+    message += (f"；列表发现 {timing['discovery_seconds']:g} 秒；元数据更新 {timing['metadata_seconds']:g} 秒"
+                f"（复用 {metadata['reused']} 条缓存，新查 {metadata['refreshed']} 条，"
+                f"待更新 {metadata['pending']} 条，失败 {metadata['failed']} 条）；"
+                f"视频深加工 {timing['processing_seconds']:g} 秒")
     if summary['errors']:
         message += f"；{len(summary['errors'])} 个频道处理失败，详情可重试"
     if summary['message']:
         message += '；' + summary['message']
-    _stage('crawl', 'stopped' if summary['stopped'] else 'error' if summary['errors'] else 'ok',
+    _stage('crawl', 'stopped' if summary['stopped'] else 'error' if summary['errors'] or summary.get('local_error') else 'ok',
            message, failures=summary['errors'])
     return summary
 

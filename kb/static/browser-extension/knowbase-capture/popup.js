@@ -1,6 +1,10 @@
 (() => {
   'use strict';
   const element = id => document.getElementById(id);
+  //: 预览出来那一刻唯一值得说的事:正文**已经**交给本机服务核对过了(两条路都是
+  //: 渲染预览之前先预检)。「勾了才提交」不用写 —— 那道勾和那颗禁用着的按钮就在
+  //: 下面挨着。补待办和收新链接共用这一句,口径只有一份。
+  const PREVIEW_NOTE = '全文已传给本机服务核对过了。';
   let server = '';
   let key = '';
   let preview = null;
@@ -174,10 +178,10 @@
       preview = {...captured, intent_id: intent.id};
       element('page-title').textContent = captured.title;
       element('page-url').textContent = plainUrl(captured.page_url);
-      element('count').textContent = `${verified.characters} 字符 · ${mode === 'selection' ? '你所选的文字，请确认不是选段' : '自动识别的文章区域'} · 尚未上传`;
+      element('count').textContent = `${verified.characters} 字符 · ${mode === 'selection' ? '你所选的文字' : '自动识别的文章区域'} · 尚未上传`;
       element('body').value = captured.body;
       element('preview').hidden = false;
-      status('先核对全文。只有勾选确认并点击使用，才会向本机知识库提交正文。');
+      status(PREVIEW_NOTE);
     } catch (error) { status(error.message, true); }
     finally { setBusy(false); }
   }
@@ -237,7 +241,7 @@
       element('count').textContent = `${verified.characters} 字符 · ${mode === 'selection' ? '你所选的文字' : '自动识别的文章区域'} · 尚未收录`;
       element('body').value = captured.body;
       element('preview').hidden = false;
-      status('全文已传给本机服务核对，先看一遍。只有勾选确认并点击使用，才会收录进知识库。');
+      status(PREVIEW_NOTE);
     } catch (error) { status(error.message, true); }
     finally { setBusy(false); }
   }

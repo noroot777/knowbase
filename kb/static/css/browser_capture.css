@@ -5,7 +5,6 @@ header { display:flex; justify-content:space-between; gap:20px; padding-bottom:2
 a { color:var(--brand); text-decoration:none; }
 header a { font-size:18px; font-weight:650; }
 h1 { font:900 34px/1.4 var(--font-display); margin:30px 0 0; }
-.intro { color:var(--muted); margin:12px 0 24px; }
 .steps { list-style:none; display:grid; grid-template-columns:repeat(3,1fr); padding:0; margin:28px 0 16px; gap:12px; font-size:12px; color:var(--muted); }
 .steps li { padding:10px 0; border-bottom:2px solid var(--line); }
 .steps .on { color:var(--brand); border-color:var(--brand); }
@@ -39,4 +38,4 @@ footer { padding-top:20px; }
 .mismatch button { margin-top:8px; }
 #pending { margin-top:22px; }
 [hidden] { display:none !important; }
-@media(max-width:520px) { main { padding:18px 15px 40px; } h1 { font-size:27px; } header span { text-align:right; } .card { padding:18px; } .steps { font-size:11px; gap:8px; } }
+@media(max-width:520px) { main { padding:18px 15px 40px; } h1 { font-size:27px; } .card { padding:18px; } .steps { font-size:11px; gap:8px; } }

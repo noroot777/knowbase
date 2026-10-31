@@ -28,7 +28,7 @@ function careRenderDetail() {
     host.innerHTML = '';
     const hint = document.createElement('p');
     hint.className = 'care-detail-hint';
-    hint.textContent = '点左边任意一条，这里说清它卡在哪一步、为什么，以及现在能做什么。';
+    hint.textContent = '点左边任意一条';
     host.appendChild(hint);
     return;
   }

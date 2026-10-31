@@ -465,7 +465,7 @@ def from_page(url: str, title: str, body: str) -> dict:
     """
     url = normalize(url)
     if classify(url) == 'x':
-        raise GrabError('X 的单条推文不走这条路，直接收录这个链接即可。')
+        raise GrabError('X 的单条推文不走这条路，点「收录这条链接」即可。')
     body = body.replace('\r\n', '\n').replace('\r', '\n').strip()
     if not grab_page.body_confirmed(body):
         # 口径同 `_grab_web` 那一档「没找到正文」:这里不另说一套门槛数字,

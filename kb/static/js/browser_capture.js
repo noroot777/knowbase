@@ -131,7 +131,9 @@
     else if (drafting && saved) message('已保存的正文和回执仍然保留。请核对网址再发起，也可以退出重新采集。');
     else if (saved) message('正文已补回原条目。翻译与入库尚待执行。');
     else if (snapshot.saved_error) message(snapshot.saved_error, true);
-    else message('核对文章网址，然后发起一次采集请求。');
+    // 「然后点发起」不写:那颗按钮就在这一栏上。留「核对」是因为这一栏是**预填**
+    // 的(原网址),而站点常按语言跳转 —— 对不上才有下面那一块 `.mismatch`。
+    else message('核对文章网址。');
     if (actionError) message(actionError, true);
   }
 

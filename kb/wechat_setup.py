@@ -203,7 +203,7 @@ def _ready(progress):
     # Invalidate the existing source badge after a successful connection.
     from kb.collectors.wechat_local import collector
     collector._local_cache = None
-    progress("ready", "绿泡泡数据库已验证可读。可以切换到本地绿泡泡通道，选择公众号并开始同步。", ready=True)
+    progress("ready", "绿泡泡数据库已验证可读。", ready=True)
 
 
 def _backup(root: Path, progress):

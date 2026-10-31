@@ -111,7 +111,7 @@ function xChannelPicked() {
   const unsure = xChanUnsureNow();
   if (!busy) xChannelSay(unsure && unsure.slot === 'state' ? unsure.text : (saved
     ? (xChan.ready ? '当前通道已就绪。' : (xChan.why || '当前通道还没有配好。'))
-    : '这一份还没存下来。点下面任何一颗按钮会先替你存一次，也可以点「保存设置」。'));
+    : '这一份还没存下来。点下面任何一颗按钮会先替你存一次。'));
   // 「上次什么时候导的」只在选择没变时才是当前通道的事实(口径同状态行)。
   // **文案整句由后端给**(`x_login_import.summary`):结论码是那一块自己的词汇表,
   // 前端照它写一张表就是把同一个判断放到两处。
