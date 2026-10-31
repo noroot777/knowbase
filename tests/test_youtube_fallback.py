@@ -252,7 +252,7 @@ class DiscoveryBudget(YouTubeFixture):
         self.assertEqual(len(sources), len(seen), '每个频道都该被查一次')
         self.assertEqual({collector.DISCOVERY_PER_SOURCE}, set(seen), '单频道预算只有一份口径')
         self.assertEqual(180, collector.DISCOVERY_PER_SOURCE)
-        self.assertEqual(len(sources) * (collector.DISCOVERY_PER_SOURCE + collector.DISCOVERY_SPACING),
+        self.assertEqual(collector.DISCOVERY_CEILING,
                          collector.discovery_budget(len(sources)))
 
 

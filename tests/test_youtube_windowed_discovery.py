@@ -358,13 +358,14 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         self.assertEqual(origin, sync_window.prepare(source, self.scope,
                          self.now + timedelta(days=5))['initial_fetch_at'])
 
-    def test_prior_success_uses_one_day_overlap_without_reinterpreting_queued_entries(self):
+    def test_prior_success_keeps_overlap_and_configured_lookback_without_reinterpreting_queue(self):
         previous = self.now - timedelta(hours=3)
         with reg.db() as connection:
             connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
                                (previous.isoformat(), self.source['id']))
         prepared = sync_window.prepare(self.source, self.scope, self.now)
-        expected = previous - timedelta(days=1)
+        expected = min(previous - timedelta(days=1), self.now.astimezone(sync_window.TZ).replace(
+            hour=0, minute=0, second=0, microsecond=0) - timedelta(days=7))
         self.assertEqual(expected, ranking.stamp(prepared['discovery_after']))
         with throttle.opened(), patch.object(media, 'ytdlp', side_effect=self.transport([
                 self.payload(1, expected - timedelta(seconds=1)), self.payload(2, expected)])):

@@ -18,6 +18,9 @@ class YouTubeBrowser(unittest.TestCase):
             for check in checks:
                 with self.subTest(check=check['name']):
                     self.assertTrue(check['ok'], check['detail'])
+            self.assertTrue({'跳过提示只属于自己的频道', '干净频道不继承别人的跳过提示',
+                             '没列完的频道显示部分同步而不是成功'} <= {check['name'] for check in checks})
+            self.assertTrue((root / 'output/youtube/subscriptions-status-desktop.png').is_file())
             files = list((Path(base.root) / 'vault/source/youtube').rglob('*.md'))
             self.assertEqual(1, len(files))
             self.assertIn('中文译文（自动生成）', files[0].read_text())

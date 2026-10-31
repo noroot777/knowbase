@@ -72,7 +72,9 @@ class YouTubeInitialWindow(YouTubeFixture):
         with reg.db() as connection:
             connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?', (succeeded, source['id']))
         refreshed = self.prepare(when=self.now + timedelta(days=5))
-        self.assertEqual(ranking.stamp(succeeded) - timedelta(days=1),
+        lookback = (self.now + timedelta(days=5)).astimezone(sync_window.TZ).replace(
+            hour=0, minute=0, second=0, microsecond=0) - timedelta(days=7)
+        self.assertEqual(min(ranking.stamp(succeeded) - timedelta(days=1), lookback),
                          ranking.stamp(refreshed['discovery_after']))
         with reg.db() as connection:
             self.assertEqual(source['initial_fetch_at'], connection.execute(
@@ -192,6 +194,37 @@ class YouTubeInitialWindow(YouTubeFixture):
         reg.delete_subscription('youtube', source['id'])
         with reg.db() as connection:
             self.assertEqual(0, connection.execute('SELECT count(*) FROM youtube_discovery_history').fetchone()[0])
+
+    def test_window_setting_widens_discovery_and_releases_matching_history_ids(self):
+        self.settings(window_days=7)
+        first = self.prepare()
+        original = first['initial_fetch_at']
+        entries = [self.entry(1, hours=5 * 24), self.entry(2, hours=20 * 24), self.entry(3, hours=40 * 24)]
+        self.assertEqual([], sync_window.recent(first, entries, self.scope))
+        storage.discover(first, [])
+        with reg.db() as connection:
+            connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
+                               (self.now.isoformat(), self.source['id']))
+        ordinary = self.prepare()
+        self.assertEqual({entries[1]['video_id'], entries[2]['video_id']}, set(ordinary['checked_old_ids']))
+        self.assertEqual([entries[0]], sync_window.recent(ordinary, entries, self.scope))
+        self.settings(window_days=30)
+        widened = self.prepare()
+        self.assertEqual((entries[2]['video_id'],), widened['checked_old_ids'])
+        self.assertEqual(entries[:2], sync_window.recent(widened, entries, self.scope))
+        storage.discover(widened, entries[:2])
+        self.assertEqual({entry['video_id'] for entry in entries[:2]}, {row['video_id'] for row in storage.rows()})
+        with reg.db() as connection:
+            self.assertEqual(original, connection.execute(
+                'SELECT initial_fetch_at FROM youtube_sync_origins WHERE source_id=?', (self.source['id'],)).fetchone()[0])
+
+    def test_existing_lagging_watermark_is_never_shortened_by_a_small_lookback(self):
+        self.settings(window_days=1)
+        previous = self.now - timedelta(days=25)
+        with reg.db() as connection:
+            connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
+                               (previous.isoformat(), self.source['id']))
+        self.assertEqual(previous - timedelta(days=1), ranking.stamp(self.prepare()['discovery_after']))
 
     def test_round_records_origin_and_skips_new_old_entries_before_storage(self):
         fetched = [self.entry(1, hours=96), self.entry(2)]

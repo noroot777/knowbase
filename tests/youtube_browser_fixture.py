@@ -11,6 +11,11 @@ from tests.youtube_translation_fixture import response
 def install():
     sources = reg.subscriptions('youtube')
     source = next(source for source in sources if source['name'] == 'AI Search')
+    status_sources = {}
+    for selected, label in zip((item for item in sources if item['enabled'] and item['id'] != source['id']),
+                               ('跳过一条测试频道', '跳过两条测试频道', '部分同步测试频道', '干净测试频道')):
+        reg.save_subscription('youtube', {'name': label, 'group_name': '状态验证'}, selected['id'])
+        status_sources[label] = selected['id']
     published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     entries = [{'video_id': f'{number:011d}', 'url': 'https://www.youtube.com/watch?v=' + f'{number:011d}',
                 'title': title, 'description': title, 'published': published, 'views': 10000 // number}
@@ -18,6 +23,13 @@ def install():
                                                'AI workflow explained', 'Travel weekend'), 1)]
 
     def fetch(selected, *arguments):
+        for count, label in enumerate(('跳过一条测试频道', '跳过两条测试频道'), 1):
+            if selected['id'] == status_sources[label]:
+                selected['discovery_unavailable'] = [
+                    {'video_id': str(number).zfill(11), 'reason': '离线夹具：单片无法读取'}
+                    for number in range(count)]
+        if selected['id'] == status_sources['部分同步测试频道']:
+            arguments[-1].append('只列到 7 条就中断了：频道预算用尽')
         return entries if selected['id'] == source['id'] else []
 
     def reply(prompt, *arguments):

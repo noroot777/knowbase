@@ -1,6 +1,26 @@
 # YouTube 低成本接入验证
 
-## 当前审查复修：单片错误与友好翻译协议
+## 当前续修：有界发现、逐频道状态与可调回看窗口
+
+- 普通发现恢复 900 秒整轮上限，单频道仍最多 180 秒，频道间隔在预算内预留；显式补抓仍为 90/1800 秒。最久未尝试优先，未轮到的不写尝试账，下轮继续。保留乱序尾部/archive 续扫，不恢复固定条数或遇旧即停。
+- 在订阅写库边界按 source_id 生成 note/notice，不再把全局消息复制给所有卡片。同名频道也隔离；未列完写 last_note 并扣留成功，完整恢复才清旧提示。局部失败的原错误、退避和水位不伪清理。
+- 首次三天起点不变，后续下界取成功时间减一天与上海当日零点减 window_days 的更早者。扩大窗口会释放相应历史 ID，缩小设置不截断落后水位。
+- 新增真实隔离 collector/存储用例，48 频道与间隔边界用虚拟时钟检查额度和公平续轮，不冒充真实远端性能。既有真实离线子进程乱序尾部、部分覆盖和 archive 路径继续覆盖。
+- 浏览器本轮扩展先命名 `🔎 YouTube逐频道状态复修`，以 `visible:false` 新建后台标签被拒绝 `Capability is not available: visibility`，没有创建标签。转项目独立无头壳、临时 profile、本地隔离服务；无需登录态，不接管或激活用户 Chrome、不连接用户 Chrome CDP。卡片、阅读区和移动布局检查均走无头通道。
+
+仅本轮新增/修改测试模块的登记命令：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_source_status tests.test_youtube_initial_window tests.test_youtube_windowed_discovery tests.test_youtube_window_coverage tests.test_youtube_pacing tests.test_youtube_fallback tests.test_youtube_incremental_review tests.test_youtube_browser -v
+```
+
+工作目录：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+原始日志、实际结果、冻结树与本轮截图统一归档至
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-cHa65zgAdf3H-continuation/`。
+结果只写外部证据，保持测试树与提交树一致；整套及未改动回归留给验收。
+不请求真实模型/YouTube、不读取真实 cookie、不操作生产库或用户服务。结构覆盖不等于语义保真，缺段译文仍不可降级为成品发布。
+
+## 上轮复修：单片错误与友好翻译协议
 
 - 完整播放列表结束与单片可读性分开，不再用七条错误文案白名单决定覆盖；预告直播、年龄限制及未知单片错误均带原始原因保留为跳过项。真正登录墙、429、cookie/JS 错误、全局错误和超时仍不能冒充完成。
 - 机器人分类收窄为明确的 `not a bot`，不再让年龄确认污染频道失败与告警。归档后零新增有独立空集凭据，不依赖停止原因枚举。

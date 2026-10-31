@@ -155,11 +155,10 @@ class DiscoveryPacing(YouTubeFixture):
         只按频道数 × 单频道预算算的话,真实耗时多出 (count-1) 拍,于是每一轮固定有最后
         几个频道被预算闸拦掉、静默进 `skipped` —— 它们本该轮得到。
         """
-        count = 10
+        count = 4
         needed = count * collector.DISCOVERY_PER_SOURCE + (count - 1) * collector.DISCOVERY_SPACING
         self.assertGreaterEqual(collector.discovery_budget(count), needed)
-        self.assertEqual(500 * (collector.DISCOVERY_PER_SOURCE + collector.DISCOVERY_SPACING),
-                         collector.discovery_budget(500))
+        self.assertEqual(collector.DISCOVERY_CEILING, collector.discovery_budget(500))
 
     def test_discovered_entries_still_land_while_paced(self):
         """节流不许顺手改掉入库这件事:歇一拍之后带回来的条目照旧收下。
@@ -183,5 +182,6 @@ class DiscoveryPacing(YouTubeFixture):
         self.assertEqual(2, result['discovered'])
         self.assertEqual({'00000000001', '00000000002'},
                          {row['video_id'] for row in storage.rows()})
-        self.assertEqual([{'title': sources[1]['name'], 'reason': '只列到 1 条就中断了：预算到点'}],
+        self.assertEqual([{'source_id': sources[1]['id'], 'title': sources[1]['name'],
+                           'reason': '只列到 1 条就中断了：预算到点'}],
                          result['partial'], '哪个频道没列完要说得出来')

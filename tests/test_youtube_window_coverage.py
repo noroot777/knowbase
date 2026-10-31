@@ -134,16 +134,38 @@ print('[download] Finished downloading playlist: fixture')
         self.assertEqual([], result['partial'])
         self.assertIn(str(self.source['id']), result['succeeded_ids'])
 
-    def test_forty_eight_channels_each_receive_their_full_budget(self):
+    def test_forty_eight_channels_rotate_within_a_bounded_discovery_round(self):
         sources = [self.source, *(self.channel(number) for number in range(2, 49))]
         clock = ListingClock()
-        result = self.collect_using(listing=self.listing([], clock, empty_seconds=52), clock=clock)
-        self.assertEqual(48, result['checked'])
-        self.assertEqual(0, result['skipped'])
-        self.assertEqual([180] * 48, self.budgets)
-        self.assertEqual({str(source['id']) for source in sources}, set(result['succeeded_ids']))
-        self.assertGreater(result['timings']['discovery_seconds'], 900)
-        self.assertEqual([], result['partial'])
+        unseen = {str(source['id']) for source in sources}
+        for round_number in range(4):
+            before = {str(source['id']): source['last_attempt'] for source in reg.subscriptions('youtube')}
+            result = self.collect_using(listing=self.listing([], clock, empty_seconds=52), clock=clock)
+            received = set(result['succeeded_ids'])
+            with self.subTest(round=round_number):
+                self.assertGreater(result['checked'], 0)
+                self.assertLess(result['checked'], 48)
+                self.assertEqual(48 - result['checked'], result['skipped'])
+                self.assertLessEqual(result['timings']['discovery_seconds'], collector.DISCOVERY_CEILING)
+                self.assertFalse(result['partial'])
+                self.assertFalse(result['failed_ids'])
+                self.assertGreater(len(received & unseen), 0)
+                for source in reg.subscriptions('youtube'):
+                    if str(source['id']) in unseen - received:
+                        self.assertEqual(before[str(source['id'])], source['last_attempt'])
+            unseen -= received
+        self.assertFalse(unseen)
+        self.assertEqual({180}, set(self.budgets))
+
+    def test_spacing_is_reserved_inside_the_aggregate_discovery_ceiling(self):
+        for number in range(2, 6):
+            self.channel(number)
+        clock = ListingClock()
+        result = self.collect_using(listing=self.listing([], clock, empty_seconds=179.25), clock=clock)
+        self.assertEqual(4, result['checked'])
+        self.assertEqual(1, result['skipped'])
+        self.assertEqual(720, result['timings']['discovery_seconds'])
+        self.assertEqual([180] * 4, self.budgets)
 
     def assert_partial_catchup(self, previous):
         with reg.db() as connection:

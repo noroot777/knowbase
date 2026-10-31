@@ -12,7 +12,7 @@ from kb.pipeline_flow import halted
 from kb.pipeline_segments import note_retry_targets
 from kb.pipeline_state import _stage
 from kb.youtube import (candidate_metadata, diagnosis, discovery, login, media, notes,
-                        products, ranking, storage, sync_window, throttle)
+                        products, ranking, source_status, storage, sync_window, throttle)
 from kb.youtube.admission import TEMPORARY, UNDATED, calibrate, gate
 from kb.youtube.channels import config
 from kb.youtube.faults import local_fault, record_local
@@ -26,6 +26,7 @@ def stopped():
 
 DISCOVERY_PER_SOURCE = 180.0
 DISCOVERY_SPACING = 1.0
+DISCOVERY_CEILING = 900.0
 RANGE_DISCOVERY_CEILING = 1800.0
 
 
@@ -52,6 +53,14 @@ class _Told(RuntimeError):
         for name in ('unavailable', 'notice'):
             if hasattr(error, name):
                 setattr(self, name, getattr(error, name))
+
+
+def save_failure(source, error, summary):
+    previous = len(summary.get('notices', ()))
+    saved = _save_failure(source, error, summary)
+    for notice in summary.get('notices', ())[previous:]:
+        notice['source_id'] = source['id']
+    return saved
 
 
 def wall(summary, source_ids, error):
@@ -125,11 +134,11 @@ def discovery_budget(count, per_source=None, ceiling=None):
     不算的话额度正好卡在 `count * DISCOVERY_PER_SOURCE` 上,而真实耗时还要多出
     `(count - 1)` 拍 —— 于是每一轮固定有最后几个频道被那道闸拦掉、静默进 `skipped`,
     而它们本该轮得到。至少留够一个频道的额度,
-    普通窗口给每个待查频道完整额度；显式补抓可另设整轮上限。
+    整轮上限之外的频道保留原有尝试时间，下轮优先轮到；显式补抓使用独立上限。
     """
     per_source = DISCOVERY_PER_SOURCE if per_source is None else per_source
     budget = max(per_source, count * (per_source + DISCOVERY_SPACING))
-    return budget if ceiling is None else min(ceiling, budget)
+    return min(DISCOVERY_CEILING if ceiling is None else ceiling, budget)
 
 
 def process(rows, settings, scope, summary, deadline):
@@ -303,16 +312,14 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
                     storage.mark_committed(connection, source, row['video_id'])
             summary['stopped'] = summary.get('stopped', False) or stopped()
             pending_failure |= summary['stopped']
-            if pending_failure:
-                notice = summary['message'] or '视频仍有未完成处理或待重试错误'
-                connection.execute('UPDATE subscriptions SET last_attempt=?,last_notice=? WHERE id=?',
-                                   (reg.now(), notice, source['id']))
-            elif not record_success:
-                connection.execute('UPDATE subscriptions SET last_attempt=? WHERE id=?', (reg.now(), source['id']))
+            note, notice = source_status.fields(source, summary, pending_failure)
+            if pending_failure or not record_success:
+                connection.execute('UPDATE subscriptions SET last_attempt=?,last_note=?,last_notice=? WHERE id=?',
+                                   (reg.now(), note, notice, source['id']))
             else:
                 connection.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
-                    failures=0,retry_at=0,last_notice=? WHERE id=?''',
-                                   (reg.now(), reg.now(), summary['message'], source['id']))
+                    failures=0,retry_at=0,last_note=?,last_notice=? WHERE id=?''',
+                                   (reg.now(), reg.now(), note, notice, source['id']))
     return True
 
 
@@ -332,8 +339,10 @@ def commit_successes(sources, summary):
                 if _repointed(connection, source) or not current or not current['enabled']:
                     summary['repointed'] += 1
                     continue
+                note, notice = source_status.fields(source, summary)
                 connection.execute('''UPDATE subscriptions SET last_success=?,last_error='',
-                    failures=0,retry_at=0,last_notice=? WHERE id=?''', (reg.now(), summary['message'], source['id']))
+                    failures=0,retry_at=0,last_note=?,last_notice=? WHERE id=?''',
+                                   (reg.now(), note, notice, source['id']))
                 completed.append(str(source['id']))
             summary['stopped'] |= stopped()
         if summary['stopped']:
@@ -359,7 +368,8 @@ def _round(scope):
                'errors': [], 'partial': [], 'notices': [], 'repointed': 0, 'cautions': {},
                'stopped': False, 'failed_ids': [], 'succeeded_ids': [],
                'discovered': 0, 'ranked': 0, 'processed': 0, 'walls': {},
-               'initial_fetch_at': {}, 'outside_initial_window': 0}
+               'initial_fetch_at': {}, 'outside_initial_window': 0,
+               'browser': of(settings)['cookies_browser']}
     pending = []
     for source in sources:
         if source['retry_at'] > time.time() and not scope.force:
@@ -391,7 +401,7 @@ def _round(scope):
         # 额度正好是 `len(pending) * (per_source + spacing)` 时,这个判断在第一个上就差
         # 那几微秒 —— 结果是一轮一个频道都没查、全进 `skipped`,而面板上只说「部分频道
         # 未轮到」(只有一个待查频道的那一轮必然撞上,实测 checked=0)。
-        if summary['checked'] and time.monotonic() + per_source > discovery_deadline:
+        if summary['checked'] and time.monotonic() + DISCOVERY_SPACING + per_source > discovery_deadline:
             break
         if summary['checked']:
             # **歇在下一个频道之前,不是查完就歇** —— 否则最后一个频道后面那一拍纯属白等,
@@ -399,6 +409,8 @@ def _round(scope):
             # 停止还接着查下一个频道,那一下就等于没响应。
             time.sleep(DISCOVERY_SPACING)
             if stopped():
+                break
+            if time.monotonic() + per_source > discovery_deadline:
                 break
         source, pending = pending[0], pending[1:]
         # 显式日期范围那一轮只禁**估算**那条路(第 2 条);带登录态逐条解析那条拿的是
@@ -408,7 +420,7 @@ def _round(scope):
         told = []
         try:
             with heeded(summary, [source['id']]):
-                source = sync_window.prepare(source, scope, when=ranking.stamp(started))
+                source = sync_window.prepare(source, scope, when=ranking.stamp(started), settings=settings)
                 if source.get('initial_fetch_at'):
                     summary['initial_fetch_at'][str(source['id'])] = source['initial_fetch_at']
                 listed = discovery.fetch(source, settings, per_source, not scope.ranged, told)
@@ -417,7 +429,7 @@ def _round(scope):
             storage.discover(source, entries)
             if unavailable := source.get('discovery_unavailable'):
                 notice = f'{len(unavailable)} 条视频无法读取（会员、私有或地区限制等），其余条目照常同步'
-                summary['notices'].append({'title': source['name'], 'reason': notice,
+                summary['notices'].append({'source_id': source['id'], 'title': source['name'], 'reason': notice,
                                           'count': len(unavailable), 'items': unavailable})
             summary['discovered'] += len(entries)
             succeeded.append(source)
@@ -428,7 +440,7 @@ def _round(scope):
             # 频道都列完了」在面板上不该长得一模一样。记成 error 更不对 —— 那会显示
             # 「连接失败」并让这条订阅进退避重试,而它这一轮明明带回了东西。
             for note in told:
-                summary['partial'].append({'title': source['name'], 'reason': note})
+                summary['partial'].append({'source_id': source['id'], 'title': source['name'], 'reason': note})
         except throttle.NotAttempted:
             # 口径同处理阶段那一道:这个频道**一次请求都没发出去**,不记失败、不推退避。
             # 它算「没轮到」—— 退回 `pending`,由下面那句「还有 N 个频道未轮到」收口,
@@ -441,7 +453,7 @@ def _round(scope):
                 summary['deferred'] += 1
             else:
                 wall(summary, [source['id']], error)
-                _save_failure(source, _Told(error), summary)
+                save_failure(source, _Told(error), summary)
                 throttle.caught(error)
         summary['checked'] += 1
         _stage('crawl', 'running', f"YouTube · 频道列表 {summary['checked']}/{len(sources)} 个频道")
@@ -497,11 +509,9 @@ def _round(scope):
     summary['timings']['processing_seconds'] = round(time.monotonic() - processing_started, 2)
     summary['stopped'] |= stopped()
     for notice in summary['notices']:
-        summary['message'] += ('；' if summary['message'] else '') + notice['reason']
+        summary['message'] += ('；' if summary['message'] else '') + f"{notice['title']}：{notice['reason']}"
     # **「取到了,但…」和「卡住了」分开说**:前者这一轮确实带回了东西,后者没有。
     # 混成一句会把一条 cookie 警告说得像整个频道失败了(口径见 `caution`)。
-    # **要在落库之前归并**:订阅那条提醒(`last_notice`)取的就是这一刻的 `message`,
-    # 放到后面去拼等于面板上那行字永远少了这一句(而它正是唯一的展示落点)。
     # **这句话不许自称「取到了内容」** —— 同一条警告在失败路上照样要说(见 `heeded`),
     # 而那时内容恰恰没拿到。只说得住的那半截:请求确实发出去了。
     # **同一个频道的同一档不说两遍**:那条警告已经成了这个频道的失败结论(`walls`)时,
@@ -533,7 +543,7 @@ def _round(scope):
                 summary['repointed'] += 1
                 continue
             if source['id'] in failures:
-                _save_failure(source, _Told(RuntimeError('；'.join(failures[source['id']]))), summary)
+                save_failure(source, _Told(RuntimeError('；'.join(failures[source['id']]))), summary)
             elif outstanding or summary['stopped']:
                 summary['deferred'] += 1
             else:
@@ -544,7 +554,7 @@ def _round(scope):
                 summary['deferred'] += 1
             else:
                 wall(summary, [source['id']], error)
-                _save_failure(source, _Told(error), summary)
+                save_failure(source, _Told(error), summary)
                 throttle.caught(error)
     try:
         commit_successes(completed_sources, summary)

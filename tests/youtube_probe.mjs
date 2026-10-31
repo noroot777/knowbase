@@ -450,6 +450,30 @@ try {
   await wait(`fetch('/api/intake/youtube/ranking').then(response=>response.json()).then(value=>value.counts.ready===1)`);
   await wait(`fetch('/api/pipeline/status').then(response=>response.json()).then(value=>!value.running)`);
   await wait(`!pipeSnapshot?.running && !$('source-add').disabled`);
+  await click('#subs-switch-rss');
+  await wait(`sourceKind === 'rss' && !$('source-add').disabled`);
+  await click('#subs-switch-youtube');
+  await wait(`sourceKind === 'youtube' && !$('source-add').disabled`);
+  await click('#source-view-manage');
+  await wait(`Array.from(document.querySelectorAll('.source-subscription')).some(card=>
+    card.querySelector('h3')?.textContent==='部分同步测试频道' && card.textContent.includes('频道没列完'))`);
+  const statusCards = await evaluate(`Object.fromEntries(Array.from(document.querySelectorAll('.source-subscription'))
+    .map(card=>[card.querySelector('h3').textContent, {state:card.querySelector('.source-state').textContent,
+      notice:card.querySelector('.source-skip-notice')?.textContent || '', text:card.textContent}]))`);
+  const skippedOne = statusCards['跳过一条测试频道'], skippedTwo = statusCards['跳过两条测试频道'];
+  check('跳过提示只属于自己的频道', skippedOne.state === '已同步（有跳过）' &&
+    skippedOne.notice.includes('1 条视频无法读取') && !skippedOne.notice.includes('2 条视频无法读取') &&
+    skippedTwo.state === '已同步（有跳过）' && skippedTwo.notice.includes('2 条视频无法读取') &&
+    !skippedTwo.notice.includes('1 条视频无法读取'), JSON.stringify({skippedOne, skippedTwo}));
+  const cleanCard = statusCards['干净测试频道'], partialCard = statusCards['部分同步测试频道'];
+  check('干净频道不继承别人的跳过提示', cleanCard.state === '已同步' && !cleanCard.notice &&
+    !cleanCard.text.includes('频道没列完'), JSON.stringify(cleanCard));
+  check('没列完的频道显示部分同步而不是成功', partialCard.state === '部分同步' &&
+    partialCard.text.includes('频道没列完') && partialCard.text.includes('7 条') && !partialCard.notice,
+    JSON.stringify(partialCard));
+  await evaluate(`Array.from(document.querySelectorAll('.source-subscription')).find(card=>
+    card.querySelector('h3').textContent==='部分同步测试频道').scrollIntoView({block:'center',behavior:'instant'}); true`);
+  await screenshot('subscriptions-status-desktop');
   await click('#source-view-items');
   await wait(`!!document.querySelector('.source-entry')`);
   await click('.source-entry');

@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
 from kb.youtube.ranking import stamp
+from kb.youtube.settings import of
 
 
 INITIAL_DAYS = 3
@@ -33,9 +34,10 @@ def initialize(connection):
         connection.execute("INSERT INTO feed_meta VALUES('youtube-discovery-window-v2',?)", (reg.now(),))
 
 
-def prepare(source, scope, when=None):
+def prepare(source, scope, when=None, settings=None):
     if scope.ranged:
         return source
+    days = of(reg.get_settings('youtube') if settings is None else settings)['window_days']
     with maintenance_lock(), reg.db() as connection:
         connection.execute('BEGIN IMMEDIATE')
         current = connection.execute('''SELECT * FROM subscriptions
@@ -49,7 +51,8 @@ def prepare(source, scope, when=None):
         now = when or datetime.now(timezone.utc)
         previous = stamp(source['last_success'])
         if previous is not None and previous <= now:
-            floor = previous - timedelta(days=1)
+            lookback = datetime.combine(now.astimezone(TZ).date() - timedelta(days=days), time.min, TZ)
+            floor = min(previous - timedelta(days=1), lookback)
         else:
             initial = origin['initial_fetch_at'] if origin else ''
             if stamp(initial) is None:

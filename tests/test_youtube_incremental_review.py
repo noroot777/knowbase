@@ -187,6 +187,5 @@ class ChannelCompletion(IncrementalFixture):
         self.assertIn('失败 0 条', stages.call_args.args[2])
 
     def test_explicit_date_budget_keeps_the_original_detailed_discovery_ceiling(self):
-        self.assertEqual(48 * (collector.DISCOVERY_PER_SOURCE + collector.DISCOVERY_SPACING),
-                         collector.discovery_budget(48))
+        self.assertEqual(collector.DISCOVERY_CEILING, collector.discovery_budget(48))
         self.assertEqual(1800, collector.discovery_budget(48, 90, collector.RANGE_DISCOVERY_CEILING))
