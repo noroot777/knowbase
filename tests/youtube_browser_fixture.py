@@ -50,7 +50,7 @@ def install():
     media.probe = lambda *arguments, **keywords: {'duration': 600, 'language': 'en'}
     media.obtain = lambda *arguments: {'origin': 'uploaded_captions', 'language': 'en', 'segments': [
         {'start': 0, 'end': 300, 'text': 'The AI agent generates code. Test every change.'},
-        {'start': 300, 'end': 600, 'text': 'Verify the result rather than trusting model claims.'}]}
+        {'start': 300, 'end': 600, 'text': 'Verify the result rather than trusting model claims. The API budget is 64.'}]}
     notes.model = lambda stage: SimpleNamespace(provider='fixture', model_id='fixture')
     notes.call = reply
     storage.discover(source, entries)

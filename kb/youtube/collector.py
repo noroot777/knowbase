@@ -236,7 +236,8 @@ def process(rows, settings, scope, summary, deadline):
             entry = notes.build(row, transcript, deadline, stopped)
             storage.update(row['video_id'], state='ready', note=json.dumps(entry, ensure_ascii=False),
                            validation=products.certify(row, metadata, transcript, entry), repair_pending=0,
-                           reason='中文内容笔记已完成', retry_at=0, last_error='')
+                           reason='中文内容笔记已完成' + ('；需核对：' + '；'.join(entry['translation_warnings'])
+                               if entry.get('translation_warnings') else ''), retry_at=0, last_error='')
             summary['processed'] += 1
         except media.Interrupted as error:
             for pending in chosen[position:]:
@@ -409,7 +410,7 @@ def _round(scope):
         told = []
         try:
             with heeded(summary, [source['id']]):
-                source = sync_window.prepare(source, scope)
+                source = sync_window.prepare(source, scope, when=ranking.stamp(started))
                 if source.get('initial_fetch_at'):
                     summary['initial_fetch_at'][str(source['id'])] = source['initial_fetch_at']
                 listed = discovery.fetch(source, settings, per_source, not scope.ranged, told)

@@ -66,14 +66,23 @@ def translate(text, selected, deadline, stopped):
 def translated_output(text, output):
     if not isinstance(output, str):
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
-    if text_language(output) != 'zh':
+    if not output.strip() or text_language(output) != 'zh':
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
+    return output.strip()
+
+
+def translation_warnings(text, output):
     source_size = sum(char.isalnum() for char in text)
     translated_size = sum(char.isalnum() for char in output)
-    minimum_ratio = .30 if source_size >= 200 else .15
-    if not output.strip() or translated_size < max(1, source_size * minimum_ratio):
-        raise RuntimeError('译文正文为空或明显过短，不能确认全文已翻译')
-    return output.strip()
+    warnings = []
+    if source_size >= 200 and translated_size < source_size * .30:
+        warnings.append('译文较原文简短，请对照原始转录核对；长度差异不能证明漏译')
+    tail = text[len(text) * 2 // 3:]
+    anchors = set(re.findall(r'\b(?:\d+(?:[.,]\d+)*%?|[A-Z]{2,}[A-Z0-9-]*)\b', tail))
+    missing = sorted(anchor for anchor in anchors if anchor.casefold() not in output.casefold())
+    if missing:
+        warnings.append('原文末段的数字或缩写未在译文中找到，请核对：' + '、'.join(missing[:8]))
+    return warnings
 
 
 def summary(text, title, selected, deadline, stopped):
@@ -86,7 +95,7 @@ def summary(text, title, selected, deadline, stopped):
 def summary_output(output, source=None):
     if not isinstance(output, str) or not output.strip() or text_language(output) != 'zh':
         raise RuntimeError('视频分段要点不是有效中文，原文和译文已缓存')
-    if len(output) > 1000 or (source is not None and len(output) >= len(source)):
+    if len(output) > 1000:
         raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
     return output
 
@@ -109,12 +118,13 @@ def build(row, transcript, deadline, stopped):
     if not isinstance(cache, dict):
         cache = {}
     translator, summarizer = model('translate'), model('youtube_summary')
-    translated = []
+    translated, warnings = [], []
     for block in transcripts.blocks(transcript['segments']):
         key = signature('translate', translator, block)
         translated.append(cached(directory, cache, key,
                                  lambda block=block: translate(block, translator, deadline, stopped),
                                  lambda output, block=block: translated_output(block, output)))
+        warnings.extend(translation_warnings(block, translated[-1]))
     facts = []
     for block in translated:
         key = signature('summary', summarizer, row['entry']['title'] + '\n' + block)
@@ -142,9 +152,11 @@ def build(row, transcript, deadline, stopped):
     payload = cached(directory, cache, key, lambda: call(prompt, summarizer, deadline, stopped), note_payload)
     origin = ORIGINS.get(transcript['origin'], transcript['origin'])
     complete = '\n\n'.join(translated)
+    warning_text = '\n\n> 翻译核验提示：' + '；'.join(dict.fromkeys(warnings)) if warnings else ''
     body = (payload['summary'] + '\n\n' + payload['body'] +
             f'\n\n> 内容依据：{origin}；已进行中文整理，未分析视频画面。字幕和语音识别可能有误。'
-            '\n\n## 完整中文转录\n\n' + complete)
+            + warning_text + '\n\n## 完整中文转录\n\n' + complete)
     return {'url': row['entry']['url'], 'title': payload['title'], 'body': body,
             'published': row['entry']['published'], 'author': row['channel'],
-            'content_kind': 'markdown', 'body_provenance': 'youtube:' + transcript['origin']}
+            'content_kind': 'markdown', 'body_provenance': 'youtube:' + transcript['origin'],
+            'translation_warnings': list(dict.fromkeys(warnings))}

@@ -464,6 +464,9 @@ try {
     $('source-reader-body').textContent.includes('完整中文转录') &&
     $('source-reader-body').textContent.includes('不能仅凭生成结果') &&
     !document.querySelector('#source-reader-body a[href*="&t="]')`));
+  check('译文核验提示不阻止入库且在阅读区可见', await evaluate(`
+    $('source-reader-body').textContent.includes('翻译核验提示') &&
+    $('source-reader-body').textContent.includes('64')`));
   await screenshot('chinese-reader-desktop');
   await click('#subs-switch-rss');
   await wait(`sourceKind === 'rss' && $('source-title').textContent === 'RSS' && !$('source-add').disabled`);

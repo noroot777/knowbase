@@ -57,7 +57,6 @@ def initialize(connection):
     seed(connection, reg.now(), reg.history_floor())
     connection.execute(SCHEMA)
     connection.execute(OWNERS)
-    sync_window.initialize(connection)
     columns = {column['name'] for column in connection.execute('PRAGMA table_info(youtube_videos)')}
     for name, definition in (('validation', "TEXT NOT NULL DEFAULT ''"),
                              ('repair_pending', 'INTEGER NOT NULL DEFAULT 0'),
@@ -78,6 +77,7 @@ def initialize(connection):
         connection.execute(f"UPDATE youtube_videos SET state='candidate' WHERE {waiting} AND metadata_pending=0",
                            reasons)
     migrate(connection)
+    sync_window.initialize(connection)
     connection.execute("UPDATE youtube_videos SET state='deferred',gate_code='legacy',retry_at=0 "
                        "WHERE state='excluded' AND gate_code=''")
     connection.execute('''CREATE TRIGGER IF NOT EXISTS youtube_subscription_reset
@@ -118,6 +118,8 @@ def discover(source, entries):
                                      (source['id'],)).fetchone()
         if not current or current['url'] != source['url'] or not current['enabled']:
             return
+        from kb.youtube.sync_window import record
+        record(connection, source)
         connection.execute('DELETE FROM youtube_video_sources WHERE source_id=? AND source_url<>?',
                            (source['id'], source['url']))
         for entry in entries:
@@ -164,18 +166,17 @@ def rows(source_ids=None, connection=None):
                 AND item.url=json_extract(candidate.entry,'$.url')) AS committed,
             EXISTS(SELECT 1 FROM feed_item_exclusions removed WHERE removed.kind='youtube'
                 AND removed.url=json_extract(candidate.entry,'$.url')) AS excluded,
-            source.name AS channel,source.config,source.history_floor,origin.initial_fetch_at,
+            source.name AS channel,source.config,source.history_floor,
             source.id AS owner_id
             FROM youtube_videos candidate JOIN youtube_video_sources owner ON owner.video_id=candidate.video_id
             JOIN subscriptions source ON source.id=owner.source_id
-            LEFT JOIN youtube_sync_origins origin ON origin.source_id=source.id AND origin.source_url=source.url
             WHERE source.enabled=1 AND source.url=owner.source_url''' + where + ' ORDER BY owner.source_id',
             arguments).fetchall()
     grouped = {}
     for item in result:
         row = dict(item)
         owner = {key: row[key] for key in ('source_id', 'source_url', 'committed', 'channel', 'config',
-                                         'history_floor', 'initial_fetch_at')}
+                                         'history_floor')}
         candidate = grouped.setdefault(row['video_id'], {**row, 'entry': json.loads(row['entry']), 'owners': []})
         candidate['owners'].append(owner)
     return list(grouped.values())

@@ -27,9 +27,19 @@ class YouTubeInitialWindow(YouTubeFixture):
         stored = reg.subscription('youtube', source['id'])
         for key in ('last_success', 'last_attempt', 'last_error', 'failures', 'retry_at'):
             self.assertEqual(self.source[key], stored[key])
+        with reg.db() as connection:
+            self.assertEqual(0, connection.execute('SELECT count(*) FROM youtube_sync_origins').fetchone()[0])
+
+    def test_all_channels_use_the_same_round_start_even_when_requests_cross_midnight(self):
+        when = datetime(2026, 10, 30, 15, 59, 59, tzinfo=timezone.utc)
+        first = self.prepare(when=when)
+        second = self.prepare(source=self.channel(2), when=when)
+        self.assertEqual(first['initial_fetch_at'], second['initial_fetch_at'])
+        self.assertEqual('2026-10-27T00:00:00+08:00', first['initial_fetch_at'])
 
     def test_retry_after_midnight_reuses_persisted_origin(self):
         first = self.prepare()
+        storage.discover(first, [])
         with reg.db() as connection:
             connection.execute('''UPDATE subscriptions SET last_attempt=?,last_error='网络错误',
                 failures=3,retry_at=999 WHERE id=?''', (reg.now(), self.source['id']))
@@ -57,10 +67,16 @@ class YouTubeInitialWindow(YouTubeFixture):
 
     def test_later_success_does_not_move_the_original_fallback(self):
         source = self.prepare()
+        storage.discover(source, [])
+        succeeded = reg.now()
         with reg.db() as connection:
-            connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?', (reg.now(), source['id']))
-        self.assertEqual(source['initial_fetch_at'],
-                         self.prepare(when=self.now + timedelta(days=5))['initial_fetch_at'])
+            connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?', (succeeded, source['id']))
+        refreshed = self.prepare(when=self.now + timedelta(days=5))
+        self.assertEqual(ranking.stamp(succeeded) - timedelta(days=1),
+                         ranking.stamp(refreshed['discovery_after']))
+        with reg.db() as connection:
+            self.assertEqual(source['initial_fetch_at'], connection.execute(
+                'SELECT initial_fetch_at FROM youtube_sync_origins WHERE source_id=?', (source['id'],)).fetchone()[0])
 
     def test_exact_dates_use_inclusive_start_and_estimates_remain_unknown(self):
         source = self.prepare()
@@ -71,11 +87,12 @@ class YouTubeInitialWindow(YouTubeFixture):
                    {**self.entry(4), 'published': ''}]
         self.assertEqual(entries[1:], sync_window.recent(source, entries, self.scope))
 
-    def test_estimated_dates_are_checked_again_after_real_metadata_arrives(self):
+    def test_existing_estimated_candidate_survives_new_origin_and_metadata_calibration(self):
+        entry = {**self.entry(), 'approximate': True, 'description': '', 'views': 0}
+        storage.discover(self.source, [entry])
         source = self.prepare()
         floor = ranking.stamp(source['initial_fetch_at'])
-        entry = {**self.entry(), 'approximate': True, 'description': '', 'views': 0}
-        storage.discover(source, [entry])
+        storage.discover(source, [])
         settings = self.settings()
         self.assertEqual(1, len(ranking.score(storage.rows(), settings['youtube'], self.scope)))
         metadata = {'timestamp': (floor - timedelta(hours=1)).timestamp(),
@@ -86,14 +103,14 @@ class YouTubeInitialWindow(YouTubeFixture):
                                                 time.monotonic() + 10, lambda: False)
         probe.assert_called_once()
         obtain.assert_not_called()
-        self.assertEqual([], ranking.score(result['rows'], settings['youtube'], self.scope))
+        self.assertEqual(1, len(ranking.score(result['rows'], settings['youtube'], self.scope)))
         row = storage.rows()[0]
         self.assertNotIn('approximate', row['entry'])
-        self.assertEqual('filtered', row['state'])
-        self.assertIn('首次同步起点', row['reason'])
+        self.assertEqual('candidate', row['state'])
+        self.assertNotIn('首次同步起点', row['reason'])
         response = self.client.get('/api/intake/youtube/ranking')
         self.assertEqual(200, response.status_code)
-        self.assertEqual(1, response.json()['counts']['filtered'])
+        self.assertEqual(1, response.json()['counts']['candidate'])
 
     def test_explicit_date_backfill_neither_initializes_nor_applies_default(self):
         entry = self.entry(hours=96)
@@ -106,13 +123,13 @@ class YouTubeInitialWindow(YouTubeFixture):
         self.assertEqual([entry], sync_window.recent(source, [entry], scope))
         storage.discover(source, [entry])
         settings = self.settings()['youtube']
-        self.assertEqual([], ranking.score(storage.rows(), settings, self.scope))
+        self.assertEqual(1, len(ranking.score(storage.rows(), settings, self.scope)))
         self.assertEqual(1, len(ranking.score(storage.rows(), settings, scope)))
 
-    def test_force_retry_does_not_bypass_initial_date_window(self):
+    def test_force_retry_keeps_previously_queued_candidates(self):
         source = self.prepare()
         storage.discover(source, [self.entry(hours=96)])
-        self.assertEqual([], ranking.score(storage.rows(), self.settings()['youtube'], FetchScope(force=True)))
+        self.assertEqual(1, len(ranking.score(storage.rows(), self.settings()['youtube'], FetchScope(force=True))))
 
     def test_shared_video_qualifies_for_an_owner_with_existing_history(self):
         source = self.prepare()
@@ -125,10 +142,11 @@ class YouTubeInitialWindow(YouTubeFixture):
         storage.discover(second, [entry])
         ranked = ranking.score(storage.rows(), self.settings()['youtube'], self.scope)
         self.assertEqual(1, len(ranked))
-        self.assertEqual([second['id']], ranked[0]['eligible_sources'])
+        self.assertEqual({source['id'], second['id']}, set(ranked[0]['eligible_sources']))
 
     def test_repointing_clears_old_origin_but_renaming_does_not(self):
         first = self.prepare()
+        storage.discover(first, [])
         reg.save_subscription('youtube', {'name': '重命名频道'}, self.source['id'])
         self.assertEqual(first['initial_fetch_at'], self.prepare(when=self.now + timedelta(days=2))['initial_fetch_at'])
         source = reg.save_subscription('youtube', {'url': 'https://www.youtube.com/@changed'}, self.source['id'])
@@ -138,12 +156,12 @@ class YouTubeInitialWindow(YouTubeFixture):
                             self.prepare(source=source, when=self.now + timedelta(days=2))['initial_fetch_at'])
 
     def test_deleted_channel_does_not_leave_an_orphaned_origin(self):
-        self.prepare()
+        storage.discover(self.prepare(), [])
         reg.delete_subscription('youtube', self.source['id'])
         with reg.db() as connection:
             self.assertEqual(0, connection.execute('SELECT count(*) FROM youtube_sync_origins').fetchone()[0])
 
-    def test_round_records_origin_and_skips_known_old_entries_before_storage(self):
+    def test_round_records_origin_and_skips_new_old_entries_before_storage(self):
         fetched = [self.entry(1, hours=96), self.entry(2)]
         with patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
                 patch.object(discovery, 'fetch', return_value=fetched), \
@@ -166,3 +184,37 @@ class YouTubeInitialWindow(YouTubeFixture):
         fetch.assert_not_called()
         with reg.db() as connection:
             self.assertEqual(0, connection.execute('SELECT count(*) FROM youtube_sync_origins').fetchone()[0])
+
+    def test_failed_first_discovery_does_not_persist_an_origin(self):
+        with patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(discovery, 'fetch', side_effect=RuntimeError('临时网络错误')):
+            result = collector.collect(self.scope)
+        self.assertEqual([str(self.source['id'])], result['failed_ids'])
+        with reg.db() as connection:
+            self.assertEqual(0, connection.execute('SELECT count(*) FROM youtube_sync_origins').fetchone()[0])
+
+    def test_previous_initial_window_filter_is_repaired_without_clearing_error_history(self):
+        storage.discover(self.source, [self.entry(hours=96), self.entry(2, hours=96)])
+        for row in storage.rows():
+            storage.update(row['video_id'], state='filtered', reason='早于首次同步起点（默认从今天回看 3 天）',
+                           last_error='旧模型错误' if row['video_id'].endswith('2') else '', attempts=2, retry_at=99)
+        storage.discover(self.source, [self.entry(3)])
+        storage.update('00000000003', state='filtered', reason='其他日期限制')
+        with reg.db() as connection:
+            connection.execute("DELETE FROM feed_meta WHERE key='youtube-discovery-window-v2'")
+        rows = {row['video_id']: row for row in storage.rows()}
+        self.assertEqual('candidate', rows['00000000001']['state'])
+        failed = rows['00000000002']
+        self.assertEqual(('failed', '旧模型错误', 2, 99),
+                         tuple(failed[key] for key in ('state', 'last_error', 'attempts', 'retry_at')))
+        self.assertEqual('filtered', rows['00000000003']['state'])
+        self.assertEqual('其他日期限制', rows['00000000003']['reason'])
+
+    def test_old_queued_dates_are_not_reclassified_by_new_discovery_origin(self):
+        entries = [self.entry(number, hours=hours) for number, hours in enumerate((80, 96, 110), 1)]
+        storage.discover(self.source, entries)
+        source = self.prepare()
+        storage.discover(source, [])
+        ranked = ranking.score(storage.rows(), self.settings()['youtube'], self.scope)
+        self.assertEqual(3, len(ranked))
+        self.assertEqual(entries, sync_window.recent(source, entries, self.scope))

@@ -1,9 +1,47 @@
 # YouTube 低成本接入验证
 
-## 时间戳解耦修复（2026-10-31）
+## 当前审查修复口径（2026-10-31）
+
+译文只硬校验非空中文；长度差异及末段数字/大写缩写缺失变为非阻塞核验提示，
+写入候选完成原因、JSON 与阅读/导出正文，不以字符比断言全文语义完整。
+保留 v3 翻译缓存，命中后重新计算提示；摘要只限制绝对 1000 字和整轮归并缩短，允许短片尾适度展开。
+首次三天起点仅约束新发现，存量队列不追溯过滤；确因旧起点被过滤的候选一次性恢复。
+普通发现改用日期精确列表及已知 ID 临时 archive，在原预算内推进，详见 `youtube-incremental-discovery.md`。
+本轮浏览器通道：先将 Chrome 扩展会话命名为 `🔎 YouTube审查修复`，再尝试
+`createBrowserTab(..., visible:false)`；接口拒绝 `Capability is not available: visibility`，
+未创建标签。不能保证后台创建，故降级独立无头壳与临时 profile，仅访问本地隔离服务，
+无登录态需求；不激活窗口、不接管现有标签、不使用用户 Chrome CDP。
+### 本轮执行证据
+
+- 首次哨兵 `9Avey34B6P9m`：43 项中 42 项通过（包含真实无头浏览器），
+  唯一错误是新增补抓测试误用 `FetchScope(date_from=..., date_to=...)`；按真实 API 改为 `since` / `until`。
+- 重验哨兵 `lZ9UfrgEt6YJ`：真实退出码 `0`，`Ran 43 tests in 19.822s`，全过、无跳过。
+  只执行本轮改动/新增的四个测试模块，整套回归及其他未改模块留给验收。
+- 真实生产形态的发现测试只替换 `media.ytdlp` 进程边界，实际运行 `discovery.fetch` / collector，
+  核对日期筛选、已知 ID 档案及清理、明确空窗口、部分输出、本机磁盘错误不惩罚频道、显式日期补抓。
+  起点测试覆盖已有候选及元数据校准不追溯判废、旧误过滤恢复且不清错误历史。
+- 无头浏览器的 39 项断言全过；隔离同步入库 1 篇，阅读区可见完整中文转录和
+  「翻译核验提示：……64、API」，警告不阻断入库；导出 Markdown 同样保留提示、不含逐秒跳转链接。
+  已查看 `chinese-reader-desktop.png` 确认可见效果，窄屏无横向溢出、无浏览器脚本异常。
+- Python AST、改动模块导入、Node 语法、单文件 700 行限制及 `git diff --check` 通过。
+  所有测试使用临时数据库、隔离服务和远端/模型替身，未使用真实 cookie、未调用真实模型或 YouTube，
+  未重跑生产同步、未修改生产库或重启服务；不据此声称真实同步候选数已下降或模型语义完整性已证明。
+
+工作目录：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。两轮登记的原始命令均为：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_notes tests.test_youtube_initial_window tests.test_youtube_windowed_discovery tests.test_youtube_browser -v
+```
+
+原始日志位于 `/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/regression/9Avey34B6P9m.log`
+及 `/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/regression/lZ9UfrgEt6YJ.log`。
+日志、`checks.json` 与三张截图归档在 `/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-latest-review/`。
+以下均为历史执行记录，不代表当前断言口径。
+
+## 时间戳解耦修复（历史：2026-10-31）
 
 现行知识库入库不再要求模型复写字幕时间标记，完整中文转录使用纯正文；下文 2026-10-24 的执行记录保留历史口径，不代表现行要求。
-原始字幕的时间覆盖校验仍保留。译文块校验中文、非空及长度：原块至少 200 个有效字符时取 30% 下限，更短片尾取 15%，不声称能证明语义无损。
+原始字幕的时间覆盖校验仍保留。当时译文块还要求原块至少 200 个有效字符时取 30% 下限，更短片尾取 15%；这道长度硬闸已在当前审查修复中撤回。
 浏览器夹具改为直接根据输入正文长度返回中文，不依赖时间标记；探针检查完整中文转录及内容存在、没有逐秒跳转链接，并检查导出 Markdown 同样不含这些链接。
 
 Chrome 扩展会话命名为 `🔎 YouTube入库修复`；后台创建参数 `visible:false` 被拒绝：`Capability is not available: visibility`。

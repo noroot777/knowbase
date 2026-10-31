@@ -1,5 +1,4 @@
 import json
-import math
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -48,8 +47,8 @@ class YouTubeNotes(YouTubeFixture):
         self.build()
         self.assertGreater(len(self.prompts), count)
 
-    def test_empty_english_or_summary_translation_not_published(self):
-        for output in ('', '中文摘要。', 'Still entirely English words.'):
+    def test_empty_or_english_translation_not_published(self):
+        for output in ('', '   ', 'Still entirely English words.'):
             with self.subTest(output=output), self.assertRaises(RuntimeError):
                 self.build(lambda *args: output)
         self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-cache.json').exists())
@@ -62,17 +61,26 @@ class YouTubeNotes(YouTubeFixture):
         with patch.object(notes, 'call', return_value=output):
             self.assertEqual(output, notes.translate(source, self.selected, self.deadline, lambda: False))
 
-    def test_long_text_rejects_partial_translations_and_accepts_normal_compression(self):
-        source = 'Every generated change needs independent verification. ' * 50
-        source_size = sum(char.isalnum() for char in source)
-        for ratio in (.15, .20, .29):
-            output = '译' * int(source_size * ratio)
-            with self.subTest(ratio=ratio), self.assertRaisesRegex(RuntimeError, '过短'):
-                notes.translated_output(source, output)
-        for ratio in (.30, .41, .60):
-            output = '译' * math.ceil(source_size * ratio)
-            with self.subTest(ratio=ratio):
-                self.assertEqual(output, notes.translated_output(source, output))
+    def test_complete_but_compressed_translation_is_not_rejected_by_length(self):
+        source = ('The information provided in this presentation should not under any circumstances '
+                  'be regarded as a replacement for independent verification of generated source code. '
+                  'Please make sure that every single change is checked before the generated result is used.')
+        output = '本演示不能代替对生成代码的独立核验，使用前务必检查每次修改。'
+        self.assertLess(sum(char.isalnum() for char in output),
+                        sum(char.isalnum() for char in source) * .30)
+        self.assertEqual(output, notes.translated_output(source, output))
+        self.assertIn('不能证明漏译', notes.translation_warnings(source, output)[0])
+
+    def test_tail_numbers_and_acronyms_are_content_warnings_not_format_requirements(self):
+        source = 'We review generated source code. ' * 20 + 'Finally the CPU budget is 64 and the API deadline is 2026.'
+        output = '作者介绍生成代码的审核流程，并讨论限制。'
+        self.assertEqual(output, notes.translated_output(source, output))
+        warnings = '；'.join(notes.translation_warnings(source, output))
+        self.assertIn('64', warnings)
+        self.assertIn('2026', warnings)
+        self.assertIn('CPU', warnings)
+        complete = output + '最后 CPU 预算为64，API 截止年为2026。'
+        self.assertFalse(any('末段' in warning for warning in notes.translation_warnings(source, complete)))
 
     def test_short_closing_translation_is_not_judged_as_a_long_text_block(self):
         source = 'Thank you very much for watching this video.'
@@ -80,16 +88,15 @@ class YouTubeNotes(YouTubeFixture):
         self.assertLess(len(output), sum(char.isalnum() for char in source) * .30)
         self.assertEqual(output, notes.translated_output(source, output))
 
-    def test_partial_translation_cache_is_revalidated_before_reuse(self):
+    def test_compressed_translation_cache_is_reused_without_repeated_model_charges(self):
         source = 'Every generated change needs independent verification. ' * 50
-        source_size = sum(char.isalnum() for char in source)
-        cache = {'translation': '译' * int(source_size * .20)}
-        output = '译' * math.ceil(source_size * .41)
-        with patch.object(notes, 'call', return_value=output) as call:
+        output = '每次生成的修改均须独立核验。'
+        cache = {'translation': output}
+        with patch.object(notes, 'call') as call:
             actual = notes.cached(media.cache_dir(self.row['video_id']), cache, 'translation',
                                   lambda: notes.translate(source, self.selected, self.deadline, lambda: False),
                                   lambda value: notes.translated_output(source, value))
-        call.assert_called_once()
+        call.assert_not_called()
         self.assertEqual(output, actual)
         self.assertEqual(output, cache['translation'])
 
@@ -122,14 +129,27 @@ class YouTubeNotes(YouTubeFixture):
             if prompt.startswith('将以下字幕'):
                 attempts += 1
                 if attempts == 2:
-                    return '中文摘要。'
+                    return ''
             return self.reply(prompt, *rest)
 
-        with self.assertRaisesRegex(RuntimeError, '过短'):
+        with self.assertRaisesRegex(RuntimeError, '中文译文'):
             self.build(failed)
         self.assertEqual(2, attempts)
         self.build()
         self.assertEqual(2, sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
+
+    def test_suspect_translation_is_saved_with_visible_warning_and_cached(self):
+        self.transcript['segments'][-1]['text'] += ' The final API budget is 64.'
+        result = self.build()
+        self.assertTrue(result['translation_warnings'])
+        self.assertIn('翻译核验提示', result['body'])
+        self.assertIn('64', result['body'])
+        self.assertEqual(result, self.build())
+
+    def test_short_reduce_tail_may_expand_without_rejecting_the_whole_note(self):
+        self.assertEqual('可用的中文分段要点。', notes.summary_output('可用的中文分段要点。', '短尾。'))
+        with self.assertRaisesRegex(RuntimeError, '压缩'):
+            notes.summary_output('中' * 1001, '原' * 12000)
 
     def test_failed_final_note_retries_using_completed_translations(self):
         def invalid(prompt, *rest):

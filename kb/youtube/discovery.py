@@ -59,18 +59,25 @@ RSS_BACKOFF = 1.0
 
 
 def fetch(source, settings=None, timeout=90, estimates=True, notes=None):
-    """普通同步只列 flat；指定日期只取精确列表；未配置登录态的显式调用才走 RSS。"""
+    """同步按发现窗口取精确日期；无窗口的调用保留 flat；显式无登录态调用才走 RSS。"""
     budget = max(6.0, float(timeout))
     spec = '' if settings is None else of(settings)['cookies_browser']
     if not spec:
         return rss(source, time.monotonic() + budget)
-    label = '带登录态轻量列表' if estimates else '带登录态逐条解析'
+    label = '带登录态增量日期列表' if source.get('discovery_after') else (
+        '带登录态轻量列表' if estimates else '带登录态逐条解析')
     try:
+        if estimates and source.get('discovery_after'):
+            from kb.youtube.windowed_discovery import fetch as windowed
+            return windowed(source, settings, time.monotonic() + budget, notes)
         fetcher = approximate if estimates else detailed
         return fetcher(source, settings, time.monotonic() + budget, notes)
     except throttle.NotAttempted:
         raise
     except Exception as error:
+        from kb.youtube.faults import local_fault
+        if local_fault(error):
+            raise
         raise _combined([f'{label}：{error}'], [error]) from None
 
 
