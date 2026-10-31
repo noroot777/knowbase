@@ -1,6 +1,29 @@
 # YouTube 低成本接入验证
 
-## 当前复修口径（2026-10-31，7Rzxh2K80EXE）
+## 当前复修口径（2026-10-31，7Rzxh2K80EXE 第二轮）
+
+- 精确窗口移除固定 20 条截断，以日期边界收口；已知 ID 的 archive 不再挡住第 21 条以后的新视频。
+- 单频道预算改为 180 秒，整轮按全部待查频道与间隔计额，不套用 flat 的 30 秒/900 秒限额。
+  最坏 48 频道约 145 分钟，不宣称冷启动很快；仍可取消、出口限流仍熔断。
+- 部分列表即使已收条目的笔记都做好，也不能推进频道成功水位；首次起点及既有水位保留，后续追赶可恢复。
+- 共用列表适配层区分真实 101 日期停止和独立警告；分类不再否决正常结束，警告仍单独展示。
+  真实超时、ERROR、其他退出码及本机故障不冒充成功；其他列表路线的契约不变。
+- 本轮只改服务端发现/完成判定和相应离线测试，不修改界面、阅读或导出，没有操作浏览器。
+  新增真实本地子进程复现 31 条窗口与 archive 尾部；时间预算用虚拟 4.3 秒/条场景验证，不据此声称实测远程性能。
+
+本轮登记的原始命令：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_window_coverage tests.test_youtube_windowed_discovery tests.test_youtube_fallback tests.test_youtube_pacing tests.test_youtube_incremental_review -v
+```
+
+工作目录：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+真实结果、完整日志与冻结树登记在外部目录
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-7Rzxh2K80EXE-round-2/`。
+仓库文档在登记前冻结，执行后不以修改文档改变被验证的提交树。
+只运行本轮新增或改动的五个测试模块；整套回归仍留给验收，未操作生产库或重跑生产同步。
+
+## 上一轮复修口径（历史：e879879）
 
 - 日期边界停止与异常中断分开：结构化保存工具退出码，仅日期发现路径在退出 `101`、
   本次原始输出有明确日期过滤且无 ERROR 或上游错误分类时正常收尾；不产生「频道没列完」及订阅假告警。

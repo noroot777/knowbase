@@ -24,9 +24,8 @@ def stopped():
     return halted()
 
 
-DISCOVERY_PER_SOURCE = 30.0
+DISCOVERY_PER_SOURCE = 180.0
 DISCOVERY_SPACING = 1.0
-DISCOVERY_CEILING = 900.0
 RANGE_DISCOVERY_CEILING = 1800.0
 
 
@@ -126,11 +125,11 @@ def discovery_budget(count, per_source=None, ceiling=None):
     不算的话额度正好卡在 `count * DISCOVERY_PER_SOURCE` 上,而真实耗时还要多出
     `(count - 1)` 拍 —— 于是每一轮固定有最后几个频道被那道闸拦掉、静默进 `skipped`,
     而它们本该轮得到。至少留够一个频道的额度,
-    `DISCOVERY_CEILING` 是上限(超出的下一轮接着查)。
+    普通窗口给每个待查频道完整额度；显式补抓可另设整轮上限。
     """
     per_source = DISCOVERY_PER_SOURCE if per_source is None else per_source
-    ceiling = DISCOVERY_CEILING if ceiling is None else ceiling
-    return min(ceiling, max(per_source, count * (per_source + DISCOVERY_SPACING)))
+    budget = max(per_source, count * (per_source + DISCOVERY_SPACING))
+    return budget if ceiling is None else min(ceiling, budget)
 
 
 def process(rows, settings, scope, summary, deadline):
@@ -382,10 +381,10 @@ def _round(scope):
             connection.execute('INSERT INTO feed_runs(kind,started_at,finished_at,summary) VALUES(?,?,?,?)',
                                ('youtube', started, reg.now(), json.dumps(summary, ensure_ascii=False)))
         return summary
-    succeeded = []
+    succeeded, incomplete = [], set()
     per_source = 90.0 if scope.ranged else DISCOVERY_PER_SOURCE
     discovery_started = time.monotonic()
-    ceiling = RANGE_DISCOVERY_CEILING if scope.ranged else DISCOVERY_CEILING
+    ceiling = RANGE_DISCOVERY_CEILING if scope.ranged else None
     discovery_deadline = discovery_started + discovery_budget(len(pending), per_source, ceiling)
     while pending and not stopped():
         # **第一个频道无条件放行。** 「剩下的时间够不够再查一个」这道闸只能拦后续的:
@@ -418,6 +417,8 @@ def _round(scope):
             storage.discover(source, entries)
             summary['discovered'] += len(entries)
             succeeded.append(source)
+            if told:
+                incomplete.add(source['id'])
             # **「没列完」不是失败,但也不许静默**(口径同 `feeds.sync` 的 `partial`):
             # 列到的照旧入库、下一轮按 URL 去重地接着列,可「停在第 7 条」和「整个
             # 频道都列完了」在面板上不该长得一模一样。记成 error 更不对 —— 那会显示
@@ -511,7 +512,7 @@ def _round(scope):
     completed_sources = []
     for source in succeeded:
         try:
-            outstanding = (summary['stopped'] or source['id'] in failures or
+            outstanding = (summary['stopped'] or source['id'] in incomplete or source['id'] in failures or
                        str(source['id']) in summary.get('local_ids', []) or
                        any(not row['excluded'] and
                            (row['last_error'] or row['state'] in ('failed', 'processing') or

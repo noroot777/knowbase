@@ -86,7 +86,6 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
                 (1, 'ERROR: request failed'),
                 (101, 'Aborting remaining downloads'),
                 (101, '[download] old does not pass filter\nERROR: request failed'),
-                (101, '[download] old does not pass filter\nWARNING: Sign in to confirm you are not a bot'),
                 (1, '[download] old does not pass filter')):
             evidence = []
             with self.subTest(code=returncode, diagnostic=diagnostic), throttle.opened(), \
@@ -96,6 +95,28 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
                 listed = self.fetch(notes=evidence)
             self.assertEqual(1, len(listed))
             self.assertIn('中断', evidence[0])
+
+    def test_normal_date_completion_keeps_warnings_without_incomplete_listing_claim(self):
+        for warning, code in (
+                ('WARNING: failed to decrypt cookies', 'cookie_unreadable'),
+                ('WARNING: could not find cookies database', 'cookie_unreadable'),
+                ('WARNING: HTTP Error 429: Too Many Requests', 'rate_limited'),
+                ('WARNING: n challenge solving failed', 'js_challenge'),
+                ('WARNING: Sign in to confirm you are not a bot', 'bot_wall')):
+            diagnostic = warning + '\n[download] old does not pass filter\nAborting remaining downloads'
+            with self.subTest(warning=warning), patch.object(
+                    toolchain, 'command', return_value=self.command([self.payload(1, self.now)], diagnostic)), \
+                    patch.object(media.login, 'arguments', return_value=[]), \
+                    patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                    patch.object(notes, 'available', return_value=(True, '')), \
+                    patch.object(media, 'probe', return_value={'duration': 600}), \
+                    patch.object(media, 'obtain', return_value=self.complete_transcript()), \
+                    patch.object(notes, 'build', side_effect=self.note):
+                result = collector.collect(self.scope)
+            self.assertEqual([], result['partial'])
+            self.assertIn(str(self.source['id']), result['cautions'][code])
+            self.assertNotIn('没列完', result['message'])
+            self.assertNotIn('没列完', reg.subscription('youtube', self.source['id'])['last_notice'])
 
     def test_real_timeout_after_boundary_text_is_not_misclassified_as_completion(self):
         command = self.command([self.payload(1, self.now)], '[download] old does not pass filter', delay=10)
@@ -136,7 +157,7 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         arguments = self.calls[0]['arguments']
         day = self.floor.astimezone(timezone.utc).strftime('%Y%m%d')
         self.assertEqual(f'upload_date>=?{day}', arguments[arguments.index('--break-match-filters') + 1])
-        self.assertEqual('20', arguments[arguments.index('--playlist-end') + 1])
+        self.assertNotIn('--playlist-end', arguments)
         self.assertIn('--no-quiet', arguments)
         self.assertNotIn('--flat-playlist', arguments)
         self.assertNotIn('--break-on-existing', arguments)

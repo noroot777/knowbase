@@ -247,16 +247,13 @@ class DiscoveryBudget(YouTubeFixture):
                 self.assertEqual(total, summary['checked'])
                 self.assertEqual(0, summary['skipped'], '一个都不许静默留到下一轮')
 
-    def test_each_channel_gets_a_bounded_lightweight_listing_budget(self):
+    def test_each_channel_gets_a_bounded_precise_window_listing_budget(self):
         sources, seen, summary = self.checked_channels(5, offset=900)
         self.assertEqual(len(sources), len(seen), '每个频道都该被查一次')
         self.assertEqual({collector.DISCOVERY_PER_SOURCE}, set(seen), '单频道预算只有一份口径')
-        self.assertEqual(30, collector.DISCOVERY_PER_SOURCE)
-        # 反过来钉一边:整轮还是有上限的,不许一轮发现无限期跑下去。
-        self.assertLessEqual(collector.DISCOVERY_CEILING, 900)
-        self.assertGreaterEqual(collector.DISCOVERY_CEILING,
-                                collector.DISCOVERY_PER_SOURCE * 4,
-                                '上限连几批都放不下的话,后面的频道永远轮不到')
+        self.assertEqual(180, collector.DISCOVERY_PER_SOURCE)
+        self.assertEqual(len(sources) * (collector.DISCOVERY_PER_SOURCE + collector.DISCOVERY_SPACING),
+                         collector.discovery_budget(len(sources)))
 
 
 class PartialListing(YouTubeFixture):
@@ -272,6 +269,10 @@ class PartialListing(YouTubeFixture):
     def one_round(self, note=''):
         self.isolate()
         source = self.channel(300 if note else 301)
+        previous = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        with reg.db() as connection:
+            connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?', (previous, source['id']))
+        source = reg.subscription('youtube', source['id'])
 
         def fetch(selected, settings, timeout, estimates, notes=None):
             if note:
@@ -292,7 +293,8 @@ class PartialListing(YouTubeFixture):
         self.assertEqual([note], [item['reason'] for item in summary['partial']])
         self.assertEqual(['频道 300'], [item['title'] for item in summary['partial']])
         self.assertEqual([], summary['errors'], '没列完不是失败,不许让它进退避重试')
-        self.assertEqual([str(source['id'])], summary['succeeded_ids'])
+        self.assertEqual([], summary['succeeded_ids'])
+        self.assertEqual(source['last_success'], reg.subscription('youtube', source['id'])['last_success'])
         self.assertIn('没列完', summary['message'], '面板上要看得出这个频道停在半路')
         self.assertIn('Private video', summary['message'], '原话要带上,那是唯一的线索')
         self.assertEqual(1, len(storage.rows([source['id']])), '列到的那条照旧入库')
@@ -303,6 +305,7 @@ class PartialListing(YouTubeFixture):
         self.assertEqual([], summary['partial'])
         self.assertNotIn('没列完', summary['message'])
         self.assertEqual(1, len(storage.rows([source['id']])))
+        self.assertEqual([str(source['id'])], summary['succeeded_ids'])
 
 
 class EstimateNeverOverwritesFacts(YouTubeFixture):
@@ -403,14 +406,16 @@ class FactsReplaceEstimates(YouTubeFixture):
         self.assertEqual(('2026-10-25', None, 77), self.stored())
 
     def test_ranged_round_rejects_a_video_whose_real_date_is_another_day(self):
-        """端到端:指定 10-27 补抓,库里那条估 10-27 而实际 10-25 —— 不许产出成品,
+        """端到端:指定前一天补抓,候选估在前一天而实际在前两天 —— 不许产出成品,
         库里的日期也要换成事实值。**这是审查冒烟的那一例。**"""
-        entry = self.guessed('2026-10-27T10:00:00+08:00')
+        guessed = (datetime.now(TZ) - timedelta(days=1)).replace(hour=10, minute=0, second=0, microsecond=0)
+        actual = guessed - timedelta(days=1)
+        entry = self.guessed(guessed.isoformat())
         metadata = {'id': entry['video_id'], 'duration': 600, 'language': 'en',
-                    'upload_date': '20261025', 'view_count': 4200}
+                    'upload_date': actual.strftime('%Y%m%d'), 'view_count': 4200}
         summary = {'added': 0, 'processed': 0, 'errors': [], 'message': '', 'stopped': False}
         settings = reg.get_settings('youtube')
-        scope = FetchScope(since='2026-10-27', until='2026-10-27')
+        scope = FetchScope(since=guessed.date().isoformat(), until=guessed.date().isoformat())
         ranking.score(storage.rows(), of(settings), scope)
         with patch.object(notes, 'available', return_value=(True, '')), \
                 patch.object(media, 'probe', return_value=metadata), \
@@ -420,7 +425,7 @@ class FactsReplaceEstimates(YouTubeFixture):
         build.assert_not_called()
         self.assertEqual(0, summary['processed'])
         row = storage.rows([self.source['id']])[0]
-        self.assertEqual('2026-10-25', row['entry']['published'][:10], '事实日期必须落库')
+        self.assertEqual(actual.date().isoformat(), row['entry']['published'][:10], '事实日期必须落库')
         self.assertNotIn('approximate', row['entry'])
         # **「这一轮不要」不是「永久不要」**:写成 excluded 的话,下一轮普通同步里
         # `rejection` 那道 `state=='excluded' and not force` 会直接拒掉它,它再也回不来。
@@ -428,8 +433,6 @@ class FactsReplaceEstimates(YouTubeFixture):
         # 否则「这一轮没进」在两处是两个状态,恢复路径也就只有一条能走通。
         self.assertEqual('filtered', row['state'])
         self.assertIn('指定日期范围', row['reason'])
-        # **接着钉住它真能回来**:换成普通一轮(事实日期 10-25 落在默认 7 天窗口里),
-        # 同一条候选重新进榜 —— 这是「放宽窗口/换一天还能收」那半边。
         revived = ranking.score(storage.rows(), of(settings), FetchScope())
         self.assertEqual([entry['video_id']], [item['video_id'] for item in revived])
         self.assertEqual('candidate', storage.rows([self.source['id']])[0]['state'])

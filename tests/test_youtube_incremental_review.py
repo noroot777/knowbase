@@ -37,11 +37,14 @@ class MetadataSnapshots(IncrementalFixture):
             self.pending(number)
             self.set_state(number, state, score_rank=number,
                            reason='本轮数量预算已用完，留待下轮', retry_at=123)
+        self.pending(5)
+        self.set_state(5, 'candidate', score_rank=5)
         storage.defer_metadata([(row, candidates.PENDING, 456) for row in storage.rows()])
         rows = storage.rows()
-        self.assertEqual([1, 2, 3, 0], [row['score_rank'] for row in rows])
-        self.assertTrue(all(row['reason'] == '本轮数量预算已用完，留待下轮' for row in rows))
-        self.assertEqual([123, 123, 123, 456], [row['retry_at'] for row in rows])
+        self.assertEqual([1, 2, 3, 0, 0], [row['score_rank'] for row in rows])
+        self.assertTrue(all(row['reason'] == '本轮数量预算已用完，留待下轮' for row in rows[:4]))
+        self.assertEqual(candidates.PENDING, rows[-1]['reason'])
+        self.assertEqual([123, 123, 123, 123, 456], [row['retry_at'] for row in rows])
 
     def test_provisional_ranking_does_not_erase_a_real_deferral_cause(self):
         self.pending()
@@ -184,5 +187,6 @@ class ChannelCompletion(IncrementalFixture):
         self.assertIn('失败 0 条', stages.call_args.args[2])
 
     def test_explicit_date_budget_keeps_the_original_detailed_discovery_ceiling(self):
-        self.assertEqual(900, collector.discovery_budget(48))
+        self.assertEqual(48 * (collector.DISCOVERY_PER_SOURCE + collector.DISCOVERY_SPACING),
+                         collector.discovery_budget(48))
         self.assertEqual(1800, collector.discovery_budget(48, 90, collector.RANGE_DISCOVERY_CEILING))

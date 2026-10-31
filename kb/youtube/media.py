@@ -252,7 +252,8 @@ def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes
         output = ytdlp(arguments, path, deadline, stopped, spec=spec, playlist=True, partial=True)
     except PartialOutput as broken:
         output, reason, cause = broken.path, broken.reason, broken.cause
-        if completed is not None and completed(broken):
+        if (completed is not None and isinstance(cause, ToolFailure) and
+                cause.returncode == 101 and cause.origin == YOUTUBE and completed(output)):
             reason, cause = '', None
     # 这一份原文还要再分一次档给下面那几抛用。**记那一笔罚不靠这儿** —— 正路是
     # `run` 的完成边界(成功、半截、失败都过),这儿只是冗余带:`trip` 第一笔说了算,

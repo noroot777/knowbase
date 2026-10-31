@@ -16,13 +16,9 @@ def stop_reason(text):
     return ''
 
 
-def completed(broken):
-    cause = broken.cause
-    if not (isinstance(cause, media.ToolFailure) and cause.returncode == 101 and
-            cause.origin == 'youtube' and cause.code in ('', 'unknown')):
-        return False
+def completed(output):
     try:
-        return stop_reason(broken.path.read_text(encoding='utf-8', errors='replace')) == 'window'
+        return stop_reason(output.read_text(encoding='utf-8', errors='replace')) == 'window'
     except OSError:
         return False
 
@@ -39,7 +35,7 @@ def fetch(source, settings, deadline, notes=None):
     day = floor.astimezone(timezone.utc).strftime('%Y%m%d')
     output = media.DATA_DIR / 'youtube' / 'channels' / f"window-{int(source['id'])}.jsonl"
     archive = None
-    arguments = ['--skip-download', '--dump-json', '--no-quiet', '--playlist-end', '20',
+    arguments = ['--skip-download', '--dump-json', '--no-quiet',
                  '--break-match-filters', f'upload_date>=?{day}']
     try:
         if known := source.get('known_video_ids'):

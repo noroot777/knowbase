@@ -158,8 +158,8 @@ class DiscoveryPacing(YouTubeFixture):
         count = 10
         needed = count * collector.DISCOVERY_PER_SOURCE + (count - 1) * collector.DISCOVERY_SPACING
         self.assertGreaterEqual(collector.discovery_budget(count), needed)
-        # 反过来钉一边:额度不许跟着频道数无限涨,上限照旧封在 `DISCOVERY_CEILING`。
-        self.assertEqual(collector.DISCOVERY_CEILING, collector.discovery_budget(500))
+        self.assertEqual(500 * (collector.DISCOVERY_PER_SOURCE + collector.DISCOVERY_SPACING),
+                         collector.discovery_budget(500))
 
     def test_discovered_entries_still_land_while_paced(self):
         """节流不许顺手改掉入库这件事:歇一拍之后带回来的条目照旧收下。
