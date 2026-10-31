@@ -23,7 +23,7 @@
 
 ## 安装与使用
 
-1. 更新代码并重启本机 Knowbase Web 服务，在「我的订阅」的文章卡片上点击「从浏览器补抓」（或在「问题与待办」里点「从浏览器采集」），左侧滑出采集抽屉。使用 `http://127.0.0.1:端口` 或 `http://localhost:端口`；此功能不向局域网开放。
+1. 更新代码并重启本机 Knowbase Web 服务，在「我的订阅」的文章卡片上或「问题与待办」里点「从浏览器采集」，左侧滑出采集抽屉。使用 `http://127.0.0.1:端口` 或 `http://localhost:端口`；此功能不向局域网开放。
 2. 还没采成过时，抽屉顶上就摊着「首次使用：装扩展并配对」。在 Chrome 扩展管理页开启开发者模式，选择「加载已解压的扩展程序」，选中它给出的那个目录——**那就是本仓库里的 `kb/static/browser-extension/knowbase-capture`，不用下载解压**。以后改了扩展代码，在扩展管理页点一次「重新加载」即可；弹窗头部的版本号就是用来确认这一下点过没有的。浏览器不在这台机器上时才需要下载 ZIP。安装由用户完成，程序不会自动安装。
 3. 在抽屉里显示并复制配对密钥，填入扩展的「连接本机知识库」，服务地址以抽屉显示的地址为准。默认端口 8787，地址和密钥保存在扩展本地存储，只需配对一次。
 4. 在你已打开并加载好的文章标签上点击 Knowbase 扩展，或使用 `Command+Shift+Y` / `Ctrl+Shift+Y`，按它给出的那句话走（上面那张表）。此时只读页面。
@@ -79,7 +79,7 @@
 | 页面与扩展共用的 HTTP 反馈 | `kb/static/browser-extension/knowbase-capture/api.js` |
 | 验收阶段回归用例 | `tests/test_browser_capture.py`、`tests/test_browser_capture_feedback.py`(挂着四条 node 探针) |
 
-页面路径为 `/browser-capture?item=<真实条目key>`。API 前缀为 `/api/browser-capture`：`target/{key}`、`pairing`、`extension.zip`、`intents`、`intents/{id}`、`intents/{id}/continue`、`pending`、`precheck`、`upload`。`target/{key}` 除条目信息外返回 `pending`、最近有效 `saved` 及 `saved_error`，应用侧无需扩展密钥即可查看和取消本篇请求；扩展的全局待办接口仍须配对。扩展资源随 `kb` 包分发，ZIP 包含清单、popup HTML/CSS/JS、共用 `api.js`、提取器和 README 共七个文件，不依赖仓库外文件。
+API 前缀为 `/api/browser-capture`：`target/{key}`、`pairing`、`extension.zip`、`intents`、`intents/{id}`、`intents/{id}/continue`、`pending`、`precheck`、`upload`。`target/{key}` 除条目信息外返回 `pending`、最近有效 `saved` 及 `saved_error`，应用侧无需扩展密钥即可查看和取消本篇请求；扩展的全局待办接口仍须配对。扩展资源随 `kb` 包分发，ZIP 包含清单、popup HTML/CSS/JS、共用 `api.js`、提取器和 README 共七个文件，不依赖仓库外文件。
 
 ## 判据在哪一边
 

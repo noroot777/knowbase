@@ -135,8 +135,8 @@
       : saved ? `回执 ${saved.id.slice(-8)} · 已持久保存` : '';
     renderPending(snapshot.pending);
     if (saved) element('cap-receipt').textContent = `本次补入 ${saved.receipt.characters} 字符 · ${new Date(saved.receipt.captured_at).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`;
-    if (pending) message('等待你在文章标签中主动采集；同一篇其他标签会共用此请求，本页没有读取浏览器标签。');
-    else if (drafting && saved) message('已保存的正文和回执仍然保留。请核对网址再发起，也可以退出重新采集。');
+    if (pending) message('等你在那个文章标签上点扩展采集；同一篇的其他标签共用这个请求。');
+    else if (drafting && saved) message('已保存的正文和回执仍然保留，核对网址再发起。');
     else if (saved) message('正文已补回原条目。翻译与入库尚待执行。');
     else if (snapshot.saved_error) message(snapshot.saved_error, true);
     // 「然后点发起」不写:那颗按钮就在这一栏上。留「核对」是因为这一栏是**预填**
@@ -216,7 +216,7 @@
     element('cap-restart').addEventListener('click', async () => {
       if (processing || !snapshot?.saved) return;
       processing = true;
-      const confirmed = await confirmBox({title: '重新采集正文？', body: '重新采集不会撤销已保存的正文和回执；只有再采一次并通过服务端核验后才会替换。', ok: '重新采集'});
+      const confirmed = await confirmBox({title: '重新采集正文？', body: '已保存的正文和回执不会被撤销，只有再采一次并通过服务端核验才会替换。', ok: '重新采集'});
       processing = false;
       if (confirmed) drafting = true;
       render();
@@ -271,7 +271,7 @@
     element('cap-saved').hidden = true;
     element('cap-pending').hidden = true;
     bind();
-    if (!key) { message('请从订阅文章或待办上的「从浏览器采集」进入；不能把未绑定的正文写进任意条目。', true); return; }
+    if (!key) { message('请从订阅文章或待办上的「从浏览器采集」进入。', true); return; }
     message('正在读取目标条目…');
     refresh();
   }

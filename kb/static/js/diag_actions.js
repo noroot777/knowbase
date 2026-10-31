@@ -257,7 +257,7 @@ async function careRelease(kind, keys, decisions) {
       `life` 过去 —— 捎过去就是在同一个问题上判第二遍,而两份判据的洞不一样
       (口径见 `docs/decisions/browser-capture.md` 与 `intake-diagnostics.md`)。
     - **key 用这一条真实的 `feed_items.key`**(和 `/body`、`/requeue` 发出去的
-      是同一个值),不是列表上的展示编号 —— 补抓页按它绑定条目。
+      是同一个值),不是列表上的展示编号 —— 抽屉按它绑定条目。
 
     **开的是左侧抽屉,不再跳走。** 原来这里 `window.open('/browser-capture?item=…')`
     去一个独立页面:人正在「问题与待办」里逐条看,点一下就被带离现场,补完正文还要

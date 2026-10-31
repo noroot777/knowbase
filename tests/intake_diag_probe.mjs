@@ -387,7 +387,7 @@ await until(`CARE.group === 'attention' && CARE.sections.some(s => s.lane.id ===
 const capRow = JSON.parse(await evalJs(`(() => {
   const s = CARE.sections.find(s => s.lane.id === 'body_exhausted');
   const row = s.items[0];
-  return JSON.stringify({ id: 'item:' + row.key, key: row.key });
+  return JSON.stringify({ id: 'item:' + row.key, key: row.key, url: row.url });
 })()`));
 const capPick = name =>
   `document.querySelector('#care-detail .care-exits button[data-exit="${name}"]')`;
@@ -421,23 +421,24 @@ const capNote = await evalJs(
   `document.querySelector('#care-detail .care-exit-note')?.textContent || ''`);
 check("按钮旁边就写着前提:文章此刻开着 + 装过配对好的扩展 + 条件不凑手用兜底那颗",
       /开着/.test(capNote) && /扩展/.test(capNote) && /手动补正文/.test(capNote), capNote);
-// 点下去那一下:**不弹确认框**(确认之后再 open 已经不是用户手势,会被弹窗拦截挡掉),
-// 直接开新标签。这里把 `window.open` 拦下来看它要去哪儿,所以没有真的开标签。
-const opened = JSON.parse(await evalJs(`(() => {
-  const real = window.open;
-  let got = null;
-  window.open = (url, target, feat) => { got = [url, target, feat]; return null; };
-  try { ${capPick("capture")}?.click(); } finally { window.open = real; }
-  return JSON.stringify(got);
-})()`));
+// 点下去那一下:**就地开出左侧采集抽屉,不跳走,也不弹确认框**。原先这里
+// `window.open('/browser-capture?item=<key>')` 去一个独立页面 —— 人正在逐条看问题,
+// 点一下就被带离现场。**连带钉住它绑的是哪一条**:抽屉里那行原网址必须等于列表上
+// 这一条的网址;只问「抽屉开没开」的话,交接时把 key 丢了照样全绿。
 check("那个 key 是真实的 feed_items.key(32 位 hex),不是展示编号",
       /^[0-9a-f]{32}$/.test(capRow.key), capRow.key);
-check("点下去进的是带这个 key 的补抓页、开在新标签、不带 opener",
-      !!opened && opened[0] === "/browser-capture?item=" + capRow.key
-        && opened[1] === "_blank" && String(opened[2]).includes("noopener"),
-      JSON.stringify(opened));
+await evalJs(`${capPick("capture")}.click()`);
+const landed = await until(
+  `!!document.getElementById('cap-drawer') && document.getElementById('cap-original-url')`
+  + `.textContent === ${JSON.stringify(capRow.url)}`);
+check("点下去就地开出采集抽屉,而且绑的是这一条",
+      landed,
+      await evalJs(`document.getElementById('cap-original-url')?.textContent || '(没开出抽屉)'`));
 check("点下去没有弹确认框(弹了就会被弹窗拦截挡住)",
       !(await evalJs(`!!document.querySelector('.confirm-mask')`)));
+// 抽屉是模态浮层(遮罩 + 给其余部分打 inert),**留着会把下面几节全挡住**。
+await evalJs(`closeCaptureDrawer()`);
+await until(`!document.getElementById('cap-drawer')`);
 // **批量栏里压根不给这一颗**:一个浏览器标签就是一篇文章,勾 20 条采不了 20 篇。
 await evalJs(`(() => {
   const s = CARE.sections.find(s => s.lane.id === 'body_exhausted');

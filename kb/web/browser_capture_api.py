@@ -87,7 +87,7 @@ def extension_download():
 @router.get('/api/browser-capture/pairing', dependencies=[Depends(app_access)])
 def pairing(request: Request):
     if request.headers.get('sec-fetch-site') != 'same-origin':
-        raise HTTPException(403, '请在知识库补抓页面主动显示配对密钥')
+        raise HTTPException(403, '请在知识库的采集抽屉里主动显示配对密钥')
     return Response(content='{"key":"' + capture.pairing_key() + '"}',
                     media_type='application/json', headers={'Cache-Control': 'no-store'})
 
@@ -165,7 +165,7 @@ def here(body: HereRequest):
     回答一遍是白跑三个界面(前因后果在 `capture.here` 的 docstring)。
 
     **POST 而不是 GET**,因为正文还欠着的那一档它会顺手把待办建好(`create`
-    幂等,同一(条目, 页面)上已有 pending 就复用)。扩展因此不必先去补抓页。
+    幂等,同一(条目, 页面)上已有 pending 就复用)。扩展因此不必先去采集抽屉。
     """
     return invoke(capture.here, body.url)
 
@@ -174,7 +174,7 @@ def here(body: HereRequest):
 def adopt_here(body: IntentRequest):
     """**「等着的那个待办指着另一个地址,而我正站的这一页就是那一篇」。**
 
-    和补抓页上那颗「改用这个地址」是同一个动作、同一个 `create`(旧待办由服务端
+    和采集抽屉里那颗「改用这个地址」是同一个动作、同一个 `create`(旧待办由服务端
     顶掉,不是先取消再发起),只是把它搬到了人所在的地方 —— 站点按浏览器语言跳转
     那一类里,人手上拿着的恰恰就是对的地址。
 

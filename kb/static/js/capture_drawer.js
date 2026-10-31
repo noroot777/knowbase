@@ -18,6 +18,12 @@
 
   //: 抽屉里那一整套。`cap-setup` 那一块的位置是会变的:没采成过时它在最上面且摊开
   //: (见 `renderSetup`),采成过之后收进底部的 <details>。
+  //:
+  //: **不加次级标题,也不复述下面那样东西是什么。** 原先每块都顶着一行标题(「这次
+  //: 补哪一篇」「这篇文章正在等待的采集」),每个输入框下面还跟一句说明它行为的小字
+  //: (「默认匹配原网址」—— 那一栏本来就是预填好的)。留下来的只有**屏幕上看不出来
+  //: 的那些**:15 分钟的有效期、「继续导出与索引」那一下的真实射程(它和确认框
+  //: 必须对得上,`tests/test_browser_capture.py` 钉着)。
   const TEMPLATE = `
   <div class="cap-head">
     <b>从浏览器采集</b>
@@ -27,11 +33,10 @@
     <div id="cap-setup-slot"></div>
     <p id="cap-message" role="status" aria-live="polite">正在读取目标条目…</p>
     <div class="cap-block">
-      <div class="cap-block-head"><h2>这次补哪一篇</h2><span id="cap-kind"></span></div>
-      <h3 id="cap-title">等待条目</h3><p id="cap-original-url" class="url"></p>
+      <div class="cap-block-head"><h3 id="cap-title">等待条目</h3><span id="cap-kind"></span></div>
+      <p id="cap-original-url" class="url"></p>
       <label for="cap-page-url">已打开文章的最终网址</label>
       <input id="cap-page-url" type="url" placeholder="https://…" disabled>
-      <p class="hint">默认匹配原网址。扩展不会用另一篇文章静默覆盖。</p>
       <label class="cap-also"><input id="cap-also-open" type="checkbox">同时在新标签打开这一篇</label>
       <div class="actions">
         <button id="cap-create" type="button" disabled>发起浏览器采集</button>
@@ -39,14 +44,13 @@
       </div>
       <p id="cap-intent-note" class="hint"></p>
       <div id="cap-pending" hidden>
-        <h2>这篇文章正在等待的采集</h2><p class="hint">同一篇只保留一个待办。</p>
+        <h2>正在等待的采集</h2>
         <ul id="cap-pending-list" class="pending-list"></ul>
       </div>
     </div>
     <div id="cap-saved" class="cap-block" hidden>
       <h2>正文已补入，入库还没结束</h2><p id="cap-receipt" class="mono"></p>
-      <p class="hint">原条目和历史导出记录保留，旧译文已作废，重新等待翻译、导出和索引。可以等下一轮同步，也可以现在继续。</p>
-      <p class="warning">继续执行跑的是导出与索引两段：同类来源其他待办会一起导出，可能联网补抓别的文章并调用翻译模型；索引会检查全库。条目化提取不在这一步，它按全库取数——等下一轮同步，或到同步中心起跑弹窗里自己勾。</p>
+      <p class="warning">「继续」跑导出与索引两段：同类来源其他待办会一起导出，可能联网补抓并调用翻译模型，索引检查全库。条目化提取不在这一步。</p>
       <div class="actions">
         <button id="cap-continue" type="button">继续导出与索引</button>
         <button id="cap-restart" class="secondary" type="button">重新采集正文</button>
@@ -54,7 +58,7 @@
       <p id="cap-run-note" role="status"></p>
     </div>
     <div id="cap-setup-folded"></div>
-    <p class="hint">浏览器采集只解决这篇文章的正文缺口，不用于补齐 X 账号时间线。待采集请求 15 分钟有效，未完成时服务重启需重新发起；已保存回执按文章恢复，关掉抽屉、另开标签或重启服务后仍可查看和继续处理。</p>
+    <p class="hint">待采集请求 15 分钟有效，服务重启要重新发起；已保存的回执不受此限，关掉抽屉也找得回来。</p>
   </div>`;
 
   //: 装扩展那一块。两种摆法共用这一份 HTML —— 各写一遍的话,改一处文案就会留下
@@ -69,7 +73,7 @@
       <p class="mono" id="cap-ext-path">读取中…</p>
       <button id="cap-copy-path" class="secondary" type="button">复制路径</button>
     </div>
-    <p class="hint">以后改了扩展代码，在扩展管理页点一次「重新加载」即可；弹窗头部的版本号就是用来确认这一下点过没有的。浏览器不在这台机器上时，才需要
+    <p class="hint">改过扩展代码就去管理页点一次「重新加载」，版本号在弹窗头部。浏览器不在这台机器上才需要
       <a class="download" href="/api/browser-capture/extension.zip" download>下载 ZIP</a>。</p>
     <ol start="3">
       <li>扩展里填本机服务地址 <code id="cap-service-url"></code>，再粘贴下面的配对密钥。</li>
@@ -79,7 +83,7 @@
       <label for="cap-pairing-key">配对密钥</label>
       <input id="cap-pairing-key" readonly type="password" autocomplete="off">
       <button id="cap-copy-key" class="secondary" type="button">复制密钥</button>
-      <p class="hint">密钥只留在本机，不要发给网站或他人。</p>
+      <p class="hint">只留在本机，别发给网站或他人。</p>
     </div>`;
 
   //: **建了就 append、关了就 remove**,不是切 `display`。workspace.js 的
@@ -113,7 +117,7 @@
     catch { /* 读不到就按「用过」办:至少不会在老用户面前把这一大块顶到最上面 */ }
     if (!drawer || !drawer.isConnected) return;
     if (info.used_before) {
-      folded.innerHTML = `<details><summary>装扩展与配对（已配置过，需要时展开）</summary>${SETUP}</details>`;
+      folded.innerHTML = `<details><summary>装扩展与配对</summary>${SETUP}</details>`;
       top.replaceChildren();
     } else {
       top.innerHTML = `<section class="cap-setup">${SETUP}</section>`;

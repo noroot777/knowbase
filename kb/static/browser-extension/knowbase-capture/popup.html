@@ -7,9 +7,9 @@
     <p id="status" role="status" aria-live="polite">正在连接本机知识库…</p>
     <details id="connection"><summary>连接本机知识库</summary>
       <label for="server">服务地址</label><input id="server" type="url" value="http://127.0.0.1:8787" autocomplete="off">
-      <label for="key">配对密钥</label><input id="key" type="password" autocomplete="off" placeholder="从知识库的采集抽屉复制，只需配置一次">
+      <label for="key">配对密钥</label><input id="key" type="password" autocomplete="off" placeholder="从知识库的采集抽屉复制">
       <button id="connect" class="secondary">保存并连接</button>
-      <p class="hint">只允许本机 127.0.0.1 / localhost。密钥不放进网址，不发送给文章网站。</p>
+      <p class="hint">只连本机 127.0.0.1 / localhost，密钥不发给文章网站。</p>
     </details>
     <section id="here">
       <h1 id="here-state">正在确认这一页…</h1>
@@ -19,15 +19,15 @@
         <button id="act-page" class="secondary" hidden></button>
         <button id="act-selection" class="secondary" hidden></button>
       </div>
-      <div class="actions"><button id="refresh" class="secondary">重新确认这一页</button></div>
+      <div class="actions"><button id="refresh" class="secondary">重新确认</button></div>
     </section>
     <section id="elsewhere" hidden>
       <h2>有个采集请求指着另一个地址</h2>
       <p id="elsewhere-title" class="t"></p><p id="elsewhere-url" class="url"></p>
-      <p class="hint">站点常按浏览器语言跳转，落到的地址和知识库里记的那条不一样。你正看的就是这一篇时，改用这一页的地址即可。</p>
+      <p class="hint">站点常按浏览器语言跳转，落到的地址和库里记的那条不一样。</p>
       <button id="adopt" class="secondary">这一页就是那一篇，改用它</button>
     </section>
-    <p class="hint">不会刷新、滚动、跳转或关闭原标签，也不会上传 Cookie、密码、表单或整页 HTML。</p>
+    <p class="hint">不动原标签，不上传 Cookie、表单或整页 HTML。</p>
   </main>
 </body>
 </html>
