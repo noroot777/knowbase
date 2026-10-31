@@ -64,6 +64,9 @@ def rejection(row, settings, scope, now, floor):
         return '缺少可靠的发布时间', True
     if scope.ranged and not scope.since <= published.astimezone(TZ).date().isoformat() <= scope.until:
         return '不在本次指定日期范围', not estimated
+    initial = stamp(row.get('initial_fetch_at'))
+    if not scope.ranged and not row['repair_pending'] and initial is not None and published < initial:
+        return '早于首次同步起点（默认从今天回看 3 天）', not estimated
     if not scope.ranged and not row['repair_pending'] and (published < floor or
             (stamp(row['history_floor']) is not None and published < stamp(row['history_floor']))):
         return '早于本轮窗口或订阅历史下界', not estimated

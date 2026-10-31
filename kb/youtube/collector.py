@@ -12,7 +12,7 @@ from kb.pipeline_flow import halted
 from kb.pipeline_segments import note_retry_targets
 from kb.pipeline_state import _stage
 from kb.youtube import (candidate_metadata, diagnosis, discovery, login, media, notes,
-                        products, ranking, storage, throttle)
+                        products, ranking, storage, sync_window, throttle)
 from kb.youtube.admission import TEMPORARY, UNDATED, calibrate, gate
 from kb.youtube.channels import config
 from kb.youtube.faults import local_fault, record_local
@@ -359,7 +359,8 @@ def _round(scope):
                'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
                'errors': [], 'partial': [], 'notices': [], 'repointed': 0, 'cautions': {},
                'stopped': False, 'failed_ids': [], 'succeeded_ids': [],
-               'discovered': 0, 'ranked': 0, 'processed': 0, 'walls': {}}
+               'discovered': 0, 'ranked': 0, 'processed': 0, 'walls': {},
+               'initial_fetch_at': {}, 'outside_initial_window': 0}
     pending = []
     for source in sources:
         if source['retry_at'] > time.time() and not scope.force:
@@ -408,7 +409,12 @@ def _round(scope):
         told = []
         try:
             with heeded(summary, [source['id']]):
-                entries = discovery.fetch(source, settings, per_source, not scope.ranged, told)
+                source = sync_window.prepare(source, scope)
+                if source.get('initial_fetch_at'):
+                    summary['initial_fetch_at'][str(source['id'])] = source['initial_fetch_at']
+                listed = discovery.fetch(source, settings, per_source, not scope.ranged, told)
+                entries = sync_window.recent(source, listed, scope)
+                summary['outside_initial_window'] += len(listed) - len(entries)
             storage.discover(source, entries)
             summary['discovered'] += len(entries)
             succeeded.append(source)
