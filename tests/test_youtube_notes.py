@@ -1,5 +1,4 @@
 import json
-import re
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -22,10 +21,8 @@ class YouTubeNotes(YouTubeFixture):
     def reply(self, prompt, *rest):
         self.prompts.append(prompt)
         if prompt.startswith('将以下字幕'):
-            parts = re.split(r'(\[\d{2}:\d{2}:\d{2}\])', prompt)[1:]
-            return '\n\n'.join(parts[position] + ' 本段完整中文译文，保留数字、事实和限制。' *
-                                max(1, len(parts[position + 1]) // 50)
-                                for position in range(0, len(parts), 2))
+            source = prompt.split('\n\n', 1)[1]
+            return '本段完整中文译文，保留数字、事实和限制。' * max(1, len(source) // 50)
         if '只输出 JSON' in prompt:
             return json.dumps({'title': '智能体代码生成的实践', 'summary': '作者展示代码生成方法，并提示核验限制。',
                                'body': '## 具体方法\n作者认为每次修改都应该验证。'}, ensure_ascii=False)
@@ -39,7 +36,8 @@ class YouTubeNotes(YouTubeFixture):
         result = self.build()
         self.assertIn('完整中文转录', result['body'])
         self.assertIn('未分析视频画面', result['body'])
-        self.assertIn('&t=60)', result['body'])
+        self.assertNotIn('&t=', result['body'])
+        self.assertNotRegex('\n'.join(self.prompts), r'\[\d{2}:\d{2}:\d{2}\]')
         self.assertNotIn('Final conclusion', result['body'])
         self.assertIn('Final conclusion', '\n'.join(self.prompts))
         count = len(self.prompts)
@@ -49,11 +47,57 @@ class YouTubeNotes(YouTubeFixture):
         self.build()
         self.assertGreater(len(self.prompts), count)
 
-    def test_lost_timestamp_or_english_translation_not_published(self):
-        for output in ('中文但是没有时间戳。', '[00:00:00] Still entirely English words.'):
+    def test_empty_english_or_summary_translation_not_published(self):
+        for output in ('', '中文摘要。', 'Still entirely English words.'):
             with self.subTest(output=output), self.assertRaises(RuntimeError):
                 self.build(lambda *args: output)
         self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-cache.json').exists())
+
+    def test_translation_accepts_natural_paragraphs_without_timestamp_alignment(self):
+        source = ('[00:00:00] The AI agent builds code.\n'
+                  '[00:00:02] It still needs review.\n'
+                  '[00:00:04] Verify every generated change before using it.')
+        output = '这个 AI 智能体能够编写代码，但仍需要审查；使用前必须核验每次生成的改动。'
+        with patch.object(notes, 'call', return_value=output):
+            self.assertEqual(output, notes.translate(source, self.selected, self.deadline, lambda: False))
+
+    def test_chinese_transcript_needs_no_translation_and_keeps_source_timing(self):
+        self.transcript['language'] = 'zh'
+        self.transcript['segments'] = [
+            {'start': 0, 'end': 60, 'text': '作者展示智能体如何编写代码。'},
+            {'start': 60, 'end': 120, 'text': '最后强调人工核验结果与限制。'}]
+        original = json.loads(json.dumps(self.transcript))
+        result = self.build()
+        self.assertIn('作者展示智能体如何编写代码。 最后强调人工核验结果与限制。', result['body'])
+        self.assertFalse(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
+        self.assertEqual(original, self.transcript)
+
+    def test_new_translation_policy_invalidates_notes_but_preserves_transcript_cache(self):
+        directory = media.cache_dir(self.row['video_id'])
+        media.save_json(directory / 'transcript.json', self.transcript)
+        with patch.object(notes, 'VERSION', 'youtube-notes-v2'):
+            self.build()
+        self.prompts.clear()
+        self.build()
+        self.assertTrue(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
+        self.assertEqual(self.transcript, media.read_json(directory / 'transcript.json'))
+
+    def test_failed_translation_retries_only_unfinished_text_blocks(self):
+        attempts = 0
+
+        def failed(prompt, *rest):
+            nonlocal attempts
+            if prompt.startswith('将以下字幕'):
+                attempts += 1
+                if attempts == 2:
+                    return '中文摘要。'
+            return self.reply(prompt, *rest)
+
+        with self.assertRaisesRegex(RuntimeError, '过短'):
+            self.build(failed)
+        self.assertEqual(2, attempts)
+        self.build()
+        self.assertEqual(2, sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
 
     def test_failed_final_note_retries_using_completed_translations(self):
         def invalid(prompt, *rest):
