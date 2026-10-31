@@ -69,7 +69,7 @@ def page_url(value: str) -> str:
 
     事故形态(2026-10-26 审查实测):服务端原来直接 `urlunsplit` 拼回原字符串,
     而扩展自己 `new URL()` 比一遍 —— 网址里带中文的订阅**每一次**都是人把整篇
-    文章读完、勾完确认之后才被 409 拒,因为扩展比的是 `/文章` 对 `/文章`、服务端
+    文章读完之后才被 409 拒,因为扩展比的是 `/文章` 对 `/文章`、服务端
     收到的是浏览器编码过的 `/%E6%96%87%E7%AB%A0`。`:443`、路径带空格、末尾 `?`
     是同一形态的另外三种。**判据不许在扩展里再写一份**,那只会开出第四第五种。
 
@@ -453,7 +453,7 @@ def _admit_body(body: str) -> tuple[str, str]:
 
     门槛是 `grab_page.body_confirmed`(按**行**去重之后的字数,见
     `readable.substance`)。扩展侧一度自己数原始长度:复读的登录提示页在那边
-    1367 字过线、这边去重只剩 260 字,于是人把整页读完、勾完确认才被拒。
+    1367 字过线、这边去重只剩 260 字,于是人把整页读完才被拒。
     **不许在扩展里再数一遍**。
     """
     body = body.replace('\r\n', '\n').replace('\r', '\n').strip()
@@ -539,8 +539,13 @@ def save(identity: str, captured_url: str, title: str, body: str, method: str) -
             raise ValueError(_NOT_PENDING)
         intent = _intents[identity]
         actual_url = state['page_url']
+        # `confirmed` 记的是**有没有人逐字看过这份正文**,不是「这次写入合不合法」。
+        # 扩展那道「我已核对」撤掉之后(取舍见 docs/decisions/browser-capture.md),
+        # 这条路上确实没人看过 —— 人选了这一页、点了采集,正文是提取器读的。
+        # 照旧记 True 就是第二句假证词,而 `manual_paste` 那条(人自己粘的)仍然是
+        # True:**两者在知识库里要分得出来,这里就是分得出来的地方。**
         provenance = dict(method='browser_' + method, page_url=actual_url,
-                          page_title=title, captured_at=reg.now(), confirmed=True)
+                          page_title=title, captured_at=reg.now(), confirmed=False)
         with reg.db() as conn:
             conn.execute('BEGIN IMMEDIATE')
             current = _items(conn, [intent['key']]).get(intent['key'])
@@ -587,7 +592,9 @@ def save_pasted(key: str, body: str, life: str = '') -> dict:
     `_admit_page`(浏览器交回来的网址规范化之后必须等于指定的最终网址),而粘贴
     压根没有「一页」可比 —— 断言正文属于这篇文章的是**人自己**,所以
     `body_provenance` 记 `manual_paste` 并且 `confirmed=True` 指的是「人确认过」,
-    不是「我们核对过那一页」。两者在知识库里要分得出来,这就是分得出来的地方。
+    不是「我们核对过那一页」。两者在知识库里要分得出来,这就是分得出来的地方 ——
+    **而且现在只有这一条路写得出 `confirmed=True`**:扩展那两条上那道「我已核对」
+    撤了,它们如实记 `False`(见 `save` 里那一段)。
 
     **互斥照旧待在 UPDATE 自己的 WHERE 里**(元规则),而且判据和扩展那条路**逐字
     相同**:key / 来源 / 原网址 / 正文指纹 / 修订号 / 非 X 观点 / 这一类来源准不准

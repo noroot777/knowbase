@@ -625,6 +625,8 @@ $('source-list').addEventListener('click', e => {
   if (e.target.closest('[data-retry-translate]')) retryTranslate();
   const read = e.target.closest('[data-read-item]');
   if (read) readSourceItem(read.dataset.readItem);
+  const capture = e.target.closest('[data-capture-item]');
+  if (capture) openCaptureDrawer(capture.dataset.captureItem);
   const entry = e.target.closest('[data-source-key]');
   // **拖选不是点击。** 卡片整块可点(点开右侧阅读器),而卡片里那一截正文现在能
   // 选来收藏(`kb/static/js/snip_cards.js`)—— 一次拖选松手时浏览器照样派一个

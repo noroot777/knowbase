@@ -65,43 +65,45 @@ await new Promise(resolve => setImmediate(resolve));
 
 // ⓞ 待办是服务端带回来的:屏幕上没有「补回哪个待办」那个下拉框,人一次都没挑
 assert.equal(element('here-actions').hidden, false);
-assert.equal(element('act').textContent, '读取这一页的正文');
+assert.equal(element('act').textContent, '采集');
 assert.match(element('here-state').textContent, /正文还缺着/);
 
 // ① 顺利那一次:交给服务端判的是**原始**标签网址(没在本地规范化过),
-//    预览上的字数用服务端那一份。
+//    两问都过就**直接写进去**(预览区连同那道「我已核对」撤了),而写完那句话里
+//    的字数用服务端那一份 —— 扩展自己数的是 1200,服务端按行去重之后是 694。
 await element('act').click();
 assert.deepEqual(prechecks[0], {intent_id: 'i1', page_url: 'https://e.org/文章', method: 'article'});
 assert.equal(prechecks[1].body, captured.body);
 assert.equal(prechecks.length, 2);
 assert.equal(injections, 2);
-assert.equal(element('preview').hidden, false);
-assert.match(element('count').textContent, /^694 字符/);
-assert.doesNotMatch(element('count').textContent, /1200/);
+assert.equal(uploads, 1, '两问都过就该直接提交,不再等第二道人工确认');
+assert.match(element('status').textContent, /694 字符/);
+assert.doesNotMatch(element('status').textContent, /1200/);
 
-// ② 读之前就被拒:一个字都没读
-injections = 0; prechecks = [];
+// ② 读之前就被拒:一个字都没读,也没写
+injections = 0; prechecks = []; uploads = 0;
 replies = [{status: 409, detail: '条目已被其他操作修改或排除。本次没有覆盖，请重新核对并发起采集'}];
 await element('act').click();
 assert.equal(injections, 0);
 assert.equal(prechecks.length, 1);
-assert.equal(element('preview').hidden, true);
+assert.equal(uploads, 0);
 assert.match(element('status').textContent, /条目已被其他操作修改或排除/);
 
-// ③ 正文那一问没过:预览不渲染,也没上传
-injections = 0;
+// ③ 正文那一问没过:读了,但**一个字都没写进去**。
+//    这一条是撤掉人工核对之后最吃紧的一道 —— 原先还有人在预览上把关,现在只剩它。
+injections = 0; uploads = 0;
 replies = [{status: 200, data: {ok: true}}, {status: 409, detail: '正文不足 400 个不重复字符，或超过 20 万字符；请检查是否只采到了选段或提示页'}];
 await element('act').click();
 assert.equal(injections, 2);
-assert.equal(element('preview').hidden, true);
-assert.match(element('status').textContent, /不重复字符/);
 assert.equal(uploads, 0);
+assert.match(element('status').textContent, /不重复字符/);
 
 // ④ 过期由服务端说,不靠本机时钟
 replies = [{status: 404, detail: '采集请求已过期、服务已重启或请求不存在，请重新发起'}];
-injections = 0;
+injections = 0; uploads = 0;
 await element('act').click();
 assert.equal(injections, 0);
+assert.equal(uploads, 0);
 assert.match(element('status').textContent, /已过期/);
 
 // ⑤ 结构:扩展里不许再出现第二份判据(网址比对、字数门槛)
@@ -111,5 +113,8 @@ assert.doesNotMatch(extractor, /\b400\b|\b200000\b/);
 // 下拉框连同「从清单里挑一个待办」那套一起退场:留着它就留着第二个入口,
 // 而它信的是上一次刷新时缓存的那份清单(那正是 precheck 要补的事故形态)。
 assert.doesNotMatch(source, /getElementById\('intent'\)|element\('intent'\)/);
+// 预览区和那道「我已核对」撤了:留着它们就等于留着一条「读完先不写」的分支,
+// 而服务端那边 `confirmed_complete` 已经没有了。
+assert.doesNotMatch(source, /element\('preview'\)|element\('complete'\)|confirmed_complete/);
 
 console.log('browser capture gate: passed');

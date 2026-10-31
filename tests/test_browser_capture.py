@@ -5,188 +5,14 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from kb import browser_capture as capture
 from kb.feeds import readable, registry as reg
 from kb.web import browser_capture_api
 from kb.source_types import catalog, permits_link_body
-from tests.test_feed_fulltext import FullTextCase
-
-BODY = '\n\n'.join([
-    'Browser capture reads the article that a person has already opened. The user chooses a target item before any text is collected, so the content cannot silently replace an unrelated document. The preview shows the actual address rather than trusting metadata supplied by a website.',
-    'An extension keeps its pairing secret in its own local storage. It sends text only to the explicitly configured loopback service, without cookies or form values. Navigation redirects are refused on that connection so a local service cannot send the credential to another server.',
-    'A replacement compares both the original content fingerprint and a monotonically increasing revision. If a background worker changes the document while the person is reading, the older request loses permission to overwrite it. This also protects changes that later return to identical text.',
-    'Existing translations describe an earlier version and must be invalidated when the source changes. The export receipt remains historical evidence rather than being erased. Later stages regenerate the document and its index; simply storing text is never reported as a completed knowledge-base update.',
-    'A selected paragraph is not necessarily a whole article. The person must inspect the complete preview and explicitly confirm its scope. A length threshold helps reject empty pages, but cannot prove that a subscription wall or lazy-loaded section contains everything the author published.',
-])
+from tests.browser_capture_case import BODY, CaptureCase
 
 
-class BrowserCaptureTests(FullTextCase):
-    def setUp(self):
-        super().setUp()
-        capture._intents.clear()
-        self.addCleanup(capture._intents.clear)
-        app = FastAPI()
-        app.include_router(browser_capture_api.router)
-        self.client = TestClient(app, base_url='http://127.0.0.1',
-                                 client=('127.0.0.1', 54321),
-                                 headers={'Sec-Fetch-Site': 'same-origin'})
-        self.key = self.put()
-        self.auth = {'Authorization': 'Bearer ' + capture.pairing_key(),
-                     'Origin': 'chrome-extension://fixture'}
-
-    def intent(self):
-        result = self.client.post('/api/browser-capture/intents',
-                                  json={'key': self.key, 'page_url': 'https://e.org/post'})
-        self.assertEqual(200, result.status_code)
-        return result.json()
-
-    def precheck(self, intent, body='', method='article', **overrides):
-        payload = dict(intent_id=intent['id'], page_url='https://e.org/post',
-                       body=body, method=method)
-        payload.update(overrides)
-        return self.client.post('/api/browser-capture/precheck', json=payload, headers=self.auth)
-
-    def upload(self, intent, **overrides):
-        body = dict(intent_id=intent['id'], page_url='https://e.org/post',
-                    title='Browser title', body=BODY, method='article', confirmed_complete=True)
-        body.update(overrides)
-        return self.client.post('/api/browser-capture/upload', json=body, headers=self.auth)
-
-    def here(self, url='https://e.org/post', auth=True, path='/here', payload=None):
-        """扩展开起来那一下问的那一次:我站着这一页,此刻能做什么。"""
-        return self.client.post('/api/browser-capture' + path,
-                                json=payload if payload is not None else {'url': url},
-                                headers=self.auth if auth else {})
-
-    def test_standing_on_the_article_is_enough_to_fill_it(self):
-        """**站在那篇文章上就够了** —— 不必先去补抓页发起一个待办。
-
-        原先补一篇正文要跨三个界面走七步,其中「补回哪个待办」那一下是让人把
-        服务端已经知道的事再答一遍:地址栏里那一行就是答案。判据落在
-        「待办是服务端自己建的」「正文真的写进了原条目」两件事上,**而且全程
-        一次 `/intents` 都没调**。
-        """
-        answer = self.here()
-        self.assertEqual(200, answer.status_code, answer.text)
-        state = answer.json()
-        self.assertEqual('fill', state['situation'])
-        self.assertEqual(self.key, state['item']['key'])
-        self.assertTrue(state['intent']['id'])
-        self.assertEqual('https://e.org/post', state['intent']['page_url'])
-        # 反复开扩展不该堆出一串待办:`create` 幂等,同一(条目, 页面)复用那一个
-        self.assertEqual(state['intent']['id'], self.here().json()['intent']['id'])
-        self.assertEqual(1, len(capture.pending()))
-        # 拿它直接提交,补抓页一次都没经过
-        saved = self.upload(state['intent'])
-        self.assertEqual(200, saved.status_code, saved.text)
-        self.assertEqual(BODY, self.row(self.key)['body'])
-
-    def test_the_page_is_found_under_either_canonical_form(self):
-        """库里那一行的 `url` 是**收它的那条路**存下来的,所以要按两份规范形问。
-
-        订阅类来源原样存 feed 给的地址,手动收录存的是 `grab.normalize`(它去掉
-        `utm_*` 这类跟踪参数)。只按一份问,另一条路收的那一半永远答「不在库里」
-        —— 而那一句的下一步是**收录**,于是同一篇在库里变成两行。
-        反过来钉一边:真正另一篇文章照旧答「不在库里」,不许靠模糊匹配认亲。
-        """
-        self.assertEqual('fill', self.here('https://e.org/post?utm_source=newsletter')
-                         .json()['situation'], '带跟踪参数的同一页要认出来')
-        self.assertEqual('absent', self.here('https://e.org/post-two').json()['situation'])
-        self.assertEqual('absent', self.here('https://e.org/zh-Hans-CN/post').json()['situation'],
-                         '语言前缀是站点自己的约定,不许在这里剥掉认成同一页')
-
-    def test_a_page_outside_the_library_creates_nothing(self):
-        """不在库里的那一页:只回一句话,**一个待办都不建**。
-
-        建了的话额度(`MAX_PENDING`)会被随手逛过的页面占满,而它们手上没有任何
-        产物 —— 真要补正文的那一条反倒被顶掉。
-        """
-        state = self.here('https://elsewhere.example.org/x').json()
-        self.assertEqual('absent', state['situation'])
-        self.assertIsNone(state['item'])
-        self.assertIsNone(state['intent'])
-        self.assertEqual([], capture.pending())
-
-    def test_a_settled_body_is_not_quietly_offered_for_refilling(self):
-        """正文已经定下来的那一条:答「齐了」,**不自动武装一条写入路径**。
-
-        「把缺的那份补上」和「我手上这份是错的、重新采一次」是两件事:后者在补抓
-        页上有自己的流程、自己的警示和回执,挤成同一颗按钮会让人分不出点的是哪件。
-        反过来钉一边:正文欠着的那一条照旧给(上面那条)。
-        """
-        with reg.db() as conn:
-            conn.execute("UPDATE feed_items SET fulltext_at=? WHERE key=?", (reg.now(), self.key))
-        state = self.here().json()
-        self.assertEqual('complete', state['situation'])
-        self.assertIsNone(state['intent'])
-        self.assertEqual([], capture.pending())
-
-    def test_an_item_no_subscription_wants_fulltext_for_is_not_owed(self):
-        """`_OWED` 的两半各钉一次 —— 这一条钉的是**资格**那一半。
-
-        「正文还欠着」不等于「`fulltext_at` 是空的」:一条内容归属的订阅都没开补抓
-        (或者最后一条开着的被关掉、被删掉)时,它压根不该等全文 —— 自动补抓队列
-        (`fulltext.queued_sql`)也正是这么判的。只看 `fulltext_at` 的话,这一页会被
-        说成「正文还缺着」并自动武装一条写入路径,而面板上它一个待办都没有。
-        """
-        plain = self.put(self.plain, url='https://e.org/plain')
-        state = self.here('https://e.org/plain').json()
-        self.assertEqual(plain, state['item']['key'])
-        self.assertEqual('complete', state['situation'], '没有订阅要它的全文 = 不欠')
-        self.assertEqual([], capture.pending())
-
-    def test_a_request_pointing_at_another_address_is_handed_to_the_person(self):
-        """等着的待办指着另一个地址时,**把它摆在人眼前**,而不是只说一句「不在库里」。
-
-        事故形态:站点按浏览器语言跳转(`openai.com/index/x` 在中文浏览器里落到
-        `/zh-Hans-CN/index/x`)。按网址一问,这一页确实「不在库里」—— 只凭这一句
-        请人收录,库里立刻多出**第二行同一篇文章**,而两行各有各的 key、各导出
-        一篇 md。摆出那个待办并给一颗「改用这一页的地址」,他一眼就看出是同一篇。
-
-        反过来钉一边:站在待办指定的那一页上时,这一项是空的(不然每次都挂着一句
-        与此刻无关的提示)。
-        """
-        self.intent()                                  # 指着 https://e.org/post
-        landed = self.here('https://e.org/zh-Hans-CN/post').json()
-        self.assertEqual('absent', landed['situation'])
-        self.assertEqual(['https://e.org/post'], [one['page_url'] for one in landed['elsewhere']])
-        self.assertEqual([], self.here().json()['elsewhere'], '就站在它指定的那一页上时不提')
-
-        adopted = self.here(path='/here/adopt',
-                            payload={'key': self.key, 'page_url': 'https://e.org/zh-Hans-CN/post'})
-        self.assertEqual(200, adopted.status_code, adopted.text)
-        self.assertEqual('https://e.org/zh-Hans-CN/post', adopted.json()['page_url'])
-        # 改用**不是放行**:正文照旧要过那一整套准入,这里只验「它现在认这一页」
-        self.assertEqual(200, self.precheck(adopted.json(), body=BODY,
-                                            page_url='https://e.org/zh-Hans-CN/post').status_code)
-
-    def test_elsewhere_never_lists_a_request_that_was_just_superseded(self):
-        """`elsewhere` 要在建完待办**之后**算。
-
-        `here()` 自己那次 `create` 会把同一条目上指着别处的旧待办标成
-        `superseded`。先算就会把刚被顶掉的那个摆出来、请人「改用这一页的地址」,
-        而它已经作废 —— 点下去只会被拒,屏幕上却看不出为什么。
-        """
-        stale = self.intent()                          # 指着 https://e.org/post
-        landed = self.here('https://e.org/post?utm_source=x').json()
-        self.assertEqual('fill', landed['situation'])
-        self.assertNotEqual(stale['id'], landed['intent']['id'], '指着另一个地址,该另建一个')
-        self.assertEqual([], landed['elsewhere'], '刚被顶掉的那个不许摆出来')
-
-    def test_the_page_question_needs_the_pairing_key(self):
-        """两个新端点都由调用方指定地址,所以鉴权和 `/upload` 同一档。
-
-        反过来钉一边:带着密钥的那一次照旧放行(否则「一律拒」也能让上面几条绿)。
-        """
-        for path in ('/here', '/here/adopt'):
-            with self.subTest(path=path):
-                payload = ({'url': 'https://e.org/post'} if path == '/here'
-                           else {'key': self.key, 'page_url': 'https://e.org/post'})
-                self.assertEqual(401, self.here(auth=False, path=path, payload=payload).status_code)
-                self.assertEqual(200, self.here(path=path, payload=payload).status_code)
+class BrowserCaptureTests(CaptureCase):
 
     def test_saves_original_item_with_provenance_and_idempotent_receipt(self):
         with reg.db() as conn:
@@ -320,13 +146,57 @@ class BrowserCaptureTests(FullTextCase):
             self.assertEqual(404, self.precheck(expired).status_code)
         self.assertEqual(422, self.precheck(self.intent(), method='screenshot').status_code)
 
-    def test_wrong_page_unconfirmed_and_short_body_cannot_write(self):
+    def test_wrong_page_and_short_body_cannot_write(self):
+        """弹窗上那道「我已核对」撤掉之后,**拦截全靠服务端这几道**。
+
+        原来这条还验一项 `confirmed_complete=False`,那是扩展报给服务端的一句
+        「人已经核对过了」。界面不再问人,那个字段也就跟着撤了(理由见
+        `browser_capture_api.upload` 的 docstring)—— 留着它只会变成扩展签给
+        自己的证词。所以这里改钉**仅剩的那两道**,外加反过来那一边。
+        """
         intent = self.intent()
         before = self.row(self.key)
-        for overrides in ({'page_url': 'https://e.org/another'},
-                          {'confirmed_complete': False}, {'body': 'short'}):
+        for overrides in ({'page_url': 'https://e.org/another'}, {'body': 'short'}):
             self.assertGreaterEqual(self.upload(intent, **overrides).status_code, 400)
         self.assertEqual(before['body'], self.row(self.key)['body'])
+        # 反过来钉一边:该放行的照旧放行 —— 不带任何「已核对」字段也写得进去,
+        # 否则上面那两条在「这个端点整个坏了」时同样全绿。
+        self.assertEqual(200, self.upload(self.intent()).status_code)
+        self.assertEqual(BODY, self.row(self.key)['body'])
+
+    def test_a_self_signed_confirmation_field_is_refused_not_believed(self):
+        """别把那道撤掉的勾当成凭证偷偷加回来。
+
+        `extra='forbid'` 让多出来的字段当场 422。钉它是因为「加回一个布尔字段
+        并在服务端信它」是这类回退最自然的写法,而那一刻界面上并没有人在核对
+        —— 服务端会拿到一句永远为真的证词,还以为自己多了一道闸。
+        """
+        intent = self.intent()
+        before = self.row(self.key)
+        self.assertEqual(422, self.upload(intent, confirmed_complete=True).status_code)
+        self.assertEqual(before['body'], self.row(self.key)['body'])
+
+    def test_who_vouched_for_this_body_is_recorded_as_it_actually_happened(self):
+        """**谁给这份正文背书**,库里要如实记着。
+
+        `body_provenance.confirmed` 记的是「有没有人逐字看过」。扩展上那道
+        「我已核对」连同预览区撤掉之后,那两条路上确实没人看过 —— 人选的是
+        **这一页**,正文是提取器读的,所以它们记 `False`。只有「手动补正文」
+        那条还记 `True`:那一段是人自己粘进来的,断言它属于这篇文章的就是他。
+
+        两者要分得出来,否则事后谁也说不清某一篇的正文是人担保的还是机器读的。
+        正反都钉:只问「有没有这个键」的话,两条路一起记 `True` 也全绿。
+        """
+        intent = self.intent()
+        self.assertEqual(200, self.upload(intent).status_code)
+        grabbed = json.loads(self.row(self.key)['body_provenance'])
+        self.assertEqual('browser_article', grabbed['method'])
+        self.assertIs(False, grabbed['confirmed'])
+
+        capture.save_pasted(self.key, BODY + '\nPasted by a person who vouches for it.')
+        pasted = json.loads(self.row(self.key)['body_provenance'])
+        self.assertEqual('manual_paste', pasted['method'])
+        self.assertIs(True, pasted['confirmed'])
 
     def test_revision_change_even_with_same_hash_blocks_overwrite(self):
         intent = self.intent()
@@ -359,7 +229,7 @@ class BrowserCaptureTests(FullTextCase):
     def test_requires_local_same_origin_and_paired_extension(self):
         intent = self.intent()
         data = dict(intent_id=intent['id'], page_url='https://e.org/post', title='title',
-                    body=BODY, method='article', confirmed_complete=True)
+                    body=BODY, method='article')
         self.assertEqual(401, self.client.post('/api/browser-capture/upload', json=data).status_code)
         self.assertEqual(403, self.client.get('/api/browser-capture/pairing',
                                              headers={'Origin': 'https://evil.example'}).status_code)
@@ -546,14 +416,16 @@ class BrowserCaptureTests(FullTextCase):
         self.assertEqual(200, result.status_code)
         self.assertEqual(['export', 'index'], start.call_args.args[0])
         self.assertEqual({'channel': 'rss'}, start.call_args.kwargs['crawl_filter'])
-        page = (browser_capture_api.ROOT / 'kb/static/browser-capture.html').read_text(encoding='utf-8')
+        # 三处话必须对得上。补抓页退役成抽屉之后,「页面」那一份在抽屉模板里
+        # (`capture_drawer.js`),确认框那一份在状态机里(`browser_capture.js`)。
+        shell = (browser_capture_api.ROOT / 'kb/static/js/capture_drawer.js').read_text(encoding='utf-8')
         script = (browser_capture_api.ROOT / 'kb/static/js/browser_capture.js').read_text(encoding='utf-8')
-        for place in (page, script, result.json()['detail']):
+        for place in (shell, script, result.json()['detail']):
             self.assertIn('条目化提取不在这一步', place)
             self.assertNotIn('提取模型', place)
 
-    def test_extension_bundle_and_both_pages_carry_the_shared_error_reader(self):
-        """下发的 ZIP 要带上扩展目录里的每个文件;两个页面都要在 `ui.js` 之前引 `api.js`。
+    def test_extension_bundle_and_the_page_carry_the_shared_error_reader(self):
+        """下发的 ZIP 要带上扩展目录里的每个文件;页面要在 `ui.js` 之前引 `api.js`。
 
         `apiFail` / `apiResponse` 只有一份实现,住在扩展目录(扩展装在浏览器里,取不到
         `kb/static/js/` 下的文件)。页面漏引它的后果是**所有失败请求当场
@@ -567,9 +439,10 @@ class BrowserCaptureTests(FullTextCase):
         self.assertEqual(200, archive.status_code)
         with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
             self.assertEqual(shipped, sorted(name.split('/')[-1] for name in bundle.namelist()))
-        for page in ('kb/static/index.html', 'kb/static/browser-capture.html'):
-            text = (browser_capture_api.ROOT / page).read_text(encoding='utf-8')
-            self.assertLess(text.index('knowbase-capture/api.js'), text.index('/static/js/ui.js'), page)
+        # 补抓页退役之后只剩这一个页面(采集那一块搬进了它的左侧抽屉)。
+        page = 'kb/static/index.html'
+        text = (browser_capture_api.ROOT / page).read_text(encoding='utf-8')
+        self.assertLess(text.index('knowbase-capture/api.js'), text.index('/static/js/ui.js'), page)
 
     def test_item_state_restores_latest_saved_receipt_without_an_intent_id(self):
         original = self.intent()

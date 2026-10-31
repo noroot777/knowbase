@@ -45,7 +45,7 @@ function renderSourceEntry(item) {
     <div class="source-entry-meta"><span><b class="source-entry-avatar" aria-hidden="true">${esc(author.slice(0, 1))}</b>${esc(author)}</span><time>${esc(item.published ? sourceTime(item.published) : '发布时间未知')}</time></div>
     ${heading}${!post && text.translated && item.title !== title ? `<p class="source-entry-original">${esc(item.title)}</p>` : ''}
     <p class="source-excerpt${post && readable ? ' is-post' : ''}">${esc(excerpt)}${more}</p>
-    <div class="source-entry-footer"><span>${sourceItemKind(item)}${status ? ' · ' + status : ''}</span><div>${!post && !item.x_post_meta && sourceModules.get(item.kind)?.body_from_link ? `<a href="/browser-capture?item=${encodeURIComponent(item.key)}" target="_blank" rel="noopener noreferrer">从浏览器补抓</a>` : ''}${readable ? `<button class="text-button" data-read-item="${key}">展开阅读</button>` : ''}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></div></article>`;
+    <div class="source-entry-footer"><span>${sourceItemKind(item)}${status ? ' · ' + status : ''}</span><div>${!post && !item.x_post_meta && sourceModules.get(item.kind)?.body_from_link ? `<button class="text-button" data-capture-item="${esc(item.key)}">从浏览器补抓</button>` : ''}${readable ? `<button class="text-button" data-read-item="${key}">展开阅读</button>` : ''}<a href="${esc(safeUrl(item.url))}" target="_blank" rel="noopener noreferrer">原文${arrow('ext')}</a></div></div></article>`;
 }
 
 function updateSourceReadingView() {

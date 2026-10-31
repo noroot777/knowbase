@@ -246,8 +246,8 @@ async function careRelease(kind, keys, decisions) {
   }
 }
 
-/** 从浏览器采集:把这一条交给补抓页(`/browser-capture?item=<key>`),由人在那篇
-    文章自己的标签上点扩展、预览确认,正文补回原条目。
+/** 从浏览器采集:把这一条交给左侧的采集抽屉,由人在那篇文章自己的标签上点扩展,
+    正文补回原条目。
 
     **这里只是一次交接,不做任何判断。**
     - **准入**是后端那一份(`browser_capture._admit_body` / `target()`),界面上由
@@ -259,14 +259,13 @@ async function careRelease(kind, keys, decisions) {
     - **key 用这一条真实的 `feed_items.key`**(和 `/body`、`/requeue` 发出去的
       是同一个值),不是列表上的展示编号 —— 补抓页按它绑定条目。
 
-    **不弹确认框**:前提(文章开着、扩展装好)写在按钮旁边那行提示里,而确认框里
-    点「开始」之后再 `window.open` 已经不是用户手势,会被弹窗拦截挡掉。
+    **开的是左侧抽屉,不再跳走。** 原来这里 `window.open('/browser-capture?item=…')`
+    去一个独立页面:人正在「问题与待办」里逐条看,点一下就被带离现场,补完正文还要
+    自己找回刚才那一条。抽屉贴在左边,底下这一页原样留着。
 
-    新标签用 `window.open(..., 'noopener')`:补抓页拿不到 `window.opener`,口径同
-    `fav.js` 那一处。 */
+    **不弹确认框**:前提(文章开着、扩展装好)写在按钮旁边那行提示里。 */
 function careOpenCapture(row) {
-  const url = '/browser-capture?item=' + encodeURIComponent(row.key);
-  window.open(url, '_blank', 'noopener');
+  openCaptureDrawer(row.key);
 }
 
 /** 手动补正文(**兜底那一颗**,主入口是上面那个「从浏览器采集」)。

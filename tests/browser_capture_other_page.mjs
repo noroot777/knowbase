@@ -40,6 +40,7 @@ let state = {key: 'k1', title: '文章', url: ORIGINAL, kind: 'rss', saved: null
 let scheduled;
 const context = vm.createContext({
   URLSearchParams, Date, JSON,
+  window: {},
   document: {getElementById: element, createElement: node},
   location: {search: '?item=k1', origin: 'http://127.0.0.1'},
   navigator: {clipboard: {writeText: async () => {}}},
@@ -50,6 +51,8 @@ const context = vm.createContext({
 });
 const source = await readFile(new URL('../kb/static/js/browser_capture.js', import.meta.url), 'utf8');
 vm.runInContext(source, context);
+// 搬进抽屉之后这段脚本不再自启动(条目 key 原先从地址栏取)——由外壳调它。
+context.window.startCapture('k1');
 await new Promise(resolve => setImmediate(resolve));
 
 // ① 拒绝那一刻的真实地址摆在待办里,带一颗改用它的按钮
@@ -60,7 +63,7 @@ assert.ok(made.some(one => one.textContent === LANDED), '那个地址要原样�
 
 // ② 点它 = 用那个地址另发一个请求(同一个 create,不是先取消)
 calls.length = 0;
-await element('pending-list').click({target: {closest: selector =>
+await element('cap-pending-list').click({target: {closest: selector =>
   selector === '[data-use-url]' ? offer : null}});
 const posted = calls.find(call => call.path === '/api/browser-capture/intents');
 assert.ok(posted, '应当发起新的采集请求');
