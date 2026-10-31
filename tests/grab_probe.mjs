@@ -309,7 +309,7 @@ try {
     return !$('grab-refetch').hidden;
   })()`);
   const KNOWN = "ok: true, known: true, done: false, content_ok: true, "
-                + "owing: '还没写成 vault 里那一篇'";
+                + "owing: '还没导出成笔记文件'";
   check("链接指向别处的来源:「重新抓一次」不露面",
         await refetchShown(`{ ${KNOWN}, kind: 'digest', url_is_origin: false }`) === false);
   // **反过来钉一边**:链接指向它自己的来源照旧露面 —— 这是错存唯一的出路

@@ -10,8 +10,9 @@
  * 就摆几条**(站点按浏览器语言跳转那一类,只说一句「不在库里」会让人收录出第二行同一
  * 篇文章),逐行那颗「改用它」交的是这一页的地址和**那一行**的条目,**而他点中的那个
  * 身份要带进后面每一问**(丢了就会被按创建时间代选成另一篇)、而且**只对他点的那一页
- * 有效**,服务端说不出是哪一篇时一颗采集按钮都不给;⑨配对密钥用一次不依赖当前标签的调用验;⑩结构上不许按失败文案
- * 分流,预览那一支也不许回来。
+ * 有效**,服务端说不出是哪一篇时一颗采集按钮都不给;⑨配对密钥用一次不依赖当前标签的调用验;
+ * ⑩「关掉这一页」只在**这一次真采成了、而且他还站在那一页上**时露面,露面那一次接焦点,
+ * 按下去只关当前这一个标签;⑪结构上不许按失败文案分流,预览那一支也不许回来。
  * 硬约束见 docs/decisions/link-grab.md 与 browser-capture.md。
  */
 import assert from 'node:assert/strict';
@@ -30,14 +31,19 @@ let pendingReply = null;   // 非空 = 验密钥那一问当场失败
 let grabReply = {status: 200, data: {ok: true, detail: '已收下，正在写入知识库'}};
 const calls = [];
 const extracted = [];
+const removed = [];
 const tab = {id: 7, url: PAGE};
+const OTHER = 'https://example.org/posts/world';
 const captured = {page_url: PAGE, title: '页面标题', body: 'x'.repeat(1500), method: 'article'};
 
 const context = vm.createContext({
   URL, Date, JSON, encodeURIComponent,
   document,
+  //: 弹窗关掉自己那一下。记次数而不是空函数:标签关了、弹窗还指着一个不存在的
+  //: 页面留在屏幕上,是这颗按钮唯一会留下的后遗症。
+  window: {closed: 0, close() { this.closed += 1; }},
   chrome: {
-    tabs: {query: async () => [tab]},
+    tabs: {query: async () => [tab], remove: async id => { removed.push(id); }},
     scripting: {executeScript: async ({files, args}) => {
       if (files) return [{}];
       extracted.push(args[0]);
@@ -66,6 +72,7 @@ const context = vm.createContext({
 
 const directory = new URL('../kb/static/browser-extension/knowbase-capture/', import.meta.url);
 const source = await readFile(new URL('popup.js', directory), 'utf8');
+const markup = await readFile(new URL('popup.html', directory), 'utf8');
 vm.runInContext(source, context);
 await new Promise(resolve => setImmediate(resolve));
 
@@ -82,6 +89,7 @@ assert.equal(element('act-page').hidden, true, '没失败之前不该提前给�
 assert.equal(element('act-selection').hidden, true);
 // 藏着的时候名字就已经写好了:放出来那一刻只改 `hidden`,没人再补名字。
 assert.equal(element('act-selection').textContent, '改用所选文字');
+assert.equal(element('close-tab').hidden, true, '什么都还没采,不许摆关页按钮');
 
 // ② 点收录:只交地址,正文一个字都不交 —— 内容由服务端自己去抓
 calls.length = 0;
@@ -278,7 +286,58 @@ assert.ok(calls.some(c => c.path.endsWith('/pending')), '该先验一次密钥')
 assert.match(element('status').textContent, /配对密钥不正确/);
 pendingReply = null;
 
-// ⑩ 结构:不许按失败文案分流。**钉形态,不钉关键词** —— 按词表匹配会连注释
+// ⑩ 「关掉这一页」:**只在这一次真采成了之后露面**,而且只认他此刻站着的那一页。
+//    判据不是「服务端说这一条齐了」—— 那一句在他只是路过一篇早就收过的文章时也成立,
+//    而那时摆出一颗默认接焦点的关页按钮,一个回车就把他正在读的东西关掉了。
+tab.url = OTHER;
+here = {ok: true, situation: 'complete', page_url: OTHER, intent: null, elsewhere: [],
+        item: {key: 'k9', kind: 'rss', title: '早就收过的那一篇', url: OTHER},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, true,
+  '只是路过一篇早就齐了的文章,不许给关页按钮');
+
+// 在这一页上真采一次(服务端自己抓那条路)。三条路都算采完,这一条最容易被漏掉:
+// 没点过「改用它」时 `intent_id` 是空的,服务端跳过回执查找、按网址答回的是
+// `complete` 而不是 `saved` —— 只认 `saved` 的写法在最常走的那条路上一颗都不给。
+here = {ok: true, situation: 'absent', page_url: OTHER, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+grabReply = {status: 200, data: {ok: true, detail: '已收下，正在写入知识库'}};
+await element('refresh').click();
+here = {...here, situation: 'complete', detail: '这一条已经在知识库里，正文也齐了。'};
+await element('act').click();
+assert.equal(element('close-tab').hidden, false, '采完了就该给这个出口');
+assert.equal(element('close-tab').focused, true, '「默认选中」= 这一刻回车走的就是它');
+// 名字和初次打开时的 hidden 都写死在标记里(这一份假 DOM 不解析 HTML,所以钉在
+// 那一份上):露出来那一刻只改 `hidden`,没有谁再去补名字。
+assert.match(markup, /<button id="close-tab" hidden>关掉这一页<\/button>/,
+  '名字写在 popup.html 里、初次打开藏着');
+
+// 已经露着的时候**不许再抢焦点**:这一块每问一次就整个重画一次,每次都抢的话,
+// 人刚把焦点挪到「重新确认」上就被拽回来了。
+element('close-tab').focused = false;
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, false, '照旧露着');
+assert.equal(element('close-tab').focused, false, '已经露着就不许再抢一次焦点');
+
+// 采完之后标签自己跳走了(站内重定向、他自己点开了下一篇):**收回去**。关的是
+// 「刚刚采的那一页」,不是「碰巧现在开着的那一页」—— 关错一个标签不可撤销。
+tab.url = PAGE;
+here = {...here, page_url: PAGE};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, true, '采的那一页已经不在眼前,就不许再摆');
+
+// 按下去:只关**当前这一个**标签,顺手把弹窗也收掉
+tab.url = OTHER;
+here = {...here, page_url: OTHER};
+await element('refresh').click();
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [tab.id], '只关当前这一个标签,一个都不许多关');
+assert.equal(context.window.closed, 1, '标签没了,弹窗不许留在屏幕上');
+tab.url = PAGE;
+
+// ⑪ 结构:不许按失败文案分流。**钉形态,不钉关键词** —— 按词表匹配会连注释
 //    一起误伤,而且换个说法就绕过去了;真正会出事的形态只有一种:把服务端那句
 //    话拆开来自己判。
 assert.doesNotMatch(source, /(message|detail)\s*\.\s*(includes|match|indexOf|startsWith|search)/,

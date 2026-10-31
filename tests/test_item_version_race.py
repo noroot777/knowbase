@@ -83,7 +83,7 @@ class VersionIdentityTests(GrabCase):
         fresh_seen = grab.known(PAGE)
         self.assertFalse(fresh_seen['exported'])
         self.assertFalse(fresh_seen['done'])
-        self.assertEqual(grab.owing(fresh_seen), '还没写成 vault 里那一篇')
+        self.assertEqual(grab.owing(fresh_seen), '还没导出成笔记文件')
         sync.export(grab.KIND)
         text = next((self.root / 'vault' / 'source' / grab.KIND).glob('*.md')).read_text()
         self.assertIn('GAMMA', text)

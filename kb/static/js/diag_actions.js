@@ -263,9 +263,39 @@ async function careRelease(kind, keys, decisions) {
     去一个独立页面:人正在「问题与待办」里逐条看,点一下就被带离现场,补完正文还要
     自己找回刚才那一条。抽屉贴在左边,底下这一页原样留着。
 
-    **不弹确认框**:前提(文章开着、扩展装好)写在按钮旁边那行提示里。 */
+    **不弹确认框**:前提(文章开着、扩展装好)写在按钮旁边那行提示里。
+
+    **交接完还要接回来**:采集发生在扩展弹窗里,这块面板既收不到回包也不轮询
+    (`careSchedule` 只在同步真跑着的时候才排下一轮)。不接的话,人关掉抽屉之后
+    左边那一行还写着补抓失败的原话、右边还摆着「从浏览器采集」—— 而这一条此刻
+    已经换了档。见 `careAfterCapture`。 */
 function careOpenCapture(row) {
-  openCaptureDrawer(row.key);
+  openCaptureDrawer(row.key, note => careAfterCapture(row.key, note));
+}
+
+/** 采集抽屉关掉之后回到现场。
+
+    **一律重画,哪怕什么都没发生。** 漏刷新的代价是人照着一屏假状态按下一颗按钮;
+    多刷一次的代价只是一次只读请求 —— 而他刚刚才从这块面板点开过抽屉,人就在这儿。
+
+    **「它去哪了」要说出来,但话不自己编。** 补完正文的那一条当场离开「待决定」:
+    `body_exhausted`(重试已停止)→ `ingest_queued`(写入知识库 · 待执行),连分组都
+    换了,所以它**不在这一屏上了** —— 左边那一行消失、右边退回「点左边任意一条」。
+    只让它静默消失是最糟的一种:这块面板自己的硬约束写着**补抓成功 ≠ 已交付**
+    (此刻库里躺的还是那个几十字的壳,检索里搜不到),消失看着就像「这件事办完了」。
+    所以问一次 `/items/<key>`,把**服务端给的那一档的名字**原样摆进那句话里,措辞和
+    列表上那行小标题同一个口径(`${lane.stage} · ${lane.state}`,见
+    `diag_list.careSectionNode`)。问不到就只说做了什么,不猜。 */
+async function careAfterCapture(key, note) {
+  await refreshCare(false);
+  if (!note) return;
+  let where = '';
+  try {
+    const now = await careGet('/items/' + encodeURIComponent(key));
+    const lane = now.lane;
+    if (lane) where = lane.stage ? `${lane.stage} · ${lane.state}` : lane.state;
+  } catch (e) { /* 问不到这一条此刻在哪一档,下面就只说做了什么 */ }
+  toast(where ? `${note}；这一条现在排在「${where}」` : note, { type: 'ok', ms: 6000 });
 }
 
 /** 手动补正文(**兜底那一颗**,主入口是上面那个「从浏览器采集」)。

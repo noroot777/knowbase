@@ -27,10 +27,21 @@ const CARE_EXIT_LABELS = {
 const CARE_CAPTURE_HINT = '「从浏览器采集」要这篇文章此刻在你的浏览器里开着，'
   + '并装好、配对过采集扩展；否则用「手动补正文」。';
 
+/** 右边那一框。**「没选」和「选中那条已经不在这一屏上」摆的是同一句话。**
+ *
+ *  后者原先留一块**彻底空白**的框。而它恰恰是这块面板最常见的那一刻:人在
+ *  「待决定」里点开一条、用「从浏览器采集」把正文补上 —— 这一条当场就不属于这一
+ *  档了(`body_exhausted` → `ingest_queued`,连分组都从「待决定」换到了「待执行」),
+ *  刷新之后左边那一行消失、右边同时变成一块什么都没有的白。两件事一起发生,看着
+ *  就是界面坏了;而他真正需要的那句话(它去哪了)由调用方那一下的 toast 给。
+ *
+ *  **选中状态一起放掉**:留着的话它会一直指着一条摆不出来的记录,下一次刷新
+ *  还是这一幕。 */
 function careRenderDetail() {
   const host = $('care-detail');
-  const id = CARE.selected;
-  if (!id) {
+  const found = CARE.selected ? careFindRow(CARE.selected) : null;
+  if (!found) {
+    CARE.selected = '';
     host.innerHTML = '';
     const hint = document.createElement('p');
     hint.className = 'care-detail-hint';
@@ -38,8 +49,6 @@ function careRenderDetail() {
     host.appendChild(hint);
     return;
   }
-  const found = careFindRow(id);
-  if (!found) { host.innerHTML = ''; return; }
   if (found.row.id) careRenderSourceDetail(host, found.row);
   else careRenderItemDetail(host, found.row, found.lane);
 }

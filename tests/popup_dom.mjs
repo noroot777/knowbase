@@ -11,7 +11,11 @@ export function node(tag = '') {
   return {
     tag, value: '', textContent: '', className: '', type: '', dataset: {},
     checked: false, disabled: false, hidden: false, open: false, children: [],
+    focused: false,
     classList: {toggle() {}, add() {}, remove() {}},
+    // 「关掉这一页」一露面就要接焦点(那一下是采完之后最该点的)。记下来而不是空函数,
+    // 是为了让探针能钉住「露面的同时真的接了焦点」,而不只是「调它不报错」。
+    focus() { this.focused = true; },
     append(...kids) { this.children.push(...kids); },
     replaceChildren(...kids) { this.children = kids; },
     querySelectorAll(selector) {

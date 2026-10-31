@@ -47,9 +47,16 @@ const node = () => ({
 });
 
 const ITEMS = {k1: 'https://e.org/第一篇', k2: 'https://e.org/第二篇'};
+//: 每次 build() 往 body 上挂的那两样(遮罩 + 抽屉)。留着是为了问得出「模板里那一栏
+//: 长什么样」—— 第 ⑨ 条要比的正是模板和复位那一行说的是不是同一个默认。
+const built = [];
 let current = 'k1';
+//: 服务端那一答里的回执。非空 = 这一条的正文已经补进去了。
+let receipt = null;
 const state = () => ({key: current, title: '文章', url: ITEMS[current], kind: 'rss',
-  pending: [], saved: null, saved_error: ''});
+  pending: [], saved: receipt, saved_error: ''});
+//: 「同时在新标签打开这一篇」真的开出来的那些标签。
+const opens = [];
 let fetches = 0;
 //: 非空 = 扣住 `/setup` 那一答,好检查首次引导的位置是不是已经定下来了。
 let releaseSetup = null;
@@ -71,8 +78,8 @@ class FakeObserver {
 }
 const context = vm.createContext({
   URLSearchParams, Date, JSON, setImmediate,
-  window: {}, overlayClosers: {},
-  document: {getElementById: element, createElement: node, body: {append() {}},
+  window: {open(...args) { opens.push(args); }}, overlayClosers: {},
+  document: {getElementById: element, createElement: node, body: {append(...kids) { built.push(...kids); }},
              //: 扩展留标记的地方(`present.js` 的 `data-knowbase-capture`)。
              documentElement: {dataset: {}}},
   location: {search: '', origin: 'http://127.0.0.1'},
@@ -316,5 +323,97 @@ toasts.length = 0;
 clipboardGate.ok();
 await settle();
 assert.equal(toasts.length, 1, '同一个值再写一遍不算重绘,等着的那次复制照旧有回应');
+
+// ⑨ 「同时在新标签打开这一篇」**默认勾着**,而那个默认写在两处,必须说同一句话。
+//    模板里那个 `checked` 是读代码的人看到的默认;真正落到屏幕上的是 `startCapture()`
+//    里那一次复位 —— 每次打开都重建一套 DOM,随后立刻跑它。所以只改模板的话,这一行
+//    会不声不响把它顶回来,而模板从此是一句假话(反过来只改复位那一行同理)。
+//    默认勾着的理由:这颗按钮发出的待办**只有人站到那一页上、在那儿点扩展才兑现得了**,
+//    不开那一页按下去什么都不会发生。
+context.window.closeCaptureDrawer();
+current = 'k1';
+context.window.openCaptureDrawer('k1');
+await settle();
+assert.equal(element('cap-also-open').checked, true, '打开抽屉时那个框就该是勾上的');
+assert.match(built.at(-1).innerHTML, /id="cap-also-open"[^>]*\schecked/,
+  '模板里那一栏也要带着 checked,别让它和复位那一行说两套话');
+
+// 反过来钉一边:人把它取消掉之后,**这一次**不许被任何重画勾回去(面板每 2 秒重画
+// 一次;勾回去的话他点发起就多开一个他已经说过不要的标签)。
+element('cap-also-open').checked = false;
+await tick();
+assert.equal(element('cap-also-open').checked, false, '人取消掉之后不许被重画勾回去');
+
+// ⑨b 取消掉之后按发起:**一个标签都不许开**(此刻它正是取消状态)。
+element('cap-page-url').value = ITEMS.k1;
+opens.length = 0;
+element('cap-create').click();
+await settle();
+assert.deepEqual(opens, [], '他说过不要,就一个标签都不许开');
+createGate.ok({ok: true});
+await settle();
+
+// ⑨c 勾着的时候真的把那一页开出来,而且**就在点下去那一瞬间**(不 await 就已经开了)。
+//     `window.open` 一旦离开这次点击的同步调用栈就不再算用户手势,会被弹窗拦截挡掉 ——
+//     而人看到的是「发起了,那一页没开」,接着在一个没有那一页的浏览器里等扩展。
+context.window.closeCaptureDrawer();
+context.window.openCaptureDrawer('k1');
+await settle();
+element('cap-page-url').value = ITEMS.k1;
+opens.length = 0;
+element('cap-create').click();            // 故意不 await
+assert.deepEqual(opens, [[ITEMS.k1, '_blank', 'noopener']],
+  '勾着就该开那一页,而且是同步开 —— 等一问一答回来就被拦截挡掉了');
+createGate.ok({ok: true});
+await settle();
+
+// ⑩ 关掉抽屉时**回头告诉开它的那一方**。开它的那几处(「问题与待办」面板、订阅页)
+//    在空闲时都不自己刷新:不回这一声的话,正文已经补上、那一条已经换了档位,屏幕上
+//    还写着「重试已停止」,人唯一的出路是刷新整页。
+//    回的那句话分两种,**两边都钉**:
+let told = 'untouched';
+context.window.closeCaptureDrawer();
+current = 'k1';
+receipt = null;
+context.window.openCaptureDrawer('k1', note => { told = note; });
+await settle();
+context.window.closeCaptureDrawer();
+assert.equal(told, '', '什么都没采就该回一句空的 —— 关掉抽屉本身不是采成了');
+
+// 正文真的补上了(这一轮轮询读回来多出一张回执):这一声必须说得出所以然。
+told = 'untouched';
+context.window.openCaptureDrawer('k1', note => { told = note; });
+await settle();
+receipt = {id: 'rcpt-00000001', receipt: {characters: 900, captured_at: 1.79e12}};
+await tick();
+context.window.closeCaptureDrawer();
+assert.match(told, /正文/, '补上了就该回一句说得清的话');
+
+// 反过来钉一边:**打开那一刻就已经在那儿**的回执不算这一次采的。算的话,每次打开
+// 一条早就补过正文的条目、随手关掉,都会报一次「正文已补入原条目」,而其实什么都
+// 没发生 —— 而这块面板上点进来的条目,相当一部分正是已经补过的。
+told = 'untouched';
+context.window.openCaptureDrawer('k1', note => { told = note; });
+await settle();
+//: 必须**再轮一轮**才问得出东西:只刷一次的话,基线那一道无论写对写错都还没被用到
+//: (实测把它里头记下的那个回执号删掉 —— 下一轮就会把一张老回执当成新的 —— 这条
+//: 用例照旧全绿)。而现实里人也不会在 2 秒之内关掉。
+await tick();
+context.window.closeCaptureDrawer();
+assert.equal(told, '', '开抽屉时就在那儿的回执不算这一次的');
+receipt = null;
+
+// 再钉一边:**换一条打开时那一声不许串台**。回调是跟着「这一次打开」走的,挂在模块
+// 上只认最后一个的写法会把上一篇那一声回给这一篇的开启方。
+let first = 'untouched';
+let second = 'untouched';
+context.window.openCaptureDrawer('k1', note => { first = note; });
+await settle();
+current = 'k2';
+context.window.openCaptureDrawer('k2', note => { second = note; });
+await settle();
+assert.equal(first, '', '换一条打开 = 上一次那一声当场结清,不许欠着');
+context.window.closeCaptureDrawer();
+assert.equal(second, '', '这一次的那一声回给这一次的开启方');
 
 console.log('capture drawer shell: passed');

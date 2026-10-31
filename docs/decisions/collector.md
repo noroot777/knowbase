@@ -34,7 +34,7 @@
   `daily.json` 里写的正是旧名字,丢掉的话**公众号从此不再定时同步、不再进日报,而面
   板上完全看不出少了什么**。配套:①退役名也要能翻成人话(`channel_labels()`,API 的 `labels`);②别名
   表要发到浏览器(`/api/pipeline/channels` 的 `aliases`),前端不许写死 `wechat_oa`。
-- **「我的订阅」的公众号视图不信 `kb-sync-channel` 那份全局选择**(`sources.js` 的
+- **「我的订阅」的公众号视图不信 `kb-sync-channel` 那份全局选择**(`subs_wechat.js` 的
   `wechatSubsChannel()` 按来源目录声明的通道过别名表解析)。**检查/重试入口同理**自己按目录现解析
   (`refreshPipeSource()`,「检查连接」重跑整个 `openWechatSubs`)。
 - **逐号「就绪」那套在主干上永久是空的**(一律 `ready=None` / `state=""`)。
@@ -121,7 +121,7 @@
   全局、没有 `tgt-ready-bar`/`tgt-refresh` 这些节点、页面上不出现「凭证」二字、
   删掉的那两个端点一次都没被请求)。
   **「我的订阅」的公众号视图不信 `kb-sync-channel` 里那份全局选择**
-  (`sources.js` 的 `wechatSubsChannel()`:按来源目录声明的通道过别名表解析)——
+  (`subs_wechat.js` 的 `wechatSubsChannel()`:按来源目录声明的通道过别名表解析)——
   那是旧版同步中心记「上次看哪个来源」用的,存量值可能是 rss/social(都是合法
   通道,别名迁移不会动它们),沿用的话公众号视图的连接卡、订阅列表、「同步全部」
   全跟着串到别的来源上。探针里存量 rss/social/未知值各走一遍:通道绑回

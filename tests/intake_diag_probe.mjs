@@ -500,6 +500,48 @@ check("合格的那几类照旧两颗都开,旁边那行写的是前提",
       reopened.capture === false && reopened.body === false && /扩展/.test(reopened.note),
       JSON.stringify(reopened));
 
+// ── 10e. 选中那条从这一屏上消失了:右边**不许留一块白** ───────────────────
+// 这是这块面板最常见的那一刻:在「待决定」里点开一条、用「从浏览器采集」把正文补
+// 上 —— 它当场就不属于这一档了(`body_exhausted` → `ingest_queued`,连分组都换到
+// 了「待执行」)。刷新之后左边那一行消失、右边同时变成一块什么都没有的白,两件事
+// 一起发生,看着就是界面坏了。
+//
+// **先直接问 `careRenderDetail` 自己**:把选中设成一条这一屏上没有的记录,当场重画。
+// 同步、不等任何重载。不走「换分组」那条路问这一条,是因为 `careSetGroup` 会**自己**
+// 先把 `CARE.selected` 清掉(`diag.js`)—— 拿它来问「清没清」问的是另一个函数,恒绿。
+await reselect();
+const orphan = JSON.parse(await evalJs(`(() => {
+  CARE.selected = 'item:' + 'f'.repeat(32);
+  careRenderDetail();
+  return JSON.stringify({ selected: CARE.selected,
+    text: ($('care-detail').textContent || '').trim(),
+    nodes: $('care-detail').children.length });
+})()`));
+check("选中那条摆不出来时,右边摆的是「点左边任意一条」而不是一块白",
+      /点左边任意一条/.test(orphan.text) && orphan.nodes > 0, JSON.stringify(orphan));
+// **选中状态要一起放掉。** 留着的话它会一直指着一条摆不出来的记录,下一次刷新还是
+// 这一幕 —— 而且他回到那一档时那一行会凭空带着选中样式。
+check("那条摆不出来的选中状态要一起放掉", orphan.selected === "", JSON.stringify(orphan));
+
+// 再走一遍**真实那条路**:换一个分组,那一行确实不在新这一组里了。
+// 等法照 10c —— `careSetGroup` 同步改 `CARE.group`、异步才取数,只等 `group` 的话
+// 读到的是重载落地**之前**那一帧:右边还原样摆着上一条连同它那几颗出口按钮(实测
+// 如此)。那一瞬间不归这条约束管,它管的是落地之后;所以这里连「旧那一屏详情已经
+// 让出来了」一起等(`.care-exits` 没了),而「让出来之后摆的是什么」才是判据。
+await reselect();
+await evalJs(`careSetGroup('resolved')`);
+await until(`CARE.group === 'resolved' && CARE.sections.length > 0
+             && CARE.sections.every(s => s.lane.group === 'resolved')
+             && !document.querySelector('#care-detail .care-exits')`);
+const vanished = JSON.parse(await evalJs(`JSON.stringify({
+  selected: CARE.selected,
+  text: ($('care-detail').textContent || '').trim(),
+  nodes: $('care-detail').children.length })`));
+check("换一组之后那一条不在这一屏上了,右边照旧是那句话",
+      /点左边任意一条/.test(vanished.text) && vanished.nodes > 0, JSON.stringify(vanished));
+await evalJs(`careSetGroup('attention')`);
+await until(`CARE.group === 'attention' && CARE.sections.length > 0`);
+
 // ── 11. 四个宽度无横向溢出 ────────────────────────────────────────────────
 for (const [w, h] of [[320, 760], [390, 844], [768, 1024], [1440, 900]]) {
   await send("Emulation.setDeviceMetricsOverride",

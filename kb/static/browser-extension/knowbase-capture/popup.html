@@ -14,12 +14,15 @@
     <section id="here">
       <h1 id="here-state">正在确认这一页…</h1>
       <p id="here-title" class="t" hidden></p><p id="here-url" class="url"></p>
-      <div class="actions" id="here-actions" hidden>
-        <button id="act"></button>
-        <button id="act-page" class="secondary" hidden>改用这一页的正文</button>
-        <button id="act-selection" class="secondary" hidden>改用所选文字</button>
+      <div class="actions">
+        <span id="here-actions" class="act-set" hidden>
+          <button id="act"></button>
+          <button id="act-page" class="secondary" hidden>改用这一页的正文</button>
+          <button id="act-selection" class="secondary" hidden>改用所选文字</button>
+        </span>
+        <button id="close-tab" hidden>关掉这一页</button>
+        <button id="refresh" class="quiet">重新确认</button>
       </div>
-      <div class="actions"><button id="refresh" class="secondary">重新确认</button></div>
     </section>
     <section id="elsewhere" hidden>
       <h2>还在等采集的条目</h2>

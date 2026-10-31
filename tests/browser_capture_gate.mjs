@@ -3,7 +3,8 @@
  * 钉这几件事:①读页之前先问服务端,不通过就一个字都不读(`injections` 不动);
  * ②正文那一问没过就不渲染预览;③预览上的字数是服务端报的那一份,不是扩展
  * 自己数的原始长度;④**待办是服务端那一答带回来的,不是人从下拉框里挑的** ——
- * 「这一页是哪一条」地址栏里就写着,让人再答一遍要跨三个界面走七步。
+ * 「这一页是哪一条」地址栏里就写着,让人再答一遍要跨三个界面走七步;⑤补完正文才给
+ * 「关掉这一页」。
  * 事故形态与硬约束见 docs/decisions/browser-capture.md。
  */
 import assert from 'node:assert/strict';
@@ -24,14 +25,16 @@ let prechecks = [];
 let replies = [];
 let injections = 0;
 let uploads = 0;
+const removed = [];
 const tab = {id: 7, url: 'https://e.org/文章'};
 const captured = {page_url: 'https://e.org/文章', title: '文章', body: 'x'.repeat(1200), method: 'article'};
 
 const context = vm.createContext({
   URL, Date, JSON,
   document,
+  window: {closed: 0, close() { this.closed += 1; }},
   chrome: {
-    tabs: {query: async () => [tab]},
+    tabs: {query: async () => [tab], remove: async id => { removed.push(id); }},
     scripting: {executeScript: async ({files}) => { injections += 1; return files ? [{}] : [{result: captured}]; }},
     storage: {local: {get: async () => ({server: 'http://127.0.0.1:8787', key: 'k'.repeat(44)}), set: async () => {}}}
   },
@@ -59,6 +62,7 @@ await new Promise(resolve => setImmediate(resolve));
 assert.equal(element('here-actions').hidden, false);
 assert.equal(element('act').textContent, '采集');
 assert.match(element('here-state').textContent, /正文还缺着/);
+assert.equal(element('close-tab').hidden, true, '正文还缺着,这一页还有用');
 
 // ① 顺利那一次:交给服务端判的是**原始**标签网址(没在本地规范化过),
 //    两问都过就**直接写进去**(预览区连同那道「我已核对」撤了),而写完那句话里
@@ -71,6 +75,15 @@ assert.equal(injections, 2);
 assert.equal(uploads, 1, '两问都过就该直接提交,不再等第二道人工确认');
 assert.match(element('status').textContent, /694 字符/);
 assert.doesNotMatch(element('status').textContent, /1200/);
+// ⑤ 补完正文那一刻给出「关掉这一页」—— 这一页多半就是采集抽屉刚为它开出来的那个
+//    标签。这里服务端那一答**还是 `fill`**(这桩假服务端永远答 `fill`),所以这一条
+//    钉的是另外半边依据:**这个弹窗刚刚采成的那一次**。只认服务端 `saved` 的写法在
+//    这条路上一颗都不给,而这正是图一里的那条路。
+assert.equal(element('close-tab').hidden, false, '补完了就该给这个出口');
+assert.equal(element('close-tab').focused, true, '「默认选中」= 这一刻回车走的就是它');
+await element('close-tab').click();
+assert.deepEqual(removed, [tab.id], '只关当前这一个标签,一个都不许多关');
+assert.equal(context.window.closed, 1, '标签没了,弹窗不许留在屏幕上');
 
 // ② 读之前就被拒:一个字都没读,也没写
 injections = 0; prechecks = []; uploads = 0;
@@ -98,7 +111,7 @@ assert.equal(injections, 0);
 assert.equal(uploads, 0);
 assert.match(element('status').textContent, /已过期/);
 
-// ⑤ 结构:扩展里不许再出现第二份判据(网址比对、字数门槛)
+// ⑥ 结构:扩展里不许再出现第二份判据(网址比对、字数门槛)
 assert.doesNotMatch(source, /new URL\([^)]*page_url/);
 assert.doesNotMatch(source, /expires_at\s*\*/);
 assert.doesNotMatch(extractor, /\b400\b|\b200000\b/);

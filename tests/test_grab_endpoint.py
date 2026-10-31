@@ -229,8 +229,8 @@ class EndpointTests(GrabCase):
         self.assertEqual(data['run'], 'run-7')
         # **欠哪一步要说出来**(`grab.owing` 那一份口径):笼统一句「还没写进知识
         # 库」把「还没导出」和「文件不见了」说成同一件事,而后者补跑一轮撞不到它。
-        self.assertIn('还没写成 vault 里那一篇', data['detail'])
-        self.assertEqual(data['owing'], '还没写成 vault 里那一篇')
+        self.assertIn('还没导出成笔记文件', data['detail'])
+        self.assertEqual(data['owing'], '还没导出成笔记文件')
         # **后果断言**:后半条链真被跑起来了 —— 只改一句文案的话这里红。
         self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
 
@@ -398,7 +398,7 @@ class EndpointTests(GrabCase):
         with self.pipeline_patch():
             data = self.post().json()
         self.assertEqual((data['duplicate'], data['done']), (True, False))
-        self.assertEqual(data['owing'], 'vault 里那一篇不见了')
+        self.assertEqual(data['owing'], '导出的那个笔记文件不见了')
         self.assertTrue(data['reclaimed'])
         # **后果断言**:这一轮 export 真会选中它(只回一个标志位的话这里红)。
         self.assertEqual(self.pending_export(), 1)
@@ -436,7 +436,7 @@ class EndpointTests(GrabCase):
         with self.pipeline_patch():
             got = self.client.get('/api/grab/state', params={'url': PAGE}).json()
         self.assertEqual((got['known'], got['done'], got['owing']),
-                         (True, False, '还没写成 vault 里那一篇'))
+                         (True, False, '还没导出成笔记文件'))
         self.mark_exported(PAGE, path)
         self.index_doc(path)
         with self.pipeline_patch():
@@ -450,7 +450,7 @@ class EndpointTests(GrabCase):
         (config.VAULT_ROOT / path).unlink()
         with self.pipeline_patch():
             got = self.client.get('/api/grab/state', params={'url': PAGE}).json()
-        self.assertEqual((got['done'], got['owing']), (False, 'vault 里那一篇不见了'))
+        self.assertEqual((got['done'], got['owing']), (False, '导出的那个笔记文件不见了'))
         self.assertEqual((got['exported'], got['stored']), (True, False))
         # **只读**:这一问不许顺手把水位清掉(那是投递那颗按钮的事)。
         self.assertEqual(self.pending_export(), 0)

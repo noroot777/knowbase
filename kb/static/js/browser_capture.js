@@ -28,6 +28,17 @@
   let loadError = '';
   let actionError = '';
   let urlAuto = null;
+  //: 「**这一次**抽屉开着期间,这条真的变过没有」—— 关掉时交回给打开它的那块面板
+  //: (`capture_drawer.openCaptureDrawer` 的第二个参数)。它存在的理由是:采集本身
+  //: 发生在**另一个窗口**(扩展弹窗)里,打开抽屉的那块面板既收不到回包、也不轮询,
+  //: 人关掉抽屉之后那一行还写着补抓失败的原话、右边还摆着「从浏览器采集」。
+  //:
+  //: **开着那一刻就有的那张回执不算**:抽屉按文章恢复最近一条有效回执,进来就看得
+  //: 见上一次的 —— 拿它当「刚刚采完」会让面板每开一次抽屉就报一次喜。所以记一个
+  //: 进来那一刻的基准,只有**换了一张**才算数。
+  let baselined = false;
+  let sawReceipt = '';
+  let settled = '';
 
   async function api(path, options = {}) {
     const response = await fetch(`/api/browser-capture${path}`, {
@@ -113,6 +124,14 @@
     element('cap-pending-list').querySelectorAll('button').forEach(button => { button.disabled = processing; });
   }
 
+  //: 这一轮读回来的快照里,那张回执换了没有。**只在 `refresh()` 里叫一次**,
+  //: 不在 `render()` 里 —— 后者光是人点一下按钮就会跑好几遍。
+  function noteSettled() {
+    const id = snapshot?.saved?.id || '';
+    if (!baselined) { baselined = true; sawReceipt = id; return; }
+    if (id && id !== sawReceipt) { sawReceipt = id; settled = '正文已补入原条目'; }
+  }
+
   function render() {
     if (!snapshot) return;
     if (loadError) {
@@ -168,6 +187,7 @@
       }
       loadError = '';
       snapshot = state;
+      noteSettled();
       render();
     } catch (error) {
       if (version !== loadVersion) return;
@@ -260,6 +280,7 @@
         const result = await api(`/intents/${encodeURIComponent(identity)}/continue`, {method: 'POST', body: '{}'});
         if (!current(gen)) return;
         continued = identity;
+        settled = '正文已补入原条目，导出与索引也已经开跑';
         element('cap-run-note').textContent = `${result.detail} · 批次 ${result.run}`;
         element('cap-run-note').classList.remove('error');
       } catch (error) {
@@ -287,8 +308,17 @@
     loadError = '';
     actionError = '';
     urlAuto = null;
+    baselined = false;
+    sawReceipt = '';
+    settled = '';
     element('cap-page-url').value = '';
-    element('cap-also-open').checked = false;
+    //: **默认勾上。** 这个默认写在两处,必须说同一句话:模板里那个 `checked`
+    //: (`capture_drawer.js`)是读代码的人看到的那一个,而真正落到屏幕上的是这一行
+    //: —— 每次打开都重建一套 DOM,随后立刻跑 `startCapture()`,所以只改模板的话
+    //: 这一行会不声不响把它顶回来。理由:这颗按钮发出的待办只有人站到那一页上、
+    //: 在那儿点扩展才兑现得了,不开那一页按下去什么都不会发生。
+    //: 回归 `tests/capture_drawer_shell.mjs` ⑨。
+    element('cap-also-open').checked = true;
     element('cap-run-note').textContent = '';
     element('cap-saved').hidden = true;
     element('cap-pending').hidden = true;
@@ -311,4 +341,7 @@
 
   window.startCapture = startCapture;
   window.stopCapture = stopCapture;
+  //: 外壳在关抽屉那一下读它(见上面 `settled` 那段)。空串 = 这一次什么都没变,
+  //: 不必报喜。
+  window.captureSettled = () => settled;
 })();

@@ -34,6 +34,11 @@ function careRenderList() {
         : '这一组现在是空的。';
     host.appendChild(empty);
     careRenderBatch();
+    //: **这一支也要重画右边。** 原来它直接 return:整组被清空之后(刚处理完最后
+    //: 一条、或者换了个搜不到东西的词),左边写着「这一组现在是空的」,右边却还
+    //: 整整齐齐摆着那条已经不在这儿的记录连同它的几颗出口按钮 —— 点下去作用在
+    //: 一条人已经处理过的内容上。
+    careRenderDetail();
     return;
   }
   for (const section of CARE.sections) host.appendChild(careSectionNode(section));

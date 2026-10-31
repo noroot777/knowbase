@@ -16,6 +16,8 @@
   let drawer = null;
   let mask = null;
   let watcher = null;
+  //: 打开它的那块面板留下的回调(见 `openCaptureDrawer`)。
+  let settledCallback = null;
   //: 和状态机那边同一个办法:每次打开是新的一代。外壳这边的异步续体是读扩展目录
   //: 那一问和「显示 / 复制配对密钥」—— 它们回来时只问「现在有没有抽屉」是不够的,
   //: 关掉再打开之后那是**另一个**抽屉,旧续体会往新抽屉里写。
@@ -53,7 +55,7 @@
       <p id="cap-original-url" class="url"></p>
       <label for="cap-page-url">已打开文章的最终网址</label>
       <input id="cap-page-url" type="url" placeholder="https://…" disabled>
-      <label class="cap-also"><input id="cap-also-open" type="checkbox">同时在新标签打开这一篇</label>
+      <label class="cap-also"><input id="cap-also-open" type="checkbox" checked>同时在新标签打开这一篇</label>
       <div class="actions">
         <button id="cap-create" type="button" disabled>发起浏览器采集</button>
         <button id="cap-draft-cancel" class="secondary" type="button" hidden>退出重新采集</button>
@@ -215,8 +217,18 @@
 
   const current = gen => gen === generation;
 
-  function openCaptureDrawer(itemKey) {
+  //: `onSettled` 可选:抽屉关掉时回叫一次,参数是「这一次开着期间这条变没变、变成
+  //: 了什么」(`window.captureSettled()`,空串 = 什么都没变)。
+  //:
+  //: **非得有这一下不可**:采集发生在另一个窗口(扩展弹窗)里,打开抽屉的那块面板
+  //: 既收不到回包、也不轮询 —— 人关掉抽屉之后,「问题与待办」里那一行还写着补抓失败
+  //: 的原话、右边还摆着「从浏览器采集」,而这一条此刻已经换了档。
+  //:
+  //: **先关旧的再记新的**:`closeCaptureDrawer()` 自己会把上一位调用方的回调叫掉
+  //: (他开的那个抽屉确实结束了),记在前面的话这一下就把新回调当成旧的用了。
+  function openCaptureDrawer(itemKey, onSettled = null) {
     if (drawer) closeCaptureDrawer();
+    settledCallback = onSettled;
     build();
     // Esc 走全站那一条分派链(`workspace.js` 按最上层浮层找这张表),不自己再挂一个
     // keydown —— 两处都关的话,叠在抽屉之上的确认框按一次 Esc 会连抽屉一起带走。
@@ -230,6 +242,11 @@
   //: 变成几条并行的链。
   function closeCaptureDrawer() {
     if (!drawer) return;
+    //: **先读再停**:`stopCapture()` 之后那份状态就不保证还在了。回调放在整段拆
+    //: 完之后再叫 —— 它多半会去刷新底下那一页,而那时抽屉该已经不在 DOM 里了。
+    const tell = settledCallback;
+    const note = typeof window.captureSettled === 'function' ? window.captureSettled() : '';
+    settledCallback = null;
     generation += 1;
     laid = null;
     //: 跟轮询一样要停:底下那一页还活着,不断开的话这个已经没了的抽屉还会在每次
@@ -242,6 +259,7 @@
     drawer.remove();
     mask = null;
     drawer = null;
+    if (tell) tell(note);
   }
 
   window.openCaptureDrawer = openCaptureDrawer;
