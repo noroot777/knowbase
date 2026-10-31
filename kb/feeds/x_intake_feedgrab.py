@@ -29,16 +29,21 @@ def run(intake):
                     workdir=str(x_channels.FEEDGRAB_HOME / 'work'), budget=deadline - time.monotonic(),
                     should_stop=intake.should_stop, complete_articles=False,
                     account_seconds=seconds('KB_X_FEEDGRAB_ACCOUNT_SECONDS', 25))[handle]
-                if result.get('error'):
+                if result.get('error') or result.get('skipped'):
                     intake.results[handle] = result
+                    store.attempt(source, 'discovery', result.get('error') or result['skipped'])
                     continue
+                result['coverage_complete'] = result.get('incomplete') == ''
                 reused = store.stage(source, result['entries'], phase='discovery',
                                      incomplete='等待上游批次收尾确认')
+                if reused is None:
+                    continue
                 intake.metrics.count('reused', reused or 0)
                 intake.metrics.count('discovered', len(result['entries']))
                 observed = max((store.utc(entry['published']).isoformat() for entry in result['entries']
                                 if store.utc(entry.get('published'))), default='')
                 intake.scans.append((source, 'discovery', intake.bounds[source['id']], observed, result))
+                intake.read.add(source['id'])
             except Exception as error:
                 if not local_fault(error):
                     raise

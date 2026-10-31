@@ -45,7 +45,8 @@ class IntakeBase(ChannelBase):
         observed = x_browser._newest(entries, '')
         result = store.stage(source, entries, phase=phase, incomplete=missing or '等待收尾', observed=observed)
         if confirm:
-            store.confirm(source, entries, phase=phase, incomplete=missing, observed=observed, boundary=bound)
+            store.confirm(source, entries, phase=phase, incomplete=missing, observed=observed, boundary=bound,
+                          coverage_complete=missing == '')
         return result
 
     def candidate(self, identifier='100'):
@@ -170,7 +171,7 @@ class WindowAndOutboxTests(IntakeBase):
         boundary = store.progress(self.source)['floor']
         store.stage(self.source, [entry], phase='history', incomplete='等待确认')
         store.confirm(self.source, [entry], phase='history', incomplete='', observed=store.observed([entry]),
-                      boundary=boundary, end=old_run.isoformat())
+                      boundary=boundary, end=old_run.isoformat(), coverage_complete=True)
         phases = []
 
         def scan(page, handle, floor, **kwargs):

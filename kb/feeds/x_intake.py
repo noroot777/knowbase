@@ -25,6 +25,8 @@ class Intake:
         self.now = datetime.now(timezone.utc)
         self.started = reg.now()
         self.results, self.scans, self.attempted, self.local = {}, [], set(), {}
+        self.read = set()
+        self.timelines = {}
         self.notices = {}
         self.blocked, self.cool = '', None
         self.profile = str(x_channels.BROWSER_PROFILE)
@@ -97,9 +99,10 @@ class Intake:
                 observed = store.observed(entries)
                 if skipped := getattr(entries, 'skipped_quotes', 0):
                     self.notices[source['id']] = f'跳过 {skipped} 条本人无正文的引用推文，未冒充本人观点入库'
-                result = dict(entries=entries, incomplete=missing, error='')
+                result = dict(entries=entries, incomplete=missing, error='', coverage_complete=missing == '')
                 if timeline := getattr(page, '_x_timeline', None):
                     timeline.finalize(result, bound.isoformat())
+                    self.timelines.setdefault(source['id'], []).append(timeline)
                 with self.metrics.storage(phase):
                     reused = store.stage(source, entries, phase=phase,
                                          incomplete=missing or '等待会话收尾确认', observed=observed)
@@ -109,6 +112,7 @@ class Intake:
                 self.metrics.count('discovered', len(entries))
                 self.metrics.count(f'{phase}_candidates', len(entries))
                 self.scans.append((source, phase, bound, observed, result))
+                self.read.add(source['id'])
                 if hits == self.cool.hits:
                     self.cool.cleared()
             except x_page_state.XSessionThrottled as error:
@@ -199,15 +203,20 @@ class Intake:
 
     def package(self):
         from kb.feeds import x_channels
+        confirmed, usable = set(), set()
         for source, phase, bound, observed, result in self.scans:
             if result.get('error'):
                 self.blocked = self.blocked or result['error']
                 continue
             if source['id'] not in self.local:
                 try:
-                    store.confirm(source, result['entries'], phase=phase,
-                                  incomplete=result.get('incomplete', ''), observed=observed,
-                                  boundary=bound.isoformat(), end=self.now.isoformat())
+                    if store.confirm(source, result['entries'], phase=phase,
+                                     incomplete=result.get('incomplete'), observed=observed,
+                                     boundary=bound.isoformat(), end=self.now.isoformat(),
+                                     coverage_complete=result.get('coverage_complete') is True):
+                        confirmed.add(source['id'])
+                        if result['entries'] or result.get('coverage_complete') is True:
+                            usable.add(source['id'])
                 except Exception as error:
                     if not local_fault(error):
                         raise
@@ -224,20 +233,27 @@ class Intake:
                     raise
                 self.local_error(source, error, '读取待办')
                 entries, pending, unavailable, expired, progress = [], 0, [], 0, {}
+            read = source['id'] in self.read & confirmed
+            reason = self.results.get(handle, {}).get('skipped') or progress.get('error', '')
+            core_error = next((timeline.incomplete for timeline in self.timelines.get(source['id'], [])
+                               if getattr(timeline, 'incomplete', '')), '')
             notes = [progress.get('gap', ''), f'{pending} 条正文待补' if pending else '',
-                     self.local.get(source['id'], ''), self.blocked]
-            if source['id'] not in self.attempted:
-                notes.append('本轮时间线未轮到，未记连接失败')
+                     self.local.get(source['id'], ''), self.blocked, reason, core_error]
+            if not read:
+                notes.append('本轮时间线未读到，保留原有成功和失败账')
             notice = f'{expired} 条待办已超出自动五天窗口，未冒充完成' if expired else ''
             notice = '；'.join(filter(None, [notice, progress.get('outside', ''), self.notices.get(source['id'], ''),
                                              x_post.unavailable_note(unavailable)]))
             result = dict(entries=entries, error='', incomplete='；'.join(dict.fromkeys(filter(None, notes))),
                           note=notice, unavailable=unavailable, unavailable_count=len(unavailable), x_intake=True,
-                          local_error=self.local.get(source['id'], ''), pending=bool(any(notes)), deadline=self.metrics.deadline)
+                          local_error=self.local.get(source['id'], ''),
+                          pending=not read or source['id'] not in usable or bool(pending or self.local.get(source['id'])
+                                  or self.blocked or core_error or self.stop()), deadline=self.metrics.deadline)
             result.update(run_started=self.started, run_monotonic=self.metrics.started)
-            if source['id'] not in self.attempted and not entries and source['id'] not in self.local:
-                result['skipped'] = self.blocked or ('已按停止请求中断' if self.stop() else '本轮未轮到，待下轮')
-            if progress.get('discovery') == 'complete' and progress.get('latest'):
+            if not read and not entries and source['id'] not in self.local:
+                result['skipped'] = reason or self.blocked or ('已按停止请求中断' if self.stop() else
+                                     '本轮未轮到，待下轮' if source['id'] not in self.attempted else '本轮未读到，待下轮')
+            if read and not core_error and progress.get('discovery') == 'complete' and progress.get('latest'):
                 result['watermark'] = progress['latest']
             self.results[handle] = result
             self.metrics.count('pending', pending)

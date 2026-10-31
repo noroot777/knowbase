@@ -72,19 +72,18 @@ def prepare(sources, channel, now):
                 conn.execute('DELETE FROM x_intake_sources WHERE source_id=?', (source['id'],))
                 previous = None
             conn.execute('''INSERT INTO x_intake_sources(source_id,identity,channel,floor,gap)
-                VALUES(?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET floor=excluded.floor''',
+                VALUES(?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
+                floor=excluded.floor,discovery='unattempted',error='' ''',
                 (source['id'], identity(source), channel, floor, '最近五天尚未确认完整覆盖'))
-            config = json.loads(source.get('config') or '{}')
-            water = config.get('x_watermark_feedgrab' if channel == 'feedgrab' else 'x_watermark_browser', '')
-            if (water and utc(water) and utc(water) < utc(floor)) or (previous and previous['gap'] and previous['floor'] < floor):
-                conn.execute('UPDATE x_intake_sources SET outside=? WHERE source_id=?',
-                             (f'{floor} 以前不再自动追补，未计为完成', source['id']))
             conn.execute('''UPDATE x_intake_candidates SET state='expired',reason='超出自动追补五天窗口'
                 WHERE state IN ('pending','repair') AND published < ?''', ((now - timedelta(days=5)).isoformat(),))
             expired = conn.execute('''SELECT count(*) FROM x_intake_links l
                 JOIN x_intake_candidates p USING(post_id) WHERE l.source_id=? AND l.identity=?
                 AND p.state='expired' ''', (source['id'], identity(source))).fetchone()[0]
-            conn.execute('UPDATE x_intake_sources SET expired=? WHERE source_id=?', (expired, source['id']))
+            date = utc(floor).astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d')
+            outside = f'{date} 以前的 {expired} 条待办已超出自动窗口，未计为完成' if expired else ''
+            conn.execute('UPDATE x_intake_sources SET expired=?,outside=? WHERE source_id=?',
+                         (expired, outside, source['id']))
 
 
 def excluded(conn, entry):
@@ -153,26 +152,29 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
     return reused
 
 
-def confirm(source, entries, *, phase, incomplete, observed, boundary, end=''):
+def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end='', coverage_complete=False):
     with maintenance_lock(wait=0), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
-            return
+            return False
         for entry in entries:
             conn.execute('UPDATE x_intake_links SET confirmed=1 WHERE source_id=? AND identity=? AND post_id=?',
                          (source['id'], identity(source), post_id(entry)))
         progress = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=?', (source['id'],)).fetchone()
         covered = progress['covered']
         coverage_end = progress['coverage_end']
-        if not incomplete:
+        proven = coverage_complete is True and incomplete == ''
+        if proven:
             connected = coverage_end and utc(boundary) <= utc(coverage_end)
             covered = min(filter(None, [covered, boundary])) if connected else boundary
             coverage_end = max(coverage_end, end or observed or boundary)
-        gap = incomplete or ('' if covered and utc(covered) <= utc(progress['floor']) else '最近五天仍有历史缺口')
-        discovery = 'complete' if not incomplete else 'partial' if phase == 'discovery' else progress['discovery']
+        gap = incomplete or ('' if proven and covered and utc(covered) <= utc(progress['floor']) else
+                             '最近五天仍有历史缺口' if proven else '时间线完整性尚未确认')
+        discovery = 'complete' if proven else 'partial' if phase == 'discovery' else progress['discovery']
         conn.execute('UPDATE x_intake_sources SET covered=?,coverage_end=?,gap=?,discovery=?,latest=? WHERE source_id=?',
                      (covered, coverage_end, gap, discovery,
                       max(progress['latest'], observed), source['id']))
+    return True
 
 
 def progress(source):
@@ -189,6 +191,8 @@ def attempt(source, phase, reason=''):
         if current(conn, source):
             conn.execute(f'UPDATE x_intake_sources SET {column}=?,error=? WHERE source_id=? AND identity=?',
                          (time.time(), reason[:500], source['id'], identity(source)))
+            if phase == 'discovery':
+                conn.execute("UPDATE x_intake_sources SET discovery='partial' WHERE source_id=?", (source['id'],))
 
 
 def pending(sources, now=None):

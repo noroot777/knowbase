@@ -342,13 +342,14 @@ def _incomplete(output: str, folder: Path) -> str:
 
 def _run(binary: str, handle: str, env: dict, cwd: Path, *, timeout=None) -> str:
     """跑一次抓取。返回它的输出(给失败时的文案用)。"""
+    effective_timeout = ACCOUNT_SECONDS if timeout is None else timeout
     try:
         proc = subprocess.run(
             [binary, f'https://x.com/{handle}'], env=env, cwd=cwd,
-            capture_output=True, text=True, timeout=ACCOUNT_SECONDS if timeout is None else timeout,
+            capture_output=True, text=True, timeout=effective_timeout,
             stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        raise FeedgrabError(f'@{handle}:feedgrab 超过 {int(ACCOUNT_SECONDS)} 秒没有返回') from None
+        raise FeedgrabError(f'@{handle}:feedgrab 超过 {effective_timeout:g} 秒没有返回') from None
     except OSError as e:
         raise FeedgrabError(f'feedgrab 执行失败:{e}') from None
     output = ((proc.stdout or '') + '\n' + (proc.stderr or '')).strip()
