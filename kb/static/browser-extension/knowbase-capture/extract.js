@@ -8,7 +8,7 @@ function readKnowbaseArticle(mode) {
   let body = '';
   if (mode === 'selection') {
     body = window.getSelection()?.toString().trim() || '';
-    if (!body) throw new Error('请先在文章里选中正文，再点击读取所选文字');
+    if (!body) throw new Error('请先在文章里选中正文，再点一次「所选文字」那一颗');
   } else {
     const selector = 'article,[itemprop="articleBody"],#js_content,.rich_media_content,.entry-content,.post-content,.article-body,.markdown-body,main,[role="main"]';
     const candidates = [...document.querySelectorAll(selector)].filter(node => {
@@ -43,7 +43,7 @@ function readKnowbaseArticle(mode) {
       return {text, score: text.length - linkText * 1.5 + (node.matches('article,[itemprop="articleBody"],#js_content') ? 150 : 0)};
     }).sort((first, second) => second.score - first.score);
     body = scored[0]?.text || '';
-    if (!body) throw new Error('没有识别出文章区域；请在页面选好全文，再使用读取所选文字');
+    if (!body) throw new Error('没有识别出文章区域；请先在页面选好全文，再点「所选文字」那一颗');
   }
   // 「够不够」「超不超」由服务端判(`kb/browser_capture._admit_body`:按**行**去重后的
   // 字数门槛)。在这里再写一遍数字就是两份口径 —— 实测复读的登录提示页在这边 1367

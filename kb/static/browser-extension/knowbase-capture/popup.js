@@ -3,10 +3,13 @@
   const element = id => document.getElementById(id);
   let server = '';
   let key = '';
-  let intents = [];
   let preview = null;
   let busy = false;
+  //: 当前标签(`{id, url}`),和服务端对这一页的那一答(`/here`)。
+  //: **这一答是这一块界面的全部依据** —— 原先这里还有一个「补回哪个待办」的
+  //: 下拉框,要人把服务端已经知道的事再回答一遍。
   let here = null;
+  let situation = null;
   //: 预览区此刻服务于哪一件事:补回某个待办(false)还是收录一篇新文章(true)。
   //: 两件事共用这一块预览和那道「我已核对」—— 人要核对的东西一模一样。
   let collecting = false;
@@ -18,11 +21,9 @@
 
   function setBusy(value) {
     busy = value;
-    const available = !!element('intent').value;
-    for (const name of ['read', 'selection']) element(name).disabled = value || !available;
-    for (const name of ['collect', 'collect-page', 'collect-selection'])
-      element(name).disabled = value || !here;
-    for (const name of ['connect', 'refresh', 'intent']) element(name).disabled = value || (name === 'intent' && !intents.length);
+    for (const name of ['act', 'act-page', 'act-selection'])
+      element(name).disabled = value || !situation;
+    for (const name of ['connect', 'refresh', 'adopt']) element(name).disabled = value;
     element('save').disabled = value || !preview || !element('complete').checked;
   }
 
@@ -73,13 +74,30 @@
     return tab;
   }
 
-  // 这一页在知识库里吗 —— 人点开扩展最先想知道的事。**判据在服务端**
-  // (`/api/grab/state` 只读,一个字节都不写),这里只展示结论。
+  //: situation → 这一块摆哪几颗按钮、各写什么字。
+  //:
+  //: **这张表不是判据。** 「这一页是哪一条、写不写得了、正文还欠不欠」由服务端
+  //: `/here` 一处回答(硬约束见 docs/decisions/browser-capture.md「准入判据只有
+  //: 一份」),这里只负责把那一答摆成界面;`null` = 这一档没有可做的事,照旧只显示
+  //: 服务端那句话。
+  //:
+  //: `fill` 那一档**一开始就摆出「改用所选文字」**:会落到这一档的多半是自动补抓
+  //: 已经试过并失败的页面(要登录、脚本渲染、403),扩展自己的识别同样可能认不出
+  //: 正文,而人站在那一页上选一段是现成的出路。
+  const PLANS = {
+    absent: {act: '收录这条链接', selection: ''},
+    fill: {act: '读取这一页的正文', selection: '改用所选文字'},
+    complete: null,
+    refused: null,
+  };
+
+  // 人点开扩展最先想知道的事:**这一页此刻能做什么。** 一问一答 ——
+  // 原先是「问 grab 这一页在不在库里」加一个「补回哪个待办」的下拉框,两份口径
+  // 查条目的方式还不一样(一份规范形 vs 两份),迟早在屏幕上互相打脸。
   async function loadHere() {
-    element('here-actions').hidden = true;
-    element('collect-page').hidden = true;
-    element('collect-selection').hidden = true;
-    element('here-title').hidden = true;
+    situation = null;
+    clearPreview();
+    renderSituation();
     try {
       here = await currentTab();
     } catch (error) {
@@ -89,47 +107,38 @@
       return;
     }
     element('here-url').textContent = plainUrl(here.url);
-    const state = await grabApi(`/state?url=${encodeURIComponent(here.url)}`);
-    if (state.known) {
-      // 「还没写完」时服务端会连着给出人该去哪一页点哪一颗(`resume`)。
-      // 自己另编一句就等于把那份口径抄进扩展,它改了这里不会跟着改。
-      element('here-state').textContent = state.done
-        ? '这一页已在知识库里。' : `这一页已收下，还没写完${state.resume || ''}。`;
-      element('here-title').textContent = state.title || '';
-      element('here-title').hidden = !state.title;
-      return;
-    }
-    element('here-state').textContent = '这一页还不在知识库里。';
-    element('here-actions').hidden = false;
+    situation = await api('/here', {method: 'POST', body: JSON.stringify({url: here.url})});
+    renderSituation();
+    // 这一行**清空**:标题那一行就是服务端对这一页的答复,再在下面补一句「已连接」
+    // 只是噪声(界面底线:让布局本身解释界面,不加次级描述)。`#status` 留给动作
+    // 结果和错误 —— 调用方在 `loadHere()` **之后**写它,所以这里清不掉那些话。
+    status('');
   }
 
-  async function loadIntents() {
-    clearPreview();
-    const result = await api('/pending');
-    intents = result.intents;
-    element('intent').replaceChildren();
-    if (!intents.length) {
-      const empty = document.createElement('option');
-      empty.value = '';
-      empty.textContent = '请先在知识库发起采集请求';
-      element('intent').append(empty);
+  function renderSituation() {
+    const plan = situation ? PLANS[situation.situation] : null;
+    element('here-state').textContent = situation ? situation.detail : '正在确认这一页…';
+    const title = (situation && situation.item && situation.item.title) || '';
+    element('here-title').textContent = title;
+    element('here-title').hidden = !title;
+    element('here-actions').hidden = !plan;
+    element('act-page').hidden = true;
+    element('act-selection').hidden = !(plan && plan.selection);
+    if (plan) {
+      element('act').textContent = plan.act;
+      element('act-page').textContent = '改用这一页的正文';
+      element('act-selection').textContent = plan.selection;
     }
-    for (const intent of intents) {
-      const option = document.createElement('option');
-      option.value = intent.id;
-      const created = new Date(intent.created_at * 1000).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'});
-      option.textContent = `${intent.title} · ${created} 发起 · ${intent.id.slice(-8)}`;
-      element('intent').append(option);
+    // 等着的那个待办指着另一个地址 —— **这一项是承重的**。站点按浏览器语言跳转
+    // 时(`openai.com/index/x` → `/zh-Hans-CN/index/x`)按网址一问是「不在库里」,
+    // 只凭这一句就请人收录的话,库里立刻多出一行同一篇文章。把那个待办摆出来、
+    // 给一颗「改用这一页的地址」,他一眼就看出是同一篇。
+    const other = (situation && situation.elsewhere && situation.elsewhere[0]) || null;
+    element('elsewhere').hidden = !other;
+    if (other) {
+      element('elsewhere-title').textContent = other.title;
+      element('elsewhere-url').textContent = plainUrl(other.page_url);
     }
-    updateExpected();
-    status(intents.length ? '已连接。先核对目标条目，再主动读取当前文章。' : '没有待采集请求。请先在知识库文章上点击「从浏览器补抓」并发起请求。');
-  }
-
-  function updateExpected() {
-    clearPreview();
-    const intent = intents.find(item => item.id === element('intent').value);
-    element('expected').textContent = intent ? `指定文章：${plainUrl(intent.page_url)}` : '';
-    setBusy(busy);
   }
 
   // 在那个标签上读一次正文。**补正文和收录共用**:同一个提取器、同一句错误话术。
@@ -150,8 +159,8 @@
     clearPreview();
     setBusy(true);
     try {
-      const intent = intents.find(item => item.id === element('intent').value);
-      if (!intent) throw new Error('请先在上面选中本次要补回的待办');
+      const intent = situation && situation.intent;
+      if (!intent) throw new Error('这一页没有要补回的条目，请重新确认这一页');
       const tab = await currentTab();
       // 读之前先问服务端:这个请求还在不在、这一页是不是它指定的那一篇、条目还是
       // 绑定的那一版吗。不通过就一个字都不读 —— 否则人读完整页才被拒(2026-10-26
@@ -173,11 +182,16 @@
     finally { setBusy(false); }
   }
 
-  // 收录这一页:先让服务端自己去抓(它走完整的八道准入,还能取到标题、作者、
-  // 日期)。抓不到才轮到下面那一颗 —— **不在这里判是为什么抓不到**:无论登录墙、
-  // 关卡还是脚本渲染,人的下一步都一样,而他正看着这一页。
-  element('collect').addEventListener('click', async () => {
-    if (busy || !here) return;
+  // 主按钮一颗,**做哪件事由服务端那一答定**(`situation`):
+  // - `fill`(库里有这一条、正文还缺着)→ 直接读这一页。不必先让服务端去抓一次:
+  //   会落到这一档恰恰是因为自动补抓已经抓不到了。
+  // - `absent`(不在库里)→ 先让服务端自己去抓(走完整的八道准入,还能取到标题、
+  //   作者、日期),抓不到才轮到下面那两颗兜底。
+  element('act').addEventListener('click', async () => {
+    if (busy || !situation) return;
+    if (situation.situation === 'fill') return read('article');
+    // 下面是 `absent` 那一档。**不在这里判是为什么抓不到**:无论登录墙、关卡
+    // 还是脚本渲染,人的下一步都一样,而他正看着这一页。
     setBusy(true);
     try {
       const result = await grabApi('', {method: 'POST', body: JSON.stringify({url: here.url})});
@@ -192,14 +206,17 @@
       // iframe 里、页面没有能认出的文章容器)只有人自己选中那一段才取得到。
       // 只给前一颗的话,`extract.js` 回的「请选好全文再读一次」就指向一颗
       // 不存在的按钮 —— 人照着做完,无处可点。
-      element('collect-page').hidden = false;
-      element('collect-selection').hidden = false;
+      element('act-page').hidden = false;
+      element('act-selection').hidden = false;
     }
     finally { setBusy(false); }
   });
 
-  element('collect-page').addEventListener('click', () => collect('article'));
-  element('collect-selection').addEventListener('click', () => collect('selection'));
+  element('act-page').addEventListener('click', () => collect('article'));
+  // 这一颗在两档里都有,各归各家:`fill` 走补回原条目(`/upload`),`absent` 走
+  // 收录成新条目(`/from-page`)。**判据仍在服务端** —— 这里只是按它那一答选路。
+  element('act-selection').addEventListener('click', () =>
+    (situation && situation.situation === 'fill' ? read : collect)('selection'));
 
   // 用这一页的正文收录。和补正文那条路同一套:先问服务端(不通过就一个字都不读
   // 第二遍)、预览上的字数用服务端那一份、人勾完确认才提交。
@@ -225,9 +242,21 @@
     finally { setBusy(false); }
   }
 
-  element('read').addEventListener('click', () => read('article'));
-  element('selection').addEventListener('click', () => read('selection'));
-  element('intent').addEventListener('change', updateExpected);
+  // 「这一页就是那一篇,改用它」—— 和补抓页上那颗「改用这个地址」同一个动作、
+  // 同一个 `create`(旧待办由服务端顶掉,不是先取消再发起),只是搬到了人所在的
+  // 地方。**不是放行**:正文照旧要过服务端那一整套准入,照旧要人核对预览勾确认。
+  element('adopt').addEventListener('click', async () => {
+    const other = (situation && situation.elsewhere && situation.elsewhere[0]) || null;
+    if (busy || !here || !other) return;
+    setBusy(true);
+    try {
+      await api('/here/adopt', {method: 'POST',
+                                body: JSON.stringify({key: other.key, page_url: here.url})});
+      await loadHere();
+      status('已改用这一页的地址。');
+    } catch (error) { status(error.message, true); }
+    finally { setBusy(false); }
+  });
   element('complete').addEventListener('change', () => setBusy(busy));
   element('connect').addEventListener('click', async () => {
     if (busy) return;
@@ -236,8 +265,13 @@
       server = localServer(element('server').value.trim());
       key = element('key').value.trim();
       if (!/^[A-Za-z0-9_-]{40,80}$/.test(key)) throw new Error('请完整复制本机知识库显示的配对密钥');
-      await refreshAll();
+      // **先用一次不依赖当前标签的鉴权调用验密钥**(`/pending` 只读、不建任何
+      // 东西),再去问这一页。拿 `/here` 验不行:人在扩展管理页或知识库页面上
+      // 配对时 `currentTab()` 就先拒了,于是密钥对不对一个字都没验、还因为没
+      // 抛出而被当成连上了,密钥照旧存进本地。
+      await api('/pending');
       await chrome.storage.local.set({server, key});
+      await loadHere();
       element('connection').open = false;
     } catch (error) { status(error.message, true); }
     finally { setBusy(false); }
@@ -245,24 +279,9 @@
   element('refresh').addEventListener('click', async () => {
     if (busy) return;
     setBusy(true);
-    try { await refreshAll(); } catch (error) { status(error.message, true); }
+    try { await loadHere(); } catch (error) { status(error.message, true); }
     finally { setBusy(false); }
   });
-
-  // 「这一页」那一问失败不该挡住待办那一块:两件事互不依赖,一边连不上时
-  // 另一边照旧可用(反过来也一样)。
-  async function refreshAll() {
-    // 两边各自接住,顺序不构成依赖:`loadIntents` 抛出时(密钥不对、服务没起)
-    // 「这一页」照旧要问 —— 写成 `await loadIntents()` 打头就等于让它一失败
-    // 这一整块永远停在「正在确认这一页…」,而注释还写着互不依赖。
-    // `loadIntents` 那个错要原样抛出去:connect 那颗按钮靠它判密钥对不对。
-    let failure = null;
-    try { await loadIntents(); } catch (error) { failure = error; }
-    try { await loadHere(); } catch (error) {
-      element('here-state').textContent = '没能确认这一页：' + error.message;
-    }
-    if (failure) throw failure;
-  }
   element('save').addEventListener('click', async () => {
     if (busy || !preview || !element('complete').checked) return;
     setBusy(true);
@@ -279,7 +298,10 @@
       }
       const result = await api('/upload', {method: 'POST', body: JSON.stringify({...preview, confirmed_complete: true})});
       clearPreview();
-      try { await loadIntents(); } catch { status('正文已保存；待办刷新失败，可稍后重新打开扩展。'); return; }
+      // 同收录那一处:已经写进去了,这一问失败只是「状态没刷新」—— 落进下面那个
+      // catch 会说「可再次提交同一预览」,而预览刚被清掉,而且那句话会让人以为
+      // 正文没保存。
+      try { await loadHere(); } catch { /* 下面照旧报服务端那句话 */ }
       status(result.detail);
     } catch (error) {
       const retry = !error.status || error.status >= 500
@@ -298,7 +320,7 @@
       server = localServer(element('server').value);
       key = stored.key || '';
       if (!key) { element('connection').open = true; status('首次使用：连接本机服务并填写配对密钥。'); return; }
-      await refreshAll();
+      await loadHere();
     } catch (error) { element('connection').open = true; status(error.message, true); }
     finally { setBusy(false); }
   }

@@ -4,7 +4,7 @@
 <body>
   <header><strong>k· Knowbase</strong><span>由你选择，只读此页</span></header>
   <main>
-    <h1>把这篇正文补回去。</h1><p id="status" role="status" aria-live="polite">正在连接本机知识库…</p>
+    <p id="status" role="status" aria-live="polite">正在连接本机知识库…</p>
     <details id="connection"><summary>连接本机知识库</summary>
       <label for="server">服务地址</label><input id="server" type="url" value="http://127.0.0.1:8787" autocomplete="off">
       <label for="key">配对密钥</label><input id="key" type="password" autocomplete="off" placeholder="从知识库补抓页复制，只需配置一次">
@@ -12,18 +12,20 @@
       <p class="hint">只允许本机 127.0.0.1 / localhost。密钥不放进网址，不发送给文章网站。</p>
     </details>
     <section id="here">
-      <h2 id="here-state">正在确认这一页…</h2>
+      <h1 id="here-state">正在确认这一页…</h1>
       <p id="here-title" class="t" hidden></p><p id="here-url" class="url"></p>
       <div class="actions" id="here-actions" hidden>
-        <button id="collect">收录这条链接</button>
-        <button id="collect-page" class="secondary" hidden>改用这一页的正文</button>
-        <button id="collect-selection" class="secondary" hidden>改用所选文字</button>
+        <button id="act"></button>
+        <button id="act-page" class="secondary" hidden></button>
+        <button id="act-selection" class="secondary" hidden></button>
       </div>
+      <div class="actions"><button id="refresh" class="secondary">重新确认这一页</button></div>
     </section>
-    <section>
-      <label for="intent">补回哪个待办</label><select id="intent" disabled><option value="">请先在知识库发起采集请求</option></select>
-      <p id="expected" class="url"></p>
-      <div class="actions"><button id="read" disabled>读取此页</button><button id="selection" class="secondary" disabled>读取所选文字</button><button id="refresh" class="secondary">刷新待办</button></div>
+    <section id="elsewhere" hidden>
+      <h2>有个采集请求指着另一个地址</h2>
+      <p id="elsewhere-title" class="t"></p><p id="elsewhere-url" class="url"></p>
+      <p class="hint">站点常按浏览器语言跳转，落到的地址和知识库里记的那条不一样。你正看的就是这一篇时，改用这一页的地址即可。</p>
+      <button id="adopt" class="secondary">这一页就是那一篇，改用它</button>
     </section>
     <section id="preview" hidden>
       <h2>核对后才会写入</h2><h3 id="page-title"></h3><p id="page-url" class="url"></p><p id="count" class="hint"></p>
@@ -31,7 +33,7 @@
       <label class="check"><input id="complete" type="checkbox">我已核对：这是目标文章的完整正文，不是登录提示、摘要或选段。</label>
       <button id="save" disabled>使用此正文</button>
     </section>
-    <p class="hint">不会刷新、滚动、跳转或关闭原标签。自动识别不准时，请先在文章里选好全文，再读取所选文字。不会上传 Cookie、密码、表单或整页 HTML。</p>
+    <p class="hint">不会刷新、滚动、跳转或关闭原标签。自动识别不准时，请先在文章里选好全文，再用「所选文字」那一颗。不会上传 Cookie、密码、表单或整页 HTML。</p>
   </main>
 </body>
 </html>
