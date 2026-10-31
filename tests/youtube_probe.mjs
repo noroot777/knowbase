@@ -460,7 +460,10 @@ try {
     $('source-reader-title').textContent.includes('智能体编程') &&
     $('source-reader-body').textContent.includes('未分析视频画面') &&
     $('source-reader-body').textContent.includes('不能仅凭生成结果')`));
-  check('时间戳链接回到原视频', await evaluate(`!!document.querySelector('#source-reader-body a[href*="&t=300"]')`));
+  check('完整中文转录不依赖时间戳链接', await evaluate(`
+    $('source-reader-body').textContent.includes('完整中文转录') &&
+    $('source-reader-body').textContent.includes('不能仅凭生成结果') &&
+    !document.querySelector('#source-reader-body a[href*="&t="]')`));
   await screenshot('chinese-reader-desktop');
   await click('#subs-switch-rss');
   await wait(`sourceKind === 'rss' && $('source-title').textContent === 'RSS' && !$('source-add').disabled`);

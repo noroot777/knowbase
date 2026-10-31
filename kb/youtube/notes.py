@@ -70,7 +70,8 @@ def translated_output(text, output):
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
     source_size = sum(char.isalnum() for char in text)
     translated_size = sum(char.isalnum() for char in output)
-    if not output.strip() or translated_size < max(1, source_size * .15):
+    minimum_ratio = .30 if source_size >= 200 else .15
+    if not output.strip() or translated_size < max(1, source_size * minimum_ratio):
         raise RuntimeError('译文正文为空或明显过短，不能确认全文已翻译')
     return output.strip()
 

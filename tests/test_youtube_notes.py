@@ -1,4 +1,5 @@
 import json
+import math
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -60,6 +61,37 @@ class YouTubeNotes(YouTubeFixture):
         output = '这个 AI 智能体能够编写代码，但仍需要审查；使用前必须核验每次生成的改动。'
         with patch.object(notes, 'call', return_value=output):
             self.assertEqual(output, notes.translate(source, self.selected, self.deadline, lambda: False))
+
+    def test_long_text_rejects_partial_translations_and_accepts_normal_compression(self):
+        source = 'Every generated change needs independent verification. ' * 50
+        source_size = sum(char.isalnum() for char in source)
+        for ratio in (.15, .20, .29):
+            output = '译' * int(source_size * ratio)
+            with self.subTest(ratio=ratio), self.assertRaisesRegex(RuntimeError, '过短'):
+                notes.translated_output(source, output)
+        for ratio in (.30, .41, .60):
+            output = '译' * math.ceil(source_size * ratio)
+            with self.subTest(ratio=ratio):
+                self.assertEqual(output, notes.translated_output(source, output))
+
+    def test_short_closing_translation_is_not_judged_as_a_long_text_block(self):
+        source = 'Thank you very much for watching this video.'
+        output = '感谢观看这个视频。'
+        self.assertLess(len(output), sum(char.isalnum() for char in source) * .30)
+        self.assertEqual(output, notes.translated_output(source, output))
+
+    def test_partial_translation_cache_is_revalidated_before_reuse(self):
+        source = 'Every generated change needs independent verification. ' * 50
+        source_size = sum(char.isalnum() for char in source)
+        cache = {'translation': '译' * int(source_size * .20)}
+        output = '译' * math.ceil(source_size * .41)
+        with patch.object(notes, 'call', return_value=output) as call:
+            actual = notes.cached(media.cache_dir(self.row['video_id']), cache, 'translation',
+                                  lambda: notes.translate(source, self.selected, self.deadline, lambda: False),
+                                  lambda value: notes.translated_output(source, value))
+        call.assert_called_once()
+        self.assertEqual(output, actual)
+        self.assertEqual(output, cache['translation'])
 
     def test_chinese_transcript_needs_no_translation_and_keeps_source_timing(self):
         self.transcript['language'] = 'zh'

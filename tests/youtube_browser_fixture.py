@@ -1,10 +1,9 @@
 import json
-import re
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from kb.feeds import registry as reg
-from kb.youtube import discovery, login, media, notes, ranking, storage, toolchain
+from kb.youtube import collector, discovery, login, media, notes, ranking, storage, toolchain
 from kb.collectors import FetchScope
 
 
@@ -22,8 +21,9 @@ def install():
 
     def reply(prompt, *arguments):
         if prompt.startswith('将以下字幕'):
-            return '\n\n'.join(marker + ' 作者演示智能体编程，强调每次修改都要测试，不能仅凭生成结果认定正确。'
-                                for marker in re.findall(r'\[\d{2}:\d{2}:\d{2}\]', prompt))
+            source = prompt.split('\n\n', 1)[1]
+            return ('作者演示智能体编程，强调每次修改都要测试，不能仅凭生成结果认定正确。' *
+                    max(1, len(source) // 50))
         if '只输出 JSON' in prompt:
             return json.dumps({'title': '智能体编程：先验证再采用',
                                'summary': '作者展示智能体编程方法，并强调测试与人工核验的重要性。',
@@ -46,6 +46,7 @@ def install():
         'detail': 'ERROR: Sign in to confirm you are not a bot. Use --cookies-from-browser'}
 
     discovery.fetch = fetch
+    collector.DISCOVERY_SPACING = 0
     media.probe = lambda *arguments, **keywords: {'duration': 600, 'language': 'en'}
     media.obtain = lambda *arguments: {'origin': 'uploaded_captions', 'language': 'en', 'segments': [
         {'start': 0, 'end': 300, 'text': 'The AI agent generates code. Test every change.'},
