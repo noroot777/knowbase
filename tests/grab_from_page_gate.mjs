@@ -48,10 +48,21 @@ const context = vm.createContext({
     //: 于是「标签在这中间跳走了」在这个桩里根本表达不出来:改 `tab.url` 会把历史那
     //: 一份也一起改掉,按下去那一刻的重新核验恒真。
     tabs: {query: async () => [{...tab}], remove: async id => { removed.push(id); }},
-    scripting: {executeScript: async ({files, args}) => {
+    scripting: {executeScript: async ({target, files, args}) => {
       if (files) return [{}];
       extracted.push(args[0]);
-      return [{result: {...captured, method: args[0]}}];
+      //: **按 `tabId` 交回那个标签的东西。** 提取目标传错时(拿上一次 `/here` 留下
+      //: 的快照里那个 id 去读),读到的是**另一个标签**的正文、会被收成这一篇;桩不
+      //: 分标签的话这种错一个字都看不出来。
+      if (target.tabId !== tab.id) {
+        return [{result: {page_url: 'https://example.org/posts/other-tab',
+                          title: '另一个标签里那一篇', body: 'y'.repeat(1500), method: args[0]}}];
+      }
+      //: **地址报的是「页面自己此刻在哪」**(真实 `extract.js` 交回的是
+      //: `location.href`),不是摆局时写死的那一个 —— 站点同源换篇之后,提取和收录
+      //: 走的就是换到的那一页,而展示快照还停在原来那一页。桩里写死一个常量的话,
+      //: 「真写进去的是哪一页」和「屏幕上摆的是哪一页」永远分不开。
+      return [{result: {...captured, page_url: tab.url, method: args[0]}}];
     }},
     storage: {local: {get: async () => ({server: 'http://127.0.0.1:8787', key: 'k'.repeat(44)}), set: async () => {}}}
   },
@@ -447,6 +458,85 @@ await element('close-tab').click();
 assert.deepEqual(removed, [], 'saved 那一档也一样:跳走之后按下去一个都不许关');
 tab.id = 7;
 tab.url = PAGE;
+
+// (e) **凭据绑的是真写进去的那一页,不是屏幕上摆着的那一页。** 站点会在弹窗开着的
+//     时候同源换篇(采失败之后自动翻下一篇最常见):提取、预检、收录走的全是换到的
+//     那一页(`extract.js` 报的是页面自己的地址),而展示快照还停在原来那一页。拿
+//     快照当凭据的后果是**两头都错**:真采成的那一页没有出口,而那篇还没采的原页
+//     在人点一次「重新确认」之后摆出一颗接着焦点的关页按钮 —— 一个回车就关掉它。
+const FIRST = 'https://example.org/posts/first';
+const SWITCHED = 'https://example.org/posts/switched';
+tab.id = 9; tab.url = FIRST;
+here = {ok: true, situation: 'absent', page_url: FIRST, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+grabReply = {status: 503, detail: '抓不到这一页'};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, true, '还没采,不给出口');
+await element('act').click();
+assert.equal(element('act-page').hidden, false, '服务端抓不到,才轮到兜底那两颗');
+// 站点自己翻到了下一篇(同一个标签、同源),弹窗一个字都不知道
+tab.url = SWITCHED;
+here = {ok: true, situation: 'complete', page_url: SWITCHED, intent: null, elsewhere: [],
+        item: {key: 'k7', kind: 'rss', title: '换到的那一篇', url: SWITCHED},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('act-page').click();
+const fromPage = calls.filter(one => one.path === '/api/grab/from-page');
+assert.equal(fromPage[fromPage.length - 1].sent.url, SWITCHED,
+  '收录的是换到的那一页 —— 提取在页面里现报的那个地址');
+assert.equal(element('close-tab').hidden, false, '真采成的那一页才该有出口');
+assert.equal(element('close-tab').focused, true, '它也该接走焦点');
+// 回到那篇**还没采的**原页:服务端照旧说不在库里,这颗按钮一个也不许给
+tab.url = FIRST;
+here = {ok: true, situation: 'absent', page_url: FIRST, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, true, '没采的那一页不许摆出口');
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '按下去也一个都不许关 —— 这一页还没采');
+
+// (e2) 站点在**另一个标签**里打开下一篇(连 id 都换了):提取目标也必须现读。拿
+//      展示快照里那个 id 去读的话,读到的是另一个标签的正文,而它会被收成这一篇。
+tab.id = 9; tab.url = FIRST;
+here = {ok: true, situation: 'absent', page_url: FIRST, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+grabReply = {status: 503, detail: '抓不到这一页'};
+await element('refresh').click();
+await element('act').click();
+assert.equal(element('act-page').hidden, false, '照旧先轮到兜底那两颗');
+tab.id = 9001; tab.url = SWITCHED;
+here = {ok: true, situation: 'complete', page_url: SWITCHED, intent: null, elsewhere: [],
+        item: {key: 'k7', kind: 'rss', title: '换到的那一篇', url: SWITCHED},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('act-page').click();
+const other = calls.filter(one => one.path === '/api/grab/from-page');
+assert.equal(other[other.length - 1].sent.url, SWITCHED,
+  '读的是人眼前这个标签 —— 拿上一次问到的那个 id 去读,交上去的会是另一个标签那一篇');
+assert.equal(element('close-tab').hidden, false, '真采成的那一页该有出口');
+
+tab.id = 7; tab.url = PAGE;
+grabReply = {status: 200, data: {ok: true, detail: '已收下，正在写入知识库'}};
+
+// (e3) **反过来钉一边:凭据的标签身份取「人眼前这一个」,不是上一次问到的那一个。**
+//      问过 `/here` 之后他切到了另一个开着同一篇的标签(同一地址、不同 id),在那儿
+//      点「采集」—— 收进去的是同一页,出口理应给他;取上一次问到的那个 id 的话,采完
+//      了反倒一颗都没有。这一头和上面几条反着:那几条防「关错一个」,这一条防「该给
+//      的不给」。
+const TWICE = 'https://example.org/posts/opened-twice';
+tab.id = 12; tab.url = TWICE;
+here = {ok: true, situation: 'absent', page_url: TWICE, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+await element('refresh').click();
+tab.id = 1200;
+here = {ok: true, situation: 'complete', page_url: TWICE, intent: null, elsewhere: [],
+        item: {key: 'k6', kind: 'rss', title: '开了两个标签那一篇', url: TWICE},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('act').click();
+assert.equal(element('close-tab').hidden, false, '在哪个标签上采的,出口就给那一个');
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [1200], '关的是他眼前这一个标签');
+tab.id = 7; tab.url = PAGE;
 
 // ⑪ 结构:不许按失败文案分流。**钉形态,不钉关键词** —— 按词表匹配会连注释
 //    一起误伤,而且换个说法就绕过去了;真正会出事的形态只有一种:把服务端那句

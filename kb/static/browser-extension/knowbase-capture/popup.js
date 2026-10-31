@@ -171,7 +171,7 @@
     //: (服务端那边 `saved(intent_id) if intent_id else None`),也就是这个弹窗这一轮
     //: 自己选过的那一条 —— 所以它说的确实是「我刚采的那一次」,不是「这一条历史上
     //: 被谁采过」。
-    if (situation && situation.situation === 'saved') doneFor = {id: here.id, url: here.url};
+    if (situation && situation.situation === 'saved') grant(here, here.url);
     renderSituation();
     // 这一行**清空**:标题那一行就是服务端对这一页的答复,再在下面补一句「已连接」
     // 只是噪声(界面底线:让布局本身解释界面,不加次级描述)。`#status` 留给动作
@@ -196,6 +196,24 @@
   //: 自己正在读的东西。
   const captureLanded = () =>
     !!(here && doneFor && doneFor.id === here.id && doneFor.url === here.url);
+
+  //: **凭据只能由「这一次真写进去的那一份身份」建立 —— 四条路都过这一处。**
+  //: - `url` 取**这一次真交给服务端的那个地址**:两条读页的路是 `extract.js` 在页面
+  //:   里现报的 `location.href`(也正是 precheck / upload / from-page 收下的那一个),
+  //:   服务端自己去抓那一路是 `/here` 那一答针对的地址,`saved` 那一路同理。
+  //: - `tab` 取**这一次操作开头现读到的那一个标签**,不是 `here`。
+  //:
+  //: **不许拿 `here` 补造凭据。** 它是上一次 `/here` 留下的展示快照,而站点会在弹窗
+  //: 开着的时候同源换篇(采失败之后自动翻下一篇最常见)。实测形态:在 A 上采失败、
+  //: 站点悄悄换到 B、点「改用这一页的正文」—— 提取、预检、收录的全是 B(服务端那边
+  //: B `known:true`、A `known:false`),凭据却记成了 A。于是**真采成的 B 没有出口**,
+  //: 而人回到 A 点一次「重新确认」,服务端照旧说「这一页还不在知识库里」,那颗
+  //: 「关掉这一页」反倒露着面、还接走了焦点 —— 一个回车关掉的是那篇**还没采的** A。
+  //: 「请求和凭据取的是同一份展示快照」不等于对:两者一致只说明它们同源,不说明
+  //: 那一份就是真写进去的那一页。
+  //: 写成函数声明(不是 `const`):`loadHere()` 在它上面,`saved` 那一路要调它 ——
+  //: 声明会提升,少一个只在某条路上才踩到的 TDZ。
+  function grant(tab, url) { doneFor = {id: tab.id, url}; }
 
   function renderSituation() {
     const plan = situation ? PLANS[situation.situation] : null;
@@ -309,7 +327,7 @@
       //: **在刷新之前记下「采完的是哪一页」。** `loadHere()` 会重问服务端,而它那
       //: 一答在最常走的那条路上是 `complete`(没点过「改用它」→ 没有身份 → 服务端
       //: 跳过回执查找) —— 光等 `saved` 的话「关掉这一页」在那条路上永远不露面。
-      doneFor = {id: tab.id, url: tab.url};
+      grant(tab, captured.page_url);
       // 已经写进去了。这一问失败只是「状态没刷新」,不该让人以为正文没保存。
       try { await loadHere(); } catch { /* 下面照旧报服务端那句话 */ }
       status(`${captured.title}：${result.detail}（${verified.characters} 字符）`);
@@ -333,11 +351,16 @@
     // 还是脚本渲染,人的下一步都一样,而他正看着这一页。
     setBusy(true);
     try {
+      // 标签现读一次:凭据的那一半身份要来自**此刻**,不是上一次 `/here` 留下的快照。
+      const tab = await currentTab();
       const result = await grabApi('', {method: 'POST', body: JSON.stringify({url: here.url})});
       //: 三条路都算采完(这一条是服务端自己去抓的那条)。判据是**这一页的内容已经
       //: 进知识库了**,不是「这个标签是谁开的」—— 后者扩展根本无从知道,而真要按它
       //: 分流,同一颗按钮会在三条路上时有时无,人看不出规律。
-      doneFor = {id: here.id, url: here.url};
+      //: 地址用**服务端这一答针对的那一个**(`here.url`,也就是刚交给它去抓的那一个):
+      //: 标签这期间要是换了页,凭据就和当前这一页对不上,那颗按钮自己不露面 —— 那正是
+      //: 想要的,收进去的毕竟是另一页。
+      grant(tab, here.url);
       // 同下面提交那一处:收下之后刷新失败不改变已经收下这件事,更不该把
       // 下面那两颗兜底按钮露出来 —— 那会让人把已入库的这一页再读一遍正文。
       try { await loadHere(); } catch { /* 照旧报「已收下」 */ }
@@ -367,11 +390,14 @@
     if (busy || !here) return;
     setBusy(true);
     try {
-      const captured = await extractFrom(here, mode);
+      // **从现读到的那个标签提取,不从 `here` 提。** 后者是上一次 `/here` 的快照,
+      // 站点在这中间换过篇的话,它的 `id` 可能已经不是人眼前这一个了。
+      const tab = await currentTab();
+      const captured = await extractFrom(tab, mode);
       const payload = {url: captured.page_url, title: captured.title, body: captured.body};
       const verified = await grabApi('/from-page/precheck', {method: 'POST', body: JSON.stringify(payload)});
       const result = await grabApi('/from-page', {method: 'POST', body: JSON.stringify(payload)});
-      doneFor = {id: here.id, url: here.url};   // 同上:收录成新条目那条路也一样采完了
+      grant(tab, captured.page_url);   // 同上:收录成新条目那条路也一样采完了
       // 已经收下了。这一问失败只是「状态没刷新」—— 不该让人以为没收下。
       try { await loadHere(); } catch { /* 下面照旧报「已收下」 */ }
       status(`${verified.title}：${result.detail || '已收下'}（${verified.characters} 字符）`);

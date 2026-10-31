@@ -25,6 +25,10 @@ let prechecks = [];
 let replies = [];
 let injections = 0;
 let uploads = 0;
+const uploaded = [];
+//: 非空 = 提取那一刻页面已经同源换到这个地址。`currentTab()` 读到一个、注入脚本
+//: 执行时页面已经在另一个,这段窗口是真实的(站点采失败后自动翻篇最常见)。
+let switchOnExtract = '';
 const removed = [];
 const tab = {id: 7, url: 'https://e.org/文章'};
 const captured = {page_url: 'https://e.org/文章', title: '文章', body: 'x'.repeat(1200), method: 'article'};
@@ -39,7 +43,14 @@ const context = vm.createContext({
     //: 于是「标签在这中间跳走了」在这个桩里根本表达不出来:改 `tab.url` 会把历史那
     //: 一份也一起改掉,按下去那一刻的重新核验恒真。
     tabs: {query: async () => [{...tab}], remove: async id => { removed.push(id); }},
-    scripting: {executeScript: async ({files}) => { injections += 1; return files ? [{}] : [{result: captured}]; }},
+    //: 地址报的是**页面自己此刻在哪**(真实 `extract.js` 交回 `location.href`),
+    //: 桩里写死一个常量就把「真写进去的是哪一页」和「屏幕上摆的是哪一页」黏在一起了。
+    scripting: {executeScript: async ({files}) => {
+      injections += 1;
+      if (files) return [{}];
+      if (switchOnExtract) tab.url = switchOnExtract;
+      return [{result: {...captured, page_url: tab.url}}];
+    }},
     storage: {local: {get: async () => ({server: 'http://127.0.0.1:8787', key: 'k'.repeat(44)}), set: async () => {}}}
   },
   apiResponse: async reply => {
@@ -51,7 +62,7 @@ const context = vm.createContext({
     if (url.endsWith('/here')) return {status: 200, data: HERE};
     if (url.endsWith('/pending')) return {status: 200, data: {intents: [INTENT]}};
     if (url.endsWith('/precheck')) { prechecks.push(sent); return replies.shift() ?? {status: 200, data: {ok: true, characters: 694}}; }
-    if (url.endsWith('/upload')) { uploads += 1; return {status: 200, data: {detail: '已补入'}}; }
+    if (url.endsWith('/upload')) { uploads += 1; uploaded.push(sent); return {status: 200, data: {detail: '已补入'}}; }
     throw new Error('unexpected request ' + url);
   }
 });
@@ -88,6 +99,30 @@ assert.equal(element('close-tab').focused, true, '「默认选中」= 这一刻�
 await element('close-tab').click();
 assert.deepEqual(removed, [tab.id], '只关当前这一个标签,一个都不许多关');
 assert.equal(context.window.closed, 1, '标签没了,弹窗不许留在屏幕上');
+
+// ⑤b **凭据跟「真上传的那个地址」走,不跟「操作开头读到的那个」走。** 两者中间
+//     有一段真实的窗口:`currentTab()` 读到 A,注入脚本执行时页面已经同源换到 B,
+//     而 `/upload` 交的是 `captured.page_url`(= B,服务端按它认页)。凭据记成 A 的
+//     话,**A 那一篇的正文根本没补上,人回到 A 却拿到一颗接着焦点的关页按钮**;
+//     真补上的 B 反倒没有出口。这一条和「改用这一页的正文」那一路是同一类。
+const MOVED = 'https://e.org/moved-on';
+tab.id = 11; tab.url = 'https://e.org/文章';
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, true, '换了标签,先回到不给出口那一档');
+switchOnExtract = MOVED;
+uploads = 0; uploaded.length = 0; prechecks = []; injections = 0;
+await element('act').click();
+switchOnExtract = '';
+assert.equal(uploads, 1, '照旧写进去了');
+assert.equal(uploaded[0].page_url, MOVED, '服务端收的是提取时页面自己报的那个地址');
+assert.equal(element('close-tab').hidden, false, '真补上的那一页(此刻就是它)该有出口');
+tab.url = 'https://e.org/文章';
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, true, '操作开头那一页并没有被补上,不许摆出口');
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '按下去也一个都不许关');
+tab.id = 7;
 
 // ② 读之前就被拒:一个字都没读,也没写
 injections = 0; prechecks = []; uploads = 0;
