@@ -121,6 +121,44 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertEqual(1, len(files))
         self.assertIn(translated + '\n\n' + literal, files[0].read_text())
 
+    def test_invalid_batch_format_recovers_units_before_publication_and_export(self):
+        selected = SimpleNamespace(provider='fixture', model_id='fixture')
+        source = ' '.join(f'Fact {position} requires reviewing the generated code before using it.'
+                          for position in range(30))
+        translated = '作者要求在使用代码前独立核验每个事实和每次生成的改动。'
+        requested = []
+
+        def reply(prompt, *arguments):
+            if prompt.startswith('将以下字幕'):
+                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
+                requested.append(segments)
+                return '以下是一段散文，不是有效的批次结果。' if len(segments) > 1 else response(prompt, translated)
+            if '只输出 JSON' in prompt:
+                return '好的，以下是笔记：\n```json\n' + json.dumps({
+                    'title': '核验代码中的每个事实', 'summary': '先核验再使用生成的代码。',
+                    'body': '## 方法\n逐项验证生成的修改。'}) + '\n```\n笔记结束。'
+            return '作者要求逐项核验生成的代码。'
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value=self.metadata), \
+                patch.object(media, 'obtain', return_value={'origin': 'uploaded_captions', 'language': 'en',
+                    'segments': [{'start': 0, 'end': 600, 'text': source}]}):
+            result = collector.collect(FetchScope(force=True))
+        self.assertEqual((1, 1), (result['processed'], result['added']), result)
+        self.assertGreater(len(requested[0]), 1)
+        self.assertEqual([[unit] for unit in requested[0]], requested[1:])
+        self.assertEqual('ready', storage.rows()[0]['state'])
+        self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+        files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
+        self.assertEqual(1, len(files))
+        body = files[0].read_text()
+        self.assertEqual(len(requested[0]), body.count(translated))
+        self.assertNotIn('以下是笔记', body)
+        self.assertNotIn('笔记结束', body)
+
     def test_missing_translation_coverage_leaves_no_note_and_recovers_on_retry(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
         complete = {'origin': 'uploaded_captions', 'language': 'en', 'segments': [

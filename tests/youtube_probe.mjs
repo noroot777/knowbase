@@ -465,6 +465,10 @@ try {
     skippedOne.notice.includes('1 条视频无法读取') && !skippedOne.notice.includes('2 条视频无法读取') &&
     skippedTwo.state === '已同步（有跳过）' && skippedTwo.notice.includes('2 条视频无法读取') &&
     !skippedTwo.notice.includes('1 条视频无法读取'), JSON.stringify({skippedOne, skippedTwo}));
+  check('零返回的跳过提示不虚构其他条目或访问限制原因',
+    [skippedOne, skippedTwo].every(card=>!card.notice.includes('其余条目') &&
+      !card.notice.includes('其他条目') && !card.notice.includes('会员、私有或地区限制')),
+    JSON.stringify({skippedOne, skippedTwo}));
   const cleanCard = statusCards['干净测试频道'], partialCard = statusCards['部分同步测试频道'];
   check('干净频道不继承别人的跳过提示', cleanCard.state === '已同步' && !cleanCard.notice &&
     !cleanCard.text.includes('频道没列完'), JSON.stringify(cleanCard));

@@ -1,16 +1,20 @@
 import re
 
-from kb.youtube import media
+from kb.youtube import login, media
 from kb.youtube.settings import of
 
 
+def video_error(line):
+    matched = re.match(r'ERROR: \[youtube\] ([A-Za-z0-9_-]{11}): (.+)', line)
+    if matched:
+        return {'video_id': matched[1], 'reason': matched[2], 'code': login.classify(matched[2])}
+    return None
+
+
 def unavailable(text):
-    items = []
-    for line in text.splitlines():
-        matched = re.match(r'ERROR: \[youtube\] ([A-Za-z0-9_-]{11}): (.+)', line)
-        if matched:
-            items.append({'video_id': matched[1], 'reason': matched[2]})
-    return items
+    items = [video_error(line) for line in text.splitlines()]
+    return [{'video_id': item['video_id'], 'reason': item['reason']}
+            for item in items if item is not None and item['code'] not in login.AUTH_CODES]
 
 
 def diagnostics(text):
@@ -18,8 +22,13 @@ def diagnostics(text):
 
 
 def blocked(text):
-    errors = [line for line in text.splitlines() if 'ERROR:' in line]
-    return len(errors) != len(unavailable(text))
+    for line in text.splitlines():
+        if 'ERROR:' not in line:
+            continue
+        item = video_error(line)
+        if item is None or item['code'] in login.AUTH_CODES:
+            return True
+    return False
 
 
 def stop_reason(text):

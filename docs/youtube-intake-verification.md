@@ -1,6 +1,26 @@
 # YouTube 低成本接入验证
 
-## 当前复修：覆盖状态、逐片错误与翻译形态恢复（L_HwbCHfGp3X）
+## 当前复修：统一批次恢复与出口阻断（erGDaoGvR8ol）
+
+- 译文整批格式、条数、编号、空段、语种判不过时，统一先按原始短段恢复，再按原序组装并核对完整批次；不再只捕获条数异常。单段仍无效才失败。模型传输/取消/超时不因该入口放宽而扇出重试。
+- 翻译及最终笔记共用 JSON 对象提取，接受客套话和代码围栏包裹；语义字段、覆盖及语种检查不放宽。坏单段缓存淘汰、有效短段与完整批次缓存复用、缺段不得发布继续保留。
+- 出口 ERROR 按 login.classify 判档，不因带视频 ID 就变成良性跳过。全阻断/零返回会记 walls、失败和退避，保留旧水位；有可用条目仍保留并记部分覆盖。良性不可用、合法空集和纯 WARNING 对照仍保留。
+- 跳过文案改为不猜测具体原因；无其他返回条目时不再说“其余条目照常同步”。实际订阅页面验证零返回文案，后端用真实离线子进程验证各 AUTH 档、多轮、水位和退避。
+- 已裁定的冷启动性能项本轮不改，不增加条数截断或远端日期早停。整套及未修改测试不补跑。
+- 浏览器本轮重新检查扩展通道：先命名 `🔎 YouTube恢复与出口阻断修复`，`visible:false` 新建后台标签被拒绝 `Capability is not available: visibility`，没有创建标签。转独立无头壳、临时 profile、本地隔离服务，无需登录态；不连接用户 Chrome CDP、不激活或接管普通标签。
+
+本轮修改测试的登记命令：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_notes tests.test_youtube_windowed_discovery tests.test_youtube_integrity tests.test_youtube_browser -v
+```
+
+实际 cwd：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+真实结果、冻结树、日志和本轮截图归档至
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-erGDaoGvR8ol/`，避免测试后修改提交树。
+不访问真实模型/YouTube、不读取真实 cookie、不操作生产 DB 或用户服务；结构覆盖不冒称语义完整。
+
+## 历史复修：覆盖状态、逐片错误与翻译形态恢复（L_HwbCHfGp3X）
 
 - `last_note` 仅用于实际列表未列完，内容积压留在 `last_notice`；真实订阅卡片与 `/api/intake-care` 同时验证，避免把内容排队变成来源连接待办。YouTube 的重试文案说明按窗口重查，不承诺不存在的位置游标。
 - 完整列表结束证据与逐片错误分类解耦：所有带严格视频 ID 的 ERROR 都不否定频道覆盖，bot/cookie/JS/429 等仍独立记警告；全局/tab 错误、超时仍阻断。真实本地子进程连续三轮覆盖有 JSON 和归档后零 JSON 两侧。

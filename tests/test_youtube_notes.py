@@ -154,6 +154,55 @@ class YouTubeNotes(YouTubeFixture):
         with patch.object(notes, 'call', return_value=encoded(source, output)):
             self.assertEqual(output, notes.translate(source, self.selected, self.deadline, lambda: False))
 
+    def test_every_batch_validation_failure_recovers_from_the_original_units(self):
+        source = 'Review every generated change before use. ' * 24
+        expected = [unit['text'] for unit in translation.units(source)]
+        count = len(expected)
+        invalid = ['中文散文而不是 JSON。', '{"translations":',
+                   json.dumps({'translations': '不是数组'}),
+                   json.dumps({'translations': ['中文译文。'] * (count - 1) + [' ']}),
+                   json.dumps({'translations': ['中文译文。'] * (count - 1) + [None]}),
+                   json.dumps({'translations': [{'id': 'foreign', 'text': '中文译文。'}] * count}),
+                   json.dumps({'translations': ['English only'] * count})]
+        for batch in invalid:
+            requested = []
+
+            def reply(prompt, *arguments):
+                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
+                requested.append(segments)
+                if len(requested) == 1:
+                    return batch
+                return response(prompt, '每次生成的修改都要独立审查后才能使用。')
+
+            with self.subTest(batch=batch), patch.object(notes, 'call', side_effect=reply):
+                result = notes.translate(source, self.selected, self.deadline, lambda: False)
+            self.assertEqual([expected, *[[unit] for unit in expected]], requested)
+            self.assertEqual(count, result.count('独立审查'))
+
+    def test_model_json_wrappers_are_extracted_for_translation_and_final_note(self):
+        def wrapped(prompt, *arguments):
+            result = self.reply(prompt, *arguments)
+            if prompt.startswith('将以下字幕') or '只输出 JSON' in prompt:
+                return '好的，以下是结果：\n```JSON\n' + result + '\n```\n以上为结果。'
+            return result
+
+        result = self.build(wrapped)
+        self.assertIn('中文译文（自动生成）', result['body'])
+        self.assertNotIn('好的，以下', result['body'])
+        self.assertNotIn('以上为结果', result['body'])
+        batches = [prompt for prompt in self.prompts if prompt.startswith('将以下字幕')]
+        self.assertEqual(2, len(batches))
+        calls = len(self.prompts)
+        self.assertEqual(result, self.build(wrapped))
+        self.assertEqual(calls, len(self.prompts))
+
+    def test_transport_failure_does_not_fan_out_into_atomic_model_requests(self):
+        failure = media.ToolFailure('model transport unavailable', 'HTTP 429', origin='model')
+        with patch.object(notes, 'call', side_effect=failure) as call, self.assertRaises(media.ToolFailure):
+            notes.translate('Review every generated change. ' * 30,
+                            self.selected, self.deadline, lambda: False)
+        self.assertEqual(1, call.call_count)
+
     def test_complete_but_compressed_translation_is_not_rejected_by_length(self):
         source = ('The information provided in this presentation should not under any circumstances '
                   'be regarded as a replacement for independent verification of generated source code. '
@@ -171,7 +220,7 @@ class YouTubeNotes(YouTubeFixture):
         with self.assertRaisesRegex(RuntimeError, '覆盖'):
             self.build(reply)
         self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-cache.json').exists())
-        self.assertEqual(1, len(self.prompts))
+        self.assertEqual(2, len(self.prompts))
         self.assertFalse(any('只输出 JSON' in prompt for prompt in self.prompts))
 
     def test_natural_chinese_numbers_and_translated_acronyms_do_not_create_quality_claims(self):
@@ -234,13 +283,17 @@ class YouTubeNotes(YouTubeFixture):
             nonlocal attempts
             if prompt.startswith('将以下字幕'):
                 attempts += 1
-                if attempts == 2:
+                if attempts >= 2:
                     return ''
             return self.reply(prompt, *rest)
 
         with self.assertRaisesRegex(RuntimeError, '中文译文'):
             self.build(failed)
-        self.assertEqual(2, attempts)
+        self.assertEqual(3, attempts)
+        blocks = notes.transcripts.blocks(self.transcript['segments'])
+        cache = media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json')
+        self.assertEqual({notes.signature(translation.STAGE, self.selected, blocks[0])}, set(cache))
+        self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in self.prompts))
         self.build()
         self.assertEqual(2, sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
 

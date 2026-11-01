@@ -1,9 +1,8 @@
 import hashlib
 import json
-import re
 
 from kb.feeds.registry import text_language
-from kb.youtube import transcripts
+from kb.youtube import json_output, transcripts
 
 
 STAGE = 'translate-coverage-v1'
@@ -31,7 +30,7 @@ def prompt(text):
 
 def values(text, output):
     try:
-        payload = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', output.strip()))
+        payload = json_output.object_payload(output)
         rows = payload['translations']
         expected = [unit['id'] for unit in units(text)]
         if not isinstance(rows, list) or not expected:

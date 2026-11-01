@@ -428,7 +428,9 @@ def _round(scope):
                 summary['outside_initial_window'] += len(listed) - len(entries)
             storage.discover(source, entries)
             if unavailable := source.get('discovery_unavailable'):
-                notice = f'{len(unavailable)} 条视频无法读取（会员、私有或地区限制等），其余条目照常同步'
+                notice = f'{len(unavailable)} 条视频无法读取'
+                if entries:
+                    notice += '，已返回的其他条目继续处理'
                 summary['notices'].append({'source_id': source['id'], 'title': source['name'], 'reason': notice,
                                           'count': len(unavailable), 'items': unavailable})
             summary['discovered'] += len(entries)

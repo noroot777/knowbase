@@ -1,10 +1,9 @@
 import hashlib
 import json
-import re
 
 from kb import llm, llm_stages
 from kb.feeds.registry import text_language
-from kb.youtube import media, transcripts, translation
+from kb.youtube import json_output, media, transcripts, translation
 
 
 VERSION = 'youtube-notes-v3'
@@ -62,7 +61,7 @@ def translation_request(text, selected, deadline, stopped, directory=None, cache
     output = call(translation.prompt(text), selected, deadline, stopped)
     try:
         translation.render(text, output)
-    except translation.ShapeError:
+    except RuntimeError:
         translated = []
         for unit in translation.units(text):
             block = unit['text']
@@ -112,7 +111,7 @@ def summary_output(output, source=None):
 
 def note_payload(output):
     try:
-        payload = json.loads(re.sub(r'^```(?:json)?\s*|\s*```$', '', output.strip()))
+        payload = json_output.object_payload(output)
     except (ValueError, TypeError, AttributeError):
         raise RuntimeError('视频笔记返回格式无效，原文与译文已缓存') from None
     if (not isinstance(payload, dict) or any(not isinstance(payload.get(field), str) or

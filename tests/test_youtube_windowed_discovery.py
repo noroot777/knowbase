@@ -141,6 +141,8 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
             self.assertEqual(0, source['failures'])
             self.assertNotIn('bot_wall', result['cautions'])
             self.assertIn('1 条视频无法读取', source['last_notice'])
+            self.assertEqual(round_number == 0, '其他条目继续处理' in source['last_notice'])
+            self.assertNotIn('会员、私有或地区限制', source['last_notice'])
         self.assertEqual('ready', storage.rows()[0]['state'])
 
     def test_playlist_end_does_not_mask_source_errors_or_unfinished_process(self):
@@ -286,7 +288,7 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
                 self.assertEqual('youtube', failed.exception.origin)
                 self.assertIn(message, failed.exception.diagnostic)
 
-    def test_item_auth_diagnostics_do_not_turn_completed_empty_scans_into_source_failures(self):
+    def test_item_auth_errors_with_no_usable_entries_fail_without_advancing_watermark(self):
         for message, code in (
                 ('Sign in to confirm you are not a bot', 'bot_wall'),
                 ('failed to decrypt cookies', 'cookie_unreadable'),
@@ -294,29 +296,51 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
                 ('Please sign in to view this video', 'not_logged_in'),
                 ('n challenge solving failed', 'js_challenge'),
                 ('HTTP Error 429: Too Many Requests', 'rate_limited')):
+            previous = (self.now - timedelta(days=1)).isoformat()
+            with reg.db() as connection:
+                connection.execute('UPDATE subscriptions SET last_success=?,failures=0,retry_at=0, '
+                                   "last_error='',last_notice='',last_note='' WHERE id=?", (previous, self.source['id']))
             for round_number in range(3):
-                diagnostic = (f'ERROR: [youtube] 00000000999: {message}\n'
-                              '[download] Finished downloading playlist: fixture')
-                payloads = [self.payload(1, self.now)] if round_number == 0 else []
+                diagnostic = '\n'.join(f'ERROR: [youtube] {number:011d}: {message}' for number in range(1, 4))
+                if round_number == 1:
+                    diagnostic += '\n[download] known has already been recorded in the archive'
+                diagnostic += '\n[download] Finished downloading playlist: fixture'
                 with self.subTest(message=message, round=round_number), patch.object(
-                        toolchain, 'command', return_value=self.command(payloads, diagnostic, 1)), \
+                        toolchain, 'command', return_value=self.command([], diagnostic, 1)), \
                         patch.object(media.login, 'arguments', return_value=[]), \
                         patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
                         patch.object(notes, 'available', return_value=(True, '')), \
                         patch.object(media, 'probe', return_value={'duration': 600}), \
                         patch.object(media, 'obtain', return_value=self.complete_transcript()), \
                         patch.object(notes, 'build', side_effect=self.note):
-                    result = collector.collect(self.scope)
-                self.assertEqual([], result['partial'])
-                self.assertEqual([], result['failed_ids'])
-                self.assertEqual({}, result['walls'])
-                self.assertIn(str(self.source['id']), result['succeeded_ids'])
-                self.assertIn(str(self.source['id']), result['cautions'][code])
-                self.assertEqual(1, result['notices'][0]['count'])
+                    result = collector.collect(FetchScope(force=True))
+                self.assertIn(str(self.source['id']), result['failed_ids'])
+                self.assertIn(str(self.source['id']), result['walls'][code])
+                self.assertNotIn(str(self.source['id']), result['succeeded_ids'])
+                self.assertFalse(result['notices'])
+                self.assertEqual(0, result['discovered'])
+                self.assertEqual(0, result['added'])
                 stored = reg.subscription('youtube', self.source['id'])
-                self.assertEqual(('', 0, 0), (stored['last_error'], stored['failures'], stored['retry_at']))
-                self.assertTrue(stored['last_success'])
-                self.assertIn('1 条视频无法读取', stored['last_notice'])
+                self.assertEqual(round_number + 1, stored['failures'])
+                self.assertGreater(stored['retry_at'], time.time())
+                self.assertEqual(previous, stored['last_success'])
+                self.assertTrue(stored['last_error'])
+                self.assertFalse(stored['last_notice'])
+
+    def test_auth_errors_keep_usable_entries_but_do_not_claim_full_coverage(self):
+        for message in ('Sign in to confirm you are not a bot', 'failed to decrypt cookies',
+                        'Please sign in to view this video', 'n challenge solving failed',
+                        'HTTP Error 429: Too Many Requests'):
+            evidence = []
+            diagnostic = f'ERROR: [youtube] 00000000999: {message}\n[download] Finished downloading playlist: fixture'
+            with self.subTest(message=message), throttle.opened(), patch.object(
+                    toolchain, 'command', return_value=self.command([self.payload(1, self.now)], diagnostic, 1)), \
+                    patch.object(media.login, 'arguments', return_value=[]):
+                entries = self.fetch(notes=evidence)
+            self.assertEqual(1, len(entries))
+            self.assertEqual([], self.prepared['discovery_unavailable'])
+            self.assertEqual(1, len(evidence))
+            self.assertIn('中断', evidence[0])
 
     def test_partial_precise_output_keeps_valid_entries_and_exposes_interruption(self):
         evidence = []
