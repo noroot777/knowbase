@@ -11,10 +11,20 @@ def video_error(line):
     return None
 
 
+def benign(item):
+    if item is None or item['code'] in login.AUTH_CODES:
+        return False
+    reason = item['reason'].strip().rstrip('.!').lower()
+    return item['code'] == 'no_access' or reason in ('video unavailable', 'this video is unavailable') or any(
+        reason.startswith(mark) for mark in ('this video has been removed', 'this video has been deleted',
+                                             'the uploader has not made this video available in your country',
+                                             'this video is available to music premium members only'))
+
+
 def unavailable(text):
     items = [video_error(line) for line in text.splitlines()]
     return [{'video_id': item['video_id'], 'reason': item['reason']}
-            for item in items if item is not None and item['code'] not in login.AUTH_CODES]
+            for item in items if benign(item)]
 
 
 def diagnostics(text):
@@ -26,7 +36,7 @@ def blocked(text):
         if 'ERROR:' not in line:
             continue
         item = video_error(line)
-        if item is None or item['code'] in login.AUTH_CODES:
+        if not benign(item):
             return True
     return False
 
@@ -63,10 +73,15 @@ def parsed(output, url):
 def fetch(source, settings, deadline, notes=None):
     output = media.DATA_DIR / 'youtube' / 'channels' / f"window-{int(source['id'])}.jsonl"
     archive = None
+    evidence, blocking = [], ''
     arguments = ['--skip-download', '--dump-json', '--no-quiet']
 
     def collect(output, url):
-        source['discovery_unavailable'] = unavailable(output.read_text(encoding='utf-8', errors='replace'))
+        nonlocal blocking
+        noise = diagnostics(output.read_text(encoding='utf-8', errors='replace'))
+        source['discovery_unavailable'] = unavailable(noise)
+        if blocked(noise):
+            blocking = noise
         return parsed(output, url)
 
     try:
@@ -75,8 +90,13 @@ def fetch(source, settings, deadline, notes=None):
             archive.write_text(''.join(f'youtube {video_id}\n' for video_id in known), encoding='utf-8')
             arguments.extend(['--download-archive', str(archive)])
         arguments.append(media._channel_url(source))
-        return media._collect_listing(arguments, output, of(settings)['cookies_browser'], deadline,
-                                      lambda: False, collect, media._channel_url(source), notes, completed=completed)
+        entries = media._collect_listing(arguments, output, of(settings)['cookies_browser'], deadline,
+                                         lambda: False, collect, media._channel_url(source), evidence, completed=completed)
+        if blocking and not evidence:
+            evidence.append('列表含未确认的错误，不能确认完整覆盖：' + blocking)
+        if notes is not None:
+            notes.extend(evidence)
+        return entries
     finally:
         if archive is not None:
             media.heed(archive)

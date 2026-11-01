@@ -138,13 +138,13 @@ class YouTubeNotes(YouTubeFixture):
         with self.assertRaisesRegex(RuntimeError, '覆盖'):
             self.build(reply)
         self.assertFalse(self.prompts)
-        self.assertEqual({}, media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json'))
+        self.assertIsNone(media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json'))
         broken = False
         result = self.build(reply)
         self.assertIn('必须独立核验', result['body'])
         self.assertIn(literal, result['body'])
         sequence = [expected, *[[unit] for unit in expected]]
-        self.assertEqual(sequence + sequence, requested)
+        self.assertEqual([expected, [expected[0]]] + sequence, requested)
 
     def test_translation_accepts_natural_paragraphs_without_timestamp_alignment(self):
         source = ('[00:00:00] The AI agent builds code.\n'

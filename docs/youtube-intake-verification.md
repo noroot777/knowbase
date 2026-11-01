@@ -1,6 +1,26 @@
 # YouTube 低成本接入验证
 
-## 当前复修：统一批次恢复与出口阻断（erGDaoGvR8ol）
+## 当前复修：结果提取、保守覆盖与源文感知语种（erGDaoGvR8ol 第 2 轮）
+
+- 翻译提示取消可解析的答案样例；共用提取器选最后一个独立顶层对象，拒绝内嵌格式承诺及提示对象回声，最终笔记同样带提示上下文验证。正文不混入示例、客套话和说明里的花括号。
+- 通用 cookie 错误特征须有同一行 cookie 语境。视频级未知错误不能证明覆盖完成，只有明确良性条目不可用可跳过；全空失败和有数据部分覆盖都验证，包含进程退 0 与退 1 两侧。
+- 短段语种判定排除源文中识别出的原样代码/命令/URL，而不是用整块汉字比例否决；叙述不翻译仍拒绝。跨短段字面内容保留原始间隔。每个短段缓存单独重验，有效结果不因别的段失败被清空。
+- 真实 collector 覆盖格式样例不能入库/导出，以及代码密集译文可 ready/导出；本地浏览器夹具阅读页增加长命令保留与无示例正文检查。
+- 本轮扩展先命名 `🔎 YouTube结果与短段契约复修`，后台创建请求 `visible:false` 被拒 `Capability is not available: visibility`，未创建标签。改用独立无头壳、临时 profile 和本地隔离夹具，不需要登录态；未激活或接管用户 Chrome。
+- 性能项遵用户裁定不动；报告非阻断项未扩修。未访问真实 YouTube、模型或 cookie，未重启用户服务或改生产 DB。
+
+仅本轮新增/修改测试模块登记：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_translation_output tests.test_youtube_login tests.test_youtube_notes tests.test_youtube_windowed_discovery tests.test_youtube_integrity tests.test_youtube_browser -v
+```
+
+实际 cwd：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+真实哨兵结果、冻结树、日志与本轮截图归档到
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-erGDaoGvR8ol-round-2/`。
+其余未修改模块和整套回归留给验收，不拿更早代码树的结果充当本轮证明；结构校验不等于语义完整核验。
+
+## 历史复修：统一批次恢复与出口阻断（erGDaoGvR8ol 第 1 轮）
 
 - 译文整批格式、条数、编号、空段、语种判不过时，统一先按原始短段恢复，再按原序组装并核对完整批次；不再只捕获条数异常。单段仍无效才失败。模型传输/取消/超时不因该入口放宽而扇出重试。
 - 翻译及最终笔记共用 JSON 对象提取，接受客套话和代码围栏包裹；语义字段、覆盖及语种检查不放宽。坏单段缓存淘汰、有效短段与完整批次缓存复用、缺段不得发布继续保留。

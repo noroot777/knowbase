@@ -5,7 +5,6 @@ from types import SimpleNamespace
 from kb.feeds import registry as reg
 from kb.youtube import collector, discovery, login, media, notes, ranking, storage, toolchain
 from kb.collectors import FetchScope
-from tests.youtube_translation_fixture import response
 
 
 def install():
@@ -34,8 +33,11 @@ def install():
 
     def reply(prompt, *arguments):
         if prompt.startswith('将以下字幕'):
-            return response(prompt, '作者演示智能体编程，强调每次修改都要测试，不能仅凭生成结果认定正确。'
-                            '接口预算为六十四。')
+            segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
+            return json.dumps({'translations': [
+                '作者演示智能体编程，强调每次修改都要测试，不能仅凭生成结果认定正确。接口预算为六十四。'
+                if 'The AI agent' in segment or 'Verify the result' in segment else segment
+                for segment in segments]}, ensure_ascii=False)
         if '只输出 JSON' in prompt:
             return json.dumps({'title': '智能体编程：先验证再采用',
                                'summary': '作者展示智能体编程方法，并强调测试与人工核验的重要性。',
@@ -60,9 +62,11 @@ def install():
     discovery.fetch = fetch
     collector.DISCOVERY_SPACING = 0
     media.probe = lambda *arguments, **keywords: {'duration': 600, 'language': 'en'}
+    narrative = ('The AI agent generates code. Test every change. ' * 6 +
+                 'Verify the result rather than trusting model claims. The API budget is 64.')
+    commands = '\n'.join(['npm install --save-dev vitest && npx vitest run --coverage'] * 12)
     media.obtain = lambda *arguments: {'origin': 'uploaded_captions', 'language': 'en', 'segments': [
-        {'start': 0, 'end': 300, 'text': 'The AI agent generates code. Test every change.'},
-        {'start': 300, 'end': 600, 'text': 'Verify the result rather than trusting model claims. The API budget is 64.'}]}
+        {'start': 0, 'end': 600, 'text': narrative + '\n\n' + commands}]}
     notes.model = lambda stage: SimpleNamespace(provider='fixture', model_id='fixture')
     notes.call = reply
     storage.discover(source, entries)

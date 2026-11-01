@@ -43,6 +43,21 @@ class BrowserSpec(unittest.TestCase):
 
 
 class Classification(unittest.TestCase):
+    def test_generic_tool_errors_need_cookie_context_on_the_same_line(self):
+        for message in ("Could not find JS function 'decodeURIComponent'",
+                        'Unable to download webpage: [Errno 2] No such file or directory',
+                        'Unable to download webpage: HTTP Error 403: permission denied',
+                        'Could not copy chapter list from the webpage'):
+            with self.subTest(message=message):
+                for output in (message, '[Cookies] Extracted cookies from chrome\n' + message,
+                               'ERROR: [youtube] 00000000001: ' + message):
+                    self.assertEqual('unknown', login.classify(output))
+                    self.assertNotIn('cookie_unreadable', login.matched(output))
+        for message in ('Could not find chrome cookies database', 'Permission denied: /profile/Cookies',
+                        'No such file or directory: /profile/Cookies', 'Could not copy Chrome cookie file'):
+            with self.subTest(message=message):
+                self.assertEqual('cookie_unreadable', login.classify(message))
+
     def test_cookie_trouble_never_reads_as_a_login_problem(self):
         """**cookie 读不出来优先于一切墙。** 两类特征同时出现时,报的必须是 cookie 那一类
         —— 它是因,墙是果;报成「没登录」就把人送去做一件没用的事。"""

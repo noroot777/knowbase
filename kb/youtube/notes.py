@@ -63,24 +63,17 @@ def translation_request(text, selected, deadline, stopped, directory=None, cache
         translation.render(text, output)
     except RuntimeError:
         translated = []
-        for unit in translation.units(text):
+        for position, unit in enumerate(translation.units(text)):
             block = unit['text']
             create = lambda block=block: call(translation.prompt(block), selected, deadline, stopped)
-            validate = lambda output, block=block: translation.values(block, output)[0]
+            validate = lambda output, position=position: translation.unit_output(text, position, output)
             if directory is not None and cache is not None:
                 key = signature('translate-unit-v1', selected, block)
                 translated.append(cached(directory, cache, key, create, validate))
             else:
                 translated.append(validate(create()))
         output = json.dumps({'translations': translated}, ensure_ascii=False)
-        try:
-            translation.render(text, output)
-        except RuntimeError:
-            if directory is not None and cache is not None:
-                for unit in translation.units(text):
-                    cache.pop(signature('translate-unit-v1', selected, unit['text']), None)
-                media.save_json(directory / 'notes-cache.json', cache)
-            raise
+        translation.render(text, output)
     return output
 
 
@@ -109,9 +102,9 @@ def summary_output(output, source=None):
     return output
 
 
-def note_payload(output):
+def note_payload(output, prompt=''):
     try:
-        payload = json_output.object_payload(output)
+        payload = json_output.object_payload(output, prompt)
     except (ValueError, TypeError, AttributeError):
         raise RuntimeError('视频笔记返回格式无效，原文与译文已缓存') from None
     if (not isinstance(payload, dict) or any(not isinstance(payload.get(field), str) or
@@ -159,7 +152,8 @@ def build(row, transcript, deadline, stopped):
               'body（分主题的中文 Markdown 笔记）。不要添加资料之外的事实，不要把作者声称当成独立核验。'
               '\n原题：' + row['entry']['title'] + '\n\n' + combined)
     key = signature('note', summarizer, prompt)
-    payload = cached(directory, cache, key, lambda: call(prompt, summarizer, deadline, stopped), note_payload)
+    payload = cached(directory, cache, key, lambda: call(prompt, summarizer, deadline, stopped),
+                     lambda output: note_payload(output, prompt))
     origin = ORIGINS.get(transcript['origin'], transcript['origin'])
     complete = '\n\n'.join(translated)
     body = (payload['summary'] + '\n\n' + payload['body'] +

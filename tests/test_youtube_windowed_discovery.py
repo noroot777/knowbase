@@ -99,9 +99,9 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
     def test_item_unavailability_does_not_make_a_proven_complete_scan_partial(self):
         for message in ('Private video', 'Join this channel to get access to members-only content',
                         'The uploader has not made this video available in your country',
-                        'This live event will begin in 3 hours.', 'Sign in to confirm your age',
+                        'Video unavailable', 'This video has been removed by the uploader',
                         'This video is available to Music Premium members only',
-                        'An unfamiliar error restricted to this individual video'):
+                        'This video has been deleted'):
             for payloads in ([], [self.payload(1, self.now)]):
                 for returncode, ending in (
                         (101, '[download] old does not pass filter\nAborting remaining downloads'),
@@ -119,7 +119,7 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
 
     def test_unavailable_video_converges_and_remains_a_notice_over_repeated_rounds(self):
         for round_number in range(3):
-            message = ('This live event will begin in 3 hours.', 'Sign in to confirm your age',
+            message = ('Private video', 'Video unavailable',
                        'This video is available to Music Premium members only')[round_number]
             diagnostic = f'ERROR: [youtube] 00000000999: {message}\n[download] Finished downloading playlist: fixture'
             payloads = [self.payload(1, self.now)] if round_number == 0 else []
@@ -292,7 +292,7 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         for message, code in (
                 ('Sign in to confirm you are not a bot', 'bot_wall'),
                 ('failed to decrypt cookies', 'cookie_unreadable'),
-                ('could not find the requested video', 'cookie_unreadable'),
+                ('could not find chrome cookies database', 'cookie_unreadable'),
                 ('Please sign in to view this video', 'not_logged_in'),
                 ('n challenge solving failed', 'js_challenge'),
                 ('HTTP Error 429: Too Many Requests', 'rate_limited')):
@@ -341,6 +341,50 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
             self.assertEqual([], self.prepared['discovery_unavailable'])
             self.assertEqual(1, len(evidence))
             self.assertIn('中断', evidence[0])
+
+    def test_unknown_item_errors_never_become_successful_empty_scans_or_cookie_walls(self):
+        for message in ("Could not find JS function 'decodeURIComponent'",
+                        'Unable to download webpage: [Errno 2] No such file or directory',
+                        'Unable to download webpage: HTTP Error 403: permission denied',
+                        'Could not copy chapter list from the webpage',
+                        "This content isn't available, try again later", 'Sign in to confirm your age',
+                        'Failed to extract any player response', 'An unfamiliar error for this video'):
+            for returncode in (0, 1):
+                previous = (self.now - timedelta(days=1)).isoformat()
+                with reg.db() as connection:
+                    connection.execute('UPDATE subscriptions SET last_success=?,failures=0,retry_at=0, '
+                                       "last_error='',last_notice='',last_note='' WHERE id=?", (previous, self.source['id']))
+                diagnostic = (f'ERROR: [youtube] 00000000999: {message}\n'
+                              '[download] known has already been recorded in the archive\n'
+                              '[download] Finished downloading playlist: fixture')
+                with self.subTest(message=message, exit=returncode), patch.object(
+                        toolchain, 'command', return_value=self.command([], diagnostic, returncode)), \
+                        patch.object(media.login, 'arguments', return_value=[]), \
+                        patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                        patch.object(notes, 'available', return_value=(True, '')):
+                    result = collector.collect(FetchScope(force=True))
+                self.assertIn(str(self.source['id']), result['failed_ids'])
+                self.assertNotIn(str(self.source['id']), result['succeeded_ids'])
+                self.assertEqual({}, result['walls'])
+                self.assertFalse(result['notices'])
+                self.assertNotIn('cookie_unreadable', result['cautions'])
+                stored = reg.subscription('youtube', self.source['id'])
+                self.assertEqual(previous, stored['last_success'])
+                self.assertEqual(1, stored['failures'])
+                self.assertGreater(stored['retry_at'], time.time())
+
+    def test_unknown_errors_with_entries_keep_data_but_withhold_coverage_even_on_exit_zero(self):
+        for returncode in (0, 1):
+            diagnostic = ('ERROR: [youtube] 00000000999: Failed to extract any player response\n'
+                          '[download] Finished downloading playlist: fixture')
+            evidence = []
+            with self.subTest(exit=returncode), throttle.opened(), patch.object(
+                    toolchain, 'command', return_value=self.command([self.payload(1, self.now)], diagnostic, returncode)), \
+                    patch.object(media.login, 'arguments', return_value=[]):
+                entries = self.fetch(notes=evidence)
+            self.assertEqual(1, len(entries))
+            self.assertEqual([], self.prepared['discovery_unavailable'])
+            self.assertTrue(evidence)
 
     def test_partial_precise_output_keeps_valid_entries_and_exposes_interruption(self):
         evidence = []

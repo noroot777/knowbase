@@ -508,6 +508,10 @@ try {
   check('自然中文数词正常入库且正文不混入工单提示', await evaluate(`
     !$('source-reader-body').textContent.includes('翻译核验提示') &&
     $('source-reader-body').textContent.includes('接口预算为六十四')`));
+  check('代码密集译文保留原始命令且不发布格式样例', await evaluate(`
+    $('source-reader-body').textContent.includes('npm install --save-dev vitest && npx vitest run --coverage') &&
+    !$('source-reader-body').textContent.includes('第一段译文') &&
+    !$('source-reader-body').textContent.includes('第二段译文')`));
   check('候选完成原因不混入翻译误报', await evaluate(`
     fetch('/api/intake/youtube/ranking').then(response=>response.json()).then(value=>
       value.items.filter(row=>row.state==='ready').length===1 &&

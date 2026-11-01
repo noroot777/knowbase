@@ -1,13 +1,27 @@
 import json
+import re
 
 
-def object_payload(output):
+def object_payload(output, prompt=''):
     if not isinstance(output, str):
         raise ValueError('model output is not text')
-    start, end = output.find('{'), output.rfind('}')
-    if start < 0 or end < start:
+    decoder = json.JSONDecoder()
+    candidates, consumed = [], 0
+    for matched in re.finditer(r'(?m)^[ \t]*(?=[\{\[])', output):
+        start = matched.end()
+        if start < consumed:
+            continue
+        try:
+            payload, end = decoder.raw_decode(output, start)
+        except ValueError:
+            continue
+        consumed = end
+        tail = output[end:].split('\n', 1)[0].strip()
+        if isinstance(payload, dict) and not tail:
+            candidates.append((output[start:end], payload))
+    if not candidates:
         raise ValueError('model output has no JSON object')
-    payload = json.loads(output[start:end + 1])
-    if not isinstance(payload, dict):
-        raise ValueError('model output is not a JSON object')
+    raw, payload = candidates[-1]
+    if raw in prompt:
+        raise ValueError('model output repeats a prompt object')
     return payload

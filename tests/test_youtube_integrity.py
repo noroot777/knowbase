@@ -159,6 +159,61 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertNotIn('以下是笔记', body)
         self.assertNotIn('笔记结束', body)
 
+    def test_format_echo_cannot_become_a_ready_note_or_export(self):
+        selected = SimpleNamespace(provider='fixture', model_id='fixture')
+        source = 'Verify every generated change before use. ' * 18
+        echo = '好的，我会按 {"translations":["第一段译文","第二段译文"]} 的格式输出。'
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', return_value=echo) as call, \
+                patch.object(media, 'probe', return_value=self.metadata), \
+                patch.object(media, 'obtain', return_value={'origin': 'uploaded_captions', 'language': 'en',
+                    'segments': [{'start': 0, 'end': 600, 'text': source}]}):
+            result = collector.collect(FetchScope(force=True))
+        self.assertEqual((0, 0), (result['processed'], result['added']), result)
+        self.assertEqual('failed', storage.rows()[0]['state'])
+        self.assertEqual(2, call.call_count)
+        self.assertEqual(frozenset(), collector.YouTubeCollector('youtube').materialize())
+        self.assertFalse(list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md')))
+
+    def test_code_heavy_translation_reaches_ready_and_export_without_language_ratio_failure(self):
+        selected = SimpleNamespace(provider='fixture', model_id='fixture')
+        narrative = ('The author explains why every generated change requires independent verification. ' * 4).strip()
+        command = 'npm install --save-dev vitest && npx vitest run --coverage'
+        source = narrative + '\n\n' + '\n'.join([command] * 16)
+        requested = []
+
+        def reply(prompt, *arguments):
+            if prompt.startswith('将以下字幕'):
+                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
+                requested.append(segments)
+                values = ['作者解释每次生成的修改都需要独立核验。' if 'The author' in segment else segment
+                          for segment in segments]
+                return json.dumps({'translations': values})
+            if '只输出 JSON' in prompt:
+                return json.dumps({'title': '核验命令执行结果', 'summary': '先独立核验，再采用生成结果。',
+                                   'body': '## 方法\n运行原始命令并核验结果。'})
+            return '作者要求先独立核验命令和生成的修改。'
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value=self.metadata), \
+                patch.object(media, 'obtain', return_value={'origin': 'uploaded_captions', 'language': 'en',
+                    'segments': [{'start': 0, 'end': 600, 'text': source}]}):
+            result = collector.collect(FetchScope(force=True))
+        self.assertEqual((1, 1), (result['processed'], result['added']), result)
+        self.assertEqual(1, len(requested))
+        self.assertEqual('ready', storage.rows()[0]['state'])
+        self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+        files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
+        self.assertEqual(1, len(files))
+        body = files[0].read_text()
+        self.assertEqual(16, body.count(command))
+        self.assertNotIn('The author', body)
+
     def test_missing_translation_coverage_leaves_no_note_and_recovers_on_retry(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
         complete = {'origin': 'uploaded_captions', 'language': 'en', 'segments': [

@@ -289,10 +289,10 @@ RUNTIME = 'deno'
 
 _CHALLENGE = ('challenge solving failed', 'challenge solver', 'only images are available',
               'jsc:', '[jsc]')
-_COOKIE = ('could not find', 'cookies database', 'failed to decrypt', 'unable to decrypt',
-           'cannot decrypt', 'no key found', 'unable to open database', 'permission denied',
-           'no such file or directory', 'dpapi', 'keyring', 'secretstorage',
-           'unsupported browser', 'could not copy')
+_COOKIE = ('cookies database', 'failed to decrypt', 'unable to decrypt',
+           'cannot decrypt', 'no key found', 'unable to open database',
+           'dpapi', 'keyring', 'secretstorage', 'unsupported browser')
+_COOKIE_CONTEXTUAL = ('could not find', 'permission denied', 'no such file or directory', 'could not copy')
 
 
 def limited(text: str) -> bool:
@@ -346,7 +346,12 @@ def matched(text: str) -> list:
     """这段文本**中了哪几档**,按 `_MARKS` 的顺序。`classify` 取第一档;并列提醒要的是
     「去掉和结论冲突的那几档之后的第一档」(`beside`),所以得拿得到全部。"""
     lowered = str(text or '').lower()
-    return [code for code, marks in _MARKS if lowered and any(mark in lowered for mark in marks)]
+    matches = [code for code, marks in _MARKS if lowered and any(mark in lowered for mark in marks)]
+    if 'cookie_unreadable' not in matches and any(
+            re.search(r'\bcookies?\b', line) and any(mark in line for mark in _COOKIE_CONTEXTUAL)
+            for line in lowered.splitlines()):
+        matches.insert(0, 'cookie_unreadable')
+    return matches
 
 
 MESSAGES = {
