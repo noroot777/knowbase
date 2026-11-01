@@ -37,6 +37,9 @@ const GRABBED = {status: 200, data: {ok: true, added: 1, duplicate: false, done:
                                      content_ok: true, stored_body: true,
                                      detail: '已收下，正在写入知识库'}};
 let grabReply = GRABBED;
+//: 「改用它」那一下服务端交回的待办 id。**可变**:同一轮里先采成一项、再改选另一项时
+//: 它必须换一个 —— 写死一个常量的话「人换了操作」在这个桩里表达不出来。
+let adoptId = 'i9';
 let fromPageReply = GRABBED;
 const calls = [];
 const extracted = [];
@@ -83,7 +86,7 @@ const context = vm.createContext({
     const path = url.replace('http://127.0.0.1:8787', '');
     calls.push({path, method: options.method || 'GET', sent: options.body ? JSON.parse(options.body) : null});
     if (path === '/api/browser-capture/here') return hereReply || {status: 200, data: here};
-    if (path === '/api/browser-capture/here/adopt') return {status: 200, data: {ok: true, id: 'i9'}};
+    if (path === '/api/browser-capture/here/adopt') return {status: 200, data: {ok: true, id: adoptId}};
     if (path.endsWith('/pending')) return pendingReply || {status: 200, data: {intents: []}};
     if (path === '/api/browser-capture/precheck') return {status: 200, data: {ok: true, characters: 1200}};
     if (path === '/api/browser-capture/upload') return {status: 200, data: {ok: true, detail: '正文已补入原条目'}};
@@ -539,14 +542,26 @@ const REFETCH_FAILED = {status: 200, data: {ok: true, added: 0, duplicate: true,
   content_ok: false, replaced: false, stored_body: false,
   detail: '这条之前被「收件桶」收过了，库里那一份看不出是正文；这次重抓还是不行'}};
 let seat = 13;
-for (const [answer, why] of [[SUMMARY_ONLY, '订阅同步先落下一段摘要'],
-                             [REFETCH_FAILED, '重抓明确失败']]) {
+for (const [answer, why, settled] of [
+  [SUMMARY_ONLY, '订阅同步先落下一段摘要',
+   {situation: 'fill', detail: '知识库里有这一条，但正文还缺着。'}],
+  [REFETCH_FAILED, '重抓明确失败',
+   {situation: 'complete', detail: '这一条收过了，只是收下的那一份看不出是正文。'}],
+]) {
   tab.id = seat; tab.url = `https://example.org/posts/not-written-${seat}`;
   seat += 1;
   here = {ok: true, situation: 'absent', page_url: tab.url, item: null, intent: null,
           detail: '这一页还不在知识库里。', elsewhere: []};
   grabReply = answer;
   await element('refresh').click();
+  //: **写完之后服务端那一答按真机摆**:这两档都是 `duplicate`,库里本来就有这一行,
+  //: 所以它不会再答「不在库里」。摘要那一档订阅还在等全文 → 「正文还缺着」;重抓
+  //: 失败那一档没有订阅等它 → 「收过了,只是收下的那一份看不出是正文」。后者落在
+  //: `SETTLED` 白名单里,于是这一条**只靠 `stored_body` 那一维**挡住,前一条两道都挡
+  //: —— 桩里偷懒继续答 `absent` 的话,两条都会被白名单顺手挡住,`stored_body` 那一维
+  //: 的红再也出不来(元规则「两份实现各有自己的回归」在同一处的两道闸上同样成立)。
+  here = {ok: true, page_url: tab.url, intent: null, elsewhere: [], ...settled,
+          item: {key: `kf${tab.id}`, kind: 'inbox', title: '库里那一份', url: tab.url}};
   await element('act').click();
   assert.equal(element('close-tab').hidden, true, `${why}:200 也不许给关页按钮`);
   removed.length = 0;
@@ -564,6 +579,11 @@ await element('refresh').click();
 await element('act').click();
 assert.equal(element('act-page').hidden, false, '先轮到兜底那两颗');
 fromPageReply = REFETCH_FAILED;
+// 同上:库里已经有别人那一份,所以写完之后服务端答的是「收过了」那一档(白名单里)
+//  —— 挡住它的只有 `stored_body` 那一维。
+here = {ok: true, situation: 'complete', page_url: tab.url, intent: null, elsewhere: [],
+        item: {key: 'kr15', kind: 'inbox', title: '别人那一份', url: tab.url},
+        detail: '这一条收过了，只是收下的那一份看不出是正文。'};
 await element('act-page').click();
 assert.equal(element('close-tab').hidden, true, '写入时撞上别人那一份:不许给关页按钮');
 removed.length = 0;
@@ -581,6 +601,10 @@ here = {ok: true, situation: 'absent', page_url: tab.url, item: null, intent: nu
         detail: '这一页还不在知识库里。', elsewhere: []};
 grabReply = REFETCHED;
 await element('refresh').click();
+// 换完要重新走后半条链,所以写完之后服务端答的是「收过了,只是还没导出成笔记文件」
+here = {ok: true, situation: 'complete', page_url: tab.url, intent: null, elsewhere: [],
+        item: {key: 'kx16', kind: 'inbox', title: '换好了那一份', url: tab.url},
+        detail: '这一条收过了，只是还没导出成笔记文件。'};
 await element('act').click();
 assert.equal(element('close-tab').hidden, false,
   '重抓真换掉了就该给出口 —— 这一档 added 恒 0');
@@ -607,6 +631,107 @@ assert.equal(element('close-tab').hidden, false, '在哪个标签上采的,出�
 removed.length = 0;
 await element('close-tab').click();
 assert.deepEqual(removed, [1200], '关的是他眼前这一个标签');
+tab.id = 7; tab.url = PAGE;
+
+// (g) **一次真的成功,不许给后来另一项还没完成的操作授权。**
+//     实测形态:A 采成了,而服务端那边 B 的待办也指着这一页;人点 B 那一行的「这一页
+//     就是这一篇,改用它」—— 屏幕上同时写着 B 的「正文还缺着」和一颗「关掉这一页」,
+//     一次采集都没再发生,按下去关掉的就是 B **还没采的**那一页(后端独立查:B 仍
+//     `pending`、回执为空、正文还是原来那 11 个字)。同一条目上点一次「重新采集正文」
+//     再回弹窗「重新确认」是同一个缺口。许可只属于**这一次做完的那一项操作**。
+const BOTH = 'https://example.org/posts/two-waiting';
+const waiting = (id, key) => ({id, key, title: '还在等的那一篇', page_url: BOTH});
+tab.id = 21; tab.url = BOTH;
+here = {ok: true, situation: 'absent', page_url: BOTH, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+grabReply = GRABBED;
+await element('refresh').click();
+here = {ok: true, situation: 'complete', page_url: BOTH, intent: null,
+        item: {key: 'kA', kind: 'rss', title: '这一页那一篇', url: BOTH},
+        detail: '这一条已经在知识库里，正文也齐了。', elsewhere: [waiting('iB', 'kB')]};
+await element('act').click();
+assert.equal(element('close-tab').hidden, false, '这一次真采成了,出口照旧给');
+// 点那一行的「改用它」:服务端为 B 新建一个指着这一页的待办,并答「B 的正文还缺着」
+adoptId = 'iB2';
+here = {ok: true, situation: 'fill', page_url: BOTH, detail: '知识库里有这一条，但正文还缺着。',
+        item: {key: 'kB', kind: 'rss', title: '还在等的那一篇', url: BOTH},
+        intent: waiting('iB2', 'kB'), elsewhere: []};
+await element('elsewhere-list').querySelectorAll('button')[0].click();
+assert.equal(element('close-tab').hidden, true, '换了操作:上一次那个出口当场作废');
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '按下去一个都不许关');
+assert.match(element('status').textContent, /还有一件没采完/,
+  '两句分得清:这一次不是「换页了」,是「这一页还有事没做完」');
+
+// (g2) **这一维不依赖服务端那一答。** 改选之后 `/here` 正好失败(503、断网、超时)时,
+//      只问「服务端此刻说没说还欠着事」的写法什么也判不出来 —— 旧许可留着,而人明明
+//      已经换到另一项还没做完的操作上了。他点的那一下是**他自己**的动作,不经过网络。
+tab.id = 22; tab.url = BOTH;
+here = {ok: true, situation: 'absent', page_url: BOTH, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+await element('refresh').click();
+here = {ok: true, situation: 'complete', page_url: BOTH, intent: null,
+        item: {key: 'kA', kind: 'rss', title: '这一页那一篇', url: BOTH},
+        detail: '这一条已经在知识库里，正文也齐了。', elsewhere: [waiting('iC', 'kC')]};
+await element('act').click();
+assert.equal(element('close-tab').hidden, false, '先回到露面那一档');
+adoptId = 'iC2';
+hereReply = {status: 503, detail: '服务暂不可用'};
+await element('elsewhere-list').querySelectorAll('button')[0].click();
+assert.equal(element('close-tab').hidden, true, '换了操作:哪怕这一问失败也不许把许可留着');
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '按下去一个都不许关');
+hereReply = null;
+
+// (g3) **反过来钉一边:刷新那一问失败不是「新操作」。** 他没换目标、一个候选都没点,
+//      只是这一问连不上 —— 那一次有效的成功不许被丢掉,否则采完之后网络一抖出口就
+//      没了,而那一页正是采集抽屉刚为它开出来的。只按「服务端此刻说做完了」授权的
+//      写法在这里变红。
+const MINE = 'https://example.org/posts/still-mine';
+tab.id = 23; tab.url = MINE;
+here = {ok: true, situation: 'absent', page_url: MINE, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+await element('refresh').click();
+here = {ok: true, situation: 'complete', page_url: MINE, intent: null, elsewhere: [],
+        item: {key: 'kM', kind: 'rss', title: '刚收下那一篇', url: MINE},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('act').click();
+assert.equal(element('close-tab').hidden, false, '采完了就该给这个出口');
+hereReply = {status: 503, detail: '服务暂不可用'};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, false, '同一页、同一项操作:这一问失败不许收走出口');
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [23], '按下去照旧关得掉');
+hereReply = null;
+
+// (g4) **同一条目上又有一项没做完的采集 —— 这一维只有服务端答得了。** 人一个候选都
+//      没点(身份那一维两头都是空串),他是在采集抽屉里点了一次「重新采集正文」:服务端
+//      这一答于是变回「正文还缺着」,并带上那个新待办。实测形态:旧的「关掉这一页」照旧
+//      摆着、还接着焦点,而那一页此刻正等着被重新采一遍 —— 一个回车关掉的就是它。
+const AGAIN = 'https://example.org/posts/recaptured';
+tab.id = 24; tab.url = AGAIN;
+here = {ok: true, situation: 'absent', page_url: AGAIN, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+await element('refresh').click();
+here = {ok: true, situation: 'complete', page_url: AGAIN, intent: null, elsewhere: [],
+        item: {key: 'kR', kind: 'inbox', title: '刚收下那一篇', url: AGAIN},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('act').click();
+assert.equal(element('close-tab').hidden, false, '先回到露面那一档');
+here = {ok: true, situation: 'fill', page_url: AGAIN, elsewhere: [],
+        detail: '知识库里有这一条，但正文还缺着。',
+        item: {key: 'kR', kind: 'inbox', title: '刚被要求重采那一篇', url: AGAIN},
+        intent: {id: 'iR', key: 'kR', title: '刚被要求重采那一篇', page_url: AGAIN}};
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, true, '这一页又有一件没采完的事:出口当场收回');
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '又有一件没采完:按下去一个都不许关');
+assert.match(element('status').textContent, /还有一件没采完/, '要说清为什么没关');
+
 tab.id = 7; tab.url = PAGE;
 
 // ⑪ 结构:不许按失败文案分流。**钉形态,不钉关键词** —— 按词表匹配会连注释

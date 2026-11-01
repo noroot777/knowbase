@@ -21,6 +21,14 @@ const INTENT = {id: 'i1', key: 'k1', title: '文章', page_url: 'https://e.org/%
 const HERE = {ok: true, situation: 'fill', detail: '知识库里有这一条，但正文还缺着。',
   page_url: INTENT.page_url, item: {key: 'k1', kind: 'rss', title: '文章', url: 'https://e.org/文章'},
   intent: INTENT, elsewhere: []};
+//: 正文真写进去之后服务端那一答:**`complete`,不再是 `fill`** —— `/upload` 落完
+//: `fulltext_at` 就不欠全文了,下一问走的是「收过了,只是还没导出成笔记文件」那一支
+//: (`saved` 要人点过候选、带着 `intent_id` 才可能,最常走的这条路上它是空的)。
+//: 桩里**让 `/here` 跟着写入变**,而不是永远答 `fill`:关页许可的一半依据正是「服务端
+//: 此刻没说这一页还欠着事」,桩写死 `fill` 就把这一半恒定成假,红永远出不来。
+const DONE = {ok: true, situation: 'complete', detail: '这一条收过了，只是还没导出成笔记文件。',
+  page_url: INTENT.page_url, item: HERE.item, intent: null, elsewhere: []};
+let hereReply = HERE;
 let prechecks = [];
 let replies = [];
 let injections = 0;
@@ -59,10 +67,10 @@ const context = vm.createContext({
   },
   fetch: async (url, options = {}) => {
     const sent = options.body ? JSON.parse(options.body) : null;
-    if (url.endsWith('/here')) return {status: 200, data: HERE};
+    if (url.endsWith('/here')) return {status: 200, data: hereReply};
     if (url.endsWith('/pending')) return {status: 200, data: {intents: [INTENT]}};
     if (url.endsWith('/precheck')) { prechecks.push(sent); return replies.shift() ?? {status: 200, data: {ok: true, characters: 694}}; }
-    if (url.endsWith('/upload')) { uploads += 1; uploaded.push(sent); return {status: 200, data: {detail: '已补入'}}; }
+    if (url.endsWith('/upload')) { uploads += 1; uploaded.push(sent); hereReply = DONE; return {status: 200, data: {detail: '已补入'}}; }
     throw new Error('unexpected request ' + url);
   }
 });
@@ -91,9 +99,10 @@ assert.equal(uploads, 1, '两问都过就该直接提交,不再等第二道人�
 assert.match(element('status').textContent, /694 字符/);
 assert.doesNotMatch(element('status').textContent, /1200/);
 // ⑤ 补完正文那一刻给出「关掉这一页」—— 这一页多半就是采集抽屉刚为它开出来的那个
-//    标签。这里服务端那一答**还是 `fill`**(这桩假服务端永远答 `fill`),所以这一条
-//    钉的是另外半边依据:**这个弹窗刚刚采成的那一次**。只认服务端 `saved` 的写法在
-//    这条路上一颗都不给,而这正是图一里的那条路。
+//    标签。服务端这一答是 `complete`(真写进去之后它就不答 `fill` 了),所以这一条
+//    同时钉两件事:**这个弹窗刚刚采成的那一次**算依据(只认 `saved` 的写法在这条
+//    最常走的路上一颗都不给,而这正是图一里的那条),以及**`complete` 也算「这一页
+//    此刻没有待做的采集」** —— 白名单少写一档,这里当场红。
 assert.equal(element('close-tab').hidden, false, '补完了就该给这个出口');
 assert.equal(element('close-tab').focused, true, '「默认选中」= 这一刻回车走的就是它');
 await element('close-tab').click();
@@ -106,6 +115,7 @@ assert.equal(context.window.closed, 1, '标签没了,弹窗不许留在屏幕上
 //     话,**A 那一篇的正文根本没补上,人回到 A 却拿到一颗接着焦点的关页按钮**;
 //     真补上的 B 反倒没有出口。这一条和「改用这一页的正文」那一路是同一类。
 const MOVED = 'https://e.org/moved-on';
+hereReply = HERE;                   // 另一条还缺正文的条目:下面要再采一次
 tab.id = 11; tab.url = 'https://e.org/文章';
 await element('refresh').click();
 assert.equal(element('close-tab').hidden, true, '换了标签,先回到不给出口那一档');
@@ -125,6 +135,8 @@ assert.deepEqual(removed, [], '按下去也一个都不许关');
 tab.id = 7;
 
 // ② 读之前就被拒:一个字都没读,也没写
+hereReply = HERE;                   // 又是一条还缺正文的条目:重新问一次才摆得出主动作
+await element('refresh').click();
 injections = 0; prechecks = []; uploads = 0;
 replies = [{status: 409, detail: '条目已被其他操作修改或排除。本次没有覆盖，请重新核对并发起采集'}];
 await element('act').click();

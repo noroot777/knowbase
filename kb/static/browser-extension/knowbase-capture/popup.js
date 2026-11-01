@@ -135,6 +135,16 @@
     refused: null,
   };
 
+  //: **服务端只有这两档算「这一页此刻没有待做的采集」。** 关页许可的另一半依据
+  //: (另一半是凭据,见 `granted()`)。
+  //:
+  //: **白名单不是黑名单**:以后多一档(或者某一档的含义变了),它自动不算做完 ——
+  //: 漏给只是少一个出口,多给是关掉人家还没采的那一页,不可撤销。
+  //:
+  //: **不能复用 `PLANS[s] === null`**:那张表答的是「这一档摆不摆主动作」,而
+  //: `refused` / `undecided` 同样没有主动作,却恰恰是「这一页还有事没定下来」。
+  const SETTLED = {complete: true, saved: true};
+
   //: **「这一档有没有主动作」只由 `PLANS` 答一处。** 按钮藏起来了不等于按不到
   //: (程序化点击、辅助技术、以后某次改动忘了藏),而 `complete` / `refused` /
   //: `undecided` / `saved` 这几档按下去会落进 `absent` 那一支 —— 那是拿 `/api/grab`
@@ -196,8 +206,33 @@
   //: 反过来一边同样钉住:**没采完不许露面**。只是开着弹窗看一眼「这一条早就齐了」
   //: 的人并没有一个「刚开出来、现在没用了」的标签,给他一颗关页按钮等于请他关掉
   //: 自己正在读的东西。
-  const captureLanded = () =>
-    !!(here && doneFor && doneFor.id === here.id && doneFor.url === here.url);
+  //: **许可那一问只有一处 `granted()`:渲染和按下去共用它**,只是参照不同 ——
+  //: 渲染问的是展示快照 `here`,按下去问的是那一刻现读到的标签(关标签不可撤销,
+  //: 两者之间页面完全可能已经换了)。
+  //:
+  //: 它要三件事同时成立:
+  //: - **凭据对得上这一页**(标签 + 地址,原样字符串相等);
+  //: - **人没有换过操作**(`doneFor.intent === chosen`)。`chosen` 是他在候选列表里
+  //:   点的那一条,采成之后不会自己变 —— 变只因为他点了别的那一行(`adoptHere`)。
+  //:   这一维**不依赖服务端那一答**,所以换操作之后哪怕 `/here` 正好失败,旧许可
+  //:   也当场作废;
+  //: - **服务端此刻没说这一页还欠着事**(`SETTLED`)。
+  //:
+  //: **实测形态(缺最后两维)**:A 采成了,服务端那边 B 的待办也指着这一页;人点
+  //: B 那一行的「这一页就是这一篇,改用它」,屏幕上同时写着 B「正文还缺着」和一颗
+  //: 「关掉这一页」—— 一次采集都没再发生,按下去关掉的就是 B 还没采的那一页
+  //: (后端查:B `pending`、回执为空、正文仍是 11 字)。同一条目上点一次「重新采集
+  //: 正文」再回弹窗「重新确认」是同一个缺口:服务端这一答变回「正文还缺着」,而旧
+  //: 许可照旧摆着。**一次真的成功,不该给后来另一项还没完成的操作授权。**
+  //:
+  //: **反过来钉一边:该给的要给。** `situation` 为 `null` 只是「这一问失败了」(503、
+  //: 断网、超时),不是「有了新操作」—— 那时沿用凭据,不许把一次有效的成功丢掉
+  //: (上一轮正是为这件事把顺序改成「先换身份、立刻重画、再问服务端」)。
+  const granted = tab =>
+    !!(doneFor && tab && tab.id === doneFor.id && tab.url === doneFor.url
+       && doneFor.intent === chosen
+       && (!situation || SETTLED[situation.situation]));
+  const captureLanded = () => granted(here);
 
   //: **凭据只能由「这一次真写进去的那一份身份」建立 —— 四条路都过这一处。**
   //: - `url` 取**这一次真交给服务端的那个地址**:两条读页的路是 `extract.js` 在页面
@@ -230,7 +265,9 @@
   //: 声明会提升,少一个只在某条路上才踩到的 TDZ。
   function grant(tab, url, stored) {
     if (!stored) return;
-    doneFor = {id: tab.id, url};
+    //: `intent` = 这一次是为**他选的哪一条**做的(`chosen`,没点过候选就是空串)。
+    //: 消费时拿它跟此刻的 `chosen` 比:换一行就作废。见 `granted()`。
+    doneFor = {id: tab.id, url, intent: chosen};
   }
 
   function renderSituation() {
@@ -488,9 +525,14 @@
     setBusy(true);
     try {
       const tab = await currentTab();
-      if (!doneFor || tab.id !== doneFor.id || tab.url !== doneFor.url) {
+      if (!granted(tab)) {
+        //: **拒了之后再挑话说,判据仍然只有 `granted()` 一处。** 两句分得清是因为
+        //: 人要做的下一步不同:换页了就去把那一页找回来,换了操作就是先把它采完。
+        //: `loadHere()` 会改 `chosen` 和 `situation`,所以这一问要在它**之前**算。
+        const moved = !doneFor || tab.id !== doneFor.id || tab.url !== doneFor.url;
         try { await loadHere(); } catch { /* 下面那句话照旧要说 */ }
-        status('这一页已经不是刚才采的那一篇了，没有关掉它。', true);
+        status(moved ? '这一页已经不是刚才采的那一篇了，没有关掉它。'
+                     : '这一页还有一件没采完的事，没有关掉它。', true);
         return;
       }
       await chrome.tabs.remove(tab.id);
