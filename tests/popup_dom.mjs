@@ -1,4 +1,5 @@
-/** 扩展弹窗那两条探针共用的假 DOM(`browser_capture_gate.mjs`、`grab_from_page_gate.mjs`)。
+/** 扩展弹窗那几条探针共用的假 DOM(`browser_capture_gate.mjs`,以及经 `popup_host.mjs`
+ *  进来的 `grab_from_page_gate.mjs`、`popup_close_tab_gate.mjs`)。
  *
  *  **共用是因为被咬过。** 两处原先各写一份:「指着别的地址」那一块改成按服务端交回
  *  几条就摆几条之后,`setBusy` 要从那张列表上现读那些按钮,给一处的桩补上
