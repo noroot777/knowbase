@@ -28,7 +28,16 @@ let here = {ok: true, situation: 'absent', detail: '这一页还不在知识库�
             page_url: PAGE, item: null, intent: null, elsewhere: []};
 let hereReply = null;      // 非空 = 这一问当场失败
 let pendingReply = null;   // 非空 = 验密钥那一问当场失败
-let grabReply = {status: 200, data: {ok: true, detail: '已收下，正在写入知识库'}};
+//: 真实 `_store` 那一支的回包形状(`kb/web/grab_api.py`)。**`stored_body` 非带不可**
+//: —— 它是「这一次把正文写进去了」那个事实(服务端一处算,两个写入入口共用),而那一
+//: 档的**每条出口 HTTP 都是 200**:撞上 `DO NOTHING`、库里只有一段订阅同步先落下的
+//: 摘要、重抓失败、已经走完整条链的幂等答复。桩里不带它,「200 却没写」和「真写了」
+//: 在这儿就长得一模一样,(f) 那几条红永远出不来。
+const GRABBED = {status: 200, data: {ok: true, added: 1, duplicate: false, done: false,
+                                     content_ok: true, stored_body: true,
+                                     detail: '已收下，正在写入知识库'}};
+let grabReply = GRABBED;
+let fromPageReply = GRABBED;
 const calls = [];
 const extracted = [];
 const removed = [];
@@ -79,7 +88,7 @@ const context = vm.createContext({
     if (path === '/api/browser-capture/precheck') return {status: 200, data: {ok: true, characters: 1200}};
     if (path === '/api/browser-capture/upload') return {status: 200, data: {ok: true, detail: '正文已补入原条目'}};
     if (path === '/api/grab/from-page/precheck') return {status: 200, data: {ok: true, title: '服务端定的标题', characters: 880}};
-    if (path === '/api/grab/from-page') return {status: 200, data: {ok: true, detail: '已收下，正在写入知识库'}};
+    if (path === '/api/grab/from-page') return fromPageReply;
     if (path === '/api/grab') return grabReply;
     throw new Error('unexpected request ' + path);
   }
@@ -317,7 +326,7 @@ assert.equal(element('close-tab').hidden, true,
 // `complete` 而不是 `saved` —— 只认 `saved` 的写法在最常走的那条路上一颗都不给。
 here = {ok: true, situation: 'absent', page_url: OTHER, item: null, intent: null,
         detail: '这一页还不在知识库里。', elsewhere: []};
-grabReply = {status: 200, data: {ok: true, detail: '已收下，正在写入知识库'}};
+grabReply = GRABBED;
 await element('refresh').click();
 here = {...here, situation: 'complete', detail: '这一条已经在知识库里，正文也齐了。'};
 await element('act').click();
@@ -515,7 +524,69 @@ assert.equal(other[other.length - 1].sent.url, SWITCHED,
 assert.equal(element('close-tab').hidden, false, '真采成的那一页该有出口');
 
 tab.id = 7; tab.url = PAGE;
-grabReply = {status: 200, data: {ok: true, detail: '已收下，正在写入知识库'}};
+grabReply = GRABBED;
+
+// (f) **HTTP 200 不代表这一次写了正文。** 这一档的每条出口都是 200,而只有「重抓真
+//     换掉了」那一条动过正文。实测形态:打开扩展时这条还没收录,后台同步先收下它的
+//     一段摘要,再点「采集」—— 服务端回 200 / `added:0` / `duplicate:true` /
+//     `content_ok:true`,一个字的正文都没采到,随后那一问照旧说「正文还缺着」,而
+//     「关掉这一页」露着面、接走了焦点,一个回车关掉的就是那篇**还没采的**原文。
+//     `content_ok` 顶不住这一档:它是**库里那一份**的质量,RSS 摘要也能为真。
+const SUMMARY_ONLY = {status: 200, data: {ok: true, added: 0, duplicate: true, done: false,
+  content_ok: true, stored_body: false, title: '只收到一段摘要',
+  detail: '这条之前被「RSS 订阅」收过了，还没写进知识库'}};
+const REFETCH_FAILED = {status: 200, data: {ok: true, added: 0, duplicate: true, done: false,
+  content_ok: false, replaced: false, stored_body: false,
+  detail: '这条之前被「收件桶」收过了，库里那一份看不出是正文；这次重抓还是不行'}};
+let seat = 13;
+for (const [answer, why] of [[SUMMARY_ONLY, '订阅同步先落下一段摘要'],
+                             [REFETCH_FAILED, '重抓明确失败']]) {
+  tab.id = seat; tab.url = `https://example.org/posts/not-written-${seat}`;
+  seat += 1;
+  here = {ok: true, situation: 'absent', page_url: tab.url, item: null, intent: null,
+          detail: '这一页还不在知识库里。', elsewhere: []};
+  grabReply = answer;
+  await element('refresh').click();
+  await element('act').click();
+  assert.equal(element('close-tab').hidden, true, `${why}:200 也不许给关页按钮`);
+  removed.length = 0;
+  await element('close-tab').click();
+  assert.deepEqual(removed, [], `${why}:按下去一个都不许关`);
+}
+
+// 「改用这一页的正文」那一侧是同一份契约:预检放行之后、真正写入之前别人先落了一份
+// 坏正文,服务端转去恢复、没有替换 —— 提取的那份正文压根没写进去。
+tab.id = 15; tab.url = 'https://example.org/posts/raced';
+here = {ok: true, situation: 'absent', page_url: tab.url, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+grabReply = {status: 503, detail: '抓不到这一页'};
+await element('refresh').click();
+await element('act').click();
+assert.equal(element('act-page').hidden, false, '先轮到兜底那两颗');
+fromPageReply = REFETCH_FAILED;
+await element('act-page').click();
+assert.equal(element('close-tab').hidden, true, '写入时撞上别人那一份:不许给关页按钮');
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '按下去一个都不许关');
+fromPageReply = GRABBED;
+
+// 反过来钉一边:**重抓真把正文换掉了**也算采成 —— 那一档 `added` 恒 0,靠 `added`
+// 推的写法在这里一颗都不给。
+const REFETCHED = {status: 200, data: {ok: true, added: 0, duplicate: true, done: false,
+  content_ok: true, replaced: true, stored_body: true,
+  detail: '库里那一份看不出是正文，已经按这次重抓到的内容换掉'}};
+tab.id = 16; tab.url = 'https://example.org/posts/refetched';
+here = {ok: true, situation: 'absent', page_url: tab.url, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+grabReply = REFETCHED;
+await element('refresh').click();
+await element('act').click();
+assert.equal(element('close-tab').hidden, false,
+  '重抓真换掉了就该给出口 —— 这一档 added 恒 0');
+assert.equal(element('close-tab').focused, true, '也该接走焦点');
+grabReply = GRABBED;
+tab.id = 7; tab.url = PAGE;
 
 // (e3) **反过来钉一边:凭据的标签身份取「人眼前这一个」,不是上一次问到的那一个。**
 //      问过 `/here` 之后他切到了另一个开着同一篇的标签(同一地址、不同 id),在那儿

@@ -11,63 +11,16 @@ import json
 import unittest
 from unittest.mock import patch
 
-from kb import config, pipeline
+from kb import config
 from kb.feeds import grab, grab_page, registry as reg
 from kb.feeds.fetching import Response
 from tests.grab_fixtures import (BODY, DIGEST_SUMMARY, SOFT_WALL, TWEET_FULL, WALL,
-                                 GrabCase, PAGE, TWEET, html_resp, page_html,
+                                 EndpointCase, PAGE, TWEET, html_resp, page_html,
                                  tweet_payload)
 
 
-class EndpointTests(GrabCase):
+class EndpointTests(EndpointCase):
     """收录端点:**重复投递时按真实进度回答**,别把暂存说成已完成。"""
-
-    def setUp(self):
-        super().setUp()
-        from fastapi.testclient import TestClient
-
-        from kb.server import app
-        self.client = self.enterContext(TestClient(app))
-        # 扩展那条路(`/from-page`)在密钥之前还有一道 `local`:只认本机回环。
-        # 默认那个 client 的 Host 是 `testserver`,一个字都打不进来 —— 所以这里
-        # 单配一个真实形状的,那一道由 `needs_the_pairing_key` 正面钉。
-        self.local_client = self.enterContext(
-            TestClient(app, base_url='http://127.0.0.1', client=('127.0.0.1', 54321)))
-        self.runs: list[list[str]] = []
-
-    def pipeline_patch(self, started=True, reason='其他同步正在运行'):
-        """**打桩也要还原那条契约**:`start_pipeline` 返回的是**这一轮的 id**,
-        不是 True —— 前端要拿它核对那一轮 export/index 的结果。回 True 的打桩会
-        让「端点把 run 原样交出去」这件事测不出来。"""
-        def fake(stages, refused=None, crawl_filter=None, **kwargs):
-            self.runs.append((list(stages), (crawl_filter or {}).get('channel')))
-            if not started and refused is not None:
-                refused.append(reason)
-            return 'run-7' if started else ''
-        return patch.object(pipeline, 'start_pipeline', fake)
-
-    def post(self, url=PAGE, **body):
-        return self.client.post('/api/grab', json={'url': url, **body})
-
-    def restore(self, url=PAGE):
-        """「只把欠的那一步补上」那条**独立路径**。
-
-        它不是 `/api/grab` 上的一个字段:字段会被**更新了文件却没重启**的那个
-        kb-web 静默忽略(Pydantic 默认丢掉不认识的键),于是降级成「不在就抓一篇
-        新的」。独立路径在那种服务上回 404,客户端据此失败关闭 —— 口径见
-        `kb.web.grab_api.RestoreRequest`。
-        """
-        return self.client.post('/api/grab/restore', json={'url': url})
-
-    def from_page(self, url=PAGE, title='浏览器里那一页', body=BODY, auth=True, path=''):
-        """扩展那条路:正文由人打开着的标签提供,服务端一次 HTTP 都不发。"""
-        from kb import browser_capture as capture
-
-        headers = ({'Authorization': 'Bearer ' + capture.pairing_key(),
-                    'Origin': 'chrome-extension://fixture'} if auth else {})
-        return self.local_client.post(f'/api/grab/from-page{path}',
-                                      json={'url': url, 'title': title, 'body': body},
-                                      headers=headers)
 
     def test_a_page_from_the_browser_is_collected_without_fetching_anything(self):
         """人浏览器里那一页 → 一条新条目。**一次 HTTP 都不发**,后半条链照旧跑。

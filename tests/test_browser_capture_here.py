@@ -6,8 +6,9 @@
 """
 
 from kb import browser_capture as capture
-from kb.feeds import registry as reg
+from kb.feeds import grab, registry as reg
 from tests.browser_capture_case import BODY, CaptureCase
+from tests.grab_fixtures import WALL
 
 
 class CaptureHereTests(CaptureCase):
@@ -87,6 +88,31 @@ class CaptureHereTests(CaptureCase):
         self.assertEqual(plain, state['item']['key'])
         self.assertEqual('complete', state['situation'], '没有订阅要它的全文 = 不欠')
         self.assertEqual([], capture.pending())
+
+    def test_the_complete_line_never_claims_a_body_it_calls_unreadable(self):
+        """「齐了」那一档那句话**不许自己跟自己打架**。
+
+        两个判据各有射程:`item['owed']` 问的是「有没有订阅在等这一篇的全文」,而
+        `grab_owing` 排在最前面的那一档问的是「收下的那一份看不出是正文」(手动收录
+        那一类自己的内容判据,`known.content_ok`)。历史坏正文正好同时落在「不欠全文」
+        和「内容不合格」上 —— 固定前缀拼出来就是「正文也齐了,只是收下的那一份看不出
+        是正文」,人读完不知道正文到底在不在。**判据落在屏幕上那行字**:欠账原因要
+        出现,「正文也齐了」那句断语一个字都不许出现。
+
+        **反过来钉一边**:欠的是后半条链那一步时照旧说得出是哪一步 —— 两档各说自己
+        的原因,谁也没被写死成同一句。
+        """
+        url = 'https://e.org/manual-wall'
+        grab.save({'url': url, 'title': 'Sign in to read', 'body': WALL,
+                   'author': 'x', 'published': '', 'content_kind': 'content'})
+        state = self.here(url).json()
+        self.assertEqual('complete', state['situation'])
+        self.assertIn('看不出是正文', state['detail'])
+        self.assertNotIn('正文也齐了', state['detail'])
+        self.put(self.plain, url='https://e.org/plain')
+        other = self.here('https://e.org/plain').json()
+        self.assertEqual('complete', other['situation'])
+        self.assertIn('还没导出成笔记文件', other['detail'])
 
     def test_a_request_pointing_at_another_address_is_handed_to_the_person(self):
         """等着的待办指着另一个地址时,**把它摆在人眼前**,而不是只说一句「不在库里」。

@@ -171,7 +171,9 @@
     //: (服务端那边 `saved(intent_id) if intent_id else None`),也就是这个弹窗这一轮
     //: 自己选过的那一条 —— 所以它说的确实是「我刚采的那一次」,不是「这一条历史上
     //: 被谁采过」。
-    if (situation && situation.situation === 'saved') grant(here, here.url);
+    //: `saved` 这一答本身就是「这一次采集已经写进这一条了」(服务端读审计表、
+    //: 还要求是这一轮选中的那个身份),所以它自带那个事实。
+    if (situation && situation.situation === 'saved') grant(here, here.url, true);
     renderSituation();
     // 这一行**清空**:标题那一行就是服务端对这一页的答复,再在下面补一句「已连接」
     // 只是噪声(界面底线:让布局本身解释界面,不加次级描述)。`#status` 留给动作
@@ -211,9 +213,25 @@
   //: 「关掉这一页」反倒露着面、还接走了焦点 —— 一个回车关掉的是那篇**还没采的** A。
   //: 「请求和凭据取的是同一份展示快照」不等于对:两者一致只说明它们同源,不说明
   //: 那一份就是真写进去的那一页。
+  //: **`stored` = 服务端说「这一次这一页的正文真写进去了」。** 没有它就不授予 ——
+  //: 两个新条目入口(`/api/grab`、`/api/grab/from-page`)共用同一份写入响应契约,
+  //: 而那份契约里**HTTP 200 不代表这一次写了正文**:撞上 `DO NOTHING`、库里只有
+  //: 一段订阅同步先落下的 RSS 摘要、重抓失败、已经走完整条链的幂等答复,全都是
+  //: 200 + `duplicate`。实测形态:打开扩展时这条还没收录,后台同步先收下它的摘要,
+  //: 再点「采集」—— 服务端回 200 / `added:0` / `duplicate:true` / `content_ok:true`,
+  //: 一个字的正文都没采到,随后那一问照旧说「正文还缺着」,而「关掉这一页」露着面、
+  //: 接走了焦点,一个回车关掉的就是那篇**还没采的**原文。重抓明确失败时同样。
+  //:
+  //: **这一问只能由服务端答,扩展一个字都不自己判**(`stored_body`,`grab_api` 一处
+  //: 算、两个入口共用)。从 `added` / `content_ok` / `done` 都推不出来,理由写在它
+  //: 那一侧;而「正文存了、还没导出索引」仍然算采成,所以也不许要求 `done`。
+  //:
   //: 写成函数声明(不是 `const`):`loadHere()` 在它上面,`saved` 那一路要调它 ——
   //: 声明会提升,少一个只在某条路上才踩到的 TDZ。
-  function grant(tab, url) { doneFor = {id: tab.id, url}; }
+  function grant(tab, url, stored) {
+    if (!stored) return;
+    doneFor = {id: tab.id, url};
+  }
 
   function renderSituation() {
     const plan = situation ? PLANS[situation.situation] : null;
@@ -327,7 +345,10 @@
       //: **在刷新之前记下「采完的是哪一页」。** `loadHere()` 会重问服务端,而它那
       //: 一答在最常走的那条路上是 `complete`(没点过「改用它」→ 没有身份 → 服务端
       //: 跳过回执查找) —— 光等 `saved` 的话「关掉这一页」在那条路上永远不露面。
-      grant(tab, captured.page_url);
+      //: `/upload` 这一路**没有「200 却没写」那一档**:它要么抛错(上面那个 `api()`
+      //: 会把非 2xx 变成异常),要么就是把这一份正文写进了那个条目 —— 回执由服务端
+      //: 当场记下,`saved` 那一档随后认得它。所以这里的事实就是「成功返回」本身。
+      grant(tab, captured.page_url, true);
       // 已经写进去了。这一问失败只是「状态没刷新」,不该让人以为正文没保存。
       try { await loadHere(); } catch { /* 下面照旧报服务端那句话 */ }
       status(`${captured.title}：${result.detail}（${verified.characters} 字符）`);
@@ -360,7 +381,7 @@
       //: 地址用**服务端这一答针对的那一个**(`here.url`,也就是刚交给它去抓的那一个):
       //: 标签这期间要是换了页,凭据就和当前这一页对不上,那颗按钮自己不露面 —— 那正是
       //: 想要的,收进去的毕竟是另一页。
-      grant(tab, here.url);
+      grant(tab, here.url, result.stored_body);
       // 同下面提交那一处:收下之后刷新失败不改变已经收下这件事,更不该把
       // 下面那两颗兜底按钮露出来 —— 那会让人把已入库的这一页再读一遍正文。
       try { await loadHere(); } catch { /* 照旧报「已收下」 */ }
@@ -397,7 +418,7 @@
       const payload = {url: captured.page_url, title: captured.title, body: captured.body};
       const verified = await grabApi('/from-page/precheck', {method: 'POST', body: JSON.stringify(payload)});
       const result = await grabApi('/from-page', {method: 'POST', body: JSON.stringify(payload)});
-      grant(tab, captured.page_url);   // 同上:收录成新条目那条路也一样采完了
+      grant(tab, captured.page_url, result.stored_body);   // 同上:这一次真写进去了才算
       // 已经收下了。这一问失败只是「状态没刷新」—— 不该让人以为没收下。
       try { await loadHere(); } catch { /* 下面照旧报「已收下」 */ }
       status(`${verified.title}：${result.detail || '已收下'}（${verified.characters} 字符）`);

@@ -170,7 +170,7 @@ def _recover(out: dict, url: str, seen: dict, label: str, asked: bool = False) -
         out['detail'] = (f'这条之前被「{label}」收过了，{why}；'
                          '这次重抓到的内容和它一样，或者这期间已经有人换过了')
         return out
-    out.update(replaced=True, done=False, title=fresh['title'])
+    out.update(replaced=True, done=False, stored_body=True, title=fresh['title'])
     return _write_through(out, f'{why}，已经按这次重抓到的内容换掉', seen['kind'])
 
 
@@ -186,6 +186,17 @@ def _duplicate(url: str, seen: dict, refetch: bool = False,
     out = {'ok': True, 'added': 0, 'duplicate': True, 'url': url,
            'title': seen['title'], 'kind': seen['kind'], 'done': bool(seen['done']),
            'content_ok': bool(seen.get('content_ok')),
+           # **「这一次有没有把正文写进去」—— 默认否,只有真写了的那一支改成 True。**
+           # 这一档的每条出口 HTTP 都是 200,而它们里面只有「重抓换掉了」那一条动过
+           # 正文:撞上 `DO NOTHING`、只收到一段 RSS 摘要、重抓失败、已经走完整条链
+           # 的幂等答复,都是 200 + `duplicate`。消费方要的恰恰是这一问(扩展那颗
+           # 「关掉这一页」按它决定给不给许可,给错就是关掉人家还没采的那一页),
+           # 而它从 `added` / `content_ok` / `done` 一个都推不出来:`added` 在这一档
+           # 恒 0;`content_ok` 是**库里那一份**的质量,RSS 摘要也能为真;`done` 说的
+           # 是导出索引走完没有,正文已保存而还没导出时它是假、却该算采成了。
+           # **缺省方向定成否是构造上的**:以后这一档多一条出口,它自动不授予许可,
+           # 而不是自动授予 —— 前者只是少给一个出口,后者不可撤销。
+           'stored_body': False,
            # 界面据它决定「重新抓一次」露不露面:亮一颗必定被拒的按钮,和后端静默
            # 覆盖是同一处口径分家的两半(第 3 条审查形态)。
            'url_is_origin': bool(seen.get('url_is_origin'))}
@@ -299,6 +310,8 @@ def _store(url: str, entry: dict) -> dict:
     # 刚过完(`grab_page.verdict` 的 ⑧)。两端字段对齐,界面不必按「有没有这个键」猜。
     out = {'ok': True, 'added': saved['added'], 'duplicate': False, 'done': False,
            'content_ok': True,
+           # 这一支就是「刚刚写进去的」那一条(上面 `DO NOTHING` 那一档已经分流走了)。
+           'stored_body': True,
            'url': url, 'title': entry['title'], 'kind': grab.KIND,
            'source_id': saved['source']['id'], 'source_name': saved['source']['name'],
            'published': entry['published'], 'chars': len(entry['body'])}
