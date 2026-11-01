@@ -1,12 +1,13 @@
 """Five-day work eligibility, a 24-hour expiry notice, and bounded terminal receipts."""
 from datetime import timedelta
 from zoneinfo import ZoneInfo
+from kb.feeds.x_intake_capacity import WINDOW
 
 
 def expire(conn, source_id, identity, floor, now):
     from kb.pipeline_retention import history_keep_days
-    automatic_floor = (now - timedelta(days=5)).isoformat()
-    retained_floor = (now - timedelta(days=5 + history_keep_days())).isoformat()
+    automatic_floor = (now - WINDOW).isoformat()
+    retained_floor = (now - WINDOW - timedelta(days=history_keep_days())).isoformat()
     conn.execute('''INSERT OR IGNORE INTO x_intake_expirations(source_id,identity,post_id,expired_at)
         SELECT l.source_id,l.identity,l.post_id,? FROM x_intake_links l
         JOIN x_intake_candidates p USING(post_id) WHERE l.source_id=? AND l.identity=?
@@ -33,7 +34,7 @@ def notice(floor, count):
 
 def prune(conn, now):
     from kb.pipeline_retention import history_keep_days
-    cutoff = (now - timedelta(days=5 + history_keep_days())).isoformat()
+    cutoff = (now - WINDOW - timedelta(days=history_keep_days())).isoformat()
     conn.execute('DELETE FROM x_intake_links WHERE source_id NOT IN (SELECT id FROM subscriptions)')
     conn.execute('''DELETE FROM x_intake_candidates WHERE published<? AND NOT
         (state='ready' AND EXISTS (SELECT 1 FROM x_intake_links l

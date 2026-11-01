@@ -13,11 +13,12 @@
 
 ## 三阶段，共享会话
 
-1. **时间线发现**：先轮询账号的近期段，通常从最近一天或更近的已确认水位开始。
+1. **时间线发现**：下界取五天地板、订阅历史下界与已确认水位的较新值，最多夹到本轮启动时刻；不额外限制为最近一天。
    账号切片按当前剩余发现预算和未轮到数量缩小；先保存 ID、URL、预览及正文欠账，不当场串行补所有长推。
 2. **历史追补**：只核对最近五天尚未确认的覆盖。复用旧“连续三条本人旧推”的边界证明，置顶/旧转推不能冒充到底。
    当前没有经实测可重放的原生 cursor，故降级为从顶部的有界 DOM 重扫，并保留历史缺口。
-   **持久候选队列可恢复，不等于远端分页游标可恢复**；不承诺解决源站无法提供的历史，亦不改成未验证的日期搜索。
+   **持久候选队列可恢复，不等于远端分页游标可恢复**；每轮从顶部尽力重扫、不保证五天内补齐，
+   超窗后需指定历史区间补抓。容量风险按下面的运行时模型展示，不改成未验证的日期搜索。
 3. **正文补全**：按独立逐条队列补折叠推文与 Article；跨账号轮转，未尝试/最久未试优先。
    单条失败只更新该候选重试次数/到期时间，不重置账号发现，也不增加账号失败账。
 
@@ -68,6 +69,14 @@ CDP 命令受当前切片截止约束；关闭命令必须能释放自有资源�
 `KB_X_HISTORY_SECONDS`（120）、`KB_X_BODY_SECONDS`（120）、`KB_X_ACCOUNT_SECONDS`（发现 8/历史 20）、
 `KB_X_BODY_ITEM_SECONDS`（25）、`KB_X_FEEDGRAB_ACCOUNT_SECONDS`（25）。
 这些是上限，不能借某一阶段调大越过全局截止。
+
+窗口与预算的运行时关系由 `x_intake_capacity` 统一计算，状态查询按全量启用且无专用 RSS 的自动 X 来源计数，
+不因本轮只点名一个来源而缩小池子。先扣收尾与关闭预留，后阶段再扣前阶段配置上限；完整切片数取预算/账号时限的整数下界。
+默认51来源的发现/历史为每轮30/6个完整切片，历史至少9轮，每日一次不能在五天内轮遍；feedgrab 为9个、至少6轮。
+卡片及历史问题证据展示不足的数字，并明确顶部重扫不是可续游标、不能保证补齐；即使容量足够，也未证明高频账号能扫到底。
+日报 `enabled && sync && channels.includes('social')` 才提供每日自动机会；停用或配置不可读时另说明机会未安排/未知，
+手动同步频率未知。`source_types.interval_minutes` 已退役，不能据此许诺每天自动追补。
+尚无持久进度的来源只读显示风险，不写假进度；已确认完整覆盖的来源不新增当前历史欠账。
 
 沿用同会话 45→90→180 秒冷却：时间线、详情和 Article 浏览器后路共用闸门。
 启动接口限流可排尾有限重试；剩余时间不够“等完 + 至少两秒有效工作”则直接留待下轮，不把尾部预算睡光。
@@ -809,3 +818,99 @@ collect、持久队列、批次确认、事务及HTTP接口均为真实实现。
 不将23项或本轮冒烟称为全族通过。真实X风控、用户登录态、模型、生产数据及51账号吞吐未验证。
 原通用连接详情仍假定“一条内容都没取到”，在混合状态下文案过强，本轮只核对原话/退避/条目实际后果，
 未扩到该既有展示模板；报告所列非阻断问题同样保留。未自行追加审查轮次或执行验收。
+
+## sfpeNajIiuqe 首轮：五天窗口与容量约束（2026-11-01）
+
+本轮基线 `f548e99650c84b03b9446250200c140c5c3ff46a`，完整读取本审查轮311行报告，接受唯一阻断类问题。
+按报告2.4第三条安全出路修复：**运行时计算容量，容量不足时撤回自动补齐承诺**，不是宣称51账号已经能在五天内全覆盖。
+不延长480秒总预算、不造原生 cursor、不用部分读数冒充连续覆盖，不改非阻断项或通用调度模块。
+
+### 根因与本轮变更
+
+- 发现原先额外夹到最近一天，三天旧水位在历史轮不到时无法带回两天前内容。现在只取有效五天地板与水位，
+  同时保留订阅更近下界、未来水位夹到本轮启动时刻；真实发现按含微秒边界交给既有 DOM 判据。
+- 新 `x_intake_capacity.py` 统一五天窗口、阶段与账号配置；运行时和只读状态消费同一模型。
+  先扣收尾/关闭预留及前阶段上限，按完整切片估计轮转：默认51来源历史120/20秒=6切片、至少9轮，
+  每日一次不满足5×6≥51；发现240/8秒=30切片。feedgrab combined240/25秒=9切片、至少6轮。
+  模型响应环境变量、总预算及更窄订阅窗口，不复制固定51或固定日报频率作为事实。
+- 实际自动机会来自 `daily_run.load_settings()` 的 enabled/sync/social，不是已退役的 interval_minutes；
+  日报未安排或读取失败时给对应说明。模型仍是“每日一次、账号用满切片”的估计，未计启动/冷却/重复顶部重扫，
+  容量满足不等于完整性证明，手动同步频率也不作假定。
+- 全量来源状态和历史问题携带 `window_capacity` / `coverage_warning`，过滤停用、专用RSS及非自动通道。
+  点名一个来源采集后仍按整个启用池计算；无持久行的账号只读显示 unattempted，不写假回执。
+  部分扫描不改 `covered/coverage_end`，已确认完整覆盖不新增当前历史债。卡片转义风险文案，建议统一为
+  “每轮从顶部尽力重扫，不是断点续页；不保证五天内补齐，超窗后需指定历史区间补抓。”
+
+### 本轮测试登记与静态依据
+
+只运行本轮实质修改的 `tests.test_x_intake`（36项）和新增 `tests.test_x_intake_capacity`（18项）。
+旧水位测试改为发现与历史共享五天下界；新测试覆盖容量临界30/31、51池、attach/feedgrab、缩小总预算、
+环境变量、更窄窗口、真实日报设置/不可读、真实collect两天成品投递、未来水位、未完成覆盖不冒充已完成、
+全量API池/单来源动作范围、未尝试只读状态以及真实Node渲染转义。
+
+首次 `QtapCKkdeFmd`：54项/1.152秒，2处旧夹具假设失败、0错误。
+暂存助手确认缺扫描上界，原来回退到一小时前的条目时间；补与真实运行相同的扫描上界。
+停机缺口测试原先声称发现完整，却期待历史仍重扫；去除一天夹后发现完整确可桥接旧覆盖，
+因此将该缺口场景的发现改成真实未完成，仍严格断言历史执行、缺口和原话保留。未放松生产覆盖证明。
+更正后 `QJH_Qfzvqo1Q`：**54项/1.147秒，全部通过、无跳过**；完整原始日志：
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/QJH_Qfzvqo1Q.log`。
+原失败日志与修正原因保留在同轮 `validation-history.json`，不删红数、不以旧树绿数代替本轮结果。
+
+实际 cwd：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`。两次登记原始命令均为：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-sfpe-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-sfpe-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-sfpe-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_x_intake tests.test_x_intake_capacity -v
+```
+
+证据根：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/x-intake-review-sfpe/`。
+`tested-code.json` 记录10份代码/JS/测试的逐文件SHA，清单自身SHA256为
+`ecd85dc446953f97e8aa4070233e522f215e90a8ba3ecdff0ff78b6c8ebb1d57`：
+
+| 文件 | SHA256 |
+| --- | --- |
+| `kb/feeds/x_intake_capacity.py` | `5870480bc503f190e9636bbb50997b9d86e51f302de1b2a907bbd06e759713ba` |
+| `kb/feeds/x_intake.py` | `c5da900fcb0c433d1601ce373e2e8dec521c38cdcfdd7134c95946dec1154479` |
+| `kb/feeds/x_intake_feedgrab.py` | `9ca02c6223eca3babc80c3db1df3edf5599f8b8b423404e020b44929a2e2434a` |
+| `kb/feeds/x_intake_store.py` | `0a0a866ceba426f976871508d38b036fb61f46805fbde891781626a013bbae1a` |
+| `kb/feeds/x_intake_retention.py` | `5ebb58dc114f1e155a5cfa66529304e24145a22e2bbfbfde06a8a1a48253fb90` |
+| `kb/feeds/x_intake_diagnostics.py` | `67f37ca0b9e48a05c6d895451c477fcdfdeeb30ba3e44111b81dfd61df8c3f8f` |
+| `kb/static/js/x_intake_status.js` | `5cfb3983479d54967718fe5ccc001ac36abcd729f8ca703c199532d68023a7e3` |
+| `kb/static/js/sources.js` | `ba4e557c994579c75dc33d9e4b942c0ae7a4c365db51d69d03589b20fe3a258e` |
+| `tests/test_x_intake.py` | `50182dbc45cc0398a4b7a7fb0f2739dbe1981752e2abff5d41ff6c64a54c9e10` |
+| `tests/test_x_intake_capacity.py` | `2acaa422018abf621caa277a188d035f8e94c8b5a2da4dc2848a22fec875027a` |
+
+八Python文件Ruff、AST/内存编译、两JS语法、10文件700行及diff空白检查均通过；sources.js为696行。
+提交对应与最终HEAD同范围定点登记另外保存在 `commit-evidence.json`，不将尚未执行的登记预先写成绿数。
+
+### 全新隔离 collect、API 与页面
+
+本轮新建 `serve.py`、`page.mjs`、`browser-smoke.py`；全新临时data/vault/videos，只本机连接，
+导入服务前禁scheduler，Python外网socket及页面外域/非GET请求均阻断。远端X/session、就绪与冷却用固定边界替身，
+collect、候选/批次、确认、事务和API使用真实实现；未运行任何额外旧测试族。
+
+- 51个启用自动来源另加停用/RSS对照共53订阅，只点名3个来源采集。三天水位准确成为发现下界，
+  两天前成品真实入库，历史仍未完成；顶部未完成扫描与完整覆盖对照另各入库1条，共3条，outbox均清空。
+  顶部未完成账号的 covered/coverage_end 仍空。持久进度行仅3条，未轮到账号无伪回执。
+- 清缓存后overview仍按51计算6历史切片/至少9轮；未轮到账号也有风险，完整覆盖对照无历史问题，
+  停用/RSS不混入容量。四接口health/overview/items/intake-care均200，24路并发实际HTTP GET全200。
+  三个历史问题的单来源动作描述保留rev/sig、无extract；未执行任何动作。
+- 真实页面3条成品可见；筛选后的4张对照卡分别正确展示近期发现、顶部未完成、尚未轮到及完整覆盖。
+  风险数字与不保证补齐文案可读、换行不横溢；两份历史详情保留完整原话和出路。
+  `feed.png`、`sources.png`、`care-{catchup,unattempted}.png`及顶部裁图均已实际查看。
+  JS异常、页面/详情横向溢出、外域和非GET请求均0，见 `page-evidence.json` / `page-final-network.json`。
+
+数据库、上下界、API、并发HTTP证据分别在 `database-evidence.json`、`scan-bounds.json`、
+`api-summary.json`、`http-evidence.json`；保留 `progress-evidence.json`、`sync-summary.json`。
+
+### 浏览器通道、清理与留白
+
+本审查轮实际尝试具名扩展后台会话“🔎 大V五天覆盖容量验证”，显式 `visible:false`，
+创建前拒绝 `Capability is not available: visibility`，没有去掉后台限制重试。
+因此降到独立临时profile的chrome-headless-shell，始终无头、仅本机GET；未连接用户Chrome/CDP/普通标签/cookie，
+没有激活窗口、切换验证标签或访问真实X。只筛选本机列表、打开待办详情，未点同步、保存、重试、登录或外链。
+自建浏览器34910及profile已清，服务31374正常停止，临时KB根已删除，48999无监听；
+见 `extension-attempt.json`、`browser-channel.json`、`browser-cleanup.json`、`server-cleanup.json`。
+
+未执行本轮未修改的runtime/phase_delivery/outcomes/delivery_verdict/default_path/其它X与历史套件或整套回归，
+统一留验收前置；不将54项或本轮冒烟称作全族通过。未验证真实51账号吞吐、X风控、登录态、模型或生产数据，
+没有实现可恢复原生cursor或保证高频来源五天覆盖。报告中其余非阻断项保留，不自行追加审查轮次或执行验收。

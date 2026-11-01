@@ -1,4 +1,5 @@
 """Structured automatic-X queue facts; free-form notes are never evidence of coverage."""
+from kb.feeds.x_intake_capacity import RESCAN_NOTICE
 
 PROBLEMS = {
     'x_intake_throttled': {
@@ -40,7 +41,7 @@ PROBLEMS = {
     'x_intake_history': {
         'state': '历史待追补', 'label': '五天历史覆盖未完成', 'step': 2,
         'explanation': '本轮已取得的内容照常保存，历史覆盖与最新发现独立记账。',
-        'advice': '后续同步在滚动五天窗口内有界重扫；不保证从像素或原生游标断点续页，超过五天不再自动补。',
+        'advice': RESCAN_NOTICE,
         'retry_title': '重扫五天历史',
     },
     'x_intake_body': {
@@ -79,6 +80,7 @@ def issues(state):
             result.append(dict(kind=kind, count=count, evidence=evidence,
                                retryable=field != 'expired'))
     attempted = state.get('discovery') != 'unattempted' or state.get('history_at', 0) > 0
-    if state.get('gap') and attempted:
-        result.append(dict(kind='x_intake_history', evidence=state['gap'], retryable=True))
+    if state.get('coverage_warning') or state.get('gap') and attempted:
+        evidence = '；'.join(filter(None, [state.get('gap'), state.get('coverage_warning')]))
+        result.append(dict(kind='x_intake_history', evidence=evidence, retryable=True))
     return result

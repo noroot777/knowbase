@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from kb.feeds import x_account, x_browser, x_cooldown, x_page_state, x_post
 from kb.feeds import x_intake_store as store
 from kb.feeds import x_intake_blocks as blocks
+from kb.feeds import x_intake_capacity as capacity
 from kb.feeds.x_cdp import CdpError, XBudgetExceeded
 from kb.feeds.x_intake_metrics import Metrics, seconds
 from kb.youtube.faults import local_fault
@@ -25,6 +26,7 @@ class Intake:
         self.channel = x_channels.channel_of(settings)
         self.callback, self.should_stop = on_progress, should_stop
         self.metrics = Metrics(budget)
+        self.metrics.data['window_capacity'] = capacity.plan(len(sources), self.channel, budget=budget)
         self.metrics.data['channel'] = 'browser' if self.channel == 'attach' else self.channel
         self.now = datetime.now(timezone.utc)
         self.started = reg.now()
@@ -167,10 +169,9 @@ class Intake:
                         fresh[-1][2] <= store.utc(prior['coverage_end'])):
                     continue
             if phase == 'discovery':
-                bound = max(bound, self.now - timedelta(days=1),
-                            store.utc(x_channels.watermark(source, self.channel)) or bound)
+                bound = max(bound, store.utc(x_channels.watermark(source, self.channel)) or bound)
                 bound = min(bound, self.now)
-            quota_seconds = seconds('KB_X_ACCOUNT_SECONDS', 8 if phase == 'discovery' else 20)
+            quota_seconds = capacity.account_seconds(self.channel, phase, reader=seconds)
             slice_seconds = quota_seconds
             minimum = min(MIN_TIMELINE_SECONDS, slice_seconds)
             remaining = deadline - time.monotonic()
@@ -313,8 +314,8 @@ class Intake:
             page.open_page('about:blank')
             self.cool = x_cooldown.of(page)
             self.metrics.data['phases']['startup'] = dict(wall_seconds=time.monotonic() - started)
-            for phase, limit in [('discovery', 240), ('history', 120), ('body', 120)]:
-                deadline = min(self.metrics.network_deadline - 5, time.monotonic() + seconds(f'KB_X_{phase.upper()}_SECONDS', limit))
+            for phase in ('discovery', 'history', 'body'):
+                deadline = min(self.metrics.network_deadline - 5, time.monotonic() + capacity.phase_seconds(phase, reader=seconds))
                 if self.blocked or self.over(deadline):
                     continue
                 with self.metrics.phase(phase):

@@ -9,6 +9,7 @@ function xIntakeStatus(source) {
     if (block?.kind) parts.unshift(`${stages[phase] || phase}：${labels[block.kind] || '访问受阻'}`);
   }
   if (state.gap) parts.push(`历史缺口：${state.gap}`);
+  if (state.coverage_warning) parts.push(state.coverage_warning);
   if (state.pending) parts.push(`正文待补 ${state.pending} 条`);
   if (state.unconfirmed) parts.push(`候选待确认 ${state.unconfirmed} 条`);
   if (state.outside) parts.push(state.outside);

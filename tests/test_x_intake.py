@@ -46,7 +46,7 @@ class IntakeBase(ChannelBase):
         result = store.stage(source, entries, phase=phase, incomplete=missing or '等待收尾', observed=observed)
         if confirm:
             store.confirm(source, entries, phase=phase, incomplete=missing, observed=observed, boundary=bound,
-                          coverage_complete=missing == '')
+                          end=self.now.isoformat(), coverage_complete=missing == '')
         return result
 
     def candidate(self, identifier='100'):
@@ -87,7 +87,7 @@ class WindowAndOutboxTests(IntakeBase):
 
         self.run_intake(scan, [source])
         self.assertTrue(all(floor >= self.now - timedelta(days=5, seconds=2) for floor in floors))
-        self.assertTrue(floors[0] > floors[-1])
+        self.assertEqual(floors[0], floors[-1])
 
     def test_expired_work_is_not_success_or_deletion(self):
         self.prepare()
@@ -176,7 +176,7 @@ class WindowAndOutboxTests(IntakeBase):
 
         def scan(page, handle, floor, **kwargs):
             phases.append(kwargs['max_scrolls'])
-            return [self.entry()], '' if kwargs['max_scrolls'] == 2 else '尚未翻过缺失的两天'
+            return [self.entry()], '发现阶段尚未翻完' if kwargs['max_scrolls'] == 2 else '尚未翻过缺失的两天'
 
         result = self.run_intake(scan)
         self.assertEqual(phases, [2, x_browser.MAX_SCROLLS])

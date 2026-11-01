@@ -5,6 +5,7 @@ from uuid import uuid4
 
 from kb.feeds import x_article, x_channels, x_feedgrab
 from kb.feeds import x_intake_store as store
+from kb.feeds import x_intake_capacity as capacity
 from kb.feeds.x_intake_metrics import seconds
 from kb.youtube.faults import local_fault
 
@@ -13,7 +14,7 @@ def run(intake):
     intake.metrics.data['cursor'] = 'feedgrab_bounded_rescan'
     intake.metrics.data['timeline_phases_separable'] = False
     with intake.metrics.phase('discovery'):
-        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + seconds('KB_X_DISCOVERY_SECONDS', 240))
+        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + capacity.phase_seconds('discovery', reader=seconds))
         sources = intake.ordered('discovery')
         for source in sources:
             if intake.over(deadline):
@@ -30,7 +31,7 @@ def run(intake):
                     data_dir=str(x_channels.FEEDGRAB_HOME / 'sessions'),
                     workdir=str(x_channels.FEEDGRAB_HOME / 'work'), budget=deadline - time.monotonic(),
                     should_stop=intake.should_stop, complete_articles=False,
-                    account_seconds=seconds('KB_X_FEEDGRAB_ACCOUNT_SECONDS', 25))[handle]
+                    account_seconds=capacity.account_seconds(intake.channel, 'combined', reader=seconds))[handle]
                 if result.get('error') or result.get('skipped'):
                     intake.outcome(source, 'combined', error=result.get('error', ''), skipped=result.get('skipped', ''))
                     intake.attempt(source, 'combined', result.get('error') or result['skipped'])
@@ -54,7 +55,7 @@ def run(intake):
                 intake.local_error(source, error, '发现')
     intake.metrics.data['phases']['history'] = dict(wall_seconds=0, shared_with='discovery')
     with intake.metrics.phase('body'):
-        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + seconds('KB_X_BODY_SECONDS', 120))
+        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + capacity.phase_seconds('body', reader=seconds))
         for source, task in intake.pending_jobs():
             if intake.over(deadline):
                 break

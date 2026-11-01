@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 from kb.feeds import registry as reg, x_article, x_body, x_post, x_post_meta
 from kb.feeds import x_intake_batches as batches
 from kb.feeds import x_intake_blocks as blocks
+from kb.feeds import x_intake_capacity as capacity
 from kb.feeds import x_intake_retention as retention
 from kb.maintenance import maintenance_lock
 
@@ -89,7 +90,7 @@ def current(conn, source):
 
 
 def floor_for(source, now):
-    floor = now - timedelta(days=5)
+    floor = now - capacity.WINDOW
     if boundary := utc(source.get('history_floor')):
         floor = max(floor, boundary)
     return floor
@@ -365,6 +366,12 @@ def acknowledge(conn, source, entries):
 
 
 def statuses(sources, channel='browser'):
+    from kb.feeds import x_channels
+    from kb.feeds.prefetch import X_LOCAL_SECONDS
+    eligible = {source['id'] for source in sources if channel in ('browser', 'attach', 'feedgrab')
+                and source.get('enabled') and reg.uses_channel(source) and x_channels._handle(source)}
+    schedule = capacity.schedule_notice() if eligible else ''
+    now = datetime.now(timezone.utc)
     with read_db(timeout=30) as conn:
         rows = {row['source_id']: dict(row) for row in conn.execute('SELECT * FROM x_intake_sources')}
         counts = {(row['source_id'], row['identity']): row['pending'] for row in conn.execute('''
@@ -386,6 +393,13 @@ def statuses(sources, channel='browser'):
             with read_db(timeout=30) as conn:
                 events = blocks.replay(conn, source['id'], identity(source), row['channel'], row['block'])
             blocks.project(source['x_intake'], events)
+        if source['id'] in eligible:
+            state = source.setdefault('x_intake', dict(discovery='unattempted'))
+            if state.get('gap') or state['discovery'] != 'complete':
+                state['window_capacity'] = capacity.plan(len(eligible), channel, budget=X_LOCAL_SECONDS,
+                                                         window=max(timedelta(0), now - floor_for(source, now)))
+                state['coverage_warning'] = capacity.warning(state['window_capacity'], schedule)
+        if 'x_intake' in source:
             from kb.feeds.x_intake_diagnostics import issues
             source['x_intake']['issues'] = issues(source['x_intake'])
 
