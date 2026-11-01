@@ -13,7 +13,7 @@ from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
 from kb.feeds import digest as digest, x_channels as x_channels
-from kb.feeds import fulltext, translate, x_intake_commit
+from kb.feeds import fulltext, source_failure, translate, x_intake_commit
 # 选源判据(本文件越过 700 行硬上限时拆出去的,见那边的模块头)。
 from kb.feeds.sync_select import pick_sources
 # 交付层那道搁置闸门(`_export` 里那一句)。判据只有 `shelf` 那一份。
@@ -162,8 +162,12 @@ def _save_result(source, result, scope):
                 return None
             entries = x_intake_commit.filtered(c, source, entries, validators)
             added = reg.put_items(source, entries, conn=c)
-            reg.merge_config(source['id'], validators.get('config_patch') or {}, conn=c)
-            if x_intake_commit.partial(c, source, entries, validators):
+            if not validators.get('x_failure'):
+                reg.merge_config(source['id'], validators.get('config_patch') or {}, conn=c)
+            partial = x_intake_commit.partial(c, source, entries, validators)
+            if failure := validators.get('x_failure'):
+                source_failure.write(c, source, failure)
+            if partial:
                 return added
             c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
                 failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=?,last_notice=? WHERE id=?''',
@@ -177,7 +181,7 @@ def _save_result(source, result, scope):
     return added
 
 
-FAILURE_CAP = 1200  #: 失败文案落库上限。来源侧要先把文本压到它之内再交过来(理由在那一侧)
+FAILURE_CAP = source_failure.CAP
 
 
 def _save_failure(source, error, summary) -> bool:
@@ -186,21 +190,11 @@ def _save_failure(source, error, summary) -> bool:
     被改指之后把旧账号那次失败记在新账号头上,是把一条好订阅按别人的毛病推进
     退避(最长 24 小时),面板上还显示"连接失败" —— 而新账号一次都没被访问过。
     """
-    reason = str(error)[:FAILURE_CAP] or type(error).__name__
     with reg.db() as c:
         if not _claim_write(c, source):
             return False
-        if unavailable := getattr(error, 'unavailable', None):
-            summary.setdefault('notices', []).append({
-                'title': source['name'], 'reason': error.notice,
-                'count': len(unavailable), 'items': unavailable})
-        summary['errors'].append({'title': source['name'], 'reason': reason, 'url': source['url']})
-        # 「重试失败项」靠这份身份收窄下一轮的范围(见 `note_retry_targets`)。
-        # 记 id 而不是名字:名字会被改,而改完之后这条订阅还是同一条。
-        summary['failed_ids'].append(str(source['id']))
-        c.execute('''UPDATE subscriptions SET last_attempt=?,last_error=?,failures=failures+1,
-            retry_at=? WHERE id=?''', (reg.now(),reason,
-            time.time() + min(86400, 1800 * 2 ** min(source['failures'], 6)),source['id']))
+        source_failure.write(c, source, error)
+    source_failure.note(summary, source, error)
     return True
 
 

@@ -39,6 +39,9 @@
   discovery 只更新发现状态；history/recovery 不得冒充发现完成，发现提示不得改写历史缺口。停机数日后，旧“最早读到哪”
   不能遮住中间几天缺口；必须重新追补。跨轮过期的在途正文也不能借迟到完成重新变成有效待投递成品。
 - 成品队列直到 `put_items`、水位补丁和 outbox 确认同事务提交才消费。崩溃/本机写失败后仍可再次投递。
+- 投递与来源结论独立：自动路径已有已确认成品且发现/combined 真失败时，`take` 返回条目及 `meta.x_failure`，
+  入库、outbox 确认、失败记账在同一事务完成。失败仍累计退避，保留旧成功时间及水位，不伪造成功清账；
+  新增与失败可以并存。空成品自动失败和显式区间/旧路径仍抛原异常，未确认条目仍不可投递。
 - 只复用当前同版来源和正文完整证明：带展开/Article 欠账的预览不算证明；存量行需匹配当前完整读数或已完成候选回执。
   旧库不明来源/正文差异进入 `repair` 待核，不靠 `DO NOTHING` 假称已修好，也不绕过版本化 CAS 回填。
 - 永久排除仍有效；远端明确不可用保留 URL/原因，不再每轮重新排该正文。
@@ -719,3 +722,90 @@ chrome-headless-shell；始终无头，仅本机 GET。未连接用户 Chrome/CD
 既有未修改 X/历史套件和全量回归未运行，统一留验收前置执行；不把32项定点测试或本轮冒烟称为全族通过。
 真实 X 风控、用户登录态、模型、生产数据、原生游标及51账号八分钟吞吐未验证。
 报告其余非阻断项不改，不自行追加审查轮次或执行验收。
+
+## P0g 第二轮审查修复：投递与来源失败独立提交
+
+本轮完整读取 `free-review/P0gZuUe0mZf5/round-2/report.md`（269行），接受唯一阻断类问题。
+基线 `18223fdb742be03d7f8d3a0bf3c6da93c381c6af`，只修改自动 X 成品出口、同事务失败记账及对应测试；
+不把来源故障改判成成功，不增加 ready 诊断计数，也不扩报告的非阻断项。
+
+### 根因与边界
+
+上一轮只让 package 从持久队列组装 entries，`take` 仍见 error 就抛异常；组装结果没有走到真正入库。
+现在仅对自动 `x_intake` 且 entries 非空的结果放行条目，以原 `XCollectionError` 格式的 `meta.x_failure`
+单独传失败；空成品或旧显式区间仍照原样抛错。发现页面/CDP故障、第三轮起的发现首屏升级以及 feedgrab
+combined 上游故障共用这个出口，不在各异常分支分别补丁。
+
+存盘在同一事务完成条目、真实 outbox 确认及原失败策略写账。失败存在时忽略水位补丁、保留 last_success，
+只增加真实失败/退避；阶段 note 与跳过提示照常保存。事务提交后才向 summary 记失败，不重复报 notice，
+不把已入库但失败的来源记成 succeeded 或 deferred。后置失败写账出错会连条目与确认一起回滚，下轮仍可投递。
+原失败 SQL/1200字符上限/退避及摘要提取到 `source_failure.py` 共用，非 X 的失败入口签名与身份检查不变；
+这是避免 sync 超过700行所需的窄拆分，不改其它采集器行为。
+
+### 定点测试与代码身份
+
+仅本轮实质修改的 `tests.test_x_intake_outcomes`（11项）与新增
+`tests.test_x_intake_delivery_verdict`（12项）执行并登记。哨兵 `_wsgpUvCJhsU` 的真实结果为
+**23项、0.725秒、全部通过，无跳过**，日志：
+`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/_wsgpUvCJhsU.log`。
+原先停在 package 的断言已改成实际 take/save 后 feed_items 增加、outbox 清空及真实失败仍在。
+新用例覆盖三条触发入口的真实 collect、多轮去重、原始失败/notice各一次、API后果、保存失败与后置失败写账
+整体回滚、改指隔离、水位/成功账保护，以及空结果/旧路径/原失败上限与退避兼容。
+
+实际 cwd：`/Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf`；登记的未过滤原始命令：
+
+```sh
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-P0g2-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-P0g2-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-P0g2-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_x_intake_outcomes tests.test_x_intake_delivery_verdict -v
+```
+
+证据根目录：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/x-intake-review-P0g-2/`。
+`tested-code.json` 记录本轮6份代码/测试的逐文件SHA，清单自身SHA256为
+`8169c0a28e3414436340c0b8465369c8b0a32c809aa6fe0ef4c88c91f9b57e73`：
+
+| 文件 | SHA256 |
+| --- | --- |
+| `kb/feeds/source_failure.py` | `c29e1a53e3b46e75d674a0617329551ca158c80129cc3607d394c66df2315de4` |
+| `kb/feeds/sync.py` | `f3136a07bd980072aa09ff37e79ecd8038438fb1c400f212d0b05850187e1956` |
+| `kb/feeds/x_channels.py` | `59744a1434b494653285556c43b227c85d467c21be8f5b0237c2d28adc40ec60` |
+| `kb/feeds/x_intake_commit.py` | `c169d58ce8c2c3b47ec9695619d0782f9cc5584663c9f0332169ece72dd8f8ed` |
+| `tests/test_x_intake_outcomes.py` | `7047c7d128895aed9f759559c1c511967a8baa66b43b25cb69584269b55f516b` |
+| `tests/test_x_intake_delivery_verdict.py` | `87b71a5144cc7dae8fb975ad73b5aa51e6f93d026a3fe840547235d3cace04fb` |
+
+六文件 Ruff、AST/内存编译、700行检查与 diff 空白检查通过，sync 为691行。
+最终提交的逐文件对应与最终 HEAD 定点登记以同目录 `commit-evidence.json` 记录，不复用旧树测试作最终证据。
+
+### 隔离真实 collect、接口与页面
+
+本轮新建 `serve.py`、`page.mjs`、`browser-smoke.py`，使用全新临时 KB data/vault/videos，
+禁 scheduler、Python 外网 socket 及页面非本机/非GET请求；仅远端 X/session、配置就绪、冷却边界替身，
+collect、持久队列、批次确认、事务及HTTP接口均为真实实现。首屏升级走真实 `_harvest_one`/首屏轮询，
+用虚拟时间/DOM固定输入复现20秒账号配置被8.5秒外限缩短，不访问真实 X 或睡满窗口。
+
+- 四来源共9条成品真实入库：健康1条清旧账，发现页面/CDP/响应故障三轮各1条，发现首屏四轮各1条，
+  feedgrab 上游失败投递旧确认成品1条。所有 outbox 均清空，API items 包含全部9个URL。
+  三类故障最终失败次数分别3/2/1，退避均保留，失败轮不推进旧成功时间或水位，原始错误照存。
+  首屏前两轮尚未升级，其成功账与失败第三/四轮分开断言，不误把所有预算读数当真故障。
+- 清空预取缓存后 health/social overview/items/intake-care 四接口均200，24路并发实际HTTP GET均200。
+  单来源动作描述仍绑定 rev/sig、无 extract，未执行重试或其它动作。数据库/摘要/API/账本证据见
+  `database-evidence.json`、`sync-summary.json`、`api-summary.json`、`http-evidence.json`、`subscription-ledgers.json`。
+- 真实页面内容列表显示9条，四张订阅卡显示1/3/4/1条；后三张保留红色失败与原话，健康对照正常。
+  内容列表、订阅管理和三份故障详情截图 `feed.png`、`sources.png`、`care-{browser,budget,feedgrab}.png`
+  均已逐一实际查看；JS异常、横向溢出、外域及非GET请求均0，见 `page-evidence.json`、`page-final-network.json`。
+
+首次外部冒烟夹具误把第三轮失败应保留的成功时间设为初始化值，忽略了前两轮未升级时已有正常投递成功。
+仅修外部断言为前轮账本，并给各轮独立时间戳防止错误更新被同秒掩盖；未改产品或已通过的23项测试。
+首个失败日志和临时根清理证据保留于 `server-first.log`、`server-first-cleanup.json`、`validation-history.json`。
+
+### 浏览器与清理、留白
+
+本审查轮实际重新尝试具名扩展后台会话“🔎 大V投递与失败验证”，`visible:false` 创建前即被拒：
+`Capability is not available: visibility`。未去掉后台限制，才降独立临时 profile 的 chrome-headless-shell，
+始终无头、仅本机GET；未连接用户Chrome/CDP/普通标签/cookie，未激活窗口或切换验证标签。
+只查看列表、展开失败说明、导航待办及详情；未点同步、重试、保存、登录或外部链接。
+自建无头进程92956及profile已清，服务84789正常停止且临时KB根已删除，48999无监听；
+见 `browser-channel.json`、`browser-cleanup.json`、`server-cleanup.json`。
+
+未运行本轮未修改的 phase_delivery/runtime/default_path/其它X或历史套件及全量回归，统一留验收前置；
+不将23项或本轮冒烟称为全族通过。真实X风控、用户登录态、模型、生产数据及51账号吞吐未验证。
+原通用连接详情仍假定“一条内容都没取到”，在混合状态下文案过强，本轮只核对原话/退避/条目实际后果，
+未扩到该既有展示模板；报告所列非阻断问题同样保留。未自行追加审查轮次或执行验收。

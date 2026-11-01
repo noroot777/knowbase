@@ -1,7 +1,7 @@
 """X-only save outcome integration; partial/local work cannot clear old failure accounts."""
 import json
 import time
-from kb.feeds import registry as reg
+from kb.feeds import registry as reg, source_failure
 from kb.feeds import x_intake_store as store
 from kb.youtube.faults import local_fault, record_local
 
@@ -38,7 +38,7 @@ def partial(conn, source, entries, validators):
             metrics['overrun_seconds'] = round(max(0, time.monotonic() - validators['x_deadline']), 3)
             conn.execute('UPDATE x_intake_runs SET metrics=? WHERE id=?',
                          (json.dumps(metrics, ensure_ascii=False), row['id']))
-    if validators.get('x_pending'):
+    if validators.get('x_pending') or validators.get('x_failure'):
         conn.execute('UPDATE subscriptions SET last_attempt=?,last_note=?,last_notice=? WHERE id=?',
                      (reg.now(), validators.get('note', ''), validators.get('notice', ''), source['id']))
         return True
@@ -50,7 +50,9 @@ class Repointed(LookupError):
 
 
 def saved(summary, source, validators):
-    if not validators.get('x_pending'):
+    if failure := validators.get('x_failure'):
+        source_failure.note(summary, source, failure)
+    elif not validators.get('x_pending'):
         summary['succeeded_ids'].append(str(source['id']))
     else:
         summary['deferred'] += 1

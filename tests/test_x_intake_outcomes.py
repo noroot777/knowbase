@@ -5,7 +5,8 @@ from unittest.mock import patch
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb.feeds import registry as reg, x_channels, x_feedgrab, x_intake
+from kb.collectors import FetchScope
+from kb.feeds import registry as reg, sync, x_channels, x_feedgrab, x_intake
 from kb.feeds import x_intake_blocks as blocks, x_intake_diagnostics, x_intake_store as store, x_page_state
 from kb.feeds.x_cdp import CdpError, XBudgetExceeded
 from kb.intake_diag import actions, sources as diagnostics
@@ -63,7 +64,16 @@ class OutcomeTests(RuntimeFixture):
         self.assertEqual(result['error'], '真实发现失败')
         self.assertEqual(set(result['phase_errors']), {'discovery', 'history'})
         self.assertNotIn('skipped', result)
-        self.assertEqual(store.delivery(self.source)[0][0]['url'], entry['url'])
+        x_channels._harvest.update(example=result)
+        taken = x_channels.take(self.source, self.options)
+        self.assertEqual(taken[1]['x_failure'], '真实发现失败')
+        self.assertEqual(sync._save_result(self.source, taken, FetchScope(force=True)), 1)
+        self.assertEqual(store.delivery(self.source)[0], [])
+        with reg.read_db() as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM feed_items').fetchone()[0], 1)
+        source = reg.subscription('social', self.source['id'])
+        self.assertEqual(source['last_error'], '真实发现失败')
+        self.assertGreater(source['retry_at'], 0)
 
     def test_three_short_discovery_rounds_still_escalate(self):
         def scan(page, handle, floor, **options):

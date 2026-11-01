@@ -328,7 +328,7 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
         got = _harvest.get(handle)
     if got is None:
         raise LookupError(f'{label(channel)} 这一轮没有抓到 @{handle}')
-    if got.get('error'):
+    if got.get('error') and not (got.get('x_intake') and got.get('entries')):
         raise XCollectionError(got)
     if note := got.get('skipped'):
         from kb.feeds.fetching import CollectionBudgetExceeded
@@ -341,6 +341,8 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
         meta.update(x_intake=True, x_pending=got.get('pending', False),
                     x_local_error=got.get('local_error', ''), x_deadline=got.get('deadline'),
                     x_run_started=got.get('run_started'), x_run_monotonic=got.get('run_monotonic'))
+        if got.get('error'):
+            meta['x_failure'] = str(XCollectionError(got))
     # 水位作为"要并进 config 的补丁"交回去,由存盘那一步和条目同一个事务提交
     # (见 `watermark_patch`)。这里是工作线程,当场写盘就和条目脱钩了。
     if patch := watermark_patch(channel, got.get('watermark', '')):
