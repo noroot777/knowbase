@@ -129,12 +129,14 @@ def chinese_output(text, source='', inherited_quotes=(), chinese_source=False):
 def _term_list(span, source):
     terms = [term.strip(' \t\r\n.：:「」『』“”"') for term in re.split(r'[、，,；;（）()]', span)]
     for term in terms:
-        if not _FOREIGN_WORDS.search(term):
+        words = _FOREIGN_WORDS.findall(term)
+        if not words:
             continue
-        if (len(_FOREIGN_WORDS.findall(term)) > 4 or term not in source or
-                not any(character.isupper() or character.isdigit() for character in term)):
+        pattern = r'(?<![A-Za-z0-9_])' + re.escape(term) + r'(?![A-Za-z0-9_])'
+        if (len(words) > 4 or any(len(word) > 64 for word in words) or not re.search(pattern, source) or
+                len(words) > 1 and not any(character.isupper() or character.isdigit() for character in term)):
             return False
-        source = source.replace(term, '', 1)
+        source = re.sub(pattern, '', source, count=1)
     return True
 
 

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from kb.collectors import FetchScope
-from kb.youtube import collector, discovery, media, model_response, notes, products, storage, transcripts, translation
+from kb.youtube import collector, discovery, media, model_response, notes, products, storage, throttle, transcripts, translation
 from tests.youtube_fixture import YouTubeFixture
 from tests.youtube_translation_fixture import response
 
@@ -150,9 +150,11 @@ class OutputFallback(YouTubeFixture):
         self.assertEqual('youtube:original-fallback', result['body_provenance'])
         self.assertIn(block, result['body'])
 
-    def test_local_and_interruption_failures_never_spend_the_output_budget(self):
+    def test_service_local_and_unattempted_failures_never_spend_the_output_budget(self):
         for error in (OSError('disk full'), media.Interrupted('stopped'),
-                      media.ToolFailure('cannot start worker', origin='local')):
+                      media.ToolFailure('cannot start worker', origin='local'),
+                      media.ToolFailure('model transport unavailable', 'HTTP 429', origin='model'),
+                      throttle.NotAttempted('model request not attempted', origin='model')):
             with self.subTest(error=error), patch.object(notes, 'model', return_value=self.selected), \
                     patch.object(notes, 'call', side_effect=error) as call:
                 for attempt in range(notes.MAX_LANGUAGE_TRIES + 1):
@@ -161,14 +163,55 @@ class OutputFallback(YouTubeFixture):
                 self.assertEqual(notes.MAX_LANGUAGE_TRIES + 1, call.call_count)
         self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-language-failures.json').exists())
 
+    def collector_model_failure(self, error, expected):
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call', side_effect=error), \
+                patch.object(media, 'probe', return_value={'duration': 600}), \
+                patch.object(media, 'obtain', return_value=self.transcript):
+            for attempt in range(notes.MAX_LANGUAGE_TRIES + 1):
+                result = collector.collect(FetchScope(force=True))
+                self.assertEqual((0, 0), (result['processed'], result['added']), result)
+                row, = storage.rows()
+                self.assertEqual(expected, row['state'])
+                self.assertFalse(row['note'])
+                self.assertEqual(attempt + 1 if expected == 'failed' else 0, row['attempts'])
+                if expected == 'deferred':
+                    self.assertEqual(('', 0), (row['last_error'], row['retry_at']))
+                self.assertFalse(collector.YouTubeCollector('youtube').materialize())
+        self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-language-failures.json').exists())
+
+    def test_service_failures_preserve_existing_content_counts_without_exhausting_them(self):
+        for attempt in range(2):
+            with self.assertRaises(translation.LanguageError):
+                self.build(self.untranslated)
+        path = media.cache_dir(self.row['video_id']) / 'notes-language-failures.json'
+        for error in (media.ToolFailure('model unavailable', origin='model'),
+                      throttle.NotAttempted('model request not attempted', origin='model')):
+            def fail(*arguments):
+                raise error
+
+            for attempt in range(notes.MAX_LANGUAGE_TRIES + 1):
+                with self.subTest(error=error, attempt=attempt), self.assertRaises(type(error)):
+                    self.build(fail)
+                self.assertEqual([2], list(media.read_json(path).values()))
+        self.assertNotIn('fallback', self.build()['body_provenance'])
+        self.assertEqual({}, media.read_json(path))
+
+    def test_collector_keeps_model_outages_retryable_after_three_rounds(self):
+        self.collector_model_failure(media.ToolFailure('model unavailable', 'HTTP 429', origin='model'), 'failed')
+
+    def test_collector_defers_unattempted_model_work_without_failure_or_publication(self):
+        self.collector_model_failure(throttle.NotAttempted('model request not attempted', origin='model'), 'deferred')
+
     def test_all_output_failures_share_a_bounded_stage_exit(self):
         cases = [('translation', json.dumps({'translations': []})),
                  ('translation', json.dumps({'translations': [None]})),
                  ('summary', ''), ('summary', '中文内容' * 400),
                  ('note', 'not JSON'), ('note', json.dumps({'note': {'title': '嵌套笔记'}})),
                  ('note', json.dumps({'title': '笔记', 'summary': '', 'body': '正文'})),
-                 ('translation', RuntimeError('refused')),
-                 ('translation', media.ToolFailure('model transport unavailable', 'HTTP 429', origin='model'))]
+                 ('translation', model_response.OutputError('refused'))]
         for number, (stage, failure) in enumerate(cases, 100):
             self.row['video_id'] = f'{number:011d}'
             requested = []
@@ -326,6 +369,30 @@ class OutputFallback(YouTubeFixture):
         for literal in ('ソフトバンク', '삼성전자', 'Yi 34B', quote, '中文译文（自动生成）'):
             self.assertIn(literal, body)
         self.assertNotIn('原文待校验：', body)
+
+    def test_collector_exports_lowercase_tool_names_without_falling_back(self):
+        names = 'npm、pnpm、yarn、bun、vite、esbuild、rollup、webpack、swc、turbopack、parcel'
+        self.transcript['segments'][0]['text'] = 'The toolchain covers ' + names.replace('、', ', ') + '.'
+        value = '工具链覆盖 ' + names + '，每个工具的缓存策略都要独立核验。'
+        payload = {'title': '工具链缓存策略', 'summary': value, 'body': value}
+
+        def reply(prompt, *arguments):
+            if prompt.startswith('将以下字幕'):
+                return response(prompt, value)
+            return json.dumps(payload) if '只输出 JSON' in prompt else value
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value={'duration': 600}), \
+                patch.object(media, 'obtain', return_value=self.transcript):
+            result = collector.collect(FetchScope(force=True))
+        self.assertEqual((1, 1), (result['processed'], result['added']), result)
+        self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+        file, = (self.root / 'vault' / 'source' / 'youtube').rglob('*.md')
+        self.assertIn(names, file.read_text())
+        self.assertNotIn('原文待校验：', file.read_text())
 
     def test_collector_rejects_half_translated_caches_then_exports_a_real_chinese_recovery(self):
         tail = ('Then we move on to the second part, which covers the deployment story, '

@@ -5,7 +5,6 @@ import time
 from kb import llm, llm_stages
 from kb.feeds.registry import text_language
 from kb.youtube import json_output, media, transcripts, translation, translation_language
-from kb.youtube.diagnosis import LOCAL
 from kb.youtube.faults import local_fault
 
 
@@ -157,7 +156,7 @@ def build(row, transcript, deadline, stopped):
             result = build_chinese(row, transcript, deadline, stopped, directory, translator, summarizer, completed)
         except (RuntimeError, ValueError, TypeError) as error:
             if (isinstance(error, media.Interrupted) or local_fault(error) or
-                    isinstance(error, media.ToolFailure) and error.origin == LOCAL):
+                    isinstance(error, media.ToolFailure)):
                 raise
             if stopped() or time.monotonic() >= deadline:
                 raise media.Interrupted('视频处理已停止或时间预算用尽') from None

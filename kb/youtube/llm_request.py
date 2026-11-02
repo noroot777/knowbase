@@ -3,7 +3,7 @@ import subprocess
 import sys
 import time
 
-from kb.youtube import media, throttle
+from kb.youtube import media, model_response, throttle
 from kb.youtube.diagnosis import LOCAL, MODEL, ToolFailure
 
 
@@ -53,15 +53,22 @@ def request(prompt, selected, deadline, stopped):
             raise media.Interrupted('已停止或本轮视频处理时间预算用尽，未保存迟到回复')
         if process.returncode:
             raise failed('视频内容模型调用失败：' + (errors or output)[-1000:])
-        result = json.loads(output)
+        try:
+            result = json.loads(output)
+        except (ValueError, TypeError):
+            raise failed('模型请求子进程返回格式无效') from None
+        if not isinstance(result, dict):
+            raise failed('模型请求子进程返回格式无效')
         if result.get('error'):
+            if result.get('error_kind') == 'output':
+                raise model_response.OutputError(str(result['error']))
             raise failed(result['error'])
         if result.get('completed') is not True:
-            raise failed('模型回复缺少正常完成凭据，未生成中文成品')
-        text = result.get('text', '').strip()
-        if not text:
-            raise failed('模型返回空内容，未生成中文成品')
-        return text
+            raise model_response.OutputError('模型回复缺少正常完成凭据，未生成中文成品')
+        text = result.get('text')
+        if not isinstance(text, str) or not text.strip():
+            raise model_response.OutputError('模型返回空内容，未生成中文成品')
+        return text.strip()
     finally:
         try:
             media.terminate(process)
@@ -73,7 +80,6 @@ def request(prompt, selected, deadline, stopped):
 
 def main():
     from kb import llm
-    from kb.youtube import model_response
     values = json.load(sys.stdin)
     client = None
     try:
@@ -88,7 +94,8 @@ def main():
             raise RuntimeError('模型回复超过处理预算')
         print(json.dumps({'text': text, 'completed': True}))
     except Exception as error:
-        print(json.dumps({'error': str(error)}))
+        print(json.dumps({'error': str(error), 'error_kind':
+                          'output' if isinstance(error, model_response.OutputError) else 'service'}))
     finally:
         if client is not None:
             client.close()

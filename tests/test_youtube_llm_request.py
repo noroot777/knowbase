@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import subprocess
@@ -5,11 +6,12 @@ import sys
 import threading
 import time
 import unittest
+from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from kb.youtube import llm_request, media
+from kb.youtube import llm_request, media, model_response
 
 
 class YouTubeModelDeadline(unittest.TestCase):
@@ -53,8 +55,39 @@ class YouTubeModelDeadline(unittest.TestCase):
         code = 'import sys,json; json.load(sys.stdin); print(json.dumps({"text":"只有开头一句。"}))'
         with patch.object(llm_request.subprocess, 'Popen', side_effect=lambda arguments, **values:
                           original([sys.executable, '-c', code], **values)):
-            with self.assertRaisesRegex(RuntimeError, '完成凭据'):
+            with self.assertRaisesRegex(model_response.OutputError, '完成凭据'):
                 llm_request.request('fixture', selected, time.monotonic() + 5, lambda: False)
+
+    def test_worker_fault_protocol_distinguishes_content_from_service_and_invalid_envelopes(self):
+        original = subprocess.Popen
+        selected = SimpleNamespace(provider='openai', model_id='fixture')
+        cases = [(json.dumps({'error': 'refused', 'error_kind': 'output'}), model_response.OutputError),
+                 (json.dumps({'error': 'HTTP 429', 'error_kind': 'service'}), media.ToolFailure),
+                 (json.dumps({'error': 'legacy SDK failure'}), media.ToolFailure),
+                 ('not JSON', media.ToolFailure), ('[]', media.ToolFailure),
+                 (json.dumps({'text': '', 'completed': True}), model_response.OutputError),
+                 (json.dumps({'text': ['nontext'], 'completed': True}), model_response.OutputError)]
+        for output, expected in cases:
+            code = 'import sys,json; json.load(sys.stdin); sys.stdout.write(' + repr(output) + ')'
+            with self.subTest(output=output), patch.object(llm_request.subprocess, 'Popen',
+                    side_effect=lambda arguments, **values: original([sys.executable, '-c', code], **values)):
+                with self.assertRaises(expected) as caught:
+                    llm_request.request('fixture', selected, time.monotonic() + 5, lambda: False)
+                if expected is media.ToolFailure:
+                    self.assertEqual('model', caught.exception.origin)
+
+    def test_worker_serializes_output_ownership_without_classifying_sdk_errors_as_content(self):
+        client = SimpleNamespace(with_options=lambda **values: client, close=lambda: None)
+        payload = json.dumps({'prompt': 'fixture', 'provider': 'openai', 'model': 'fixture',
+                              'deadline': time.monotonic() + 5})
+        for error, expected in ((model_response.OutputError('refused'), 'output'),
+                                (RuntimeError('HTTP 500'), 'service')):
+            output = io.StringIO()
+            with self.subTest(error=error), patch.object(llm_request.sys, 'stdin', io.StringIO(payload)), \
+                    patch('kb.llm._openai', return_value=client), \
+                    patch.object(model_response, 'complete', side_effect=error), redirect_stdout(output):
+                llm_request.main()
+            self.assertEqual({'error': str(error), 'error_kind': expected}, json.loads(output.getvalue()))
 
     def local_model(self, mode):
         requests = []
@@ -104,8 +137,9 @@ class YouTubeModelDeadline(unittest.TestCase):
         selected = SimpleNamespace(provider='openai', model_id='fixture')
         with patch.dict(os.environ, {'OPENAI_API_KEY': 'fixture', 'OPENAI_BASE_URL': url + '/v1',
                                      'NO_PROXY': '127.0.0.1,localhost'}):
-            with self.assertRaisesRegex(RuntimeError, 'fixture error'):
+            with self.assertRaisesRegex(media.ToolFailure, 'fixture error') as caught:
                 llm_request.request('fixture', selected, time.monotonic() + 8, lambda: False)
+            self.assertEqual('model', caught.exception.origin)
         self.assertEqual(1, len(requests))
 
     def test_continuous_anthropic_stream_cannot_extend_deadline(self):

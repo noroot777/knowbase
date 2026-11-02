@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from kb import llm_openai
-from kb.youtube import llm_request
+from kb.youtube import llm_request, model_response
 
 
 class YouTubeModelResponse(unittest.TestCase):
@@ -94,21 +94,21 @@ class YouTubeModelResponse(unittest.TestCase):
 
     def test_chat_non_stop_reasons_never_cross_the_real_request_process(self):
         for reason in ('length', 'content_filter', 'tool_calls', None):
-            with self.subTest(reason=reason), self.assertRaisesRegex(RuntimeError, '未正常完成'):
+            with self.subTest(reason=reason), self.assertRaisesRegex(model_response.OutputError, '未正常完成'):
                 self.ask('chat', reason)
         self.assertEqual(['/v1/chat/completions'] * 4, self.paths)
 
     def test_responses_incomplete_failed_and_unknown_status_are_not_text_success(self):
         for reason in ('incomplete', 'failed', 'in_progress', None):
-            with self.subTest(reason=reason), self.assertRaisesRegex(RuntimeError, '未正常完成'):
+            with self.subTest(reason=reason), self.assertRaisesRegex(model_response.OutputError, '未正常完成'):
                 self.ask('responses', reason)
         self.assertEqual(['/v1/responses'] * 4, self.paths)
 
     def test_anthropic_truncation_refusal_and_missing_terminal_event_are_rejected(self):
         for reason in ('max_tokens', 'refusal', 'pause_turn', None):
-            with self.subTest(reason=reason), self.assertRaisesRegex(RuntimeError, '未正常完成'):
+            with self.subTest(reason=reason), self.assertRaisesRegex(model_response.OutputError, '未正常完成'):
                 self.ask('anthropic', reason)
-        with self.assertRaisesRegex(RuntimeError, '未正常完成'):
+        with self.assertRaisesRegex(model_response.OutputError, '未正常完成'):
             self.ask('anthropic', 'end_turn', terminal=False)
         self.assertEqual(['/v1/messages'] * 5, self.paths)
 
@@ -122,5 +122,5 @@ class YouTubeModelResponse(unittest.TestCase):
 
     def test_refusal_is_not_a_success_even_with_a_normal_status(self):
         for protocol, reason in (('chat', 'stop'), ('responses', 'completed')):
-            with self.subTest(protocol=protocol), self.assertRaisesRegex(RuntimeError, '拒绝|非正文'):
+            with self.subTest(protocol=protocol), self.assertRaisesRegex(model_response.OutputError, '拒绝|非正文'):
                 self.ask(protocol, reason, refusal=True)

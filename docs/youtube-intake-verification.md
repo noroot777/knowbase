@@ -1,6 +1,17 @@
 # YouTube 低成本接入验证
 
-## 当前复修：有界成品失败、共用叙述守卫与首次水位（oyGbBDVpsJfW 第 1 轮）
+## 当前部分复修：模型故障归属及小写清单（oyGbBDVpsJfW 第 2 轮）
+
+- 第 1 项：模型服务故障与未起跑不再计入内容预算。实际模型回复的格式、未完成、拒答和空内容仍有三轮出口；新增跨子进程 output/service 类型传递，原始 SDK/非法进程信封仍归模型服务失败，不把请求没成功冒充内容不合格。
+- 第 3 项：源绑定清单接受单个小写名称，按词边界与出现次数匹配、每词最多 64 字母；多词项仍保留四词及大写/数字边界，逗号不重新切断普通长口播。覆盖 10/11/12 名称、未知名称、重复、子串、过长词与普通逗号短句反向，以及真实 collector/Markdown 导出。
+- 第 2 项症状属实，本轮未修改 native 原文免译判据。建议直接合并输入/译文判据会反转既有中文长引文保留契约，待认可部分修复后提供具体反例，请用户裁定；不声称本轮已修完整份报告，也不将该项冒称已有裁定。
+- 仅本轮修改的四个测试模块登记；最终命令、计数、受测树及原始日志归档到 `/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-oyGbBDVpsJfW-round-2/`。后端与 Markdown 修改，不操作浏览器、不复用旧截图，未改模块及整套回归留验收。
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_output_fallback tests.test_youtube_translation_output tests.test_youtube_llm_request tests.test_youtube_model_response -v
+```
+
+## 历史复修：有界成品失败、共用叙述守卫与首次水位（oyGbBDVpsJfW 第 1 轮）
 
 - 模型生成的语种、结构/字段、缺段、压缩不收敛、未完成/拒答/空内容及传输失败均按当前阶段累计三轮，保留阶段成功清自己、模型/完整转录作用域和中文缓存兜底。不使用包含元数据/下载失败的总 attempts 提前耗尽内容预算；本机、停止、过期仍不发布。
 - 译文、native 模型缓存输出、要点和成稿共用叙述守卫，逗号不再切断长英文尾段；紧凑的源绑定术语清单保留，源字面/受限引文仍扣除。真正中文原文直通不被输出守卫强迫翻译；字符/词形仍不是语义完整性证明。

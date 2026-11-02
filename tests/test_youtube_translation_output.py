@@ -246,6 +246,31 @@ class TranslationOutput(YouTubeFixture):
         for position, value in enumerate(values):
             self.assertEqual(value, translation.unit_output(source, position, json.dumps({'translations': [value]})))
 
+    def test_lowercase_source_bound_names_are_not_rejected_as_long_english_prose(self):
+        names = ['npm', 'pnpm', 'yarn', 'bun', 'vite', 'esbuild', 'rollup', 'webpack', 'swc',
+                 'turbopack', 'parcel', 'ffmpeg']
+        for count in (10, 11, 12):
+            source = 'The toolchain covers ' + ', '.join(names[:count]) + ', each with different caching behavior.'
+            value = '工具链覆盖 ' + '、'.join(names[:count]) + '，每一个的缓存处理都不一样。'
+            output = json.dumps({'translations': [value]})
+            with self.subTest(count=count):
+                self.assertEqual(value, translation.render(source, output))
+                self.assertEqual(value, translation.unit_output(source, 0, output))
+                self.assertEqual(value, notes.summary_output(value, source))
+                payload = {'title': '工具链缓存策略', 'summary': value, 'body': value}
+                self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=source))
+        for source, value in (
+                ('Tools: ' + ', '.join(names[:11]), '工具包括 ' + '、'.join(names) + '，需要核验。'),
+                ('Tools: ' + ', '.join(names), '工具包括 npm、' + '、'.join(names) + '，需要核验。'),
+                ('Tools: ' + ', '.join(names[1:]), '工具包括 ' + '、'.join(names) + '，需要核验。'),
+                ('Tools: ' + ', '.join(['a' * 65, *names]),
+                 '工具包括 ' + '、'.join(['a' * 65, *names]) + '，需要核验。'),
+                ('we move on now, then we review results, next we record failures, finally we ship changes',
+                 '作者说明方法和限制，需要独立核验。' * 20 +
+                 'we move on now, then we review results, next we record failures, finally we ship changes')):
+            with self.subTest(source=source, value=value):
+                self.assertFalse(translation_language.chinese_output(value, source))
+
     def test_bounded_quote_evidence_survives_compression_without_licensing_new_quotes(self):
         quote = 'the server must respond with a valid JSON-RPC object containing the field name and the field value'
         source = ('Reviewers independently verify implementation constraints before deployment. ' * 4 +
