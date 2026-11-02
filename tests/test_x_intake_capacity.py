@@ -22,11 +22,11 @@ from tests.test_x_intake_review_runtime import RuntimeFixture
 class CapacityMathTests(unittest.TestCase):
     def test_default_browser_population_gets_enough_history_slices_without_a_longer_run(self):
         value = capacity.plan(51, 'browser')
-        self.assertEqual((value['stages']['discovery']['slots'], value['stages']['history']['slots']), (25, 11))
+        self.assertEqual((value['stages']['discovery']['slots'], value['stages']['history']['slots']), (13, 11))
         self.assertEqual(value['stages']['history']['rounds'], 5)
         self.assertTrue(value['stages']['history']['fits_daily_window'])
         self.assertEqual(sum(value['phase_seconds'].values()), 445)
-        self.assertEqual(value['phase_seconds']['body'], 25)
+        self.assertEqual(value['phase_seconds']['body'], 120)
         self.assertEqual(capacity.warning(value), '')
 
     def test_exact_capacity_boundary_and_one_extra_source(self):
@@ -44,8 +44,8 @@ class CapacityMathTests(unittest.TestCase):
 
     def test_global_deadline_reduces_later_phase_capacity(self):
         value = capacity.plan(51, 'browser', budget=100)
-        self.assertEqual(value['phase_seconds'], dict(discovery=8, history=42, body=25))
-        self.assertEqual(value['stages']['history']['slots'], 2)
+        self.assertEqual(value['phase_seconds'], dict(discovery=75, history=0, body=0))
+        self.assertEqual(value['stages']['history']['slots'], 0)
         self.assertTrue(capacity.limited(value))
         self.assertIn('预算容量不足', capacity.warning(value))
 

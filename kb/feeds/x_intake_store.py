@@ -396,8 +396,8 @@ def statuses(sources, channel='browser'):
         if source['id'] in eligible:
             state = source.setdefault('x_intake', dict(discovery='unattempted'))
             if state.get('gap') or state['discovery'] != 'complete':
-                state['window_capacity'] = capacity.plan(len(eligible), channel, budget=X_LOCAL_SECONDS,
-                                                         window=max(timedelta(0), now - floor_for(source, now)))
+                state['window_capacity'] = capacity.observe(capacity.plan(len(eligible), channel, budget=X_LOCAL_SECONDS,
+                                                         window=max(timedelta(0), now - floor_for(source, now))), state, now)
                 state['capacity_limited'] = capacity.limited(state['window_capacity'])
                 state['coverage_warning'] = capacity.warning(state['window_capacity'], schedule)
         if 'x_intake' in source:

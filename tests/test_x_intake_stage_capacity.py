@@ -75,14 +75,15 @@ class DiscoveryCheckpointTests(RuntimeFixture):
         self.assertTrue(store.progress(self.source)['gap'])
         self.assertGreater(floors[-1], floors[0])
 
-    def test_partial_confirmed_discovery_advances_only_its_checkpoint_not_coverage(self):
+    def test_partial_confirmed_discovery_cannot_skip_the_unread_interval(self):
         marker = (self.now - timedelta(days=3)).isoformat()
         floors, checkpoints, states = self.run_real_scanner(marker=marker)
         self.assertLess(abs((floors[0] - store.utc(marker)).total_seconds()), 2)
-        self.assertEqual(states, ['partial', 'complete', 'complete'])
-        self.assertEqual(store.utc(checkpoints[0]), self.now)
+        self.assertEqual(states, ['partial'] * 3)
+        self.assertEqual(checkpoints, [marker] * 3)
         progress = store.progress(self.source)
-        self.assertGreater(store.utc(progress['covered']), store.utc(progress['floor']))
+        self.assertFalse(progress['covered'])
+        self.assertFalse(progress['coverage_end'])
         self.assertTrue(progress['gap'])
         with reg.read_db() as conn:
             self.assertGreaterEqual(conn.execute('SELECT count(*) FROM feed_items').fetchone()[0], 10)
@@ -171,7 +172,7 @@ class RotationBudgetTests(RuntimeFixture):
             with patch.object(x_intake, 'datetime', Snapshot), patch.object(x_intake, 'time', clock), \
                  patch.object(x_intake_metrics, 'time', clock), patch.object(x_cooldown, 'time', clock):
                 summary = self.collect_runtime(scan)
-            self.assertEqual(calls, dict(discovery=25, history=11))
+            self.assertEqual(calls, dict(discovery=13, history=11))
             self.assertLessEqual(clock.now, 445)
             self.assertFalse(summary['failed_ids'])
         self.assertEqual(len(history_seen), 51)
@@ -184,7 +185,7 @@ class RotationBudgetTests(RuntimeFixture):
         intake = x_intake.Intake(reg.subscriptions('social'), self.options, budget=480)
         with patch.object(x_intake.time, 'monotonic', return_value=intake.metrics.started + 15):
             limits = intake.budgets()
-        self.assertEqual(limits, dict(discovery=185, history=220, body=25))
+        self.assertEqual(limits, dict(discovery=90, history=220, body=120))
 
     def test_configured_reader_is_used_for_both_estimate_and_actual_limits(self):
         def read(name, default):

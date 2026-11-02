@@ -56,7 +56,8 @@ def run(intake):
                 intake.local_error(source, error, '发现')
     intake.metrics.data['phases']['history'] = dict(wall_seconds=0, shared_with='discovery')
     with intake.metrics.phase('body'):
-        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + limits['body'])
+        body = intake.budgets(reader=seconds, phase='body')['body']
+        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + body)
         for source, task in intake.pending_jobs():
             if intake.over(deadline):
                 break

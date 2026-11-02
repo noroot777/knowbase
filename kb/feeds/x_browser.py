@@ -261,7 +261,6 @@ def _harvest_one(page: Chrome, handle: str, floor: datetime | None, *,
                 f'本轮已跳过(如 {rejected[0]});其余推文照常收录,'
                 '同步位置保持不变,下次同步重试')
         incomplete = f'{incomplete};{note}' if incomplete else note
-    entries.checkpoint_safe = not rejected and not page.incomplete and not (should_stop and should_stop())
     page.check()
     return entries, ';'.join(dict.fromkeys(filter(None, [page.incomplete, incomplete])))
 

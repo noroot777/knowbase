@@ -48,10 +48,14 @@ class Intake:
     def over(self, deadline):
         return self.stop() or time.monotonic() + MIN_USEFUL >= deadline
 
-    def budgets(self, reader=None):
+    def budgets(self, reader=None, *, phase='discovery'):
         value = capacity.plan(len(self.sources), self.channel, budget=self.metrics.data['budget_seconds'],
-                              remaining=self.metrics.network_deadline - 5 - time.monotonic(), reader=reader or seconds)
-        self.metrics.data['window_capacity'] = value
+                              remaining=self.metrics.network_deadline - 5 - time.monotonic(), reader=reader or seconds,
+                              discovery_done=phase != 'discovery', history_done=phase == 'body',
+                              body_pending=sum(1 for _ in self.pending_jobs()) if phase == 'body' else None)
+        if phase == 'discovery':
+            self.metrics.data['window_capacity'] = value
+        self.metrics.data.setdefault('phase_allocations', {})[phase] = value
         return value['phase_seconds']
 
     def announce(self, text):
@@ -321,8 +325,8 @@ class Intake:
             page.open_page('about:blank')
             self.cool = x_cooldown.of(page)
             self.metrics.data['phases']['startup'] = dict(wall_seconds=time.monotonic() - started)
-            limits = self.budgets()
             for phase in ('discovery', 'history', 'body'):
+                limits = self.budgets(phase=phase)
                 deadline = min(self.metrics.network_deadline - 5, time.monotonic() + limits[phase])
                 if self.blocked or self.over(deadline):
                     continue
@@ -354,8 +358,7 @@ class Intake:
                                      boundary=bound.isoformat(), end=self.now.isoformat(),
                                      coverage_complete=result.get('coverage_complete') is True, batch_id=batch_id):
                         confirmed.add(source['id'])
-                        if (phase in ('discovery', 'combined') and observed and
-                                (result.get('coverage_complete') is True or getattr(result['entries'], 'checkpoint_safe', False))):
+                        if phase in ('discovery', 'combined') and observed and result.get('coverage_complete') is True:
                             checkpoints[source['id']] = observed
                         if result['entries'] or result.get('coverage_complete') is True:
                             usable.add(source['id'])
