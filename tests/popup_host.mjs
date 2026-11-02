@@ -44,6 +44,9 @@ export const hereAnswer = (staged, sent) => {
        detail: '这一页还不在知识库里。', elsewhere: []}};
 };
 
+//: 探针把它交回来 = 「这一问服务端接了、但不答」。见下面 `fetch` 里那一段。
+export const HANG = Symbol('hang');
+
 export async function popupHost({tab, answer}) {
   const {element, document} = popupDom();
   const calls = [];
@@ -52,6 +55,12 @@ export async function popupHost({tab, answer}) {
 
   const context = vm.createContext({
     URL, Date, JSON, encodeURIComponent,
+    //: 关页前那一问是**有界**的(`AbortSignal.timeout`,见 popup 的 `ASK_MS`)。真实
+    //: 浏览器里它是全局的;这里不给的话那颗按钮一按就 ReferenceError。
+    //: **时限压到 150ms**:钉的是「这一问有界、到点算拒绝」这件事,不是 popup 里那个
+    //: 秒数(真机 4 秒)—— 不压的话那条用例要白等 4 秒。压短不影响判据:去掉信号的
+    //: 写法在这儿会一直挂着,探针那一条用赛跑把它变成红。
+    AbortSignal: {timeout: ms => AbortSignal.timeout(Math.min(ms, 150))},
     document,
     //: 弹窗关掉自己那一下。记次数而不是空函数:标签关了、弹窗还指着一个不存在的
     //: 页面留在屏幕上,是那颗关页按钮唯一会留下的后遗症。
@@ -91,6 +100,18 @@ export async function popupHost({tab, answer}) {
       //: 答)。**它交回 undefined 才落到下面** —— 「这一问当场失败」是靠交回一个
       //: 4xx/5xx 表达的,所以这里只能认 undefined,不能认假值。
       const staged = answer(path, calls[calls.length - 1].sent);
+      //: **`signal` 要真的管事。** 真实 fetch 一收到 abort 就把那一问 reject 掉;桩里
+      //: 不理它的话,「服务端接了连接却一直不答」这一种在这儿**永远等不到结果**,那颗
+      //: 按钮按下去整条用例挂住 —— 而那正是关页前那一问唯一会卡死的形态。探针用
+      //: `HANG` 摆这一局。
+      if (staged === HANG) {
+        return new Promise((_, reject) => {
+          const die = () => { const e = new Error('那一问被中止了'); e.name = 'AbortError'; reject(e); };
+          if (!options.signal) return;   //: 没给信号就真的挂着 —— 那是「没有截止时间」的样子
+          if (options.signal.aborted) die();
+          else options.signal.addEventListener('abort', die);
+        });
+      }
       if (staged !== undefined && staged !== null) return staged;
       if (path.endsWith('/pending')) return {status: 200, data: {intents: []}};
       if (path === '/api/browser-capture/precheck') return {status: 200, data: {ok: true, characters: 1200}};

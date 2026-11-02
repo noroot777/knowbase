@@ -4,19 +4,21 @@
  * 钉这几件事:只在**这一次真采成了、而且他还站在那一页上**时露面,露面那一次接焦点、
  * 已经露着就不许再抢;按下去只关当前这一个标签。对不上的维度一条都不许漏:
  * (a) 同一个标签换了一页;(b) 地址一样但不是那个标签;(c) 确认那一问失败时许可不许
- * 留在上一页上;(d) 服务端那一答 `saved` 也是凭据的来源;(e)(e2) 凭据绑真写进去的
- * 那一页和人眼前那个标签,不绑展示快照;(e3) 反过来钉一边 —— 该给的不许不给;
- * (f) HTTP 200 不代表这一次写了正文(`stored_body` 那一维);(g)(g2)(g3)(g4)(g5)
- * 操作身份:换了目标当场作废、这一维不依赖服务端那一答、刷新失败不算换操作、同一条目
- * 上又有一件没采完时出口收回,而**这一否决落在凭据上、持久有效**,下一问失败或下一答
- * 说「齐了」都换不回来,只有新的一次成功才能再授权。
+ * 留在上一页上;(d)(d2) **只读查询不建、也不移交许可** —— 服务端那一答 `saved` 认得
+ * 回执,但回执里没有标签身份,拿它授权就是把许可挪给人此刻在读的那个标签;
+ * (e)(e2) 凭据绑真写进去的那一页和人眼前那个标签,不绑展示快照;(e3) 反过来钉一边 ——
+ * 该给的不许不给;(f) HTTP 200 不代表这一次写了正文(`stored_body` 那一维);
+ * (g)(g2)(g3)(g3b)(g3c)(g4)(g5)(g6) 操作身份与当下状态:换了目标当场作废、这一维不依赖
+ * 服务端那一答、刷新失败不算换操作(**但按下去那一刻问不着一律拒,还得有界**)、同一
+ * 条目上又有一件没采完时出口收回,而**这一否决落在凭据上、持久有效**,下一答说「齐了」
+ * 也换不回来,只有新的一次成功才能再授权。
  *
  * 其余各档(不在库里、兜底两颗、候选列表、配对)在 `tests/grab_from_page_gate.mjs`,
  * 两份共用 `tests/popup_host.mjs` 那层桩。
  * 硬约束见 docs/decisions/browser-capture.md 与 link-grab.md。
  */
 import assert from 'node:assert/strict';
-import {popupHost, hereAnswer, GRABBED, PAGE} from './popup_host.mjs';
+import {popupHost, hereAnswer, GRABBED, HANG, PAGE} from './popup_host.mjs';
 
 //: 服务端那一答。每个用例改这一份,扩展只负责把它摆成界面。
 let here = {ok: true, situation: 'absent', detail: '这一页还不在知识库里。',
@@ -176,27 +178,57 @@ await element('close-tab').click();
 assert.deepEqual(removed, [tab.id], '只关当前这一个标签,一个都不许多关');
 assert.equal(context.window.closed, 1, '标签没了,弹窗不许留在屏幕上');
 
-// (d) **服务端那一答 `saved` 是凭据的第二个来源**,它也得落下来、也得带标签身份。
-//     走到这一档的是:这个弹窗刚上传完、那一答在路上丢了(或服务重启了),人点一下
-//     「重新确认」—— 服务端读审计表认得那张回执。只在当下看一眼 `situation` 的写法
-//     在这里会摆出**一颗按不动的按钮**:动作边界只认凭据,而凭据那时还是空的。
+// (d) **只读查询不建许可。** 服务端那一答 `saved` 认得审计表里那张回执,所以它说得出
+//     「这一篇的正文写进去了」—— 说不出「写进去的那一次发生在你眼前这个标签里」(回执
+//     里没有 Chrome 标签身份)。原先这一档会就地授权一次,理由是「上传那一答在路上丢
+//     了、或者服务重启了,人点一下「重新确认」也该有出口」;那条路撤了,代价写在
+//     popup.js 的 `loadHere()` 里:这种时候屏幕上照旧写着「已经写进这一条了」,但不给
+//     关页出口。漏一个出口是多按一下,关错一个标签不可撤销。
 const SAVED = 'https://example.org/posts/saved-one';
 tab.id = 8; tab.url = SAVED;
 here = {ok: true, situation: 'saved', page_url: SAVED, intent: null, elsewhere: [],
         item: {key: 'k8', kind: 'rss', title: '补过的那一篇', url: SAVED},
         detail: '这一次采集已经写进这一条了。正文已补入原条目。'};
 await element('refresh').click();
-assert.equal(element('close-tab').hidden, false, '服务端说这一次已经写进去了,照样给出口');
+assert.match(element('here-state').textContent, /已经写进这一条了/, '那句话照旧说');
+assert.equal(element('close-tab').hidden, true, '光读到一张回执不算许可:不许摆出关页出口');
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '按下去也一个都不许关');
+
+// (d2) 承重的那一半:**那一下原先把许可挪到了人此刻在读的那个标签上。** 同一篇他开了
+//      两个标签(或者采完那一个已经被他关了、眼前这个是后开的):地址逐字相等,只有
+//      标签不是那一个。挪过去之后 `granted()` 拿标签 id 去比的是它自己刚写进去的值,
+//      等于没比 —— 按下去关掉的是那个压根没参与这一次采集的标签。
+//      这一条跟 (b) 不是一回事:(b) 的那一答是 `complete`(按网址答的),走不到原先那
+//      条授权路;只有 `saved` 走得到,而 `saved` 的前提是他点过「改用它」(服务端那边
+//      `intent_id` 非空才查回执),所以这里照真机把那一步走完。
+const SAMEURL = 'https://example.org/posts/two-tabs';
+const pendingOn = (id, key) => ({id, key, title: '还在等的那一篇', page_url: SAMEURL});
+tab.id = 71; tab.url = SAMEURL;
+here = {ok: true, situation: 'undecided', page_url: SAMEURL, item: null, intent: null,
+        detail: '下面还在等的条目里点一下要补的那一篇。', elsewhere: [pendingOn('iT', 'kT')]};
+await element('refresh').click();
+adoptId = 'iT2';
+here = {ok: true, situation: 'fill', page_url: SAMEURL, elsewhere: [],
+        detail: '知识库里有这一条，但正文还缺着。',
+        item: {key: 'kT', kind: 'rss', title: '还在等的那一篇', url: SAMEURL},
+        intent: pendingOn('iT2', 'kT')};
+await element('elsewhere-list').querySelectorAll('button')[0].click();
+//: 采完那一下自己会再问一次 `/here` —— 他点过「改用它」,所以服务端这一答是 `saved`
+//: (`intent_id` 非空才去查回执)。
+here = {ok: true, situation: 'saved', page_url: SAMEURL, intent: null, elsewhere: [],
+        item: {key: 'kT', kind: 'rss', title: '还在等的那一篇', url: SAMEURL},
+        detail: '这一次采集已经写进这一条了。正文已补入原条目。'};
+await element('act').click();                 // 真采一次:凭据记在 71 号标签上
+assert.equal(element('close-tab').hidden, false, '这一次真采成了,出口照旧给');
+tab.id = 72;                                  // 同一地址的另一个标签
 removed.length = 0;
 const closedSoFar = context.window.closed;
 await element('close-tab').click();
-assert.deepEqual(removed, [8], '按下去真的关得掉 —— 不许摆一颗按不动的按钮');
-assert.equal(context.window.closed, closedSoFar + 1, '标签没了,弹窗照旧跟着收');
-// 反过来钉一边:这一档也一样跟标签身份绑着,跳走之后不许关。
-tab.id = 8001; tab.url = 'https://example.org/posts/after-saved';
-removed.length = 0;
-await element('close-tab').click();
-assert.deepEqual(removed, [], 'saved 那一档也一样:跳走之后按下去一个都不许关');
+assert.deepEqual(removed, [], '只读刷新不许把许可挪到眼前这个标签');
+assert.equal(context.window.closed, closedSoFar, '什么都没关,弹窗也不该自己收');
+assert.match(element('status').textContent, /不是刚才采的那一篇/, '要说清为什么没关');
 tab.id = 7;
 tab.url = PAGE;
 
@@ -414,11 +446,16 @@ await element('close-tab').click();
 assert.deepEqual(removed, [], '按下去一个都不许关');
 hereReply = null;
 
-// (g3) **反过来钉一边:刷新那一问失败不是「新操作」。** 他没换目标、一个候选都没点,
-//      只是这一问连不上 —— 那一次有效的成功不许被丢掉,否则采完之后网络一抖出口就
-//      没了,而那一页正是采集抽屉刚为它开出来的。只按「服务端此刻说做完了」授权的
-//      写法在这里变红。**它同时是 (g6) 那一道的反向钉**:按下去那一刻那一问也失败,
-//      照旧按凭据关得掉 —— 「问不着」和「问着了、答的是还欠着事」是两件事。
+// (g3) **「问不着」在展示上和在按下去那一刻不是一回事 —— 两头都钉。**
+//      他没换目标、一个候选都没点,只是这一问连不上(503、断网、超时)。
+//      - **那颗按钮照旧摆着**:一次有效的成功不许被一次网络抖动丢掉,否则采完之后网络
+//        一抖出口就没了,而那一页正是采集抽屉刚为它开出来的。摆着它什么也关不掉。
+//      - **按下去一个都不许关**:服务端那道否决(这一页又有一件没采完的事)正是靠这
+//        一问送过来的,503 把它一并吞掉 —— 「什么都没变、只是断网」和「已经又发起了
+//        一次重采、偏巧也断网」在弹窗这边长得一模一样。分不清就不许关:拒了是人自己
+//        关一下那个标签,关错了是那一页再也采不成(那个待办只有人站在那一页上才兑现
+//        得了)。**原先这里钉的是反面**(「照旧关得掉」),那是把「没问着」当成了「问
+//        着了、答的是齐了」。
 const MINE = 'https://example.org/posts/still-mine';
 tab.id = 23; tab.url = MINE;
 here = {ok: true, situation: 'absent', page_url: MINE, item: null, intent: null,
@@ -434,8 +471,50 @@ await element('refresh').click();
 assert.equal(element('close-tab').hidden, false, '同一页、同一项操作:这一问失败不许收走出口');
 removed.length = 0;
 await element('close-tab').click();
-assert.deepEqual(removed, [23], '按下去照旧关得掉');
+assert.deepEqual(removed, [], '问不着就不许关 —— 那一道否决正是靠这一问送过来的');
+assert.match(element('status').textContent, /没能跟知识库确认/, '三句话分得清:这一句是「问不着」');
+assert.equal(element('close-tab').disabled, false, '拒了之后那颗按钮要能再按一次');
+
+// (g3b) 上面那一条**为什么必须是拒**:同一个局面下,服务端那边确实又挂上了一件没做完
+//       的事(他在采集抽屉里点过一次「重新采集正文」),只是这一问 503、那句否决送不
+//       过来。弹窗这边看到的和 (g3) 一模一样 —— 所以只要分不清就得拒。
+//       实测形态(真机、真服务端):采完一篇后再为它发起重采,不点「重新确认」直接按
+//       这颗按钮而这一问 503,那一页被关掉了;后端独立查:新请求仍 `pending`、回执为空。
+here = {ok: true, situation: 'fill', page_url: MINE, elsewhere: [],
+        detail: '知识库里有这一条，但正文还缺着。',
+        item: {key: 'kM', kind: 'inbox', title: '刚被要求重采那一篇', url: MINE},
+        intent: {id: 'iM2', key: 'kM', title: '刚被要求重采那一篇', page_url: MINE}};
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '服务端此刻说还欠着事,而这一问失败 —— 更不该关');
 hereReply = null;
+// 这一问通了之后,出口确实该收回:刚才那一拒拒对了。
+await element('refresh').click();
+assert.equal(element('close-tab').hidden, true, '那一问真通了,答的就是「还欠着事」');
+
+// (g3c) **那一问还得有界。** 服务端接了连接却一直不答(卡在维护锁上、磁盘满)时,
+//       `fetch` 自己不会醒,而这一下已经把按钮按住了(`busy`):没有截止时间的话人等到
+//       的是一颗永远按不动的按钮,连「再试一次」都点不了。到点按「问不着」处理 ——
+//       那是拒绝,不是放行。没给信号的写法在这儿会一直挂着,下面那场赛跑把它变成红
+//       (桩把时限压到 150ms,钉的是「有界」不是那个秒数,见 `popup_host.mjs`)。
+tab.id = 25; tab.url = MINE;
+here = {ok: true, situation: 'absent', page_url: MINE, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+await element('refresh').click();
+here = {ok: true, situation: 'complete', page_url: MINE, intent: null, elsewhere: [],
+        item: {key: 'kM', kind: 'rss', title: '刚收下那一篇', url: MINE},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('act').click();
+assert.equal(element('close-tab').hidden, false, '先回到露面那一档');
+hereReply = HANG;
+removed.length = 0;
+const raced = await Promise.race([
+  element('close-tab').click().then(() => 'ended'),
+  new Promise(resolve => setTimeout(resolve, 1500, 'hung'))]);
+hereReply = null;
+assert.equal(raced, 'ended', '服务一直不答时,这一下自己要结束 —— 不许把按钮永远按住');
+assert.deepEqual(removed, [], '到点了也算问不着:一个都不许关');
+assert.equal(element('close-tab').disabled, false, '结束之后那颗按钮要能再按一次');
 
 // (g4) **同一条目上又有一项没做完的采集 —— 这一维只有服务端答得了。** 人一个候选都
 //      没点(身份那一维两头都是空串),他是在采集抽屉里点了一次「重新采集正文」:服务端
