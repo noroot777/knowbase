@@ -16,8 +16,8 @@
   let drawer = null;
   let mask = null;
   let watcher = null;
-  //: 打开它的那块面板留下的回调(见 `openCaptureDrawer`)。
-  let settledCallback = null;
+  //: 打开它的那块面板留下的那两个口子(见 `openCaptureDrawer`)。
+  let closeHooks = {};
   //: 和状态机那边同一个办法:每次打开是新的一代。外壳这边的异步续体是读扩展目录
   //: 那一问和「显示 / 复制配对密钥」—— 它们回来时只问「现在有没有抽屉」是不够的,
   //: 关掉再打开之后那是**另一个**抽屉,旧续体会往新抽屉里写。
@@ -217,18 +217,24 @@
 
   const current = gen => gen === generation;
 
-  //: `onSettled` 可选:抽屉关掉时回叫一次,参数是「这一次开着期间这条变没变、变成
-  //: 了什么」(`window.captureSettled()`,空串 = 什么都没变)。
+  //: `hooks` 可选,两个口子**是两件事:一件无条件、一件要问服务端**,所以不合成一个:
   //:
-  //: **非得有这一下不可**:采集发生在另一个窗口(扩展弹窗)里,打开抽屉的那块面板
-  //: 既收不到回包、也不轮询 —— 人关掉抽屉之后,「问题与待办」里那一行还写着补抓失败
-  //: 的原话、右边还摆着「从浏览器采集」,而这一条此刻已经换了档。
+  //: `onClose()` —— 抽屉关掉了,**同步、无条件**叫一次。打开抽屉的那块面板必须自己
+  //: 重读一遍:采集发生在另一个窗口(扩展弹窗)里,它既收不到回包、也不轮询 —— 人关掉
+  //: 抽屉之后,「问题与待办」里那一行还写着补抓失败的原话、右边还摆着「从浏览器采集」,
+  //: 而这一条此刻已经换了档。这一下是这次关闭的正事,**不许押在网络上**。
+  //:
+  //: `onSettled(note)` —— 「这一次开着期间这条确实采成了」那句话,**只在真有这回事时**
+  //: 叫。它要现问一次服务端(`window.captureSettled()`,见 `browser_capture.js`:关得比
+  //: 一轮轮询快时这边一轮都没看见,而回执早写下了),所以到得比 `onClose` 晚;问出来是
+  //: 空串(没变 / 问不着)就一次都不叫 —— **「空的别报」这条判在这里,不留给每个面板
+  //: 各写一遍**。
   //:
   //: **先关旧的再记新的**:`closeCaptureDrawer()` 自己会把上一位调用方的回调叫掉
   //: (他开的那个抽屉确实结束了),记在前面的话这一下就把新回调当成旧的用了。
-  function openCaptureDrawer(itemKey, onSettled = null) {
+  function openCaptureDrawer(itemKey, hooks = {}) {
     if (drawer) closeCaptureDrawer();
-    settledCallback = onSettled;
+    closeHooks = hooks || {};
     build();
     // Esc 走全站那一条分派链(`workspace.js` 按最上层浮层找这张表),不自己再挂一个
     // keydown —— 两处都关的话,叠在抽屉之上的确认框按一次 Esc 会连抽屉一起带走。
@@ -242,11 +248,15 @@
   //: 变成几条并行的链。
   function closeCaptureDrawer() {
     if (!drawer) return;
-    //: **先读再停**:`stopCapture()` 之后那份状态就不保证还在了。回调放在整段拆
-    //: 完之后再叫 —— 它多半会去刷新底下那一页,而那时抽屉该已经不在 DOM 里了。
-    const tell = settledCallback;
-    const note = typeof window.captureSettled === 'function' ? window.captureSettled() : '';
-    settledCallback = null;
+    //: **先问再停**:那一问开头几行是同步读状态的(`browser_capture.js` 的
+    //: `captureSettled`),`stopCapture()` 之后 `itemKey` 已经是 null、它只会闭嘴。
+    //: 拿到的是个 Promise,后半段落在整段拆完之后。
+    //: **没人听就不问** —— 那句话只有 `onSettled` 一个消费方,没挂它的调用方(以及
+    //: Esc 关掉的那些)不该为此多打一次接口。
+    const hooks = closeHooks;
+    const asked = hooks.onSettled && typeof window.captureSettled === 'function'
+      ? window.captureSettled() : null;
+    closeHooks = {};
     generation += 1;
     laid = null;
     //: 跟轮询一样要停:底下那一页还活着,不断开的话这个已经没了的抽屉还会在每次
@@ -259,7 +269,11 @@
     drawer.remove();
     mask = null;
     drawer = null;
-    if (tell) tell(note);
+    //: 回调放在整段拆完之后再叫 —— 它多半会去刷新底下那一页,而那时抽屉该已经不在
+    //: DOM 里了。两个的先后也是定的:面板重读**不等**那一问,服务端慢一秒不该让底下
+    //: 那一行多旧一秒;报喜迟一点到没有代价。
+    if (hooks.onClose) hooks.onClose();
+    if (asked) Promise.resolve(asked).then(note => { if (note) hooks.onSettled(note); });
   }
 
   window.openCaptureDrawer = openCaptureDrawer;

@@ -270,13 +270,18 @@ async function careRelease(kind, keys, decisions) {
     左边那一行还写着补抓失败的原话、右边还摆着「从浏览器采集」—— 而这一条此刻
     已经换了档。见 `careAfterCapture`。 */
 function careOpenCapture(row) {
-  openCaptureDrawer(row.key, note => careAfterCapture(row.key, note));
+  openCaptureDrawer(row.key, {
+    onClose: () => refreshCare(false),
+    onSettled: note => careAfterCapture(row.key, note),
+  });
 }
 
-/** 采集抽屉关掉之后回到现场。
+/** 采集抽屉关掉之后那句「它去哪了」。列表重读不在这儿 —— 那是 `onClose` 那一下的事。
 
-    **一律重画,哪怕什么都没发生。** 漏刷新的代价是人照着一屏假状态按下一颗按钮;
-    多刷一次的代价只是一次只读请求 —— 而他刚刚才从这块面板点开过抽屉,人就在这儿。
+    **重画无条件,报喜有条件,所以是两个口子**(`onClose` / `onSettled`):漏刷新的
+    代价是人照着一屏假状态按下一颗按钮,而那一下必须同步、不许等抽屉去问服务端;
+    「采成了」那句话要等问出来才知道,到得晚一点没有代价。空串不会叫到这儿来
+    (判在 `capture_drawer.js`)。
 
     **「它去哪了」要说出来,但话不自己编。** 补完正文的那一条当场离开「待决定」:
     `body_exhausted`(重试已停止)→ `ingest_queued`(写入知识库 · 待执行),连分组都
@@ -287,8 +292,6 @@ function careOpenCapture(row) {
     列表上那行小标题同一个口径(`${lane.stage} · ${lane.state}`,见
     `diag_list.careSectionNode`)。问不到就只说做了什么,不猜。 */
 async function careAfterCapture(key, note) {
-  await refreshCare(false);
-  if (!note) return;
   let where = '';
   try {
     const now = await careGet('/items/' + encodeURIComponent(key));

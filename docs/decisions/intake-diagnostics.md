@@ -313,8 +313,10 @@
 - **采集抽屉一关就重读列表,而且那一条去哪了要说一句;右边那一框不许变成空白。**
   这块面板**空闲时不自己刷新**,而「从浏览器采集」补完正文之后那一条当场换了档
   (`body_exhausted` → `ingest_queued`,**连分组都从「待决定」换到「待执行」**)。所以
-  `careOpenCapture` 把一个回调交给 `openCaptureDrawer`,抽屉关掉时回头告诉这一侧
-  (契约在 `browser-capture.md`),这里 `refreshCare(false)` 一次。
+  `careOpenCapture` 把两个口子交给 `openCaptureDrawer`(契约在 `browser-capture.md`):
+  `onClose` 里 `refreshCare(false)` 一次 —— **无条件、也不等抽屉去问服务端**,这块面板
+  对不对全靠它;`onSettled` 才是下面那句去向提示,抽屉问清「这一次真采成了」才会叫到
+  这儿来(空串不会),所以 `careAfterCapture` 里不必再判一次「note 是不是空的」。
   **三件事必须一起做,少一件就是一幕看着像坏了的界面:**
   - **让那一行自然离场,不要留在原档**。它已经不属于这一档了,留着就是面板在说假话;
     而「一条内容此刻在哪一档」的判据只有 `lanes.where` 一份,前端不许就地改档位。

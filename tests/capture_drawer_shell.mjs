@@ -58,6 +58,9 @@ const state = () => ({key: current, title: '文章', url: ITEMS[current], kind: 
 //: 「同时在新标签打开这一篇」真的开出来的那些标签。
 const opens = [];
 let fetches = 0;
+//: 真 = `/target` 那一问当场红(网络断了、服务重启中)。关抽屉那一下要现问一次
+//: 服务端,所以「问不着的时候闭不闭嘴」得问得出来。
+let targetFails = false;
 //: 非空 = 扣住 `/setup` 那一答,好检查首次引导的位置是不是已经定下来了。
 let releaseSetup = null;
 let holdSetup = false;
@@ -98,6 +101,7 @@ const context = vm.createContext({
     if (url.endsWith('/intents') && options.method === 'POST')
       return new Promise((ok, no) => { createGate = {ok, no}; });
     fetches += 1;
+    if (targetFails) throw new Error('读取目标条目失败');
     return state();
   }
 });
@@ -122,9 +126,13 @@ assert.ok(opened > 0, '打开抽屉应当读一次目标条目');
 await tick();
 assert.ok(fetches > opened, '开着的时候应当继续轮询');
 
-// ② 关掉之后一次都不许再打接口。
+// ② 关掉之后一次都不许再打接口。**关掉那一下本身也不许白问**:下面第 ⑩ 条那句
+//    「这一次采成了没有」要现问一次服务端,而这里一个回调都没挂 —— 没人听的时候
+//    连问都不该问。比的是**次数**:只问「还在不在轮询」的话,「每关一次多打一次」
+//    看着跟干净停住一模一样。
 const beforeClose = fetches;
 context.window.closeCaptureDrawer();
+assert.equal(fetches, beforeClose, '没人听那一声时,关掉这一下不该多问一次');
 await tick();
 await tick();
 assert.equal(fetches, beforeClose, '关掉抽屉之后不许再轮询');
@@ -370,50 +378,137 @@ await settle();
 // ⑩ 关掉抽屉时**回头告诉开它的那一方**。开它的那几处(「问题与待办」面板、订阅页)
 //    在空闲时都不自己刷新:不回这一声的话,正文已经补上、那一条已经换了档位,屏幕上
 //    还写着「重试已停止」,人唯一的出路是刷新整页。
-//    回的那句话分两种,**两边都钉**:
-let told = 'untouched';
+//
+//    两个口子**职责不同、能到的时间也不同**,所以分开钉:`onClose` 无条件、同步(底下
+//    那一页正确与否全靠它,不许押在网络上);`onSettled` 只在「这一次真采成了」的时候
+//    叫,而那件事的答案在服务端 —— 关得比一轮轮询(2 秒)快时这边一轮都没看见。
+//
+//    **下面一律比次数,不比有无**:「每次都叫、参数是空串」和「该叫时才叫」在只问
+//    「叫没叫」的用例里长得一模一样,而消费方那边收到就是一句 toast。
+let tells = [];
+let closes = 0;
+const hooks = () => ({onClose: () => { closes += 1; }, onSettled: note => { tells.push(note); }});
+const fresh = () => { tells = []; closes = 0; };
+const receiptOf = id => ({id, receipt: {characters: 900, captured_at: 1.79e12}});
+let asked = 0;
+
+// ⑩a 什么都没发生:那一声一次都不许有。
+fresh();
 context.window.closeCaptureDrawer();
 current = 'k1';
 receipt = null;
-context.window.openCaptureDrawer('k1', note => { told = note; });
+context.window.openCaptureDrawer('k1', hooks());
 await settle();
+asked = fetches;
 context.window.closeCaptureDrawer();
-assert.equal(told, '', '什么都没采就该回一句空的 —— 关掉抽屉本身不是采成了');
-
-// 正文真的补上了(这一轮轮询读回来多出一张回执):这一声必须说得出所以然。
-told = 'untouched';
-context.window.openCaptureDrawer('k1', note => { told = note; });
+assert.equal(closes, 1, '关掉就该让开它的那块面板重读一遍,不问条件、也不等那一问');
+assert.equal(fetches, asked + 1, '有人听的时候,关掉这一下要现问一次服务端');
 await settle();
-receipt = {id: 'rcpt-00000001', receipt: {characters: 900, captured_at: 1.79e12}};
+assert.deepEqual(tells, [], '什么都没采就一声都不该有 —— 关掉抽屉本身不是采成了');
+
+// ⑩b 正文真的补上了,而且这一轮轮询已经读回来了:这一声必须说得出所以然,
+//     **并且不必再问一遍** —— 答案已经在手上。
+fresh();
+context.window.openCaptureDrawer('k1', hooks());
+await settle();
+receipt = receiptOf('rcpt-00000001');
+await tick();
+asked = fetches;
+context.window.closeCaptureDrawer();
+assert.equal(fetches, asked, '轮询已经看见了的事,关掉那一下不必再问服务端');
+await settle();
+assert.equal(tells.length, 1, '补上了就该回一声,而且只一声');
+assert.match(tells[0], /正文/, '那一声要说得清是什么事');
+
+// ⑩c **关得比一轮轮询快的那个窗口**(这一条是这整节的由来)。人在扩展弹窗里点完
+//     回来,随手就把抽屉关了 —— 服务端此刻已经把回执写下了,而这边 2 秒一轮、一轮
+//     都还没轮到。只认「关掉前那次轮询快照」的写法在这里**一声都没有**:正文明明补
+//     上了,「问题与待办」里那一行还写着补抓失败的原话、右边还摆着「从浏览器采集」,
+//     人以为没采成,再点一次。
+fresh();
+receipt = null;
+context.window.openCaptureDrawer('k1', hooks());
+await settle();
+receipt = receiptOf('rcpt-00000002');   // 服务端写下了,故意不 tick:谁都没看见
+asked = fetches;
+context.window.closeCaptureDrawer();
+assert.equal(fetches, asked + 1, '轮询没看见过的,必须现问一次服务端');
+await settle();
+assert.equal(tells.length, 1, '服务端这一刻有新回执,就该回一声');
+assert.match(tells[0], /正文/, '那一声要说得清是什么事');
+
+// ⑩d 反过来钉一边:**打开那一刻就已经在那儿**的回执不算这一次采的。算的话,每次
+//     打开一条早就补过正文的条目、随手关掉,都会报一次「正文已补入原条目」,而其实
+//     什么都没发生 —— 而这块面板上点进来的条目,相当一部分正是已经补过的。
+//     **两条路各钉一次**(轮询那一路和关掉现问那一路,基准都只有一份)。
+fresh();
+receipt = receiptOf('rcpt-00000003');
+context.window.openCaptureDrawer('k1', hooks());
+await settle();
+//: 轮询那一路要**再轮一轮**才问得出东西:只刷一次的话,基线那一道无论写对写错都还
+//: 没被用到(实测把它里头记下的那个回执号删掉 —— 下一轮就会把一张老回执当成新的
+//: —— 这条用例照旧全绿)。
 await tick();
 context.window.closeCaptureDrawer();
-assert.match(told, /正文/, '补上了就该回一句说得清的话');
-
-// 反过来钉一边:**打开那一刻就已经在那儿**的回执不算这一次采的。算的话,每次打开
-// 一条早就补过正文的条目、随手关掉,都会报一次「正文已补入原条目」,而其实什么都
-// 没发生 —— 而这块面板上点进来的条目,相当一部分正是已经补过的。
-told = 'untouched';
-context.window.openCaptureDrawer('k1', note => { told = note; });
 await settle();
-//: 必须**再轮一轮**才问得出东西:只刷一次的话,基线那一道无论写对写错都还没被用到
-//: (实测把它里头记下的那个回执号删掉 —— 下一轮就会把一张老回执当成新的 —— 这条
-//: 用例照旧全绿)。而现实里人也不会在 2 秒之内关掉。
-await tick();
+assert.deepEqual(tells, [], '开抽屉时就在那儿的回执不算这一次的(轮询这一路)');
+
+fresh();
+context.window.openCaptureDrawer('k1', hooks());
+await settle();
+asked = fetches;
+context.window.closeCaptureDrawer();   // 不 tick:走的是关掉现问那一路
+assert.equal(fetches, asked + 1, '这一路确实问过了 —— 否则下一条断言恒绿');
+await settle();
+assert.deepEqual(tells, [], '开抽屉时就在那儿的回执不算这一次的(关掉现问这一路)');
+
+// ⑩e **问不着就不报喜,不猜。** 漏一句提示的代价是人自己再看一眼那一行;认成采成了
+//     的代价是指着一条根本没补上的文章说「正文已补入原条目」。
+//     同时钉住 `onClose` 不受它牵连:底下那一页照旧重读。
+fresh();
+receipt = null;
+context.window.openCaptureDrawer('k1', hooks());
+await settle();
+receipt = receiptOf('rcpt-00000004');
+targetFails = true;
 context.window.closeCaptureDrawer();
-assert.equal(told, '', '开抽屉时就在那儿的回执不算这一次的');
+await settle();
+targetFails = false;
+assert.equal(closes, 1, '那一问红了也不该拖累底下那一页的重读');
+assert.deepEqual(tells, [], '问不着的时候不许报喜');
+
+// ⑩f **连基准都没拿到就关了**(第一轮轮询还在途)。这时候库里那张回执可能是上一次
+//     留下的,跟刚写进去的长得一模一样 —— 没有基准就分不清,所以连问都不必问。
+fresh();
+receipt = receiptOf('rcpt-00000005');
+context.window.openCaptureDrawer('k1', hooks());
+asked = fetches;                        // 故意不 settle:这一次没有基准
+context.window.closeCaptureDrawer();
+assert.equal(fetches, asked, '没有基准时问回来也分不清新旧,不该问');
+await settle();
+assert.deepEqual(tells, [], '没有基准就不报喜');
 receipt = null;
 
-// 再钉一边:**换一条打开时那一声不许串台**。回调是跟着「这一次打开」走的,挂在模块
-// 上只认最后一个的写法会把上一篇那一声回给这一篇的开启方。
-let first = 'untouched';
-let second = 'untouched';
-context.window.openCaptureDrawer('k1', note => { first = note; });
+// ⑩g 再钉一边:**换一条打开时那一声不许串台**,而且上一次那一声要结清。回调跟着
+//     「这一次打开」走,挂在模块上只认最后一个的写法会把 k1 那一声回给 k2 的开启方。
+//
+//     这一条还顺带钉住**那一问的头几行必须是同步的**:k1 的那一问在途时 `startCapture`
+//     已经把模块状态换成 k2 了(基准变成 k2 看到的那张回执,`itemKey` 变成 k2)——
+//     把「读结论、读基准、读 key」挪到 `await` 后面的话,k1 这一声当场消失。
+const first = [];
+const second = [];
+receipt = null;
+context.window.openCaptureDrawer('k1', {onSettled: note => { first.push(note); }});
 await settle();
+receipt = receiptOf('rcpt-00000006');   // k1 开着的时候补上了,没有哪一轮轮询看见
 current = 'k2';
-context.window.openCaptureDrawer('k2', note => { second = note; });
+context.window.openCaptureDrawer('k2', {onSettled: note => { second.push(note); }});
 await settle();
-assert.equal(first, '', '换一条打开 = 上一次那一声当场结清,不许欠着');
+assert.equal(first.length, 1, '换一条打开 = 上一次那一声当场结清,不许欠着');
+assert.match(first[0], /正文/, '结清的那一声说的是 k1 那一次的事');
+assert.deepEqual(second, [], 'k1 那一声不许回给 k2 的开启方');
 context.window.closeCaptureDrawer();
-assert.equal(second, '', '这一次的那一声回给这一次的开启方');
+await settle();
+assert.deepEqual(second, [], 'k2 这一次什么都没采(它进来就看见那张回执),不该有声');
 
 console.log('capture drawer shell: passed');

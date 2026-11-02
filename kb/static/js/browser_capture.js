@@ -36,9 +36,17 @@
   //: **开着那一刻就有的那张回执不算**:抽屉按文章恢复最近一条有效回执,进来就看得
   //: 见上一次的 —— 拿它当「刚刚采完」会让面板每开一次抽屉就报一次喜。所以记一个
   //: 进来那一刻的基准,只有**换了一张**才算数。
+  //:
+  //: **而这个基准只能由轮询推进,结论不能只问轮询。** 轮询 2 秒一轮,人在扩展里点完
+  //: 回来随手就关掉抽屉 —— 那张回执服务端已经写下了,这边一轮都还没看见,于是面板
+  //: 什么也不说,人以为没采成。所以 `settled` 只是**已经看见了的那一半**,交接那一刻
+  //: 还要拿这个基准再问服务端一次(见文件末尾 `captureSettled`)。
   let baselined = false;
   let sawReceipt = '';
   let settled = '';
+  //: 「正文落库了」这句话有三个出口(轮询看见、继续处理之后、关抽屉那一问),**措辞
+  //: 只有一份** —— 面板上报出来的是同一件事,不该因为是哪条路看见的而换说法。
+  const BODY_LANDED = '正文已补入原条目';
 
   async function api(path, options = {}) {
     const response = await fetch(`/api/browser-capture${path}`, {
@@ -129,7 +137,7 @@
   function noteSettled() {
     const id = snapshot?.saved?.id || '';
     if (!baselined) { baselined = true; sawReceipt = id; return; }
-    if (id && id !== sawReceipt) { sawReceipt = id; settled = '正文已补入原条目'; }
+    if (id && id !== sawReceipt) { sawReceipt = id; settled = BODY_LANDED; }
   }
 
   function render() {
@@ -280,7 +288,7 @@
         const result = await api(`/intents/${encodeURIComponent(identity)}/continue`, {method: 'POST', body: '{}'});
         if (!current(gen)) return;
         continued = identity;
-        settled = '正文已补入原条目，导出与索引也已经开跑';
+        settled = `${BODY_LANDED}，导出与索引也已经开跑`;
         element('cap-run-note').textContent = `${result.detail} · 批次 ${result.run}`;
         element('cap-run-note').classList.remove('error');
       } catch (error) {
@@ -343,5 +351,35 @@
   window.stopCapture = stopCapture;
   //: 外壳在关抽屉那一下读它(见上面 `settled` 那段)。空串 = 这一次什么都没变,
   //: 不必报喜。
-  window.captureSettled = () => settled;
+  //:
+  //: **轮询看见过就直接用,没看见的要现问一次。** 「这一次开着期间这条变没变」的答案
+  //: 在服务端,`settled` 只是这边碰巧看见了的那一部分;关得比一轮轮询快(≤2s)时它是
+  //: 空的,而回执早写下了。所以拿**进来那一刻的基准**再问一次 `/target`,只有「现在
+  //: 有一张、且不是进来时那一张」才算这一次采成了。
+  //:
+  //: 三处**必须这么写**:
+  //: ①开头那三行是同步的(`async` 函数体在第一个 `await` 之前同步跑完) —— 外壳拿到
+  //: 这个 Promise 之后紧接着就 `stopCapture()`,人甚至已经开了下一篇,那时 `itemKey`
+  //: 已经是 null、`settled` 和 `sawReceipt` 已经被 `startCapture()` 清成另一条的了。
+  //: **别把这三行挪到 await 后面,也别在它们之前插入任何 await。**
+  //: ②问的是**这个模块自己正盯着的那一条**,不由外壳传 key 进来:同一个问题两处各记
+  //: 一份 key 就会有对不上的那天,而对不上时问出来的是另一篇的回执。顺带钉住了上面那条
+  //: 顺序 —— 真排到 `stopCapture()` 后面去,`itemKey` 已经是 null,这里只会闭嘴。
+  //: ③`baselined` 为假(一轮轮询都没回来过就关了)时**不报喜**:没有基准就分不清
+  //: 「刚写进去的」和「上一次留下的」,而上一次那张长得一模一样。
+  //: 问不着(网络红、服务重启)同样不报喜 —— 漏报一句提示的代价是人自己再看一眼那一行,
+  //: 误报是指着一条没采成的说采成了。
+  //: 回归 `tests/capture_drawer_shell.mjs` ⑩。
+  window.captureSettled = async () => {
+    const known = settled;
+    const base = baselined ? sawReceipt : null;
+    const key = itemKey;
+    if (known) return known;
+    if (!key || base === null) return '';
+    try {
+      const state = await api(`/target/${encodeURIComponent(key)}`);
+      const id = state.saved?.id || '';
+      return id && id !== base ? BODY_LANDED : '';
+    } catch { return ''; }
+  };
 })();

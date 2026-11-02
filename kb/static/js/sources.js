@@ -539,9 +539,9 @@ $('source-list').addEventListener('click', e => {
   // 不重读的话,刚补完正文的那张卡片还挂着「正文缺失」,上面还摆着「从浏览器采集」。
   // 口径同「问题与待办」那一侧(`diag_actions.careAfterCapture`)。
   if (capture) {
-    openCaptureDrawer(capture.dataset.captureItem, note => {
-      renderSourceView();
-      if (note) toast(note, { type: 'ok' });
+    openCaptureDrawer(capture.dataset.captureItem, {
+      onClose: renderSourceView,
+      onSettled: note => toast(note, { type: 'ok' }),
     });
   }
   const entry = e.target.closest('[data-source-key]');
