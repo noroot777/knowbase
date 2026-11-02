@@ -26,7 +26,7 @@ class Intake:
         self.channel = x_channels.channel_of(settings)
         self.callback, self.should_stop = on_progress, should_stop
         self.metrics = Metrics(budget)
-        self.metrics.data['window_capacity'] = capacity.plan(len(sources), self.channel, budget=budget)
+        self.metrics.data['window_capacity'] = capacity.plan(len(sources), self.channel, budget=budget, reader=seconds)
         self.metrics.data['channel'] = 'browser' if self.channel == 'attach' else self.channel
         self.now = datetime.now(timezone.utc)
         self.started = reg.now()
@@ -47,6 +47,12 @@ class Intake:
 
     def over(self, deadline):
         return self.stop() or time.monotonic() + MIN_USEFUL >= deadline
+
+    def budgets(self, reader=None):
+        value = capacity.plan(len(self.sources), self.channel, budget=self.metrics.data['budget_seconds'],
+                              remaining=self.metrics.network_deadline - 5 - time.monotonic(), reader=reader or seconds)
+        self.metrics.data['window_capacity'] = value
+        return value['phase_seconds']
 
     def announce(self, text):
         if self.callback:
@@ -169,7 +175,8 @@ class Intake:
                         fresh[-1][2] <= store.utc(prior['coverage_end'])):
                     continue
             if phase == 'discovery':
-                bound = max(bound, store.utc(x_channels.watermark(source, self.channel)) or bound)
+                marker = store.utc(x_channels.watermark(source, self.channel))
+                bound = max(bound, marker if marker and marker >= bound else self.now - timedelta(days=1))
                 bound = min(bound, self.now)
             quota_seconds = capacity.account_seconds(self.channel, phase, reader=seconds)
             slice_seconds = quota_seconds
@@ -314,8 +321,9 @@ class Intake:
             page.open_page('about:blank')
             self.cool = x_cooldown.of(page)
             self.metrics.data['phases']['startup'] = dict(wall_seconds=time.monotonic() - started)
+            limits = self.budgets()
             for phase in ('discovery', 'history', 'body'):
-                deadline = min(self.metrics.network_deadline - 5, time.monotonic() + capacity.phase_seconds(phase, reader=seconds))
+                deadline = min(self.metrics.network_deadline - 5, time.monotonic() + limits[phase])
                 if self.blocked or self.over(deadline):
                     continue
                 with self.metrics.phase(phase):
@@ -335,7 +343,7 @@ class Intake:
             for phase, timeline in self.timelines.get(source['id'], []):
                 if error := getattr(timeline, 'blocker', None):
                     self.mark_block(source, error, phase)
-        confirmed, usable = set(), set()
+        confirmed, usable, checkpoints = set(), set(), {}
         for source, phase, bound, observed, result, batch_id in self.scans:
             if result.get('error'):
                 continue
@@ -346,6 +354,9 @@ class Intake:
                                      boundary=bound.isoformat(), end=self.now.isoformat(),
                                      coverage_complete=result.get('coverage_complete') is True, batch_id=batch_id):
                         confirmed.add(source['id'])
+                        if (phase in ('discovery', 'combined') and observed and
+                                (result.get('coverage_complete') is True or getattr(result['entries'], 'checkpoint_safe', False))):
+                            checkpoints[source['id']] = observed
                         if result['entries'] or result.get('coverage_complete') is True:
                             usable.add(source['id'])
                             self.observations[source['id']] = blocks.clear(
@@ -395,8 +406,8 @@ class Intake:
             if not read and not entries and not source_error and source['id'] not in self.local:
                 result['skipped'] = reason or '；'.join(phase_notes) or ('已按停止请求中断' if self.stop() else
                                      '本轮未轮到，待下轮' if source['id'] not in self.attempted else '本轮未读到，待下轮')
-            if read and not core_error and not progress.get('blocks', {}).get('discovery') and progress.get('discovery') == 'complete' and progress.get('latest'):
-                result['watermark'] = progress['latest']
+            if not result['pending'] and not source_error and not core_error and source['id'] in checkpoints:
+                result['watermark'] = checkpoints[source['id']]
             self.results[handle] = result
             self.metrics.count('pending', pending)
             self.metrics.count('unconfirmed', progress.get('unconfirmed', 0))

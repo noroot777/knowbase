@@ -20,34 +20,34 @@ from tests.test_x_intake_review_runtime import RuntimeFixture
 
 
 class CapacityMathTests(unittest.TestCase):
-    def test_default_browser_population_does_not_fit_a_daily_five_day_rotation(self):
+    def test_default_browser_population_gets_enough_history_slices_without_a_longer_run(self):
         value = capacity.plan(51, 'browser')
-        self.assertEqual((value['stages']['discovery']['slots'], value['stages']['history']['slots']), (30, 6))
-        self.assertEqual(value['stages']['history']['rounds'], 9)
-        self.assertFalse(value['stages']['history']['fits_daily_window'])
-        text = capacity.warning(value)
-        self.assertIn('51个来源', text)
-        self.assertIn('每轮按配置6个完整账号切片', text)
-        self.assertIn('至少9轮', text)
-        self.assertIn('不保证五天内补齐', text)
+        self.assertEqual((value['stages']['discovery']['slots'], value['stages']['history']['slots']), (25, 11))
+        self.assertEqual(value['stages']['history']['rounds'], 5)
+        self.assertTrue(value['stages']['history']['fits_daily_window'])
+        self.assertEqual(sum(value['phase_seconds'].values()), 445)
+        self.assertEqual(value['phase_seconds']['body'], 25)
+        self.assertEqual(capacity.warning(value), '')
 
     def test_exact_capacity_boundary_and_one_extra_source(self):
-        self.assertTrue(capacity.plan(30, 'browser')['stages']['history']['fits_daily_window'])
-        self.assertFalse(capacity.plan(31, 'browser')['stages']['history']['fits_daily_window'])
+        with patch.dict(os.environ, {'KB_X_HISTORY_SECONDS': '120'}):
+            self.assertTrue(capacity.plan(30, 'browser')['stages']['history']['fits_daily_window'])
+            self.assertFalse(capacity.plan(31, 'browser')['stages']['history']['fits_daily_window'])
 
     def test_attach_and_browser_share_the_same_capacity_contract(self):
         self.assertEqual(capacity.plan(51, 'attach'), capacity.plan(51, 'browser'))
 
     def test_feedgrab_uses_its_combined_phase_and_account_quota(self):
         stage = capacity.plan(51, 'feedgrab')['stages']['combined']
-        self.assertEqual((stage['slots'], stage['account_seconds'], stage['rounds']), (9, 25, 6))
-        self.assertFalse(stage['fits_daily_window'])
+        self.assertEqual((stage['slots'], stage['account_seconds'], stage['rounds']), (11, 25, 5))
+        self.assertTrue(stage['fits_daily_window'])
 
     def test_global_deadline_reduces_later_phase_capacity(self):
         value = capacity.plan(51, 'browser', budget=100)
-        self.assertEqual(value['stages']['discovery']['seconds'], 75)
-        self.assertEqual(value['stages']['history']['slots'], 0)
-        self.assertIn('容不下一个完整切片', capacity.warning(value))
+        self.assertEqual(value['phase_seconds'], dict(discovery=8, history=42, body=25))
+        self.assertEqual(value['stages']['history']['slots'], 2)
+        self.assertTrue(capacity.limited(value))
+        self.assertIn('预算容量不足', capacity.warning(value))
 
     def test_configured_budgets_and_account_quotas_are_not_duplicate_constants(self):
         with patch.dict(os.environ, {'KB_X_HISTORY_SECONDS': '220', 'KB_X_ACCOUNT_SECONDS': '20'}):
@@ -55,7 +55,7 @@ class CapacityMathTests(unittest.TestCase):
         self.assertEqual(value['stages']['history']['slots'], 11)
         self.assertTrue(value['stages']['history']['fits_daily_window'])
         self.assertNotIn('历史追补预算容量不足', capacity.warning(value))
-        self.assertIn('不是断点续页', capacity.warning(value))
+        self.assertEqual(capacity.warning(value), '')
 
     def test_a_subscription_floor_narrower_than_five_days_reduces_capacity(self):
         value = capacity.plan(30, 'browser', window=timedelta(days=1))
@@ -110,7 +110,7 @@ class CapacityDeliveryTests(RuntimeFixture):
     def test_a_recent_subscription_floor_and_future_watermark_still_bound_discovery(self):
         with reg.db() as conn:
             conn.execute('UPDATE subscriptions SET history_floor=? WHERE id=?',
-                         ((self.now - timedelta(hours=36)).isoformat(), self.source['id']))
+                         ((self.now - timedelta(hours=12)).isoformat(), self.source['id']))
         source = reg.subscription('social', self.source['id'])
         seen = []
         def scan(page, handle, floor, **options):
@@ -118,7 +118,7 @@ class CapacityDeliveryTests(RuntimeFixture):
                 seen.append(floor)
             return [], ''
         self.run_intake(scan, [source])
-        self.assertLess(abs((seen[0] - (self.now - timedelta(hours=36))).total_seconds()), 1)
+        self.assertLess(abs((seen[0] - (self.now - timedelta(hours=12))).total_seconds()), 1)
         source['config'] = json.dumps(x_channels.watermark_patch('browser', (self.now + timedelta(days=1)).isoformat()))
         before = self.now
         self.run_intake(scan, [source])
@@ -139,10 +139,12 @@ class CapacityDeliveryTests(RuntimeFixture):
             care = client.get('/api/intake-care?kind=social')
         self.assertEqual((response.status_code, care.status_code), (200, 200))
         state = response.json()['sources'][0]['x_intake']
-        self.assertIn('不是断点续页', state['coverage_warning'])
+        self.assertFalse(state['capacity_limited'])
+        self.assertEqual(state['coverage_warning'], '')
         issue = next(row for row in care.json()['sources'] if row['problem'] == 'x_intake_history')
         self.assertIn('不保证五天内补齐', issue['advice'])
-        self.assertIn('不是断点续页', issue['evidence'])
+        self.assertIn('尚未读到五天下界', issue['evidence'])
+        self.assertNotIn('不是断点续页', issue['evidence'])
         self.assertEqual(store.progress(self.source)['covered'], prior['covered'])
 
     def test_capacity_counts_the_whole_enabled_automatic_population_after_a_targeted_run(self):
@@ -160,8 +162,9 @@ class CapacityDeliveryTests(RuntimeFixture):
         source = next(row for row in overview.json()['sources'] if row['id'] == self.source['id'])
         state = source['x_intake']
         self.assertEqual(state['window_capacity']['sources'], 51)
-        self.assertIn('至少9轮', state['coverage_warning'])
-        self.assertIn('每日一次无法在5天窗口内轮遍', state['coverage_warning'])
+        self.assertEqual(state['window_capacity']['stages']['history']['slots'], 11)
+        self.assertFalse(state['capacity_limited'])
+        self.assertEqual(state['coverage_warning'], '')
         problem = next(row for row in care.json()['sources'] if row['source_id'] == self.source['id'] and row['problem'] == 'x_intake_history')
         scope = actions.scope_of('social', [], problem=problem)
         self.assertEqual(scope['source_id'], self.source['id'])
@@ -185,6 +188,8 @@ class CapacityDeliveryTests(RuntimeFixture):
         with patch.object(capacity, 'schedule_notice', return_value='日报未安排自动同步大V'):
             store.statuses([source])
         self.assertEqual(source['x_intake']['discovery'], 'unattempted')
+        self.assertFalse(source['x_intake']['capacity_limited'])
+        self.assertFalse(source['x_intake']['issues'])
         self.assertIn('未安排自动同步', source['x_intake']['coverage_warning'])
         with reg.read_db() as conn:
             self.assertEqual(conn.execute('SELECT count(*) FROM x_intake_sources').fetchone()[0], 0)
@@ -195,7 +200,7 @@ class CapacityRendererTests(unittest.TestCase):
     def test_capacity_warning_is_rendered_and_escaped(self):
         path = Path(__file__).resolve().parents[1] / 'kb/static/js/x_intake_status.js'
         script = "const fs=require('fs');global.esc=s=>s.replaceAll('<','&lt;');eval(fs.readFileSync(process.argv[1],'utf8'));"
-        script += "const html=xIntakeStatus({x_intake:{discovery:'partial',coverage_warning:'预算容量不足<51，不保证五天内补齐'}});"
+        script += "const html=xIntakeStatus({x_intake:{discovery:'partial',capacity_limited:true,coverage_warning:'预算容量不足<51，不保证五天内补齐'}});"
         script += "if(!html.includes('预算容量不足&lt;51，不保证五天内补齐')||html.includes('预算容量不足<51'))process.exit(1);"
         result = subprocess.run(['node', '-e', script, str(path)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)

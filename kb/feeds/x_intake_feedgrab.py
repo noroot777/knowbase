@@ -13,8 +13,9 @@ from kb.youtube.faults import local_fault
 def run(intake):
     intake.metrics.data['cursor'] = 'feedgrab_bounded_rescan'
     intake.metrics.data['timeline_phases_separable'] = False
+    limits = intake.budgets(reader=seconds)
     with intake.metrics.phase('discovery'):
-        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + capacity.phase_seconds('discovery', reader=seconds))
+        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + limits['discovery'])
         sources = intake.ordered('discovery')
         for source in sources:
             if intake.over(deadline):
@@ -55,7 +56,7 @@ def run(intake):
                 intake.local_error(source, error, '发现')
     intake.metrics.data['phases']['history'] = dict(wall_seconds=0, shared_with='discovery')
     with intake.metrics.phase('body'):
-        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + capacity.phase_seconds('body', reader=seconds))
+        deadline = min(intake.metrics.network_deadline - 5, time.monotonic() + limits['body'])
         for source, task in intake.pending_jobs():
             if intake.over(deadline):
                 break

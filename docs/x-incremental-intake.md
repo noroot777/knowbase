@@ -13,8 +13,10 @@
 
 ## 三阶段，共享会话
 
-1. **时间线发现**：下界取五天地板、订阅历史下界与已确认水位的较新值，最多夹到本轮启动时刻；不额外限制为最近一天。
+1. **时间线发现**：使用五天窗口内有效水位；首次或过期水位回退最近一天，同时服从五天地板与订阅更近下界，最多夹到本轮启动时刻。
    账号切片按当前剩余发现预算和未轮到数量缩小；先保存 ID、URL、预览及正文欠账，不当场串行补所有长推。
+   安全部分发现完成批次确认后，可以本批实际最新观测推进热数据检查点；这不是连续覆盖证明，未读历史仍归追补。
+   身份证据被拒、核心/本机错误、中断或未确认候选不能授权推进，历史阶段的 latest 不能代替发现观测。
 2. **历史追补**：只核对最近五天尚未确认的覆盖。复用旧“连续三条本人旧推”的边界证明，置顶/旧转推不能冒充到底。
    当前没有经实测可重放的原生 cursor，故降级为从顶部的有界 DOM 重扫，并保留历史缺口。
    **持久候选队列可恢复，不等于远端分页游标可恢复**；每轮从顶部尽力重扫、不保证五天内补齐，
@@ -58,25 +60,30 @@
 
 ## 预算与限流
 
-默认整轮预算 480 秒，先保留 30 秒收尾（小预算取20%）；发现/历史/正文分别最多 240/120/120 秒，
-共享提前后的联网截止，不是三个阶段都能用满。关闭另保留 5 秒，不挤占那份本地收尾窗口。
+默认整轮预算 480 秒，先保留 30 秒收尾（小预算取20%）及 5 秒关闭。阶段共享余下445秒，
+发现基础上限240秒、历史基础120秒、正文上限120秒；历史默认上限按来源数适配，再为正文保留一个25秒切片。
+例如51来源为发现200秒、历史220秒、正文25秒，不是三个阶段都能用满基础上限。
 已确认持久成品的投递只有本地事务，不再被联网截止拒绝；即使关闭超时跨过总截止仍投递，超支如实记录。
 维护锁和队列 SQLite 写锁不长期等：拿不到立即报本机待续，不把 15 分钟维护锁等待塞入预算。
 CDP 命令受当前切片截止约束；关闭命令必须能释放自有资源。操作系统/关闭本身不可硬实时中止，
 `overrun_seconds` 如实记录超时尾部，不把它伪装成零，不承诺 51 个账号都在八分钟完成。
 
 环境变量（秒）：`KB_X_LOCAL_SECONDS`（480）、`KB_X_DISCOVERY_SECONDS`（240）、
-`KB_X_HISTORY_SECONDS`（120）、`KB_X_BODY_SECONDS`（120）、`KB_X_ACCOUNT_SECONDS`（发现 8/历史 20）、
+`KB_X_HISTORY_SECONDS`（未设置时按来源数适配，至少120）、`KB_X_BODY_SECONDS`（120）、`KB_X_ACCOUNT_SECONDS`（发现 8/历史 20）、
 `KB_X_BODY_ITEM_SECONDS`（25）、`KB_X_FEEDGRAB_ACCOUNT_SECONDS`（25）。
 这些是上限，不能借某一阶段调大越过全局截止。
 
 窗口与预算的运行时关系由 `x_intake_capacity` 统一计算，状态查询按全量启用且无专用 RSS 的自动 X 来源计数，
-不因本轮只点名一个来源而缩小池子。先扣收尾与关闭预留，后阶段再扣前阶段配置上限；完整切片数取预算/账号时限的整数下界。
-默认51来源的发现/历史为每轮30/6个完整切片，历史至少9轮，每日一次不能在五天内轮遍；feedgrab 为9个、至少6轮。
-卡片及历史问题证据展示不足的数字，并明确顶部重扫不是可续游标、不能保证补齐；即使容量足够，也未证明高频账号能扫到底。
+不因本轮只点名一个来源而缩小池子。默认历史按 `max(120, ceil(来源数/窗口天数)×账号时限)` 反算，
+在共享截止内先保留至少一个发现切片和一个正文切片。完整切片数取预算/账号时限的整数下界；启动后按实际余量重算，
+优先保留历史和正文配额。运行摘要记录本轮目标的实际分配，状态页预测全池轮转，两者都使用调用方的配置读取口。
+默认51来源的发现/历史为每轮25/11个完整切片，历史最多5轮；feedgrab combined 为11个、最多5轮。
+显式配置 `KB_X_HISTORY_SECONDS=120` 仍限制为6切片/9轮，不以自适配覆盖用户配置。
+卡片仅在 `capacity_limited === true` 时展示容量不足数字；历史问题要求已尝试且确有 gap 或结构化容量不足。
+免责声明留在真实历史问题的建议，不参与判据；容量充足并不证明高频账号能扫到底，也不把顶部重扫说成可续游标。
 日报 `enabled && sync && channels.includes('social')` 才提供每日自动机会；停用或配置不可读时另说明机会未安排/未知，
 手动同步频率未知。`source_types.interval_minutes` 已退役，不能据此许诺每天自动追补。
-尚无持久进度的来源只读显示风险，不写假进度；已确认完整覆盖的来源不新增当前历史欠账。
+尚无持久进度的来源只读显示“尚未轮到”，不会因调度说明或免责声明生成问题或假进度；已确认完整覆盖不新增当前历史欠账。
 
 沿用同会话 45→90→180 秒冷却：时间线、详情和 Article 浏览器后路共用闸门。
 启动接口限流可排尾有限重试；剩余时间不够“等完 + 至少两秒有效工作”则直接留待下轮，不把尾部预算睡光。
@@ -821,6 +828,8 @@ collect、持久队列、批次确认、事务及HTTP接口均为真实实现。
 
 ## sfpeNajIiuqe 首轮：五天窗口与容量约束（2026-11-01）
 
+以下记录首轮快照；发现下界、默认容量与问题判据已由后面的二轮修复替代，不能当作当前契约。
+
 本轮基线 `f548e99650c84b03b9446250200c140c5c3ff46a`，完整读取本审查轮311行报告，接受唯一阻断类问题。
 按报告2.4第三条安全出路修复：**运行时计算容量，容量不足时撤回自动补齐承诺**，不是宣称51账号已经能在五天内全覆盖。
 不延长480秒总预算、不造原生 cursor、不用部分读数冒充连续覆盖，不改非阻断项或通用调度模块。
@@ -914,3 +923,107 @@ collect、候选/批次、确认、事务和API使用真实实现；未运行任
 未执行本轮未修改的runtime/phase_delivery/outcomes/delivery_verdict/default_path/其它X与历史套件或整套回归，
 统一留验收前置；不将54项或本轮冒烟称作全族通过。未验证真实51账号吞吐、X风控、登录态、模型或生产数据，
 没有实现可恢复原生cursor或保证高频来源五天覆盖。报告中其余非阻断项保留，不自行追加审查轮次或执行验收。
+
+## sfpeNajIiuqe 二轮：可达发现、事实判据与实际轮转（2026-11-02）
+
+完整读取390行二轮报告，接受三项阻断，基线 `308731de78e98869ae261717677d14c52b3f8dfa`。
+此次不再仅撤回补齐承诺，而是选择报告第三项允许的**按来源数反算阶段预算**方案；不扩大八分钟总预算，
+不声称实现原生游标或任意活跃度下的完整覆盖。其余非阻断项不扩入本轮。
+
+### 根因与对应修复
+
+1. **发现机会不再必须证明整段五天历史。** 首次/过期水位回退一天；有效三天水位仍可发现两天前内容，
+   来源更近下界与未来水位上界仍生效。真实 DOM 扫描器在无来源拒绝、无页面核心错误、无中断时交付
+   `checkpoint_safe`。会话收尾及批次确认成功后，安全部分发现可用本批最新实际观测推进热数据检查点，
+   不能借历史 latest 推进。它不是最老扫描位置或连续覆盖证明，部分扫描仍不写 `covered/coverage_end`；
+   剩余历史缺口保留。核心/本机错误、未确认候选、来源真实失败继续冻结水位。
+2. **问题行只看结构化事实。** `capacity_limited` 来自阶段 `fits_daily_window is False`，
+   历史问题统一为 `attempted && (gap || capacity_limited === true)`；卡片也只认字面布尔值true。
+   `warning()` 不再无条件拼免责声明，调度文字本身不制造问题；未尝试来源没有假缺口或假失败。
+   免责声明留在真实历史问题的 advice，真实历史缺口和连接错误继续独立可见。
+3. **默认51来源的预算实际能轮转。** 先扣30秒收尾和5秒关闭，历史默认
+   `max(120, ceil(51/5)×20)=220` 秒，留一个25秒正文切片，发现得到200秒。
+   发现25个完整8秒切片、历史11个完整20秒切片，合445秒；历史轮转上界从9轮降至5轮。
+   feedgrab combined 默认275秒、11个25秒切片、5轮。启动耗时从实际余量扣除：启动15秒时
+   发现185/历史220/正文25秒。显式历史120秒仍为6切片/9轮并诚实报风险；小预算不凭空扩容。
+   计划和实际分配共用同一个读取口；冷却、启动更久或高频账号深度仍可能不足，不能从切片容量推出完整性。
+
+### 本轮限定测试与静态检查
+
+仅执行本轮实质修改的 `tests.test_x_intake`（36）、`tests.test_x_intake_capacity`（18）及
+新增 `tests.test_x_intake_stage_capacity`（13），共67项；首次登记 `yuqPkZkfaXn9`，
+实际日志 `Ran 67 tests in 5.652s / OK`，退出0、无跳过。
+日志：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/regression/yuqPkZkfaXn9.log`，
+SHA256 `02767af19708ec398e6b69a661b6557715c7cd4aec31174a6b90c2c991923462`。
+
+新增契约包括真实 `_harvest_one` 三轮：旧三天水位首轮partial、安全确认后推进，后两轮complete而历史gap仍在；
+首次一天可完成、来源拒绝不授权推进、未确认批次不推进；51全池只点名一个时其余50不生问题；
+五次真实collect、51账号扫描每次用满8/20秒切片，在每轮445秒内轮转全部账号，各有两天前内容实际落库，
+最终51条。另验证显式上限、启动预留、注入读取口及真实Node渲染布尔判据。
+已有水位阶段分离断言恢复为发现下界晚于历史；来源更近下界用12小时夹具严格验证，未放松历史完整证明。
+
+登记的未过滤原始命令（cwd为本任务worktree）：
+
+```sh
+cd /Users/fjh/code/knowledge-base/.worktrees/J45OI3nIhEEf
+env KB_DATA_DIR=/private/tmp/kb-J45OI3nIhEEf-x-sfpe2-validation/data KB_VAULT_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-sfpe2-validation/vault KB_VIDEOS_ROOT=/private/tmp/kb-J45OI3nIhEEf-x-sfpe2-validation/videos HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1 /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_x_intake tests.test_x_intake_capacity tests.test_x_intake_stage_capacity -v
+```
+
+9个Python文件Ruff、AST/内存编译、JS `node --check`、`git diff --check` 均通过。
+10个代码/测试文件均不超过700行（`x_browser.py`恰700），未安装依赖或修改格式配置。
+证据根：`/Users/fjh/code/harness/data/runs/J45OI3nIhEEf/x-intake-review-sfpe-2/`。
+测试前 `tested-code.json` SHA256：`c352241978932299343ea537372d6c4357418cbfa154734a3596cdf87f6c8d28`。
+
+| 文件 | SHA256 |
+|---|---|
+| `kb/feeds/x_browser.py` | `f0c36844dbac3a9ab14ba8bc6197d38a3218f4b1ae9ff42b27e92aa4c7407b91` |
+| `kb/feeds/x_intake.py` | `acf29cc916d36dee13f39da58b57979d2860c40e0e13e338ec9f5a40ddaab4a5` |
+| `kb/feeds/x_intake_capacity.py` | `11fc4497fdb97b85ef1d51752383d5fbb82b4b41217d2ef8269a1168699ded99` |
+| `kb/feeds/x_intake_feedgrab.py` | `934dd20c8f0f9050ebc9e226a88c2487b581230dbd19d00288d4963d42bd754e` |
+| `kb/feeds/x_intake_store.py` | `b85f40038b464ceb329842b3fd1f59b15d757d09a36f2dda4b5e512c5249ffd4` |
+| `kb/feeds/x_intake_diagnostics.py` | `bc9b342ec7648687265b827f894afbeda86e3f3fc52f9f26064745ad2d030536` |
+| `kb/static/js/x_intake_status.js` | `49627ea804f665c3cbe4d6219d9aa782273fe1511b60a7a460b1e981e9438189` |
+| `tests/test_x_intake.py` | `53cfbfb8bf01f0063682e8517bcfa8f5dc2c25bd45d07330798aaf30c6e19916` |
+| `tests/test_x_intake_capacity.py` | `8d6903b1ff95b28916f289dc84de9a1f9dd4748da09ec0307aa70744d47f46be` |
+| `tests/test_x_intake_stage_capacity.py` | `9370e9b0b8f70cfb0e85cb7de8538384a290f345a3f20feb34e26eb36b967009` |
+
+### 隔离 collect、API 与可见后果
+
+本轮新建 `serve.py` / `browser-smoke.py` / `page.mjs`，全新临时KB、导入server前禁调度器、阻断外网socket，
+只替代远端X会话、DOM传输、readiness和冷却；真实扫描器、候选批次、确认、outbox、collect存盘及API不替代。
+
+- 51启用自动来源另加停用/RSS对照共53，实际访问4个，其余47从未尝试且没有持久进度行。
+  旧三天水位真实扫描三轮：partial→complete→complete，首轮10条、后两轮去重0条；发现检查点推进至实际最新观测，
+  首轮partial的 `covered/coverage_end`仍空，后续只证明近期区间，历史gap仍保留。
+  首次和健康各5条，共20条真实入库、API全部可读、所有已确认outbox清空；健康有完整历史证明而无欠账。
+  真发现连接故障独立失败、保留原话和退避，不被其它来源成功结清。
+- 清内存缓存后，默认全池容量11切片/5轮、`capacity_limited=false`，警告为空；47个未尝试来源问题数0。
+  显式历史120秒的真实API快照为6切片/9轮且风险为真，但未尝试来源仍无问题；默认只有3条真实历史缺口和1条连接失败。
+  不靠文案拼接或初始化写入维持这些结果。
+- health/overview/items/intake-care四接口均200，24路并发实际HTTP GET全200。
+  三个历史问题的scope仍绑定单source/rev/sig，不含extract，未执行重试或动作。
+- 真实页面显示20条内容；5张对照卡分别是发现完成但历史未完、首次发现完成、真实连接失败、尚未轮到、完整覆盖。
+  未尝试卡没有免责声明，容量足够的卡不出现容量警告；历史详情保留真实原话和建议，连接详情保留原始故障。
+  `feed.png`、`sources.png`、`care-history.png`、`care-failure.png`均已实际查看；JS异常、页面/详情横向溢出、
+  外域或非GET请求均0。
+
+证据为 `rounds-evidence.json`、`scan-bounds.json`、`database-evidence.json`、`api-{summary,overview,diagnostics}.json`、
+`api-capped-{overview,diagnostics}.json`、`http-evidence.json`、`page-evidence.json`及截图。
+冒烟夹具两次更正：失败ID应为字符串；24小时边界包含整点，预期条数从误算18改为实际20。
+浏览器夹具一次更正：失败原话按既有UI折叠，卡片验状态、详情仍严格验原话。
+产品未因此改动；失败日志、对应清理及原因保留在 `validation-history.json`，不将失败尝试隐去。
+
+### 浏览器降级、资源清理与覆盖留白
+
+本轮真实新尝试扩展具名会话“🔎 大V阶段与容量二轮验证”，显式 `visible:false`，创建前返回
+`Capability is not available: visibility`，未移除后台限制重试。
+随后降为独立临时profile的chrome-headless-shell，全程无头、仅本机GET；不接触用户Chrome/CDP/普通标签、
+cookie或真实X，不激活窗口、不切换标签。仅筛选本机列表和打开详情，未点同步/重试/保存/登录/外链。
+浏览器96553及profile已清；首次浏览器89516也已清。服务76042正常停止、临时KB根删除，48999无监听；
+两次失败夹具服务63037/68800亦正常退出且临时根已删。见 `extension-attempt.json`、`browser-channel.json`、
+`browser-cleanup.json`、`server-cleanup.json`以及first/second清理记录。
+
+未运行本轮未修改的runtime/phase_delivery/outcomes/delivery_verdict/default_path及其它X/全仓回归，留验收前置；
+不把67项或本轮冒烟称作全族通过。未验证真实X登录态、风控、51个真实账号吞吐或模型/生产数据。
+没有伪造可恢复原生cursor；深时间线仍可能扫不完，完整证明口径不变。报告其余非阻断项与通用来源连接分组文案保留，
+不擅自增加复审轮次或执行验收。最终提交身份及同范围最终HEAD登记结果记录在外部 `commit-evidence.json`。

@@ -87,7 +87,7 @@ class WindowAndOutboxTests(IntakeBase):
 
         self.run_intake(scan, [source])
         self.assertTrue(all(floor >= self.now - timedelta(days=5, seconds=2) for floor in floors))
-        self.assertEqual(floors[0], floors[-1])
+        self.assertGreater(floors[0], floors[-1])
 
     def test_expired_work_is_not_success_or_deletion(self):
         self.prepare()

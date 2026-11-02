@@ -80,7 +80,7 @@ def issues(state):
             result.append(dict(kind=kind, count=count, evidence=evidence,
                                retryable=field != 'expired'))
     attempted = state.get('discovery') != 'unattempted' or state.get('history_at', 0) > 0
-    if state.get('coverage_warning') or state.get('gap') and attempted:
+    if attempted and (state.get('gap') or state.get('capacity_limited') is True):
         evidence = '；'.join(filter(None, [state.get('gap'), state.get('coverage_warning')]))
         result.append(dict(kind='x_intake_history', evidence=evidence, retryable=True))
     return result
