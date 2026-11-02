@@ -32,7 +32,7 @@ class TranslationOutput(YouTubeFixture):
         with self.assertRaises(ValueError):
             json_output.object_payload('以下是结果：' + answer, answer)
 
-    def test_technical_narrative_is_not_blocked_by_a_chinese_character_ratio(self):
+    def test_technical_narrative_uses_source_bound_structure_before_the_shared_language_ratio(self):
         cases = (
             ('okay so first you do pip install -U yt-dlp and then pip install -r requirements.txt '
              'after that uv sync --frozen and uv run pytest -q, and finally pnpm add drizzle-orm '
@@ -96,16 +96,23 @@ class TranslationOutput(YouTubeFixture):
                     self.assertEqual(expected, notes.translate(source, self.selected, 10**10, lambda: False))
                 call.assert_called_once()
         quote = 'the server must respond with a valid JSON object containing the field name and the field value'
-        source = 'The spec says: "' + quote + '".'
-        value = '规范原文写的是：“' + quote + '”。'
+        source = ('The author describes the implementation constraints, the deployment plan, the rollout schedule, '
+                  'and the independent verification process. The spec says: "' + quote + '". '
+                  'The team measures latency and records every failure, then verifies the result '
+                  'against the published requirements.')
+        value = '作者说明实现约束、部署计划与独立核验流程。规范原文写的是：“' + quote + '”。团队记录延迟与失败并核对要求。'
         self.assertEqual(value, translation.render(source, json.dumps({'translations': [value]})))
+        self.assertEqual(value, translation.unit_output(source, 0, json.dumps({'translations': [value]})))
         with self.assertRaises(translation.LanguageError):
             translation.render('The author describes the server.', json.dumps({'translations': [value]}))
         source = 'The spec says: "' + (quote + ' ') * 12 + '".'
         values = [unit['text'].replace('The spec says:', '规范原文写的是：') for unit in translation.units(source)]
         self.assertGreater(len(values), 2)
-        rendered = translation.render(source, json.dumps({'translations': values}))
-        self.assertIn((quote + ' ') * 10, rendered)
+        with self.assertRaises(translation.LanguageError):
+            translation.render(source, json.dumps({'translations': values}))
+        translated = ['规范要求服务器返回含字段名和字段值的有效对象。'] * len(values)
+        rendered = translation.render(source, json.dumps({'translations': translated}))
+        self.assertNotIn(quote, rendered)
 
     def test_translated_names_do_not_share_the_native_input_script_gate(self):
         for name in ('ソフトバンク', '삼성전자', 'ｿﾌﾄﾊﾞﾝｸ'):
@@ -167,8 +174,79 @@ class TranslationOutput(YouTubeFixture):
         with patch.object(notes, 'call') as call:
             self.assertEqual(source, notes.translate(source, self.selected, 10**10, lambda: False))
             call.assert_not_called()
-        self.assertTrue(translation_language.valid('先核对 ' + ' '.join(['token'] * 10) + '，再使用。', [], source))
-        self.assertFalse(translation_language.valid('先核对 ' + ' '.join(['token'] * 11) + '，再使用。', [], source))
+        self.assertTrue(translation_language.valid('先完整核对所有参数 ' + ' '.join(['token'] * 10) + '，再独立验证后使用。', [], source))
+        self.assertFalse(translation_language.valid('先完整核对所有参数 ' + ' '.join(['token'] * 11) + '，再独立验证后使用。', [], source))
+
+    def test_comma_separated_english_with_a_chinese_opening_is_not_a_translation(self):
+        tail = ('Then we move on to the second part, which covers the deployment story, '
+                'and after that we look at the rollout, with the numbers from last quarter, '
+                'and finally we close with the roadmap, which the team has already published, '
+                'so you can read it yourself, if you want the full detail, and that is all for today.')
+        source = 'Welcome back to the channel. ' + tail
+        self.assertEqual(1, len(translation.units(source)))
+        for value in ('欢迎回到本频道。' + tail, tail + '。好'):
+            output = json.dumps({'translations': [value]})
+            with self.subTest(value=value):
+                self.assertEqual('en', text_language(value))
+                with self.assertRaises(translation.LanguageError):
+                    translation.render(source, output)
+                with self.assertRaises(translation.LanguageError):
+                    translation.unit_output(source, 0, output)
+                with patch.object(notes, 'call', return_value=output) as call, \
+                        self.assertRaises(translation.LanguageError):
+                    notes.translate(source, self.selected, 10**10, lambda: False)
+                self.assertEqual(2, call.call_count)
+
+    def test_quotes_are_bounded_source_evidence_not_unlimited_translation_exemptions(self):
+        quote = ('We are going to ship the new runtime next quarter and the migration guide will land '
+                 'at the same time so that everyone can upgrade without downtime.')
+        unmatched = ('He opened with "a quick note on the rollout before we start and then the team '
+                     'walked through every number from last quarter without stopping once" and then moved on.')
+        for source in ('"' + quote + '"', 'The spec says: "' + quote + '".', unmatched,
+                       'The spec says: "' + quote * 3 + '".'):
+            self.assertEqual([], translation_language.quote_spans(source))
+            for prefix in ('', '好。'):
+                output = json.dumps({'translations': [prefix + unit['text'] for unit in translation.units(source)]})
+                with self.subTest(source=source, prefix=prefix), self.assertRaises(translation.LanguageError):
+                    translation.render(source, output)
+        quote = 'the server must respond with a valid JSON object containing the field name and the field value'
+        source = ('The author describes implementation constraints and independent verification. ' * 4 +
+                  'The spec says: "' + quote + '".')
+        spans = translation_language.quote_spans(source)
+        self.assertEqual([quote], [source[start:end] for start, end in spans])
+        for value in ('"' + quote + '".', '说明：“' + quote + '”' + (' "' + quote + '"') * 4):
+            with self.subTest(value=value):
+                self.assertFalse(translation_language.valid(value, [], source))
+                self.assertFalse(translation_language.chinese_output(value, source))
+        value = '作者要求明确记录实现约束，并独立核验。规范写道：“' + quote + '”。'
+        self.assertTrue(translation_language.valid(value, [], source))
+        self.assertTrue(translation_language.chinese_output(value, source))
+        source = source.replace('"' + quote + '"', '“' + quote + '”')
+        self.assertEqual(1, len(translation_language.quote_spans(source)))
+        self.assertTrue(translation_language.chinese_output(value, source))
+        source = ('Reviewers independently verify implementation constraints before deployment ' * 5 +
+                  'The spec says: "' + quote + '". ' +
+                  'Independent reviewers record every failure and compare the results. ' * 3)
+        blocks = [unit['text'] for unit in translation.units(source)]
+        contexts = translation_language.contexts(source, blocks, quoted=True)
+        self.assertEqual(2, sum(bool(context) for context in contexts))
+        values = [('作者要求独立核验部署结果。' + ' '.join(context) if position == 0 else
+                   ' '.join(context) + '作者要求独立核验部署结果。') for position, context in enumerate(contexts)]
+        self.assertIn(quote, translation.render(source, json.dumps({'translations': values})))
+        for position, value in enumerate(values):
+            self.assertEqual(value, translation.unit_output(source, position, json.dumps({'translations': [value]})))
+
+    def test_source_bound_flags_and_identifiers_never_swallow_surrounding_prose(self):
+        source = 'Use packr add package_name --frozen before independently reviewing every generated change.'
+        spans = [source[start:end] for start, end in translation_language.literal_spans(source)]
+        self.assertEqual(['package_name', '--frozen'], spans)
+        self.assertTrue(translation_language.valid('使用 packr add package_name --frozen 后独立核验所有生成的修改。',
+                                                    spans, source))
+        for value in (source, '好。' + source,
+                      '好。package_name --frozen then we deploy, after that we record results, and move on.'):
+            with self.subTest(value=value):
+                self.assertFalse(translation_language.valid(value, spans, source))
+        self.assertFalse(translation_language.chinese_output('好。' + 'invented_identifier_' * 10, source))
 
     def test_non_chinese_cjk_narrative_must_be_translated_not_echoed(self):
         sources = ('今日は新しい技術を紹介します。状態管理と描画を分離するのが基本の考え方です。',

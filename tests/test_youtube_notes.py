@@ -303,10 +303,12 @@ class YouTubeNotes(YouTubeFixture):
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 notes.note_payload(json.dumps(payload))
 
-    def test_output_names_and_long_source_quotes_are_accepted_and_cached(self):
+    def test_output_names_and_bounded_source_quotes_are_accepted_and_cached(self):
         quote = 'the server must respond with a valid JSON object containing the field name and the field value'
-        source = 'The spec says: "' + quote + '". SoftBank and Samsung fund this service.'
-        value = '规范要求：“' + quote + '”。作者讨论 ソフトバンク 与 삼성전자 的投资。'
+        source = ('The author describes implementation constraints and independent verification. '
+                  'The team records every deployment failure and measures latency before rollout. '
+                  'The spec says: "' + quote + '". SoftBank and Samsung fund this service.')
+        value = '作者说明实现约束，核验部署失败和延迟。规范要求：“' + quote + '”。作者讨论 ソフトバンク 与 삼성전자 的投资。'
         self.transcript['segments'] = [{'start': 0, 'end': 120, 'text': source}]
         payload = {'title': 'ソフトバンク 的服务投资', 'summary': value, 'body': value}
 
@@ -323,6 +325,80 @@ class YouTubeNotes(YouTubeFixture):
         count = len(self.prompts)
         self.assertEqual(result, self.build(reply))
         self.assertEqual(count, len(self.prompts))
+
+    def test_all_model_output_fields_reject_english_with_a_single_chinese_signal(self):
+        tail = ('Then we move on to the second part, which covers the deployment story, '
+                'and after that we look at the rollout, with the numbers from last quarter, '
+                'and finally we close with the roadmap, which the team has already published, '
+                'so you can read it yourself, if you want the full detail, and that is all for today.')
+        source = '作者说明部署流程和独立核验。'
+        for value in ('欢迎回到本频道。' + tail, tail + '。好'):
+            with self.subTest(value=value):
+                with self.assertRaises(translation.LanguageError):
+                    notes.translated_output(source, value)
+                with self.assertRaises(translation.LanguageError):
+                    notes.summary_output(value, tail)
+                for field in ('title', 'summary', 'body'):
+                    payload = {'title': '部署核验', 'summary': source, 'body': source}
+                    payload[field] = value
+                    with self.subTest(field=field), self.assertRaises(translation.LanguageError):
+                        notes.note_payload(json.dumps(payload), source=tail)
+        literal = '```python\nresult = build_agent("demo")\nprint(result)\n```'
+        value = '作者要求独立核验。\n\n' + literal
+        source = 'Verify every generated change.\n\n' + literal
+        self.assertEqual(value, notes.summary_output(value, source))
+        payload = {'title': '独立核验', 'summary': value, 'body': value}
+        self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=source))
+        for invented in (literal, 'https://unrelated.test/' + 'english_narrative_' * 12):
+            value = '好。' + invented
+            with self.subTest(invented=invented), self.assertRaises(translation.LanguageError):
+                notes.summary_output(value, 'Verify the output.')
+
+    def test_poisoned_native_summary_and_note_caches_are_revalidated_with_real_source(self):
+        source = '作者说明部署流程并要求独立核验。'
+        self.transcript['segments'] = [{'start': 0, 'end': 120, 'text': source}]
+        original = self.build()
+        directory = media.cache_dir(self.row['video_id'])
+        original_cache = media.read_json(directory / 'notes-cache.json')
+        bad = ('The author describes deployment, reviews the numbers, records the limitations, '
+               'checks the rollout, and explains the next steps, before the team ships the result. 好')
+        summary_key = notes.signature('summary', self.selected, self.row['entry']['title'] + '\n' + source)
+        native_key = notes.signature('translate', self.selected, source)
+        note_key, = set(original_cache) - {summary_key, native_key}
+        for key in (native_key, summary_key, note_key):
+            cache = dict(original_cache)
+            cache[key] = (json.dumps({'title': '核验', 'summary': bad, 'body': source})
+                          if key == note_key else bad)
+            media.save_json(directory / 'notes-cache.json', cache)
+            self.prompts.clear()
+            with self.subTest(key=key):
+                self.assertEqual(original, self.build())
+                self.assertNotIn(bad, original['body'])
+                self.assertEqual(original_cache, media.read_json(directory / 'notes-cache.json'))
+                self.assertFalse(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
+                self.assertEqual(0 if key == native_key else 1, len(self.prompts))
+
+    def test_summary_and_note_quotes_require_bounded_source_and_independent_chinese(self):
+        quote = 'the server must respond with a valid JSON object containing the field name and the field value'
+        source = ('Reviewers independently verify implementation constraints and record deployment failures. ' * 4 +
+                  'The spec says: "' + quote + '".')
+        value = '引用：“' + quote + '”。'
+        self.assertEqual(value, notes.summary_output(value, source))
+        with self.assertRaises(translation.LanguageError):
+            notes.summary_output(value)
+        payload = {'title': '规范核验', 'summary': value, 'body': value}
+        self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=source))
+        with self.assertRaises(translation.LanguageError):
+            notes.note_payload(json.dumps(payload), prompt=source)
+        for invalid in ('"' + quote + '".',
+                        '好。"' + quote + '" then the team starts deployment, and checks every number, before shipping.'):
+            with self.subTest(invalid=invalid), self.assertRaises(translation.LanguageError):
+                notes.summary_output(invalid, source)
+            for field in ('title', 'summary', 'body'):
+                payload = {'title': '规范核验', 'summary': '核验规范。', 'body': '独立核验部署。'}
+                payload[field] = invalid
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(translation.LanguageError):
+                    notes.note_payload(json.dumps(payload), source=source)
 
     def test_new_translation_policy_invalidates_notes_but_preserves_transcript_cache(self):
         directory = media.cache_dir(self.row['video_id'])

@@ -164,9 +164,12 @@ class OutputFallback(YouTubeFixture):
     def test_collector_accepts_names_and_quotes_in_one_pass_and_exports_them(self):
         quote = 'the server must respond with a valid JSON object containing the field name and the field value'
         source = ('Compare GPT 4o, Claude 3.5 Sonnet, Gemini 1.5 Pro, Llama 3.1, Mistral Large, '
-                  'Command R, DeepSeek V2, Qwen 2.5, Phi 3 and Yi 34B. The spec says: "' + quote + '".')
+                  'Command R, DeepSeek V2, Qwen 2.5, Phi 3 and Yi 34B. '
+                  'Reviewers verify implementation constraints and record deployment failures independently. '
+                  'The spec says: "' + quote + '".')
         value = ('对比 GPT 4o、Claude 3.5 Sonnet、Gemini 1.5 Pro、Llama 3.1、Mistral Large、'
-                 'Command R、DeepSeek V2、Qwen 2.5、Phi 3 和 Yi 34B。规范原文是：“' + quote + '”。')
+                 'Command R、DeepSeek V2、Qwen 2.5、Phi 3 和 Yi 34B。审查者独立核验实现约束并记录部署失败。'
+                 '规范原文是：“' + quote + '”。')
         self.transcript['segments'][0]['text'] = source
         payload = {'title': 'ソフトバンク 的模型投资', 'summary': '作者讨论 삼성전자 的投入。',
                    'body': '作者引用了 ソフトバンク 的公告。' + value}
@@ -194,3 +197,52 @@ class OutputFallback(YouTubeFixture):
         for literal in ('ソフトバンク', '삼성전자', 'Yi 34B', quote, '中文译文（自动生成）'):
             self.assertIn(literal, body)
         self.assertNotIn('原文待校验：', body)
+
+    def test_collector_rejects_half_translated_caches_then_exports_a_real_chinese_recovery(self):
+        tail = ('Then we move on to the second part, which covers the deployment story, '
+                'and after that we look at the rollout, with the numbers from last quarter, '
+                'and finally we close with the roadmap, which the team has already published, '
+                'so you can read it yourself, if you want the full detail, and that is all for today.')
+        source = 'Welcome back to the channel. ' + tail
+        bad = '欢迎回到本频道。' + tail
+        self.transcript['segments'][0]['text'] = source
+        directory = media.cache_dir(self.row['video_id'])
+        cached_bad = json.dumps({'translations': [bad]})
+        media.save_json(directory / 'notes-cache.json', {
+            notes.signature(translation.STAGE, self.selected, source): cached_bad,
+            notes.signature('translate-unit-v1', self.selected, source): cached_bad})
+        broken, prompts = True, []
+
+        def reply(prompt, *arguments):
+            prompts.append(prompt)
+            if broken and prompt.startswith('将以下字幕'):
+                return cached_bad
+            return self.reply(prompt)
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value={'duration': 600}), \
+                patch.object(media, 'obtain', return_value=self.transcript):
+            for attempt in range(2):
+                result = collector.collect(FetchScope(force=True))
+                self.assertEqual((0, 0), (result['processed'], result['added']), result)
+                self.assertEqual('failed', storage.rows()[0]['state'])
+                self.assertFalse(collector.YouTubeCollector('youtube').materialize())
+                self.assertNotIn(cached_bad, media.read_json(directory / 'notes-cache.json').values())
+            self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in prompts))
+            broken = False
+            result = collector.collect(FetchScope(force=True))
+            self.assertEqual((1, 1), (result['processed'], result['added']), result)
+            self.assertEqual('ready', storage.rows()[0]['state'])
+            self.assertTrue(products.valid(storage.rows()[0]))
+            self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+            files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
+            self.assertEqual(1, len(files))
+            body = files[0].read_text()
+            self.assertIn('中文译文（自动生成）', body)
+            self.assertIn('作者要求独立核验修改，并记录方法和局限。', body)
+            self.assertNotIn('Then we move on', body)
+            self.assertNotIn('原文待校验', body)
+            self.assertEqual({}, media.read_json(directory / 'notes-language-failures.json'))

@@ -88,7 +88,7 @@ def translated_output(text, output):
         return translation.render(text, output)
     if not isinstance(output, str):
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
-    if not output.strip() or not translation_language.chinese_output(output):
+    if not output.strip() or not translation_language.chinese_output(output, text):
         raise translation.LanguageError('模型未返回中文译文，保留原始字幕等待重试')
     return output.strip()
 
@@ -103,14 +103,14 @@ def summary(text, title, selected, deadline, stopped):
 def summary_output(output, source=None):
     if not isinstance(output, str) or not output.strip():
         raise RuntimeError('视频分段要点不是有效中文，原文和译文已缓存')
-    if not translation_language.chinese_output(output):
+    if not translation_language.chinese_output(output, source or ''):
         raise translation.LanguageError('视频分段要点不是有效中文，原文和译文已缓存')
     if len(output) > 1000:
         raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
     return output
 
 
-def note_payload(output, prompt=''):
+def note_payload(output, prompt='', source=''):
     try:
         payload = json_output.object_payload(output, prompt)
     except (ValueError, TypeError, AttributeError):
@@ -118,7 +118,7 @@ def note_payload(output, prompt=''):
     if (not isinstance(payload, dict) or any(not isinstance(payload.get(field), str) or
             not payload[field].strip() for field in ('title', 'summary', 'body'))):
         raise RuntimeError('视频笔记不是完整中文成品，未入库')
-    if any(not translation_language.chinese_output(payload[field]) for field in ('title', 'summary', 'body')):
+    if any(not translation_language.chinese_output(payload[field], source) for field in ('title', 'summary', 'body')):
         raise translation.LanguageError('视频笔记不是完整中文成品，未入库')
     return payload
 
@@ -185,7 +185,7 @@ def build_chinese(row, transcript, deadline, stopped, directory, translator, sum
         key = signature('summary', summarizer, row['entry']['title'] + '\n' + block)
         facts.append(cached(directory, cache, key,
                             lambda block=block: summary(block, row['entry']['title'], summarizer, deadline, stopped),
-                            summary_output))
+                            lambda output, block=block: summary_output(output, block)))
     combined = '\n\n'.join(facts)
     while len(combined) > 14000:
         reduced = []
@@ -205,7 +205,7 @@ def build_chinese(row, transcript, deadline, stopped, directory, translator, sum
               '\n原题：' + row['entry']['title'] + '\n\n' + combined)
     key = signature('note', summarizer, prompt)
     payload = cached(directory, cache, key, lambda: call(prompt, summarizer, deadline, stopped),
-                     lambda output: note_payload(output, prompt))
+                     lambda output: note_payload(output, prompt, combined))
     origin = ORIGINS.get(transcript['origin'], transcript['origin'])
     complete = '\n\n'.join(translated)
     body = (payload['summary'] + '\n\n' + payload['body'] +

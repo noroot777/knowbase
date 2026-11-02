@@ -1,7 +1,12 @@
 import ast
 import re
 
-_LITERALS = re.compile(r'```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`|https?://[^\s<>`]+')
+from kb.feeds.registry import text_language
+
+_LITERALS = re.compile(r'```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`|https?://[^\s<>`]+|'
+                       r'\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/[^\s<>`，,。；;）)"“”]*)?')
+_TOKENS = re.compile(r'(?<![A-Za-z0-9_-])(?:--?[A-Za-z][A-Za-z0-9_-]*|'
+                     r'[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+)(?![A-Za-z0-9_-])')
 _COMMAND = re.compile(
     r'(?<![\w-])(?:npm\s+(?:install|run|exec|test|ci)\b|npx\s+\S+|'
     r'git\s+(?:clone|rebase|push|pull|checkout|switch|commit|diff|status|add)\b|'
@@ -18,7 +23,7 @@ _WORDS = re.compile(r'[^\W\d_]+')
 
 
 def literal_spans(text):
-    spans = [matched.span() for matched in _LITERALS.finditer(text)]
+    spans = [matched.span() for pattern in (_LITERALS, _TOKENS) for matched in pattern.finditer(text)]
     for matched in _COMMAND.finditer(text):
         boundary = _COMMAND_END.search(text, matched.end())
         end = boundary.start() if boundary else len(text)
@@ -50,8 +55,28 @@ def literal_spans(text):
     return merged
 
 
-def contexts(text, blocks):
-    spans = literal_spans(text) + [(quoted.start() + 1, quoted.end() - 1) for quoted in _QUOTES.finditer(text)]
+def _without(text, fragments):
+    for fragment in sorted(fragments, key=len, reverse=True):
+        if fragment.strip():
+            text = text.replace(fragment.strip(), '', 1)
+    return text
+
+
+def quote_spans(text):
+    literals, spans = literal_spans(text), []
+    for quoted in _QUOTES.finditer(text):
+        start, end = quoted.start() + 1, quoted.end() - 1
+        if (not re.search(r'[:：][ \t]*$', text[:quoted.start()]) or end - start > 200 or
+                any(left < end and right > start for left, right in literals)):
+            continue
+        spans.append((start, end))
+    narrative = _without(text, [text[start:end] for start, end in literals])
+    quoted_letters = sum(character.isalpha() for start, end in spans for character in text[start:end])
+    return spans if quoted_letters * 3 <= sum(character.isalpha() for character in narrative) else []
+
+
+def contexts(text, blocks, quoted=False):
+    spans = quote_spans(text) if quoted else literal_spans(text)
     cursor, result = 0, []
     for block in blocks:
         start = text.index(block, cursor)
@@ -67,7 +92,9 @@ def foreign_script(text):
     return bool(_FOREIGN_SCRIPTS.search(text))
 
 
-def chinese_output(text):
+def _chinese(text):
+    if text_language(text) != 'zh':
+        return False
     if not any(character.isalpha() for character in text):
         return True
     return any(_HAN.search(word) and
@@ -75,15 +102,25 @@ def chinese_output(text):
                for word in _WORDS.findall(text))
 
 
-def valid(value, literals, source):
-    remainder = value
-    for literal in sorted(literals, key=len, reverse=True):
-        remainder = remainder.replace(literal.strip(), '')
-    for quoted in _QUOTES.finditer(source):
-        content = quoted[0][1:-1]
-        for output_quote in _QUOTES.finditer(remainder):
-            if output_quote[0][1:-1] == content:
-                remainder = remainder.replace(output_quote[0], '')
+def _narrative(value, literals, quotes):
+    literal_free = _without(value, literals)
+    remainder = _without(literal_free, quotes)
+    return remainder, remainder != literal_free
+
+
+def chinese_output(text, source=''):
+    literals = contexts(source, [source])[0] if source else []
+    quotes = contexts(source, [source], quoted=True)[0] if source else []
+    remainder, quoted = _narrative(text, literals, quotes)
+    return (not quoted or bool(_HAN.search(remainder))) and _chinese(remainder)
+
+
+def valid(value, literals, source, quotes=None):
+    if quotes is None:
+        quotes = contexts(source, [source], quoted=True)[0] if source else []
+    remainder, quoted = _narrative(value, literals, quotes)
+    if quoted and not _HAN.search(remainder):
+        return False
     if value.split() == source.split() and any(character.isalpha() for character in remainder):
         return False
     if any(len(re.findall(_FOREIGN_SCRIPTS.pattern + '+', sentence)) > 1 and
@@ -93,11 +130,11 @@ def valid(value, literals, source):
     if any(len(_FOREIGN_WORDS.findall(span)) > 10
            for span in re.split(r'[\u4e00-\u9fff、，,；;（）()]', remainder)):
         return False
-    return chinese_output(remainder)
+    return _chinese(remainder)
 
 
 def joined(text, blocks, values):
-    spans = literal_spans(text) + [(quoted.start() + 1, quoted.end() - 1) for quoted in _QUOTES.finditer(text)]
+    spans = literal_spans(text) + quote_spans(text)
     cursor, result = 0, ''
     for block, value in zip(blocks, values):
         start = text.index(block, cursor)
