@@ -1,6 +1,29 @@
 # YouTube 低成本接入验证
 
-## 当前复修：单行字幕命令边界与预算留尾清旧错（sJYB8ObBe4Vx）
+## 当前复修：半译拦截与列表连接状态独立结算（sJYB8ObBe4Vx 第 2 轮）
+
+- 共用语种出口在扣除源文字面后，不允许汉字间隔内超过十个英文词；中文前后缀、只译首句不能掩盖长段英文。批次、逐段恢复和旧缓存重验用同一判据，不恢复汉字占比或长度比。
+- 原文免翻译分支同样核对叙述规则，疑似中文但仍含长英文的字幕改走覆盖翻译，不让原文语种比例判断绕过共用出口。
+- 保留技术术语、识别到的代码/命令/URL 和既有纯字面缓存；不扩充命令工具名单，不宣称逐段语义核验或所有外文形态都可判定。
+- 列表请求正常返回即按订阅身份清旧连接错误和订阅退避，包括零新增和有内容失败；内容失败保留视频错误、视频退避、失败重试目标与本频道说明。覆盖未完成/内容积压仍扣留成功水位，列表抛错继续记录当前连接失败和累计退避。
+- UI 仅对 YouTube 取消 last_error 对覆盖/跳过说明的遮挡，真实列表失败仍显示失败原因；不改其他来源。
+- 测试同步更新旧的“内容失败须保留订阅连接错误”断言，保留并增强候选错误、退避、重试目标和水位断言；本机故障仍不惩罚视频或订阅，但列表已经成功返回的连接事实不回滚。
+- 浏览器夹具覆盖零新增积压、内容失败和真实连接失败并列说明；仍检查原 51 项与真实阅读/Markdown。新增截图记录订阅结算状态。
+- 本轮先命名扩展会话 `🔎 YouTube半译与列表状态复修`，请求后台标签被拒 `Capability is not available: visibility`，未创建标签。之后用项目独立无头壳、临时 profile 与 loopback 夹具，不用用户登录态、不接管普通标签。
+- 已裁定的性能与带 ID AUTH/未知错误的覆盖政策未动；其余非阻断项未扩修，不自动改写生产成品。
+
+仅本轮修改的七个测试模块登记：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_translation_output tests.test_youtube_source_status tests.test_youtube_integrity tests.test_youtube_collector tests.test_youtube_incremental_review tests.test_youtube_incremental_faults tests.test_youtube_browser -v
+```
+
+cwd：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+真实结果、冻结受测树、日志与截图归档在
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-sJYB8ObBe4Vx-round-2/`。
+未改模块和整套回归留验收，未访问真实 YouTube/模型/cookie，未改生产环境。
+
+## 历史复修：单行字幕命令边界与预算留尾清旧错（sJYB8ObBe4Vx 第 1 轮）
 
 - 命令字面量不再从命中位置一直吞到字幕块末尾：按句末与有限参数结构识别，普通叙述不能因为前面出现 npm install 就全被豁免。源文叙述逐段原样返回时拒绝，纯已识别代码/URL 仍可保留。
 - 测试经过真实 transcripts.parse/clean/blocks 生成无换行字幕，同时覆盖批次、逐段恢复、旧错误缓存重验、拒绝发布与恢复后实际 Markdown 导出。字面识别仍是保守语法子集，不承诺任意命令或翻译语义核验。

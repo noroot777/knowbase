@@ -68,7 +68,7 @@ class YouTubeSourceStatus(YouTubeFixture):
             self.assertEqual(('', ''), (stored['last_note'], stored['last_notice']))
             self.assertTrue(stored['last_success'])
 
-    def test_partial_notification_does_not_clear_the_original_failure_or_watermark(self):
+    def test_successful_empty_partial_listing_clears_connection_error_but_not_watermark(self):
         source = self.sources[0]
         previous = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
         with reg.db() as connection:
@@ -82,7 +82,7 @@ class YouTubeSourceStatus(YouTubeFixture):
 
         result = self.collect(fetch)
         stored = reg.subscription('youtube', source['id'])
-        self.assertEqual((previous, '原有失败', 3, 123), tuple(
+        self.assertEqual((previous, '', 0, 0), tuple(
             stored[key] for key in ('last_success', 'last_error', 'failures', 'retry_at')))
         self.assertIn('9 条', stored['last_note'])
         self.assertNotIn(str(source['id']), result['succeeded_ids'])
@@ -103,7 +103,7 @@ class YouTubeSourceStatus(YouTubeFixture):
         self.assertEqual(('', ''), (stored['last_note'], stored['last_notice']))
         self.assertTrue(stored['last_success'])
 
-    def test_partial_with_real_entries_clears_old_connection_failure_but_not_current_content_errors(self):
+    def test_partial_listing_clears_old_connection_failure_without_discarding_content_or_auth_evidence(self):
         previous = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
         old_entry = self.entry(990, hours=24 * 40)
         for position, (content_error, auth_error) in enumerate(((False, False), (True, False), (False, True))):
@@ -114,7 +114,7 @@ class YouTubeSourceStatus(YouTubeFixture):
             if content_error:
                 entry = self.entry(980)
                 storage.discover(source, [entry])
-                storage.update(entry['video_id'], state='failed', last_error='仍未修复的视频处理错误')
+                storage.update(entry['video_id'], state='failed', last_error='仍未修复的视频处理错误', retry_at=10**12)
 
             def fetch(selected, settings, timeout, estimates, evidence):
                 if selected['id'] == source['id']:
@@ -131,13 +131,76 @@ class YouTubeSourceStatus(YouTubeFixture):
                 self.assertEqual(previous, stored['last_success'])
                 self.assertIn('9 条', stored['last_note'])
                 self.assertNotIn(str(source['id']), result['succeeded_ids'])
-                self.assertEqual(('上轮连接失败', 3, 1) if content_error or auth_error else ('', 0, 0),
+                self.assertEqual(('', 0, 0),
                                  tuple(stored[key] for key in ('last_error', 'failures', 'retry_at')))
+                if content_error:
+                    row = next(row for row in storage.rows([source['id']]) if row['video_id'] == entry['video_id'])
+                    self.assertEqual(('failed', '仍未修复的视频处理错误'), (row['state'], row['last_error']))
+                if auth_error:
+                    self.assertIn('Firefox', stored['last_notice'])
                 problems = [item['problem'] for item in source_diagnostics.problems('youtube')
                             if item['source_id'] == source['id']]
                 self.assertIn('partial', problems)
                 if not content_error and not auth_error:
                     self.assertEqual(['partial'], problems)
+
+    def test_zero_new_entries_with_deferred_or_failed_content_clears_only_connection_ledger(self):
+        previous = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+        for number, state in enumerate(('deferred', 'failed'), 1):
+            source = self.sources[number - 1]
+            entry = self.entry(990 + number)
+            storage.discover(source, [entry])
+            storage.update(entry['video_id'], state=state, last_error='内容待重试' if state == 'failed' else '',
+                           reason='内容预算留尾', retry_at=10**12)
+            with reg.db() as connection:
+                connection.execute("UPDATE subscriptions SET last_success=?,last_error='旧连接失败',"
+                                   "failures=3,retry_at=1 WHERE id=?", (previous, source['id']))
+            with patch.object(media, 'probe', return_value={'duration': 600}):
+                result = self.collect(lambda *arguments: [])
+            stored = reg.subscription('youtube', source['id'])
+            self.assertEqual(('', 0, 0, previous), tuple(stored[key] for key in
+                             ('last_error', 'failures', 'retry_at', 'last_success')))
+            self.assertIn('未完成处理', stored['last_notice'])
+            self.assertNotIn(str(source['id']), result['succeeded_ids'])
+            row = next(row for row in storage.rows([source['id']]) if row['video_id'] == entry['video_id'])
+            self.assertEqual(state, row['state'])
+            self.assertEqual(10**12, row['retry_at'])
+
+    def test_current_content_failure_uses_video_backoff_and_notice_not_connection_error(self):
+        source = self.sources[0]
+        with patch.object(discovery, 'fetch', side_effect=lambda selected, *arguments:
+                          [self.entry(970)] if selected['id'] == source['id'] else []), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'firefox'}), \
+                patch.object(collector, 'DISCOVERY_SPACING', 0), patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(media, 'probe', return_value={'duration': 600}), \
+                patch.object(media, 'obtain', side_effect=RuntimeError('本轮字幕下载失败')):
+            result = collector.collect(FetchScope(force=True))
+        stored = reg.subscription('youtube', source['id'])
+        self.assertEqual(('', 0, 0, ''), tuple(stored[key] for key in
+                         ('last_error', 'failures', 'retry_at', 'last_success')))
+        self.assertIn('本轮字幕下载失败', stored['last_notice'])
+        self.assertEqual([str(source['id'])], result['failed_ids'])
+        row, = storage.rows([source['id']])
+        self.assertEqual('failed', row['state'])
+        self.assertGreater(row['retry_at'], 0)
+
+    def test_actual_listing_failure_keeps_error_and_backoff_instead_of_becoming_empty_success(self):
+        source = self.sources[0]
+        with reg.db() as connection:
+            connection.execute("UPDATE subscriptions SET last_error='旧连接失败',failures=3,retry_at=1 WHERE id=?",
+                               (source['id'],))
+        def fetch(selected, *arguments):
+            if selected['id'] == source['id']:
+                raise RuntimeError('本轮频道列表无法读取')
+            return []
+        result = self.collect(fetch)
+        stored = reg.subscription('youtube', source['id'])
+        self.assertIn('本轮频道列表无法读取', stored['last_error'])
+        self.assertEqual(4, stored['failures'])
+        self.assertGreater(stored['retry_at'], 1)
+        self.assertEqual('', stored['last_success'])
+        self.assertIn(str(source['id']), result['failed_ids'])
+        self.assertNotIn(str(source['id']), result['succeeded_ids'])
 
     def test_complete_listing_with_count_budget_tail_clears_old_connection_failure(self):
         source = self.sources[0]

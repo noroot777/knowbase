@@ -142,7 +142,8 @@ class LocalFaultRound(IncrementalFixture):
 
     def assert_local_only(self, summary, preserved_notice=False):
         source = reg.subscription('youtube', self.source['id'])
-        self.assertEqual(self.before, {key: source[key] for key in self.before})
+        self.assertEqual({**self.before, 'last_error': '', 'failures': 0, 'retry_at': 0},
+                         {key: source[key] for key in self.before})
         if preserved_notice:
             self.assertEqual('原有提醒', source['last_notice'])
         self.assertEqual([], summary['failed_ids'])
@@ -184,7 +185,8 @@ class LocalFaultRound(IncrementalFixture):
         self.assertEqual([], result['errors'])
         self.assertEqual(1, result['deferred'])
         source = reg.subscription('youtube', self.source['id'])
-        self.assertEqual(self.before, {key: source[key] for key in self.before})
+        self.assertEqual({**self.before, 'last_error': '', 'failures': 0, 'retry_at': 0},
+                         {key: source[key] for key in self.before})
         self.assertEqual('ready', next(row for row in storage.rows() if row['video_id'] == '00000000002')['state'])
 
     def test_processing_storage_errors_do_not_increment_video_attempts(self):
@@ -219,8 +221,12 @@ class LocalFaultRound(IncrementalFixture):
         storage.discover(self.source, [self.entry()])
         with patch.object(collector, 'commit_successes', side_effect=maintenance.LockBusy('最终写入忙')):
             result = self.collect()
-        self.assert_local_only(result, preserved_notice=True)
+        self.assert_local_only(result)
         self.assertEqual('最终写入忙', result['local_error'])
+        self.assertEqual('', reg.subscription('youtube', self.source['id'])['last_notice'])
+        row, = storage.rows()
+        self.assertEqual('ready', row['state'])
+        self.assertTrue(row['committed'])
 
     def test_batch_metadata_annotation_busy_still_leaves_round_history(self):
         self.pending()

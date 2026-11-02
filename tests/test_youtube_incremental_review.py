@@ -160,13 +160,15 @@ class ChannelCompletion(IncrementalFixture):
         self.assertEqual('failed', storage.rows()[0]['state'])
         self.assertGreater(storage.rows()[0]['retry_at'], time.time())
 
-    def test_an_entire_failed_candidate_batch_still_reports_channel_failure(self):
+    def test_failed_candidate_batch_keeps_retry_targets_without_channel_connection_backoff(self):
         entries = [self.pending(1), self.pending(2)]
         result, _, _ = self.collect(lambda *arguments: entries,
             lambda *arguments, **kwargs: (_ for _ in ()).throw(RuntimeError('视频详情不可用')))
         self.assertEqual([str(self.source['id'])], result['failed_ids'])
         self.assertEqual([], result['succeeded_ids'])
-        self.assertGreater(self.standing()['retry_at'], time.time())
+        self.assertEqual(('', 0, 0), tuple(self.standing()[key] for key in ('last_error', 'failures', 'retry_at')))
+        self.assertTrue(all(row['retry_at'] > time.time() for row in storage.rows()))
+        self.assertIn('视频详情不可用', self.standing()['last_notice'])
 
     def test_auth_failure_is_promoted_even_when_other_metadata_is_healthy(self):
         self.pending(1)
@@ -176,7 +178,9 @@ class ChannelCompletion(IncrementalFixture):
                 media.ToolFailure('登录态失效', 'Sign in to confirm your age', 'not_logged_in')))
         self.assertEqual([str(self.source['id'])], result['failed_ids'])
         self.assertIn('not_logged_in', result['walls'])
-        self.assertGreater(self.standing()['failures'], 0)
+        self.assertEqual(('', 0), tuple(self.standing()[key] for key in ('last_error', 'failures')))
+        self.assertIn('登录', self.standing()['last_notice'])
+        self.assertGreater(storage.rows()[0]['retry_at'], time.time())
 
     def test_clean_sync_keeps_warning_fields_empty_and_shows_statistics_separately(self):
         result, _, stages = self.collect(lambda *arguments: [self.entry()])

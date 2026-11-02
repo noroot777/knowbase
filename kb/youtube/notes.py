@@ -3,7 +3,7 @@ import json
 
 from kb import llm, llm_stages
 from kb.feeds.registry import text_language
-from kb.youtube import json_output, media, transcripts, translation
+from kb.youtube import json_output, media, transcripts, translation, translation_language
 
 
 VERSION = 'youtube-notes-v3'
@@ -55,8 +55,16 @@ def translate(text, selected, deadline, stopped):
     return translated_output(text, translation_request(text, selected, deadline, stopped))
 
 
+def native_chinese(text):
+    if text_language(text) != 'zh':
+        return False
+    blocks = [unit['text'] for unit in translation.units(text)]
+    return all(translation_language.valid(block, literals, '') for block, literals in
+               zip(blocks, translation_language.contexts(text, blocks)))
+
+
 def translation_request(text, selected, deadline, stopped, directory=None, cache=None):
-    if text_language(text) == 'zh':
+    if native_chinese(text):
         return text
     output = call(translation.prompt(text), selected, deadline, stopped)
     try:
@@ -78,7 +86,7 @@ def translation_request(text, selected, deadline, stopped, directory=None, cache
 
 
 def translated_output(text, output):
-    if text_language(text) != 'zh':
+    if not native_chinese(text):
         return translation.render(text, output)
     if not isinstance(output, str):
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
@@ -122,7 +130,7 @@ def build(row, transcript, deadline, stopped):
     translator, summarizer = model('translate'), model('youtube_summary')
     translated = []
     for block in transcripts.blocks(transcript['segments']):
-        stage = 'translate' if text_language(block) == 'zh' else translation.STAGE
+        stage = 'translate' if native_chinese(block) else translation.STAGE
         key = signature(stage, translator, block)
         translated.append(cached(directory, cache, key,
                                  lambda block=block: translation_request(block, translator, deadline, stopped,

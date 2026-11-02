@@ -490,13 +490,26 @@ try {
     backlogCard.notice.includes('2 条视频无法读取') && backlogCard.notice.includes('未完成处理') &&
     !backlogCard.text.includes('上一轮连接失败') && !backlogCard.text.includes('查看失败原因') &&
     backlogCard.text.includes('尚未成功同步'), JSON.stringify(backlogCard));
+  const emptyBacklog = statusCards['零新增积压测试频道'], contentFailed = statusCards['内容失败测试频道'];
+  check('零新增或内容仍失败不再沿用旧连接错误', [emptyBacklog, contentFailed].every(card=>
+    card.state === '已同步（有跳过）' && card.notice.includes('未完成处理') &&
+    !card.text.includes('上一轮连接失败') && !card.text.includes('查看失败原因') &&
+    card.text.includes('尚未成功同步')), JSON.stringify({emptyBacklog, contentFailed}));
+  const connectionFailed = statusCards['连接失败说明测试频道'];
+  check('真实连接失败不遮挡覆盖和跳过说明', connectionFailed.state === '连接失败' &&
+    connectionFailed.text.includes('本轮频道列表无法读取') && connectionFailed.text.includes('上轮只列到 3 条') &&
+    connectionFailed.notice.includes('上轮有 1 条视频无法读取'), JSON.stringify(connectionFailed));
   const care = await evaluate(`fetch('/api/intake-care?kind=youtube').then(response=>response.json())`);
-  check('真实待办接口只报告覆盖失败而非内容积压', care.source_problems === 1 &&
-    care.sources.length === 1 && care.sources[0].name === '部分同步测试频道' &&
-    care.sources[0].problem === 'partial', JSON.stringify(care.sources));
+  check('真实待办接口只报告覆盖失败而非内容积压', care.source_problems === 3 && care.sources.length === 3 &&
+    care.sources.some(source=>source.name === '部分同步测试频道' && source.problem === 'partial') &&
+    care.sources.some(source=>source.name === '连接失败说明测试频道' && source.problem === 'connect') &&
+    care.sources.some(source=>source.name === '连接失败说明测试频道' && source.problem === 'partial'), JSON.stringify(care.sources));
   await evaluate(`Array.from(document.querySelectorAll('.source-subscription')).find(card=>
     card.querySelector('h3').textContent==='部分同步测试频道').scrollIntoView({block:'center',behavior:'instant'}); true`);
   await screenshot('subscriptions-status-desktop');
+  await evaluate(`Array.from(document.querySelectorAll('.source-subscription')).find(card=>
+    card.querySelector('h3').textContent==='零新增积压测试频道').scrollIntoView({block:'center',behavior:'instant'}); true`);
+  await screenshot('subscriptions-outcomes-desktop');
   await click('#source-view-items');
   await wait(`!!document.querySelector('.source-entry')`);
   await click('.source-entry');

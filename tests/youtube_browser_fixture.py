@@ -12,19 +12,34 @@ def install():
     source = next(source for source in sources if source['name'] == 'AI Search')
     status_sources = {}
     for selected, label in zip((item for item in sources if item['enabled'] and item['id'] != source['id']),
-                               ('跳过一条测试频道', '跳过两条测试频道', '部分同步测试频道', '干净测试频道')):
+                               ('跳过一条测试频道', '跳过两条测试频道', '部分同步测试频道', '干净测试频道',
+                                '零新增积压测试频道', '内容失败测试频道', '连接失败说明测试频道')):
         reg.save_subscription('youtube', {'name': label, 'group_name': '状态验证'}, selected['id'])
         status_sources[label] = selected['id']
     published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     with reg.db() as connection:
         connection.executemany("UPDATE subscriptions SET last_error='上一轮连接失败',failures=3,retry_at=1 WHERE id=?",
-                               [(status_sources['部分同步测试频道'],), (source['id'],)])
+                               [(status_sources[label],) for label in
+                                ('部分同步测试频道', '零新增积压测试频道', '内容失败测试频道')] + [(source['id'],)])
+        connection.execute("UPDATE subscriptions SET last_note='上轮只列到 3 条，覆盖未完成',"
+                           "last_notice='上轮有 1 条视频无法读取' WHERE id=?",
+                           (status_sources['连接失败说明测试频道'],))
     entries = [{'video_id': f'{number:011d}', 'url': 'https://www.youtube.com/watch?v=' + f'{number:011d}',
                 'title': title, 'description': title, 'published': published, 'views': 10000 // number}
                for number, title in enumerate(('AI agent coding tutorial', 'AI model research benchmark',
                                                'AI workflow explained', 'Travel weekend'), 1)]
 
     def fetch(selected, *arguments):
+        if selected['id'] == status_sources['连接失败说明测试频道']:
+            raise RuntimeError('本轮频道列表无法读取')
+        for number, label in enumerate(('零新增积压测试频道', '内容失败测试频道'), 991):
+            if selected['id'] == status_sources[label]:
+                entry = {**entries[0], 'video_id': f'{number:011d}', 'url': f'https://www.youtube.com/watch?v={number:011d}',
+                         'views': 1}
+                storage.discover(selected, [entry])
+                storage.update(entry['video_id'], state='failed' if number == 992 else 'deferred',
+                               last_error='该视频内容仍待重试' if number == 992 else '', retry_at=10**12)
+                return []
         if selected['id'] == source['id']:
             selected['discovery_unavailable'] = [
                 {'video_id': f'{number:011d}', 'reason': '离线夹具：单片无法读取'} for number in (981, 982)]

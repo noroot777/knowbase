@@ -9,6 +9,7 @@ _COMMAND = re.compile(
     r'export\s+[A-Za-z_]\w*=)')
 _COMMAND_END = re.compile(r'[.!?。！？](?=\s|$)|[;\r\n]')
 _COMMAND_ARG = re.compile(r'''[ \t]*("(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_@%+=:/.$~*?{}\\-]+)''')
+_FOREIGN_WORDS = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
 
 
 def literal_spans(text):
@@ -59,6 +60,8 @@ def valid(value, literals, source):
     for literal in sorted(literals, key=len, reverse=True):
         remainder = remainder.replace(literal.strip(), '')
     if value.split() == source.split() and re.search(r'[A-Za-z]', remainder):
+        return False
+    if any(len(_FOREIGN_WORDS.findall(span)) > 10 for span in re.split(r'[\u4e00-\u9fff]', remainder)):
         return False
     return not any(character.isalpha() for character in remainder) or bool(re.search(r'[\u4e00-\u9fff]', remainder))
 

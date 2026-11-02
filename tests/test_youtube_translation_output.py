@@ -104,6 +104,33 @@ class TranslationOutput(YouTubeFixture):
             with self.subTest(source=source), self.assertRaises(RuntimeError):
                 translation.render(source, json.dumps({'translations': [value]}))
 
+    def test_chinese_padding_and_partial_translation_do_not_hide_foreign_prose(self):
+        source = ('Welcome back to the channel. Today we build an agent from scratch. '
+                  'You will need node and a terminal. The planner decomposes every goal into steps '
+                  'and the executor verifies each result before proceeding to the next step. ' * 5).strip()
+        blocks = [unit['text'] for unit in translation.units(source)]
+        for transform in (lambda block: '好。' + block, lambda block: block + '完',
+                          lambda block: '欢迎回来。' + block.partition('.')[2]):
+            values = [transform(block) for block in blocks]
+            with self.subTest(value=values[0]):
+                with self.assertRaises(RuntimeError):
+                    translation.render(source, json.dumps({'translations': values}))
+                for position, value in enumerate(values):
+                    with self.assertRaises(RuntimeError):
+                        translation.unit_output(source, position, json.dumps({'translations': [value]}))
+                def reply(prompt, *arguments):
+                    segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
+                    return json.dumps({'translations': [transform(block) for block in segments]})
+                with patch.object(notes, 'call', side_effect=reply), self.assertRaises(RuntimeError):
+                    notes.translate(source, self.selected, 10**10, lambda: False)
+        source = '作者说明应当核验结果。' * 20 + 'Today we build an agent from scratch and verify every generated change before use.'
+        self.assertEqual('zh', text_language(source))
+        with patch.object(notes, 'call', return_value=json.dumps({'translations': ['作者介绍智能体并要求核验每次改动。']})) as call:
+            self.assertEqual('作者介绍智能体并要求核验每次改动。', notes.translate(source, self.selected, 10**10, lambda: False))
+            call.assert_called_once()
+        self.assertTrue(translation_language.valid('先核对 ' + ' '.join(['token'] * 10) + '，再使用。', [], source))
+        self.assertFalse(translation_language.valid('先核对 ' + ' '.join(['token'] * 11) + '，再使用。', [], source))
+
     def test_cleaned_single_line_captions_do_not_turn_command_tails_into_literals(self):
         lines = ['Welcome back to the channel. Today we examine an AI agent framework.',
                  'First run npm install to get the deps.',

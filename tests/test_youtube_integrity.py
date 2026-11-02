@@ -191,18 +191,16 @@ class YouTubeIntegrity(YouTubeFixture):
         source, = transcripts.blocks(segments)
         self.assertNotIn('\n', source)
         blocks = [unit['text'] for unit in translation.units(source)]
-        incomplete = json.dumps({'translations': ['作者介绍智能体框架。', *blocks[1:]]})
         directory = media.cache_dir(self.row['video_id'])
         key = notes.signature(translation.STAGE, selected, source)
-        media.save_json(directory / 'notes-cache.json', {key: incomplete})
-        broken, prompts = True, []
+        broken, prompts = lambda value: value, []
 
         def reply(prompt, *arguments):
             prompts.append(prompt)
             if prompt.startswith('将以下字幕'):
                 values = json.loads(prompt.split('\n\n', 1)[1])['segments']
                 if broken:
-                    return incomplete if len(values) > 1 else json.dumps({'translations': values})
+                    return json.dumps({'translations': [broken(value) for value in values]})
                 for original, translated in sentences.items():
                     values = [value.replace(original, translated) for value in values]
                 return json.dumps({'translations': values})
@@ -218,13 +216,18 @@ class YouTubeIntegrity(YouTubeFixture):
                 patch.object(media, 'probe', return_value=self.metadata), \
                 patch.object(media, 'obtain', return_value={'origin': 'uploaded_captions', 'language': 'en',
                                                            'segments': segments}):
-            result = collector.collect(FetchScope(force=True))
-            self.assertEqual(0, result['added'])
-            self.assertEqual('failed', storage.rows()[0]['state'])
-            self.assertNotIn(key, media.read_json(directory / 'notes-cache.json'))
-            self.assertTrue(prompts)
-            self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in prompts))
-            self.assertFalse(collector.YouTubeCollector('youtube').materialize())
+            for broken in (lambda value: value, lambda value: '好。' + value,
+                           lambda value: value + '完', lambda value: '欢迎回来。' + value.partition('.')[2]):
+                incomplete = json.dumps({'translations': [broken(block) for block in blocks]})
+                media.save_json(directory / 'notes-cache.json', {key: incomplete})
+                prompts.clear()
+                result = collector.collect(FetchScope(force=True))
+                self.assertEqual(0, result['added'])
+                self.assertEqual('failed', storage.rows()[0]['state'])
+                self.assertNotIn(key, media.read_json(directory / 'notes-cache.json'))
+                self.assertTrue(prompts)
+                self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in prompts))
+                self.assertFalse(collector.YouTubeCollector('youtube').materialize())
             broken = False
             result = collector.collect(FetchScope(force=True))
         self.assertEqual((1, 1), (result['processed'], result['added']), result)
@@ -403,8 +406,9 @@ class YouTubeIntegrity(YouTubeFixture):
 
     def assert_unresolved(self, summary):
         source = reg.subscription('youtube', self.source['id'])
-        self.assertEqual('旧字幕错误', source['last_error'])
+        self.assertEqual('', source['last_error'])
         self.assertEqual('', source['last_success'])
+        self.assertEqual('旧字幕错误', storage.rows([self.source['id']])[0]['last_error'])
         self.assertNotIn(str(self.source['id']), summary['succeeded_ids'])
         self.assertGreater(summary['deferred'], 0)
         with patch.object(collector, 'collect', return_value=summary):

@@ -24,10 +24,12 @@ class YouTubeBrowser(unittest.TestCase):
                              '取回数据后的部分同步不再显示旧连接失败',
                              '数量预算留尾清旧失败且显示本轮跳过说明',
                              '单行字幕的命令后叙述确实翻译成中文',
+                             '零新增或内容仍失败不再沿用旧连接错误', '真实连接失败不遮挡覆盖和跳过说明',
                              '没列完的频道显示部分同步而不是成功', '内容积压不伪装成频道覆盖失败',
                              'YouTube覆盖提示说明按窗口重查而非接续位置',
                              '真实待办接口只报告覆盖失败而非内容积压'} <= {check['name'] for check in checks})
             self.assertTrue((root / 'output/youtube/subscriptions-status-desktop.png').is_file())
+            self.assertTrue((root / 'output/youtube/subscriptions-outcomes-desktop.png').is_file())
             files = list((Path(base.root) / 'vault/source/youtube').rglob('*.md'))
             self.assertEqual(1, len(files))
             self.assertIn('中文译文（自动生成）', files[0].read_text())

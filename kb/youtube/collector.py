@@ -63,6 +63,23 @@ def save_failure(source, error, summary):
     return saved
 
 
+def commit_listing(source):
+    with maintenance_lock(), reg.db() as connection:
+        if not _claim_write(connection, source):
+            return False
+        changed = connection.execute("UPDATE subscriptions SET last_attempt=?,last_error='',failures=0,retry_at=0 "
+                                     'WHERE id=? AND enabled=1', (reg.now(), source['id']))
+    return changed.rowcount == 1
+
+
+def content_failure(source, error, summary):
+    reason = diagnosis.shown(error, FAILURE_CAP)
+    summary['errors'].append({'title': source['name'], 'reason': reason, 'url': source['url']})
+    summary['failed_ids'].append(str(source['id']))
+    summary['notices'].append({'source_id': source['id'], 'title': source['name'],
+                               'reason': '视频处理未完成：' + reason})
+
+
 def wall(summary, source_ids, error):
     """把这次失败的分档记在账上。**分类只在拿着异常对象的这一刻做一次。**
 
@@ -292,8 +309,7 @@ def process(rows, settings, scope, summary, deadline):
     return failures
 
 
-def commit_notes(source, completed, summary, pending_failure=False, ranged=False, record_success=True,
-                 clear_failure=False):
+def commit_notes(source, completed, summary, pending_failure=False, ranged=False, record_success=True):
     with maintenance_lock():
         entries = [json.loads(row['note']) for row in completed]
         if not ranged:
@@ -315,8 +331,7 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
             pending_failure |= summary['stopped']
             note, notice = source_status.fields(source, summary, pending_failure)
             if pending_failure or not record_success:
-                reset = ",last_error='',failures=0,retry_at=0" if clear_failure and not summary['stopped'] else ''
-                connection.execute('UPDATE subscriptions SET last_attempt=?,last_note=?,last_notice=?' + reset + ' WHERE id=?',
+                connection.execute('UPDATE subscriptions SET last_attempt=?,last_note=?,last_notice=? WHERE id=?',
                                    (reg.now(), note, notice, source['id']))
             else:
                 connection.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
@@ -393,7 +408,7 @@ def _round(scope):
             connection.execute('INSERT INTO feed_runs(kind,started_at,finished_at,summary) VALUES(?,?,?,?)',
                                ('youtube', started, reg.now(), json.dumps(summary, ensure_ascii=False)))
         return summary
-    succeeded, incomplete, returned = [], set(), set()
+    succeeded, incomplete = [], set()
     per_source = 90.0 if scope.ranged else DISCOVERY_PER_SOURCE
     discovery_started = time.monotonic()
     ceiling = RANGE_DISCOVERY_CEILING if scope.ranged else None
@@ -426,10 +441,11 @@ def _round(scope):
                 if source.get('initial_fetch_at'):
                     summary['initial_fetch_at'][str(source['id'])] = source['initial_fetch_at']
                 listed = discovery.fetch(source, settings, per_source, not scope.ranged, told)
-                if listed:
-                    returned.add(source['id'])
                 entries = sync_window.recent(source, listed, scope)
                 summary['outside_initial_window'] += len(listed) - len(entries)
+            if not commit_listing(source):
+                summary['repointed'] += 1
+                continue
             storage.discover(source, entries)
             if unavailable := source.get('discovery_unavailable'):
                 notice = f'{len(unavailable)} 条视频无法读取'
@@ -535,12 +551,8 @@ def _round(scope):
     for source in succeeded:
         try:
             rows = storage.rows([source['id']])
-            current_failure = (summary['stopped'] or source['id'] in failures or
-                               str(source['id']) in summary.get('local_ids', []) or
-                               any(code in login.AUTH_CODES and str(source['id']) in {str(identity) for identity in identities}
-                                   for code, identities in summary.get('cautions', {}).items()) or
-                               any(not row['excluded'] and (row['last_error'] or row['state'] in ('failed', 'processing'))
-                                   for row in rows))
+            if source['id'] in failures:
+                content_failure(source, RuntimeError('；'.join(failures[source['id']])), summary)
             outstanding = (summary['stopped'] or source['id'] in incomplete or source['id'] in failures or
                        str(source['id']) in summary.get('local_ids', []) or
                        any(not row['excluded'] and
@@ -552,13 +564,10 @@ def _round(scope):
             completed = storage.ready(source)
             if scope.ranged:
                 completed = [row for row in completed if scope.since <= row['entry']['published'][:10] <= scope.until]
-            if not commit_notes(source, completed, summary, outstanding, scope.ranged, record_success=False,
-                                clear_failure=source['id'] in returned and not current_failure):
+            if not commit_notes(source, completed, summary, outstanding, scope.ranged, record_success=False):
                 summary['repointed'] += 1
                 continue
-            if source['id'] in failures:
-                save_failure(source, _Told(RuntimeError('；'.join(failures[source['id']]))), summary)
-            elif outstanding or summary['stopped']:
+            if outstanding or summary['stopped']:
                 summary['deferred'] += 1
             else:
                 completed_sources.append(source)
@@ -568,7 +577,7 @@ def _round(scope):
                 summary['deferred'] += 1
             else:
                 wall(summary, [source['id']], error)
-                save_failure(source, _Told(error), summary)
+                content_failure(source, error, summary)
                 throttle.caught(error)
     try:
         commit_successes(completed_sources, summary)

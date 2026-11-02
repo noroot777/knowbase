@@ -130,7 +130,7 @@ class YouTubeCollector(YouTubeFixture):
             result = collector.collect(FetchScope(since='2026-01-01', until='2026-01-02'))
         self.assertEqual(1, result['added'])
 
-    def test_preexisting_failure_not_cleared_by_budget_deferral(self):
+    def test_listing_recovery_clears_connection_error_but_preserves_video_failure_and_coverage(self):
         storage.discover(self.source, self.fetched[:1])
         storage.failed(storage.rows()[0], RuntimeError('字幕失败'))
         with reg.db() as connection:
@@ -141,4 +141,5 @@ class YouTubeCollector(YouTubeFixture):
             result = collector.YouTubeCollector('youtube').fetch(FetchScope())
         self.assertFalse(result.whole)
         self.assertEqual((), result.targets)
-        self.assertEqual('字幕失败', reg.subscriptions('youtube')[-1]['last_error'])
+        self.assertEqual('', reg.subscriptions('youtube')[-1]['last_error'])
+        self.assertEqual('字幕失败', storage.rows()[0]['last_error'])
