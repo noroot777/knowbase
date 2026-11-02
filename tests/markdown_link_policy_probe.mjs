@@ -11,6 +11,16 @@ const check = async (name, expression) => {
   passed.push(name);
 };
 const targets = async () => (await send('Target.getTargets')).result.targetInfos;
+// closeTarget 的回包先于目标销毁到达:不等它从列表里消失,下一条用例数到的标签页基线就含着它。
+const closeTab = async targetId => {
+  await send('Target.closeTarget', { targetId });
+  const deadline = Date.now() + 6000;
+  while ((await targets()).some(target => target.targetId === targetId)) {
+    if (Date.now() > deadline) return false;
+    await sleep(50);
+  }
+  return true;
+};
 const clickNewTab = async (selector, name, { invalid = false } = {}) => {
   const before = new Set((await targets()).map(target => target.targetId));
   const expected = await evalJs(`document.querySelector(${JSON.stringify(selector)}).href`);
@@ -23,13 +33,15 @@ const clickNewTab = async (selector, name, { invalid = false } = {}) => {
     if (!opened) await sleep(100);
   }
   assert.ok(opened, name + ': 新标签到达目标');
+  let closed = false;
   try {
     await check(name, `location.href === window.policyOriginalUrl
       && window.policyMemory === '问题、回答和筛选仍在'
       && $('policy-cases').isConnected`);
   } finally {
-    await send('Target.closeTarget', { targetId: opened.targetId });
+    closed = await closeTab(opened.targetId);
   }
+  assert.ok(closed, name + ': 新标签已关闭');
 };
 const clickFragment = async (selector, name, targetSelector = null) => {
   const before = await evalJs(`({ url:location.href, filters:JSON.stringify(gState) })`);
