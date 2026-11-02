@@ -38,7 +38,7 @@ class OutputFallback(YouTubeFixture):
                 patch.object(notes, 'call', side_effect=reply or self.reply):
             return notes.build(self.row, self.transcript, self.deadline, lambda: False)
 
-    def test_each_language_stage_has_a_bounded_labelled_original_exit(self):
+    def test_each_language_stage_preserves_valid_chinese_in_its_bounded_exit(self):
         for number, stage in enumerate(('translation', 'summary', 'note'), 10):
             self.row['video_id'] = f'{number:011d}'
             requested = []
@@ -58,15 +58,97 @@ class OutputFallback(YouTubeFixture):
                     with self.assertRaises(translation.LanguageError):
                         self.build(reply)
                 result = self.build(reply)
-                self.assertTrue(result['title'].startswith('原文待校验：'))
-                self.assertEqual('youtube:original-fallback', result['body_provenance'])
-                self.assertIn('不是中文译文或已核验笔记', result['body'])
-                self.assertIn('\n\n'.join(transcripts.blocks(self.transcript['segments'])), result['body'])
+                if stage == 'translation':
+                    self.assertTrue(result['title'].startswith('原文待校验：'))
+                    self.assertEqual('youtube:original-fallback', result['body_provenance'])
+                    self.assertIn('不是中文译文或已核验笔记', result['body'])
+                    self.assertIn('\n\n'.join(transcripts.blocks(self.transcript['segments'])), result['body'])
+                else:
+                    self.assertTrue(result['title'].startswith('整理待校验：'))
+                    self.assertEqual('youtube:translation-fallback', result['body_provenance'])
+                    self.assertIn('不是已核验内容笔记', result['body'])
+                    self.assertIn('作者要求独立核验修改，并记录方法和局限。', result['body'])
+                    self.assertNotIn('Verify every generated change', result['body'])
                 self.assertNotIn('## 中文译文', result['body'])
                 self.assertNotIn('English note', result['body'])
                 count = len(requested)
                 self.assertEqual(result, self.build(reply))
                 self.assertEqual(count, len(requested))
+
+    def test_each_stage_gets_its_own_budget_and_success_clears_only_that_stage(self):
+        stage = 'translation'
+
+        def reply(prompt, *arguments):
+            if stage == 'translation' and prompt.startswith('将以下字幕'):
+                return self.untranslated(prompt)
+            if stage == 'summary' and not prompt.startswith('将以下字幕') and '只输出 JSON' not in prompt:
+                return 'This summary remains English.'
+            if stage == 'note' and '只输出 JSON' in prompt:
+                return json.dumps({'title': 'English title', 'summary': 'English summary', 'body': 'English note'})
+            return self.reply(prompt)
+
+        for stage in ('translation', 'summary', 'note'):
+            for attempt in range(2):
+                with self.subTest(stage=stage, attempt=attempt), self.assertRaises(translation.LanguageError) as error:
+                    self.build(reply)
+                self.assertEqual(stage, error.exception.stage)
+                counters = media.read_json(media.cache_dir(self.row['video_id']) / 'notes-language-failures.json')
+                self.assertEqual([attempt + 1], list(counters.values()))
+        result = self.build(reply)
+        self.assertEqual('youtube:translation-fallback', result['body_provenance'])
+        self.assertIn('作者要求独立核验修改', result['body'])
+        self.assertNotIn('English note', result['body'])
+
+    def test_legacy_shared_budget_cannot_exhaust_a_new_stage(self):
+        fingerprint = (json.dumps(self.transcript, ensure_ascii=False, sort_keys=True) + '\n' +
+                       self.selected.provider + '\n' + self.selected.model_id)
+        legacy = notes.signature('language-failure-v1', self.selected, fingerprint)
+        directory = media.cache_dir(self.row['video_id'])
+        media.save_json(directory / 'notes-language-failures.json', {legacy: notes.MAX_LANGUAGE_TRIES})
+        result = self.build()
+        self.assertNotIn('待校验：', result['title'])
+        self.assertIn('## 中文译文', result['body'])
+
+    def test_fallback_keeps_valid_atomic_chinese_and_labels_only_the_missing_original(self):
+        source = ('Verify every generated change before use. ' * 8 + '\n\n' +
+                  'Review the deployment results independently. ' * 8).strip()
+        self.transcript['segments'][0]['text'] = source
+        units = translation.units(source)
+        self.assertEqual(2, len(units))
+        directory = media.cache_dir(self.row['video_id'])
+        good = '作者要求使用前核验所有生成的修改。'
+        media.save_json(directory / 'notes-cache.json', {
+            notes.signature('translate-unit-v1', self.selected, units[0]['text']):
+                json.dumps({'translations': [good]})})
+        for attempt in range(2):
+            with self.assertRaises(translation.LanguageError):
+                self.build(self.untranslated)
+        result = self.build(self.untranslated)
+        self.assertEqual('youtube:mixed-fallback', result['body_provenance'])
+        self.assertIn(good, result['body'])
+        self.assertIn(units[1]['text'], result['body'])
+        self.assertNotIn(units[0]['text'], result['body'])
+        self.assertIn('第 1 段：中文资料（待核验）', result['body'])
+        self.assertIn('第 2 段：原文（未翻译）', result['body'])
+
+    def test_exhausted_fallback_revalidates_chinese_cache_without_model_calls(self):
+        def reply(prompt, *arguments):
+            return 'This summary remains English.' if not prompt.startswith('将以下字幕') else self.reply(prompt)
+
+        for attempt in range(2):
+            with self.assertRaises(translation.LanguageError):
+                self.build(reply)
+        result = self.build(reply)
+        self.assertEqual('youtube:translation-fallback', result['body_provenance'])
+        directory = media.cache_dir(self.row['video_id'])
+        block, = transcripts.blocks(self.transcript['segments'])
+        media.save_json(directory / 'notes-cache.json', {
+            notes.signature(translation.STAGE, self.selected, block): json.dumps({'translations': [block]})})
+        with patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call') as call:
+            result = notes.build(self.row, self.transcript, self.deadline, lambda: False)
+        call.assert_not_called()
+        self.assertEqual('youtube:original-fallback', result['body_provenance'])
+        self.assertIn(block, result['body'])
 
     def test_format_transport_local_and_interruption_failures_never_spend_the_language_budget(self):
         for error in (media.ToolFailure('model transport unavailable', 'HTTP 429', origin='model'),
@@ -246,3 +328,38 @@ class OutputFallback(YouTubeFixture):
             self.assertNotIn('Then we move on', body)
             self.assertNotIn('原文待校验', body)
             self.assertEqual({}, media.read_json(directory / 'notes-language-failures.json'))
+
+    def test_collector_exports_cached_chinese_when_only_final_note_exhausts_its_budget(self):
+        prompts = []
+
+        def reply(prompt, *arguments):
+            prompts.append(prompt)
+            if '只输出 JSON' in prompt and not prompt.startswith('将以下字幕'):
+                return json.dumps({'title': 'English title', 'summary': 'English summary', 'body': 'English note'})
+            return self.reply(prompt)
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value={'duration': 600}), \
+                patch.object(media, 'obtain', return_value=self.transcript):
+            for attempt in range(2):
+                result = collector.collect(FetchScope(force=True))
+                self.assertEqual((0, 0), (result['processed'], result['added']))
+                self.assertFalse(collector.YouTubeCollector('youtube').materialize())
+            result = collector.collect(FetchScope(force=True))
+            self.assertEqual((1, 1), (result['processed'], result['added']), result)
+            self.assertTrue(products.valid(storage.rows()[0]))
+            self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+            body, = [filename.read_text() for filename in
+                     (self.root / 'vault' / 'source' / 'youtube').rglob('*.md')]
+            self.assertIn('整理待校验：', body)
+            self.assertIn('中文资料（待核验）', body)
+            self.assertIn('作者要求独立核验修改，并记录方法和局限。', body)
+            self.assertNotIn('Verify every generated change', body)
+            self.assertNotIn('English note', body)
+            self.assertEqual(1, sum(prompt.startswith('将以下字幕') for prompt in prompts))
+            count = len(prompts)
+            collector.collect(FetchScope(force=True))
+            self.assertEqual(count, len(prompts))

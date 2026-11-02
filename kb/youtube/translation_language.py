@@ -3,8 +3,8 @@ import re
 
 from kb.feeds.registry import text_language
 
-_LITERALS = re.compile(r'```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`|https?://[^\s<>`]+|'
-                       r'\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/[^\s<>`，,。；;）)"“”]*)?')
+_LITERALS = re.compile(r'```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`|https?://[^\s<>`，,。；;）)"“”「」『』]+|'
+                       r'\b(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?:/[^\s<>`，,。；;）)"“”「」『』]*)?')
 _TOKENS = re.compile(r'(?<![A-Za-z0-9_-])(?:--?[A-Za-z][A-Za-z0-9_-]*|'
                      r'[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)+)(?![A-Za-z0-9_-])')
 _COMMAND = re.compile(
@@ -67,16 +67,21 @@ def quote_spans(text):
     for quoted in _QUOTES.finditer(text):
         start, end = quoted.start() + 1, quoted.end() - 1
         if (not re.search(r'[:：][ \t]*$', text[:quoted.start()]) or end - start > 200 or
-                any(left < end and right > start for left, right in literals)):
+                any(left < end and right > start and not start <= left <= right <= end
+                    for left, right in literals)):
             continue
         spans.append((start, end))
     narrative = _without(text, [text[start:end] for start, end in literals])
-    quoted_letters = sum(character.isalpha() for start, end in spans for character in text[start:end])
+    quoted_letters = sum(character.isalpha() for start, end in spans for character in
+                         _without(text[start:end], [text[left:right] for left, right in literals
+                                                   if start <= left <= right <= end]))
     return spans if quoted_letters * 3 <= sum(character.isalpha() for character in narrative) else []
 
 
 def contexts(text, blocks, quoted=False):
-    spans = quote_spans(text) if quoted else literal_spans(text)
+    quotes = quote_spans(text)
+    spans = quotes if quoted else [(left, right) for left, right in literal_spans(text)
+                                   if not any(start <= left <= right <= end for start, end in quotes)]
     cursor, result = 0, []
     for block in blocks:
         start = text.index(block, cursor)
@@ -103,9 +108,8 @@ def _chinese(text):
 
 
 def _narrative(value, literals, quotes):
-    literal_free = _without(value, literals)
-    remainder = _without(literal_free, quotes)
-    return remainder, remainder != literal_free
+    quote_free = _without(value, quotes)
+    return _without(quote_free, literals), quote_free != value
 
 
 def chinese_output(text, source=''):

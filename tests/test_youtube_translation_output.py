@@ -248,6 +248,44 @@ class TranslationOutput(YouTubeFixture):
                 self.assertFalse(translation_language.valid(value, spans, source))
         self.assertFalse(translation_language.chinese_output('好。' + 'invented_identifier_' * 10, source))
 
+    def test_technical_literals_inside_a_bounded_quote_do_not_cancel_the_whole_quote(self):
+        narrative = ('I spent the entire weekend reading through the specification and the reference implementation, '
+                     'because the behaviour of the handshake never matched anything I expected from the earlier '
+                     'release notes, and the wording in the document turned out to be the real answer here. '
+                     'I also compared it against three other servers, re-read the changelog twice, and asked two '
+                     'maintainers about it before I finally understood what was going on with that one paragraph. '
+                     'The paragraph about error handling says: ')
+        tail = ' and that one sentence explains every single failure we saw in production during migration week.'
+        chinese = ('我整个周末都在读规范和参考实现，因为握手的行为和早先发布说明里的预期不同。'
+                   '后来发现文档措辞才是真正的答案。我还对比了三个服务端、重读变更日志并询问维护者。错误处理段落写道：')
+        for name in ('JSON-RPC', 'open-source', 'end-to-end', 'field_name', '--strict', 're-read',
+                     '`field_name`', 'https://example.test/error'):
+            quote = 'the server must always reply with a ' + name + ' error object and never close the socket'
+            source = narrative + '"' + quote + '"' + tail
+            value = chinese + '“' + quote + '”，这解释了迁移时看到的失败。'
+            with self.subTest(name=name):
+                self.assertEqual([quote], translation_language.contexts(source, [source], quoted=True)[0])
+                literals = translation_language.contexts(source, [source])[0]
+                self.assertEqual(['re-read'], literals)
+                self.assertTrue(translation_language.valid(value, literals, source))
+                self.assertEqual(value, notes.summary_output(value, source))
+                payload = {'title': '协议错误核验', 'summary': value, 'body': value}
+                self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=source))
+                blocks = [unit['text'] for unit in translation.units(source)]
+                contexts = translation_language.contexts(source, blocks, quoted=True)
+                values = ['作者独立核验握手规范并对比部署失败。' + ''.join(context) for context in contexts]
+                rendered = translation.render(source, json.dumps({'translations': values}))
+                self.assertIn(name, rendered)
+                for position, translated in enumerate(values):
+                    self.assertEqual(translated, translation.unit_output(source, position,
+                                                                        json.dumps({'translations': [translated]})))
+        quote = 'the protocol error details are described in https://example.test/error'
+        source = narrative + '「' + quote + '」' + tail
+        self.assertEqual([quote], translation_language.contexts(source, [source], quoted=True)[0])
+        self.assertTrue(translation_language.chinese_output('规范写道：「' + quote + '」。仍需独立核验。', source))
+        fenced = '```json\n{"example": "' + quote + '"}\n```'
+        self.assertEqual([], translation_language.quote_spans(fenced))
+
     def test_non_chinese_cjk_narrative_must_be_translated_not_echoed(self):
         sources = ('今日は新しい技術を紹介します。状態管理と描画を分離するのが基本の考え方です。',
                    '오늘은 人工智能 技術과 狀態管理를 설명합니다. 실제로 확인해 보겠습니다.',

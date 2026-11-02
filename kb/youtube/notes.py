@@ -104,7 +104,7 @@ def summary_output(output, source=None):
     if not isinstance(output, str) or not output.strip():
         raise RuntimeError('视频分段要点不是有效中文，原文和译文已缓存')
     if not translation_language.chinese_output(output, source or ''):
-        raise translation.LanguageError('视频分段要点不是有效中文，原文和译文已缓存')
+        raise translation.LanguageError('视频分段要点不是有效中文，原文和译文已缓存', 'summary')
     if len(output) > 1000:
         raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
     return output
@@ -119,7 +119,7 @@ def note_payload(output, prompt='', source=''):
             not payload[field].strip() for field in ('title', 'summary', 'body'))):
         raise RuntimeError('视频笔记不是完整中文成品，未入库')
     if any(not translation_language.chinese_output(payload[field], source) for field in ('title', 'summary', 'body')):
-        raise translation.LanguageError('视频笔记不是完整中文成品，未入库')
+        raise translation.LanguageError('视频笔记不是完整中文成品，未入库', 'note')
     return payload
 
 
@@ -128,47 +128,92 @@ def build(row, transcript, deadline, stopped):
         raise media.Interrupted('视频处理已停止或时间预算用尽')
     directory = media.cache_dir(row['video_id'])
     translator, summarizer = model('translate'), model('youtube_summary')
-    key = signature('language-failure-v1', translator,
-                    json.dumps(transcript, ensure_ascii=False, sort_keys=True) + '\n' +
-                    summarizer.provider + '\n' + summarizer.model_id)
+    fingerprint = (json.dumps(transcript, ensure_ascii=False, sort_keys=True) + '\n' +
+                   summarizer.provider + '\n' + summarizer.model_id)
+    keys = {stage: signature('language-failure-v2-' + stage, translator, fingerprint)
+            for stage in ('translation', 'summary', 'note')}
     path = directory / 'notes-language-failures.json'
     failures = media.read_json(path)
     if not isinstance(failures, dict):
         failures = {}
-    attempts = failures.get(key, 0)
-    if not isinstance(attempts, int) or attempts < 0:
-        attempts = 0
-    if attempts < MAX_LANGUAGE_TRIES:
+    attempts = {stage: value if isinstance(value := failures.get(key), int) and value >= 0 else 0
+                for stage, key in keys.items()}
+
+    def completed(stage):
+        if keys[stage] in failures:
+            failures.pop(keys[stage])
+            media.save_json(path, failures)
+
+    if all(value < MAX_LANGUAGE_TRIES for value in attempts.values()):
         try:
-            result = build_chinese(row, transcript, deadline, stopped, directory, translator, summarizer)
-        except translation.LanguageError:
+            result = build_chinese(row, transcript, deadline, stopped, directory, translator, summarizer, completed)
+        except translation.LanguageError as error:
             if stopped() or time.monotonic() >= deadline:
                 raise media.Interrupted('视频处理已停止或时间预算用尽') from None
-            attempts += 1
-            failures[key] = attempts
+            stage = error.stage
+            attempts[stage] += 1
+            failures[keys[stage]] = attempts[stage]
             media.save_json(path, failures)
-            if attempts < MAX_LANGUAGE_TRIES:
+            if attempts[stage] < MAX_LANGUAGE_TRIES:
                 raise
         else:
-            if key in failures:
-                failures.pop(key)
-                media.save_json(path, failures)
+            completed('note')
             return result
+    if stopped() or time.monotonic() >= deadline:
+        raise media.Interrupted('视频处理已停止或时间预算用尽')
+    return fallback(row, transcript, directory, translator, deadline, stopped)
+
+
+def fallback(row, transcript, directory, translator, deadline, stopped):
+    cache = media.read_json(directory / 'notes-cache.json')
+    if not isinstance(cache, dict):
+        cache = {}
+    sections = []
+    for block in transcripts.blocks(transcript['segments']):
+        if stopped() or time.monotonic() >= deadline:
+            raise media.Interrupted('视频处理已停止或时间预算用尽')
+        stage = 'translate' if native_chinese(block) else translation.STAGE
+        try:
+            value = translated_output(block, block if native_chinese(block) else
+                                      cache[signature(stage, translator, block)])
+        except (KeyError, RuntimeError, ValueError, TypeError):
+            for position, unit in enumerate(translation.units(block)):
+                try:
+                    value = translation.unit_output(block, position,
+                                                    cache[signature('translate-unit-v1', translator, unit['text'])])
+                except (KeyError, RuntimeError, ValueError, TypeError):
+                    sections.append((False, unit['text']))
+                else:
+                    sections.append((True, value))
+        else:
+            sections.append((True, value))
     if stopped() or time.monotonic() >= deadline:
         raise media.Interrupted('视频处理已停止或时间预算用尽')
     original = '\n\n'.join(transcripts.blocks(transcript['segments']))
     if not original.strip():
         raise RuntimeError('没有可保留的视频原文')
     origin = ORIGINS.get(transcript['origin'], transcript['origin'])
-    return {'url': row['entry']['url'], 'title': '原文待校验：' + row['entry']['title'],
-            'body': ('> 自动中文整理连续三轮未通过语种校验，已停止自动重试。以下仅保留完整原文，'
+    if any(chinese for chinese, value in sections):
+        body = ('> 自动中文整理的某个阶段连续三轮未通过语种校验，已停止该阶段自动重试。'
+                '以下保留已通过校验的中文资料（原文或自动译文），不是已核验内容笔记；请结合原视频核对。\n\n')
+        body += '\n\n'.join(f'### 第 {position} 段：' + ('中文资料（待核验）' if chinese else '原文（未翻译）') +
+                            '\n\n' + value for position, (chinese, value) in enumerate(sections, 1))
+        provenance = 'translation-fallback' if all(chinese for chinese, value in sections) else 'mixed-fallback'
+        title = '整理待校验：'
+    else:
+        body = ('> 自动中文整理连续三轮未通过语种校验，已停止自动重试。以下仅保留完整原文，'
                      '不是中文译文或已核验笔记；请结合原视频核对。\n\n'
-                     f'> 原文依据：{origin}；未分析视频画面。\n\n## 原文（未翻译）\n\n' + original),
+                '## 原文（未翻译）\n\n' + original)
+        title, provenance = '原文待校验：', 'original-fallback'
+    body += f'\n\n> 原文依据：{origin}；未分析视频画面。'
+    if stopped() or time.monotonic() >= deadline:
+        raise media.Interrupted('视频处理已停止或时间预算用尽')
+    return {'url': row['entry']['url'], 'title': title + row['entry']['title'], 'body': body,
             'published': row['entry']['published'], 'author': row['channel'],
-            'content_kind': 'markdown', 'body_provenance': 'youtube:original-fallback'}
+            'content_kind': 'markdown', 'body_provenance': 'youtube:' + provenance}
 
 
-def build_chinese(row, transcript, deadline, stopped, directory, translator, summarizer):
+def build_chinese(row, transcript, deadline, stopped, directory, translator, summarizer, completed=lambda stage: None):
     cache = media.read_json(directory / 'notes-cache.json')
     if not isinstance(cache, dict):
         cache = {}
@@ -180,6 +225,7 @@ def build_chinese(row, transcript, deadline, stopped, directory, translator, sum
                                  lambda block=block: translation_request(block, translator, deadline, stopped,
                                                                         directory, cache),
                                  lambda output, block=block: translated_output(block, output)))
+    completed('translation')
     facts = []
     for block in translated:
         key = signature('summary', summarizer, row['entry']['title'] + '\n' + block)
@@ -199,6 +245,7 @@ def build_chinese(row, transcript, deadline, stopped, directory, translator, sum
         if len(smaller) >= len(combined):
             raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
         combined = smaller
+    completed('summary')
     prompt = ('将下面的视频要点整理成简体中文内容笔记。只输出 JSON 对象，字段为 '
               'title（具体的中文标题）、summary（不超过350字，包含关键事实和限制）、'
               'body（分主题的中文 Markdown 笔记）。不要添加资料之外的事实，不要把作者声称当成独立核验。'

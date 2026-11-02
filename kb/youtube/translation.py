@@ -13,7 +13,9 @@ class ShapeError(RuntimeError):
 
 
 class LanguageError(RuntimeError):
-    pass
+    def __init__(self, message, stage='translation'):
+        super().__init__(message)
+        self.stage = stage
 
 
 def units(text):
