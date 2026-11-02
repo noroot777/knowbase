@@ -7,7 +7,8 @@
 - **只有两路合起来把自测全跑绿了才落证**;自测这一轮跳过、或有一条没绿,都不落。
 - **跳过的自测在一路里真被拿掉了**,其余用例一条不少。
 - **收尾归父进程**:SIGTERM 进来,两路连同它们自己都得没了;父进程被 SIGKILL 时,
-  子进程靠 watch_parent 自己退。
+  子进程靠 watch_parent 自己退;**盯父进程那根线程不许碰全局 time.sleep**(有的用例
+  打桩它记节拍,轮询线程会往桩里灌拍子)。
 
 子进程一律是几行 `python -c` 的替身,不起真的整套(那就是在执行回合里跑全量了)。
 """
@@ -182,7 +183,7 @@ class SplitRunTests(unittest.TestCase):
             return real_summarize(procs, logs, work, *rest)
 
         out = io.StringIO()
-        with mock.patch.object(tier_split, "child_argv", lambda part, selftest, report:
+        with mock.patch.object(tier_split, "child_argv", lambda part, selftest, report, fd:
                                [sys.executable, "-c", CHILD, part, selftest, report, mode]), \
                 mock.patch.object(tier_selftest, "decide", lambda: (skip, "测试")), \
                 mock.patch.object(tier_selftest, "fingerprint", lambda: "fp"), \
@@ -246,7 +247,7 @@ class CleanupTests(unittest.TestCase):
                 from unittest import mock
                 from tests import tier_selftest, tier_split
                 CHILD = {CHILD!r}
-                with mock.patch.object(tier_split, "child_argv", lambda p, s, r:
+                with mock.patch.object(tier_split, "child_argv", lambda p, s, r, fd:
                                        [sys.executable, "-c", CHILD, p, s, r, "hang"]), \\
                         mock.patch.object(tier_selftest, "decide", lambda: (True, "x")):
                     sys.exit(tier_split.run_full())
@@ -270,35 +271,58 @@ class CleanupTests(unittest.TestCase):
                     proc.kill()
                     proc.wait()
 
+    def _middle(self, td, child_body):
+        """父(本用例)→ 中间进程(握写端)→ 子进程(watch_parent 读端)。"""
+        pid_file = Path(td) / "child"
+        child = textwrap.dedent(f'''
+            import os, sys, time
+            from tests import tier_split
+            real_sleep = time.sleep
+            exec({child_body!r})
+            tier_split.watch_parent(int(sys.argv[1]))
+            open({str(pid_file)!r}, "w").write(str(os.getpid()))
+            real_sleep(60)
+        ''')
+        middle = textwrap.dedent(f'''
+            import os, subprocess, sys, time
+            r, w = os.pipe()
+            subprocess.Popen([sys.executable, "-c", {child!r}, str(r)], pass_fds=(r,))
+            os.close(r)
+            time.sleep(60)
+        ''')
+        proc = subprocess.Popen([sys.executable, "-c", middle], cwd=ROOT)
+        self.addCleanup(lambda: proc.poll() is None and (proc.kill(), proc.wait()))
+        deadline = time.monotonic() + 30
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        return proc, int(pid_file.read_text())
+
     def test_a_part_leaves_when_its_parent_is_killed(self):
         with tempfile.TemporaryDirectory() as td:
-            pid_file = Path(td) / "child"
-            child = textwrap.dedent(f'''
-                import os, sys, time
-                from tests import tier_split
-                tier_split._POLL_SECONDS = 0.1
-                tier_split.watch_parent(int(sys.argv[1]))
-                open({str(pid_file)!r}, "w").write(str(os.getpid()))
-                time.sleep(60)
+            proc, pid = self._middle(td, "")
+            self.assertFalse(_gone(pid, within=1.5), "父进程还在,子进程不许自己退")
+            proc.kill()
+            proc.wait()
+            self.assertTrue(_gone(pid), "父进程被 SIGKILL 之后,子进程没自己退")
+
+    def test_watching_the_parent_never_touches_time_sleep(self):
+        """用例打桩全局 time.sleep 期间,盯父进程那根线程一拍都不许往桩里灌。"""
+        with tempfile.TemporaryDirectory() as td:
+            beats = Path(td) / "beats"
+            body = textwrap.dedent(f'''
+                def fake(secs):
+                    with open({str(beats)!r}, "a") as f:
+                        f.write("x")
+                    real_sleep(0.001)
+                time.sleep = fake
             ''')
-            middle = textwrap.dedent(f'''
-                import os, subprocess, sys, time
-                subprocess.Popen([sys.executable, "-c", {child!r}, str(os.getpid())])
-                time.sleep(60)
-            ''')
-            proc = subprocess.Popen([sys.executable, "-c", middle], cwd=ROOT)
-            try:
-                deadline = time.monotonic() + 30
-                while not pid_file.exists() and time.monotonic() < deadline:
-                    time.sleep(0.1)
-                pid = int(pid_file.read_text())
-                proc.kill()
-                proc.wait()
-                self.assertTrue(_gone(pid), "父进程被 SIGKILL 之后,子进程没自己退")
-            finally:
-                if proc.poll() is None:
-                    proc.kill()
-                    proc.wait()
+            proc, pid = self._middle(td, body)
+            time.sleep(1.5)
+            self.assertFalse(beats.exists() and beats.read_text(),
+                             "盯父进程的线程在空转全局 time.sleep")
+            proc.kill()
+            proc.wait()
+            self.assertTrue(_gone(pid))
 
 
 if __name__ == "__main__":

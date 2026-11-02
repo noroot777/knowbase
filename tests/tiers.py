@@ -241,9 +241,9 @@ def main(argv: list[str]) -> int:
     if tier not in TIERS + PARTS:
         print(f"不认识的层 {tier!r},只有 {'|'.join(TIERS)}(缺省 fast)", file=sys.stderr)
         return 2
-    if "parent" in opts:
+    if "parent-fd" in opts:
         from tests import tier_split
-        tier_split.watch_parent(int(opts["parent"]))
+        tier_split.watch_parent(int(opts["parent-fd"]))
     return run_tier(tier, selftest=opts.get("selftest"), report=opts.get("report"))
 
 
