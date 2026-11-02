@@ -329,7 +329,8 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
                     storage.mark_committed(connection, source, row['video_id'])
             summary['stopped'] = summary.get('stopped', False) or stopped()
             pending_failure |= summary['stopped']
-            note, notice = source_status.fields(source, summary, pending_failure)
+            videos = storage.rows([source['id']], connection=connection) if pending_failure else ()
+            note, notice = source_status.fields(source, summary, pending_failure, videos)
             if pending_failure or not record_success:
                 connection.execute('UPDATE subscriptions SET last_attempt=?,last_note=?,last_notice=? WHERE id=?',
                                    (reg.now(), note, notice, source['id']))
@@ -449,6 +450,8 @@ def _round(scope):
             storage.discover(source, entries)
             if unavailable := source.get('discovery_unavailable'):
                 notice = f'{len(unavailable)} 条视频无法读取'
+                if undated := sum(item.get('code') == 'undated' for item in unavailable):
+                    notice += f'，其中 {undated} 条缺少可靠发布日期'
                 if entries:
                     notice += '，已返回的其他条目继续处理'
                 summary['notices'].append({'source_id': source['id'], 'title': source['name'], 'reason': notice,

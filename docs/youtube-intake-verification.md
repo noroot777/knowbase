@@ -1,6 +1,17 @@
 # YouTube 低成本接入验证
 
-## 当前复修：用户确认混合字幕补译并保留原句（oyGbBDVpsJfW 第 2 轮）
+## 当前复修：无日期条目与退避期原因保留（jHIfk1MBW8CO 第 1 轮）
+
+- 完整覆盖证据不再要求零 JSON 行或至少一条合法日期；仅有无日期条目时也可安全结束本轮列表，单片缺失/非法日期另记跳过说明，不把整个频道罚入退避。无完整结束证据、真实中断、AUTH/未知 ERROR 的保守边界保留。
+- 内容处理积压从认领写事务内回读本频道尚未解决的视频错误；机器人/登录墙在视频退避轮次仍有可读原因，不靠保留整份旧频道提醒。已恢复、过滤、排除、改指或其他频道的旧错误不复用。
+- 本轮修改的两个测试模块覆盖真实子进程列表输出、重复 collector 轮次、新视频继续进入与 Markdown 导出，以及视频墙后的无新增请求轮次和恢复清理；不访问真实 YouTube、模型、用户 cookie 或生产库，不修改前端，不复用历史截图。
+- 登记日志、实际计数、受测树及提交一致性归档到 `/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-jHIfk1MBW8CO/`。未改模块和整套回归留验收。
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_windowed_discovery tests.test_youtube_source_status -v
+```
+
+## 历史复修：用户确认混合字幕补译并保留原句（oyGbBDVpsJfW 第 2 轮）
 
 - 用户已确认大段英文补中文并保留原句，允许增加翻译调用；此前第 2 项的免译契约争议已获得方向，不再维持中文原文长英文段零翻译的旧断言。
 - native 免译先过共享输出守卫，身份相等不再旁路；保留原始日/韩文输入检查、短术语、结构字面与有限合格引用边界。即使转录 language=zh，普通长英文仍需翻译。

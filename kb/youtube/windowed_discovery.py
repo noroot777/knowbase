@@ -60,14 +60,12 @@ def completed(output, returncode):
         return False
 
 
-def parsed(output, url):
+def parsed(output, url, undated=None):
     text = output.read_text(encoding='utf-8', errors='replace')
     noise = diagnostics(text)
     archived = re.search(r'^\[download\] .*has already been recorded in the archive', noise, re.M)
-    if (not any(line.lstrip().startswith('{') for line in text.splitlines()) and
-            not blocked(noise) and (archived or stop_reason(noise))):
-        return []
-    return media._detailed(output, url)
+    complete = not blocked(noise) and bool(archived or stop_reason(noise))
+    return media._detailed(output, url, allow_empty=complete, undated=undated)
 
 
 def fetch(source, settings, deadline, notes=None):
@@ -82,7 +80,7 @@ def fetch(source, settings, deadline, notes=None):
         source['discovery_unavailable'] = unavailable(noise)
         if blocked(noise):
             blocking = noise
-        return parsed(output, url)
+        return parsed(output, url, source['discovery_unavailable'])
 
     try:
         if known := sorted(set(source.get('known_video_ids', ())) | set(source.get('checked_old_ids', ()))):

@@ -333,13 +333,8 @@ def detailed_videos(source, settings, deadline, stopped, limit=10, notes=None):
                             of(settings)['cookies_browser'], deadline, stopped, _detailed, url, notes)
 
 
-def _detailed(output, url):
-    """逐行取 JSON,**只收真的带发布时间那几条**。
-
-    读不出时间的不拿「现在」顶替(那会让一条老视频以今天的身份进窗口),直接跳过;
-    一条都没收到时照 `_listed` 的口径抛,并带上 yt-dlp 原话 —— 真空频道和取失败在这条路
-    上同样分不开,而漏报是静默丢数据。
-    """
+def _detailed(output, url, allow_empty=False, undated=None):
+    """只取真实日期；空集是否有完整覆盖证据由调用方决定。"""
     entries, seen = [], set()
     text = output.read_text(encoding='utf-8', errors='replace')
     for line in text.splitlines():
@@ -354,12 +349,18 @@ def _detailed(output, url):
             continue
         stamp = payload.get('timestamp')
         day = str(payload.get('upload_date') or '')
-        if isinstance(stamp, (int, float)):
-            published = datetime.fromtimestamp(stamp, timezone.utc)
-        elif len(day) == 8 and day.isdigit():
-            # 只有日期那一档:按项目时区的当天零点算,不补一个假的钟点。
-            published = datetime.strptime(day, '%Y%m%d').replace(tzinfo=TZ)
-        else:
+        try:
+            if isinstance(stamp, (int, float)):
+                published = datetime.fromtimestamp(stamp, timezone.utc)
+            elif len(day) == 8 and day.isdigit():
+                published = datetime.strptime(day, '%Y%m%d').replace(tzinfo=TZ)
+            else:
+                published = None
+        except (OverflowError, OSError, ValueError):
+            published = None
+        if published is None:
+            if undated is not None:
+                undated.append({'video_id': video_id, 'reason': '无法读取发布日期', 'code': 'undated'})
             continue
         seen.add(video_id)
         views = payload.get('view_count')
@@ -371,7 +372,7 @@ def _detailed(output, url):
                         'description': str(payload.get('description') or '')[:4000],
                         'duration': duration if isinstance(duration, (int, float)) else None,
                         'url': 'https://www.youtube.com/watch?v=' + video_id})
-    if not entries:
+    if not entries and not allow_empty:
         noise = diagnostics(output)
         dropped(text, noise)
         raise ToolFailure(f'yt-dlp 没有从 {url} 解析出带发布时间的视频', noise,

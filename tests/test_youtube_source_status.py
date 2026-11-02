@@ -184,6 +184,77 @@ class YouTubeSourceStatus(YouTubeFixture):
         self.assertEqual('failed', row['state'])
         self.assertGreater(row['retry_at'], 0)
 
+    def test_video_auth_diagnostics_survive_backoff_rounds_and_clear_after_recovery(self):
+        source = self.sources[0]
+        message = 'Sign in to confirm you are not a bot'
+
+        def fetch(selected, *arguments):
+            if selected['id'] == source['id']:
+                selected['discovery_unavailable'] = [{'video_id': '00000000999', 'reason': '单片不可读'}]
+                return [self.entry(970)]
+            return []
+
+        with patch.object(discovery, 'fetch', side_effect=fetch), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'firefox'}), \
+                patch.object(collector, 'DISCOVERY_SPACING', 0), patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(media, 'probe', return_value={'duration': 600}), \
+                patch.object(media, 'obtain', side_effect=media.ToolFailure(message, message, 'bot_wall')) as obtain, \
+                patch.object(notes, 'build', side_effect=self.note):
+            first = collector.collect(FetchScope())
+            self.assertIn(str(source['id']), first['walls']['bot_wall'])
+            stored = reg.subscription('youtube', source['id'])
+            self.assertIn(message, stored['last_notice'])
+            row, = storage.rows([source['id']])
+            self.assertEqual(('failed', 1), (row['state'], row['attempts']))
+            retry_at = row['retry_at']
+            for round_number in range(2):
+                with self.subTest(backoff_round=round_number):
+                    result = collector.collect(FetchScope())
+                    self.assertEqual({}, result['walls'])
+                    stored = reg.subscription('youtube', source['id'])
+                    self.assertIn(message, stored['last_notice'])
+                    self.assertIn('1 条视频无法读取', stored['last_notice'])
+                    self.assertEqual(('', 0, 0, ''), tuple(stored[key] for key in
+                                     ('last_error', 'failures', 'retry_at', 'last_success')))
+                    self.assertNotIn(message, reg.subscription('youtube', self.sources[1]['id'])['last_notice'])
+                    row, = storage.rows([source['id']])
+                    self.assertEqual((1, retry_at), (row['attempts'], row['retry_at']))
+                    self.assertEqual(1, obtain.call_count)
+            obtain.side_effect = None
+            obtain.return_value = self.complete_transcript()
+            collector.collect(FetchScope(force=True))
+            stored = reg.subscription('youtube', source['id'])
+            self.assertTrue(stored['last_success'])
+            self.assertNotIn(message, stored['last_notice'])
+            self.assertIn('1 条视频无法读取', stored['last_notice'])
+            row, = storage.rows([source['id']])
+            self.assertEqual(('ready', '', 0), (row['state'], row['last_error'], row['retry_at']))
+
+    def test_pending_notice_uses_current_unresolved_owned_rows_not_previous_notice(self):
+        source, other = self.sources[:2]
+        entries = [self.entry(number) for number in (960, 961, 962, 963)]
+        storage.discover(source, entries[:3])
+        storage.discover(other, entries[3:])
+        for entry, state, message in zip(entries, ('failed', 'filtered', 'failed', 'failed'),
+                                         ('当前视频登录受阻', '已过滤旧错误', '已排除旧错误', '另一个频道的错误')):
+            storage.update(entry['video_id'], state=state, last_error=message, retry_at=10**12)
+        with reg.db() as connection:
+            connection.execute('INSERT INTO feed_item_exclusions VALUES(?,?,?,?,?)',
+                               (reg.item_key('youtube', entries[2]['url']), 'youtube', entries[2]['url'], '', reg.now()))
+            connection.execute("UPDATE subscriptions SET last_notice='旧连接警告与过时跳过数量' WHERE id=?",
+                               (source['id'],))
+        self.assertTrue(next(row for row in storage.rows([source['id']])
+                             if row['video_id'] == entries[2]['video_id'])['excluded'])
+        summary = self.summary()
+        self.assertTrue(collector.commit_notes(source, [], summary, pending_failure=True))
+        stored = reg.subscription('youtube', source['id'])
+        self.assertIn('当前视频登录受阻', stored['last_notice'])
+        for stale in ('旧连接警告', '已过滤旧错误', '已排除旧错误', '另一个频道的错误'):
+            self.assertNotIn(stale, stored['last_notice'])
+        storage.update(entries[0]['video_id'], state='ready', last_error='')
+        self.assertTrue(collector.commit_notes(source, [], self.summary(), pending_failure=True))
+        self.assertNotIn('当前视频登录受阻', reg.subscription('youtube', source['id'])['last_notice'])
+
     def test_actual_listing_failure_keeps_error_and_backoff_instead_of_becoming_empty_success(self):
         source = self.sources[0]
         with reg.db() as connection:

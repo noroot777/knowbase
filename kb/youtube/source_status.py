@@ -1,12 +1,16 @@
 from kb.youtube import diagnosis, login
 
 
-def fields(source, summary, pending=False):
+def fields(source, summary, pending=False, videos=()):
     identity = str(source['id'])
     partial = [item['reason'] for item in summary.get('partial', ())
                if str(item.get('source_id', '')) == identity]
     notices = [item['reason'] for item in summary.get('notices', ())
                if str(item.get('source_id', '')) == identity]
+    if pending:
+        notices.extend('视频处理未完成：' + row['last_error'] for row in videos
+                       if not row.get('excluded') and row['state'] not in ('ready', 'excluded', 'filtered')
+                       and row.get('last_error'))
     browser = summary.get('browser', 'chrome')
     for code, identities in summary.get('walls', {}).items():
         if identity in {str(value) for value in identities}:
