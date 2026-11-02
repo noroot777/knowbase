@@ -127,13 +127,42 @@ class OutputFallback(YouTubeFixture):
                 self.build(self.untranslated)
         result = self.build(self.untranslated)
         self.assertEqual('youtube:mixed-fallback', result['body_provenance'])
-        chinese, original = result['body'].split('\n\n## 原文对照（未改写）\n\n')
-        self.assertIn(good, chinese)
-        self.assertIn(units[1]['text'], chinese)
-        self.assertNotIn(units[0]['text'], chinese)
-        self.assertEqual(source, original.split('\n\n> 原文依据：', 1)[0])
+        self.assertNotIn('## 原文对照', result['body'])
+        self.assertIn(good, result['body'])
+        self.assertEqual(1, result['body'].count(units[1]['text']))
+        self.assertNotIn(units[0]['text'], result['body'])
         self.assertIn('第 1 段：中文资料（待核验）', result['body'])
         self.assertIn('第 2 段：原文（未翻译）', result['body'])
+
+    def test_original_comparison_is_only_appended_when_fallback_sections_are_all_chinese(self):
+        source = ' '.join(f'Checkpoint {position} requires independent validation before deployment.'
+                          for position in range(70))
+        self.transcript['segments'][0]['text'] = source
+        blocks = transcripts.blocks(self.transcript['segments'])
+        self.assertEqual(2, len(blocks))
+        good = '作者要求对各个阶段独立核验，然后再部署。'
+        directory = media.cache_dir(self.row['video_id'])
+        for translated_count, provenance in ((0, 'original-fallback'), (1, 'mixed-fallback'),
+                                             (2, 'translation-fallback')):
+            cache = {notes.signature(translation.STAGE, self.selected, block):
+                     json.dumps({'translations': [good] * len(translation.units(block))})
+                     for block in blocks[:translated_count]}
+            media.save_json(directory / 'notes-cache.json', cache)
+            with self.subTest(translated_count=translated_count), patch.object(notes, 'call') as call:
+                result = notes.fallback(self.row, self.transcript, directory, self.selected,
+                                        self.deadline, lambda: False)
+                call.assert_not_called()
+                self.assertEqual('youtube:' + provenance, result['body_provenance'])
+                self.assertEqual(translated_count == len(blocks), '## 原文对照' in result['body'])
+                if translated_count == len(blocks):
+                    chinese, original = result['body'].split('\n\n## 原文对照（未改写）\n\n')
+                    self.assertIn(good, chinese)
+                    self.assertEqual('\n\n'.join(blocks), original.split('\n\n> 原文依据：', 1)[0])
+                else:
+                    for block in blocks[translated_count:]:
+                        for unit in translation.units(block):
+                            self.assertEqual(1, result['body'].count(unit['text']))
+                self.assertEqual(source, self.transcript['segments'][0]['text'])
 
     def test_exhausted_fallback_revalidates_chinese_cache_without_model_calls(self):
         def reply(prompt, *arguments):
@@ -167,11 +196,12 @@ class OutputFallback(YouTubeFixture):
                 self.assertEqual(notes.MAX_LANGUAGE_TRIES + 1, call.call_count)
         self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-language-failures.json').exists())
 
-    def collector_model_failure(self, error, expected):
+    def collector_model_failure(self, error, expected, recover=False):
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
                 patch.object(notes, 'available', return_value=(True, '')), \
-                patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call', side_effect=error), \
+                patch.object(notes, 'model', return_value=self.selected), \
+                patch.object(notes, 'call', side_effect=error) as call, \
                 patch.object(media, 'probe', return_value={'duration': 600}), \
                 patch.object(media, 'obtain', return_value=self.transcript):
             for attempt in range(notes.MAX_LANGUAGE_TRIES + 1):
@@ -184,7 +214,62 @@ class OutputFallback(YouTubeFixture):
                 if expected == 'deferred':
                     self.assertEqual(('', 0), (row['last_error'], row['retry_at']))
                 self.assertFalse(collector.YouTubeCollector('youtube').materialize())
+            if recover:
+                call.side_effect = self.reply
+                result = collector.collect(FetchScope(force=True))
+                self.assertEqual((1, 1), (result['processed'], result['added']))
+                row, = storage.rows()
+                self.assertEqual('ready', row['state'])
+                self.assertTrue(products.valid(row))
+                self.assertNotIn('fallback', json.loads(row['note'])['body_provenance'])
+                self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+                filename, = (self.root / 'vault' / 'source' / 'youtube').rglob('*.md')
+                self.assertIn('## 中文译文（自动生成）', filename.read_text())
+                self.assertNotIn('原文待校验：', filename.read_text())
         self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-language-failures.json').exists())
+
+    def test_response_service_failures_preserve_each_existing_content_stage_budget(self):
+        failure = SimpleNamespace(status='failed', error=SimpleNamespace(message='server had an error'),
+                                  incomplete_details=None)
+        for number, stage in enumerate(('translation', 'summary', 'note'), 800):
+            self.row['video_id'] = f'{number:011d}'
+            mode = 'output'
+
+            def reply(prompt, *arguments):
+                actual = 'translation' if prompt.startswith('将以下字幕') else 'note' if '只输出 JSON' in prompt else 'summary'
+                if actual == stage and mode == 'output':
+                    raise model_response.OutputError('explicit output failure')
+                if actual == stage and mode == 'service':
+                    return model_response.complete(None, 'fixture', 'fixture', prompt)
+                return self.reply(prompt)
+
+            path = media.cache_dir(self.row['video_id']) / 'notes-language-failures.json'
+            with self.subTest(stage=stage), patch.object(model_response.llm, 'openai_conversion_enabled',
+                                                       return_value=False), \
+                    patch.object(model_response.llm_openai, '_create', return_value=failure):
+                for attempt in range(2):
+                    with self.assertRaises(model_response.OutputError):
+                        self.build(reply)
+                self.assertEqual([2], list(media.read_json(path).values()))
+                mode = 'service'
+                for attempt in range(notes.MAX_LANGUAGE_TRIES + 1):
+                    with self.assertRaisesRegex(media.ToolFailure, 'server had an error') as caught:
+                        self.build(reply)
+                    self.assertEqual('model', caught.exception.origin)
+                    self.assertEqual([2], list(media.read_json(path).values()))
+                mode = 'success'
+                self.assertNotIn('fallback', self.build(reply)['body_provenance'])
+                self.assertEqual({}, media.read_json(path))
+
+    def test_collector_retries_failed_response_envelopes_then_exports_a_real_recovery(self):
+        failure = SimpleNamespace(status='failed', error=SimpleNamespace(message='server had an error'),
+                                  incomplete_details=None)
+        with patch.object(model_response.llm, 'openai_conversion_enabled', return_value=False), \
+                patch.object(model_response.llm_openai, '_create', return_value=failure):
+            def fail(*arguments):
+                return model_response.complete(None, 'fixture', 'fixture', 'fixture')
+
+            self.collector_model_failure(fail, 'failed', recover=True)
 
     def test_service_failures_preserve_existing_content_counts_without_exhausting_them(self):
         for attempt in range(2):

@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from kb import llm_openai
-from kb.youtube import llm_request, model_response
+from kb.youtube import llm_request, media, model_response
 
 
 class YouTubeModelResponse(unittest.TestCase):
@@ -21,7 +21,8 @@ class YouTubeModelResponse(unittest.TestCase):
         self.paths = []
         self.requests = []
 
-    def ask(self, protocol, reason, *, terminal=True, refusal=False):
+    def ask(self, protocol, reason, *, terminal=True, refusal=False, choice_count=1, error_message='',
+            message_status='completed'):
         paths = self.paths
         requests = self.requests
         text = '接口预算为六十四。'
@@ -58,7 +59,7 @@ class YouTubeModelResponse(unittest.TestCase):
                     payload = {'id': 'chat_fixture', 'object': 'chat.completion', 'created': 0,
                                'model': 'fixture', 'choices': [{'index': 0, 'finish_reason': reason,
                                'message': {'role': 'assistant', 'content': text,
-                                           'refusal': '拒绝' if refusal else None}}]}
+                                           'refusal': '拒绝' if refusal else None}}] * choice_count}
                     self.wfile.write(json.dumps(payload).encode())
                 else:
                     content = [{'type': 'refusal', 'refusal': '拒绝'}] if refusal else [
@@ -67,8 +68,9 @@ class YouTubeModelResponse(unittest.TestCase):
                                'model': 'fixture', 'status': reason,
                                'incomplete_details': {'reason': 'max_output_tokens'}
                                if reason == 'incomplete' else None,
+                               'error': {'code': 'server_error', 'message': error_message} if error_message else None,
                                'output': [{'type': 'message', 'id': 'msg_fixture',
-                                           'role': 'assistant', 'status': 'completed', 'content': content}]}
+                                           'role': 'assistant', 'status': message_status, 'content': content}]}
                     self.wfile.write(json.dumps(payload).encode())
 
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -93,24 +95,55 @@ class YouTubeModelResponse(unittest.TestCase):
         self.assertEqual('只有开头一句。', llm_openai.complete(client, 'fixture', '原文', 6000, False))
 
     def test_chat_non_stop_reasons_never_cross_the_real_request_process(self):
-        for reason in ('length', 'content_filter', 'tool_calls', None):
+        for reason in ('length', 'content_filter', 'tool_calls'):
             with self.subTest(reason=reason), self.assertRaisesRegex(model_response.OutputError, '未正常完成'):
                 self.ask('chat', reason)
-        self.assertEqual(['/v1/chat/completions'] * 4, self.paths)
+        self.assertEqual(['/v1/chat/completions'] * 3, self.paths)
 
-    def test_responses_incomplete_failed_and_unknown_status_are_not_text_success(self):
-        for reason in ('incomplete', 'failed', 'in_progress', None):
-            with self.subTest(reason=reason), self.assertRaisesRegex(model_response.OutputError, '未正常完成'):
-                self.ask('responses', reason)
+    def test_chat_missing_completion_evidence_is_a_model_service_failure(self):
+        for reason, count in ((None, 1), ('stop', 0), ('stop', 2)):
+            with self.subTest(reason=reason, count=count), self.assertRaises(media.ToolFailure) as caught:
+                self.ask('chat', reason, choice_count=count)
+            self.assertEqual('model', caught.exception.origin)
+        self.assertEqual(['/v1/chat/completions'] * 3, self.paths)
+
+    def test_responses_incomplete_status_is_an_output_failure(self):
+        with self.assertRaisesRegex(model_response.OutputError, '未正常完成'):
+            self.ask('responses', 'incomplete')
+        self.assertEqual(['/v1/responses'], self.paths)
+
+    def test_responses_service_statuses_preserve_upstream_diagnostics(self):
+        for reason in ('failed', 'in_progress', 'queued', 'cancelled', None, 'unknown'):
+            message = 'server had an error processing your request' if reason == 'failed' else ''
+            with self.subTest(reason=reason), self.assertRaises(media.ToolFailure) as caught:
+                self.ask('responses', reason, error_message=message)
+            self.assertEqual('model', caught.exception.origin)
+            self.assertIn(reason or 'missing_status', str(caught.exception))
+            if message:
+                self.assertIn(message, str(caught.exception))
+        self.assertEqual(['/v1/responses'] * 6, self.paths)
+
+    def test_responses_message_delivery_is_distinct_from_explicit_output_truncation(self):
+        for status in (None, 'in_progress', 'unknown'):
+            with self.subTest(status=status), self.assertRaises(media.ToolFailure) as caught:
+                self.ask('responses', 'completed', message_status=status)
+            self.assertEqual('model', caught.exception.origin)
+        with self.assertRaises(model_response.OutputError):
+            self.ask('responses', 'completed', message_status='incomplete')
         self.assertEqual(['/v1/responses'] * 4, self.paths)
 
-    def test_anthropic_truncation_refusal_and_missing_terminal_event_are_rejected(self):
-        for reason in ('max_tokens', 'refusal', 'pause_turn', None):
+    def test_anthropic_truncation_refusal_and_pause_are_output_failures(self):
+        for reason in ('max_tokens', 'refusal', 'pause_turn'):
             with self.subTest(reason=reason), self.assertRaisesRegex(model_response.OutputError, '未正常完成'):
                 self.ask('anthropic', reason)
-        with self.assertRaisesRegex(model_response.OutputError, '未正常完成'):
-            self.ask('anthropic', 'end_turn', terminal=False)
-        self.assertEqual(['/v1/messages'] * 5, self.paths)
+        self.assertEqual(['/v1/messages'] * 3, self.paths)
+
+    def test_anthropic_missing_completion_evidence_is_a_model_service_failure(self):
+        for reason, terminal in ((None, True), ('end_turn', False), ('max_tokens', False)):
+            with self.subTest(reason=reason, terminal=terminal), self.assertRaises(media.ToolFailure) as caught:
+                self.ask('anthropic', reason, terminal=terminal)
+            self.assertEqual('model', caught.exception.origin)
+        self.assertEqual(['/v1/messages'] * 3, self.paths)
 
     def test_all_protocols_accept_normal_completion_and_natural_chinese(self):
         for protocol, reason, field in (('chat', 'stop', 'max_completion_tokens'),

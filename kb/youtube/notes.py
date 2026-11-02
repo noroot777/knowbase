@@ -212,7 +212,8 @@ def fallback(row, transcript, directory, translator, deadline, stopped):
                 '以下保留已通过校验的中文资料（原文或自动译文），不是已核验内容笔记；请结合原视频核对。\n\n')
         body += '\n\n'.join(f'### 第 {position} 段：' + ('中文资料（待核验）' if chinese else '原文（未翻译）') +
                             '\n\n' + value for position, (chinese, value) in enumerate(sections, 1))
-        body += original_comparison(blocks)
+        if all(chinese for chinese, value in sections):
+            body += original_comparison(blocks)
         provenance = 'translation-fallback' if all(chinese for chinese, value in sections) else 'mixed-fallback'
         title = '整理待校验：'
     else:

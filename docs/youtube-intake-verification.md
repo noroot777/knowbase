@@ -1,6 +1,18 @@
 # YouTube 低成本接入验证
 
-## 当前复修：区分历史错误与当前失败（jHIfk1MBW8CO 第 2 轮）
+## 当前复修：模型服务完成凭据与混合兜底去重（Kr34QSo_Ybmb 第 1 轮）
+
+- 在 YouTube 模型响应边界区分服务未交付完整回复和模型已给出不合格内容；Responses 服务失败保留上游 error.message，Chat 缺完成标记或回复项、Anthropic 缺流结束事件/停止原因走 MODEL，不再消耗内容阶段三轮预算。
+- 模型明确截断、拒答、非正文及空正文仍按原内容预算处理；服务错误的父子进程归属、超时和取消保护保持原协议，不修改通用模型调用。
+- 混合兜底已经逐段保留未译原文时，不再附整份原文对照；各段均为中文资料时继续附完整原文对照，完全未译时继续只保留一份完整原文。原始转录与有效译文缓存不清空。
+- 本轮修改的两个测试模块覆盖三协议的真实 loopback SDK/子进程分类、三个阶段已有内容计数遇到服务故障仍保持、collector 四轮故障后恢复并实际导出，以及三种兜底出口的原文次数；未改模块和整套回归留验收。
+- 登记日志、实际计数、受测树和提交一致性归档到 `/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-Kr34QSo_Ybmb/`。仅后端响应语义与 Markdown，不操作浏览器，不复用历史截图。
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_model_response tests.test_youtube_output_fallback -v
+```
+
+## 历史复修：区分历史错误与当前失败（jHIfk1MBW8CO 第 2 轮）
 
 - 频道内容提醒仅回读当前仍为 failed 且未永久排除的视频错误；candidate、deferred、processing 即使保留旧 last_error，也不把它当成本轮仍被登录墙阻断。
 - 不清除历史错误，不修改排名、重试目标、视频预算或通用失败结算；真实 failed 视频在退避期仍保留原因，恢复或转入预算队列后不再反复提示重新登录。
