@@ -16,6 +16,9 @@
   点验收时自动跑**(手动跑用于排查;动了测试基建/共享夹具的那一轮当轮跑)——
   共享 `KB_DATA_DIR` 的「只在同跑时红、单跑永远绿」那类问题,只有全量同跑看得见。
 
+每一层跑完都打一份耗时账(最慢的文件/用例,文件那栏含类级夹具,见 `timing_lines`):
+提速只能对着重尾下手,默认输出却只有一串点和一个总秒数。
+
 **所选层对快速层开关的态度必须显式**(`_apply_tier_env`):fast 设上,probes/full
 把继承值清掉。不清的话,外头 export 过一次的壳里 full 就再也不是「一条不拦」。
 **功能开关**(`KB_FEED_DOH` 这类)同样清 —— 名单和理由在 `tests/__init__.py`。
@@ -43,6 +46,11 @@ from tests import clear_feature_env
 
 TESTS_DIR = ROOT / "tests"
 TIERS = ("fast", "probes", "full")
+
+#: 耗时账的时钟,单独一个名字好让回归换成假钟(不去动全局的 time.monotonic)。
+_clock = time.monotonic
+#: 跑完打几行「最慢」:文件、用例各这么多条。
+SLOWEST_N = 15
 
 #: probes 层的口径:测试文件的源码里引用了 tests.headless(共享闸门、run_probe、
 #: fixture_server 都在这一个模块里)。docstring 里偶尔提一句也会被圈进来 ——
@@ -112,10 +120,37 @@ class TierResult(unittest.TextTestResult):
         self.kb_started: set[str] = set()        # 真正开始过的方法 id
         self.kb_whole_skips: set[str] = set()    # 整条 skip(方法级 + holder)
         self.kb_partial_skips: set[str] = set()  # 子例 skip 的**父方法** id
+        # 耗时账(timing_lines 读):用例按 startTest→stopTest 记;文件按「上一条
+        # 结束 → 本条结束」接力记,这样 setUpClass/setUpModule 起的夹具服务、浏览器
+        # 也算进它所在的文件 —— 只看单条用例的话,重尾里最贵的那一截恰好看不见。
+        self.kb_case_secs: Counter[str] = Counter()
+        self.kb_file_secs: Counter[str] = Counter()
+        self._kb_mark = _clock()
+        self._kb_case_t0 = self._kb_mark
+        self._kb_last_file: str | None = None
+
+    def startTestRun(self):
+        super().startTestRun()
+        self._kb_mark = _clock()
 
     def startTest(self, test):
         self.kb_started.add(test.id())
+        self._kb_case_t0 = _clock()
         super().startTest(test)
+
+    def stopTest(self, test):
+        super().stopTest(test)
+        now = _clock()
+        self.kb_case_secs[test.id()] += now - self._kb_case_t0
+        self._kb_last_file = type(test).__module__
+        self.kb_file_secs[self._kb_last_file] += now - self._kb_mark
+        self._kb_mark = now
+
+    def stopTestRun(self):
+        # 最后一个文件的类级/模块级收尾在最后一条 stopTest 之后才跑,补记给它。
+        if self._kb_last_file is not None:
+            self.kb_file_secs[self._kb_last_file] += _clock() - self._kb_mark
+        super().stopTestRun()
 
     def addSkip(self, test, reason):
         super().addSkip(test, reason)
@@ -136,6 +171,26 @@ def browser_coverage(browser_ids: set[str], result: TierResult) -> tuple[int, in
     ran = (result.kb_started & browser_ids) \
         - result.kb_whole_skips - result.kb_partial_skips
     return len(browser_ids), len(ran)
+
+
+def timing_lines(result: TierResult, n: int = SLOWEST_N) -> list[str]:
+    """最慢的 n 个文件、n 条用例,连同它们占总时长的比例。
+
+    文件那一栏含类级/模块级夹具(起沙箱服务、起浏览器);接力记账的代价是**上一个
+    文件的类级收尾**(收子进程)也落在下一个文件头上,通常不到一秒。
+    """
+    total = sum(result.kb_file_secs.values())
+    if not total:
+        return []
+    out = []
+    for title, book in (("文件(含类级夹具)", result.kb_file_secs),
+                        ("用例", result.kb_case_secs)):
+        top = book.most_common(n)
+        part = sum(secs for _, secs in top)
+        out.append(f"  最慢的 {len(top)} 个{title}合计 {part:.0f} 秒,"
+                   f"占 {part / total:.0%}:")
+        out += [f"    {secs:6.1f}s  {name}" for name, secs in top]
+    return out
 
 
 def main(argv: list[str]) -> int:
@@ -171,6 +226,10 @@ def main(argv: list[str]) -> int:
     # 得看得到装哪个、怎么装,不能让「安装提示写在装饰器里」停在装饰器里。
     for reason, n in Counter(r for _, r in result.skipped).most_common():
         print(f"  skip ×{n}:{reason}", file=status, flush=True)
+    # 耗时账:提速只能对着重尾下手(少数几条占了大半),而 verbosity=1 只有一串点,
+    # 不打出来就只剩一个总秒数可看。
+    for row in timing_lines(result):
+        print(row, file=status, flush=True)
     if tier == "probes":
         # 这一层的意义就是「现在就验浏览器」,没验全不许绿:缺壳时浏览器用例全
         # skip、几百条纯逻辑邻居通过、命令报成功 —— 那正是要修的事故形态。空集
