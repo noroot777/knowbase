@@ -98,9 +98,8 @@ export async function checkWechatTargetSizing({ evaluate, wait, check, viewport,
   const measure = () => evaluate(`(() => {
     const list = $('tgt-list'), box = list.getBoundingClientRect();
     const entries = [...list.children], first = entries[0].getBoundingClientRect(), last = entries.at(-1).getBoundingClientRect();
-    const hint = document.querySelector('#subs-wechat-manage > .hint').getBoundingClientRect();
     return { height:box.height, content:last.bottom - first.top, scrollHeight:list.scrollHeight,
-      clientHeight:list.clientHeight, hintGap:hint.top - box.bottom, hintBottom:hint.bottom,
+      clientHeight:list.clientHeight, listBottom:box.bottom,
       viewport:innerHeight, page:document.documentElement.scrollHeight,
       horizontal:document.documentElement.scrollWidth > innerWidth };
   })()`);
@@ -112,12 +111,12 @@ export async function checkWechatTargetSizing({ evaluate, wait, check, viewport,
       await populate(count);
       const dimensions = await measure();
       check(`${count} 个公众号的名单边框按内容收缩而非填满空白`, Math.abs(dimensions.height - dimensions.content - 2) < 3, JSON.stringify(dimensions));
-      check(`${count} 个公众号的说明紧接名单且工作区不整页滚动`, dimensions.hintGap >= 0 && dimensions.hintGap <= 14 && dimensions.page <= dimensions.viewport + 1, JSON.stringify(dimensions));
+      check(`${count} 个公众号的名单整块落在视口内且工作区不整页滚动`, dimensions.listBottom <= dimensions.viewport && dimensions.page <= dimensions.viewport + 1, JSON.stringify(dimensions));
       if (count) await screenshot(`review-wechat-${count}-targets-1440`);
     }
     await populate(30);
     const desktop = await measure();
-    check('30 个公众号超出高度时名单内部滚动且说明仍可见', desktop.scrollHeight > desktop.clientHeight + 100 && desktop.hintBottom <= desktop.viewport && desktop.page <= desktop.viewport + 1, JSON.stringify(desktop));
+    check('30 个公众号超出高度时名单内部滚动且底边仍在视口内', desktop.scrollHeight > desktop.clientHeight + 100 && desktop.listBottom <= desktop.viewport && desktop.page <= desktop.viewport + 1, JSON.stringify(desktop));
     await evaluate(`$('tgt-list').scrollTop = $('tgt-list').scrollHeight; true`);
     check('长公众号名单可以滚动到最后一条操作按钮', await evaluate(`(() => {
       const button = document.querySelector('#tgt-list .tgt-row:last-child button'), box = button.getBoundingClientRect();
@@ -131,7 +130,7 @@ export async function checkWechatTargetSizing({ evaluate, wait, check, viewport,
     await screenshot('review-wechat-3-targets-375');
     await populate(30);
     const mobileLong = await measure();
-    check('手机长公众号名单内部滚动且页尾说明保留', mobileLong.scrollHeight > mobileLong.clientHeight && mobileLong.hintBottom <= mobileLong.viewport && mobileLong.page <= mobileLong.viewport + 1 && !mobileLong.horizontal, JSON.stringify(mobileLong));
+    check('手机长公众号名单内部滚动且底边仍在视口内', mobileLong.scrollHeight > mobileLong.clientHeight && mobileLong.listBottom <= mobileLong.viewport && mobileLong.page <= mobileLong.viewport + 1 && !mobileLong.horizontal, JSON.stringify(mobileLong));
     await screenshot('review-wechat-30-targets-375');
   } finally {
     await viewport(1440, 1000);
