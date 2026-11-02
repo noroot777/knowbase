@@ -154,14 +154,17 @@ def refresh(rows, settings, scope, deadline, stopped, observe=None, progress=Non
     unfinished &= waiting_ids
     not_reached &= waiting_ids - unfinished
     stats['pending'] = len(waiting)
-    current = [row for row in latest if not row.get('excluded')]
-    for row in current:
+    for row in latest:
+        if row.get('excluded'):
+            continue
         if row['video_id'] in metadata_by_id:
             row['_metadata'] = metadata_by_id[row['video_id']]
         elif row['video_id'] in pending:
             row['_metadata_reason'] = PENDING if row['entry'].get('approximate') else STALE
     failures = source_failures(errors, eligible)
-    return {'rows': current, 'stats': stats, 'errors': errors,
+    # 永久移除的那几条也交给排名:「已排除的不占名次」只由 `ranking.score` 判一份,
+    # 它看不见的话,移除之前占着的名次就一直挂在榜上(面板按 `score_rank` 排序)。
+    return {'rows': latest, 'stats': stats, 'errors': errors,
             'local_errors': local_errors,
             'pending_ids': waiting_ids, 'not_reached_ids': not_reached,
             'unfinished_ids': unfinished, 'stopped': cancelled,

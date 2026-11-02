@@ -272,6 +272,10 @@ class PartialListing(YouTubeFixture):
     def one_round(self, note=''):
         self.isolate()
         source = self.channel(300 if note else 301)
+        # 同步过的老订阅:没成功过的频道走首次 3 天起点,窗口外那条在入库之前就被滤掉了。
+        with reg.db() as connection:
+            connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
+                               (reg.now(), source['id']))
 
         def fetch(selected, settings, timeout, estimates, notes=None):
             if note:
@@ -403,14 +407,19 @@ class FactsReplaceEstimates(YouTubeFixture):
         self.assertEqual(('2026-10-25', None, 77), self.stored())
 
     def test_ranged_round_rejects_a_video_whose_real_date_is_another_day(self):
-        """端到端:指定 10-27 补抓,库里那条估 10-27 而实际 10-25 —— 不许产出成品,
-        库里的日期也要换成事实值。**这是审查冒烟的那一例。**"""
-        entry = self.guessed('2026-10-27T10:00:00+08:00')
+        """端到端:指定某天补抓,库里那条估在那天而实际早两天 —— 不许产出成品,
+        库里的日期也要换成事实值。**这是审查冒烟的那一例。**
+
+        日期按今天往回推,不写死:写死的那一版过了几天,事实日期就落出 7 天窗口和订阅
+        历史下界,后半段「换成普通一轮能回来」随之红掉,而代码一个字没动。"""
+        today = datetime.now(TZ).date()
+        guessed, real = today - timedelta(days=1), today - timedelta(days=3)
+        entry = self.guessed(f'{guessed.isoformat()}T10:00:00+08:00')
         metadata = {'id': entry['video_id'], 'duration': 600, 'language': 'en',
-                    'upload_date': '20261025', 'view_count': 4200}
+                    'upload_date': real.strftime('%Y%m%d'), 'view_count': 4200}
         summary = {'added': 0, 'processed': 0, 'errors': [], 'message': '', 'stopped': False}
         settings = reg.get_settings('youtube')
-        scope = FetchScope(since='2026-10-27', until='2026-10-27')
+        scope = FetchScope(since=guessed.isoformat(), until=guessed.isoformat())
         ranking.score(storage.rows(), of(settings), scope)
         with patch.object(notes, 'available', return_value=(True, '')), \
                 patch.object(media, 'probe', return_value=metadata), \
@@ -420,7 +429,7 @@ class FactsReplaceEstimates(YouTubeFixture):
         build.assert_not_called()
         self.assertEqual(0, summary['processed'])
         row = storage.rows([self.source['id']])[0]
-        self.assertEqual('2026-10-25', row['entry']['published'][:10], '事实日期必须落库')
+        self.assertEqual(real.isoformat(), row['entry']['published'][:10], '事实日期必须落库')
         self.assertNotIn('approximate', row['entry'])
         # **「这一轮不要」不是「永久不要」**:写成 excluded 的话,下一轮普通同步里
         # `rejection` 那道 `state=='excluded' and not force` 会直接拒掉它,它再也回不来。
@@ -428,7 +437,7 @@ class FactsReplaceEstimates(YouTubeFixture):
         # 否则「这一轮没进」在两处是两个状态,恢复路径也就只有一条能走通。
         self.assertEqual('filtered', row['state'])
         self.assertIn('指定日期范围', row['reason'])
-        # **接着钉住它真能回来**:换成普通一轮(事实日期 10-25 落在默认 7 天窗口里),
+        # **接着钉住它真能回来**:换成普通一轮(事实日期三天前,落在默认 7 天窗口里),
         # 同一条候选重新进榜 —— 这是「放宽窗口/换一天还能收」那半边。
         revived = ranking.score(storage.rows(), of(settings), FetchScope())
         self.assertEqual([entry['video_id']], [item['video_id'] for item in revived])

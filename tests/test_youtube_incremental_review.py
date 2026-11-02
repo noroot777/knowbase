@@ -41,7 +41,9 @@ class MetadataSnapshots(IncrementalFixture):
         rows = storage.rows()
         self.assertEqual([1, 2, 3, 0], [row['score_rank'] for row in rows])
         self.assertTrue(all(row['reason'] == '本轮数量预算已用完，留待下轮' for row in rows))
-        self.assertEqual([123, 123, 123, 456], [row['retry_at'] for row in rows])
+        # 处理预算的延后不归元数据管:挂起元数据不许改写它的冷却(只释放 `metadata_deferral()`
+        # 认得的那两类,见 `tests/test_youtube_incremental_completion.py`)。
+        self.assertEqual([123, 123, 123, 123], [row['retry_at'] for row in rows])
 
     def test_provisional_ranking_does_not_erase_a_real_deferral_cause(self):
         self.pending()

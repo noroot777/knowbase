@@ -30,11 +30,13 @@ class YouTubeAdmission(YouTubeFixture):
         alias = self.channel(2)
         self.entry_value = self.entry(hours=24 * 6)
         now = datetime.now(timezone.utc)
+        # 两条都是同步过的老订阅:首次同步那道 3 天起点(`sync_window`)只管没成功过的频道,
+        # 这里要验的是各自的历史下界。
         with reg.db() as connection:
-            connection.execute('UPDATE subscriptions SET history_floor=? WHERE id=?',
-                               ((now - timedelta(days=5)).isoformat(), self.source['id']))
-            connection.execute('UPDATE subscriptions SET history_floor=? WHERE id=?',
-                               ((now - timedelta(days=30)).isoformat(), alias['id']))
+            connection.execute('UPDATE subscriptions SET history_floor=?,last_success=? WHERE id=?',
+                               ((now - timedelta(days=5)).isoformat(), reg.now(), self.source['id']))
+            connection.execute('UPDATE subscriptions SET history_floor=?,last_success=? WHERE id=?',
+                               ((now - timedelta(days=30)).isoformat(), reg.now(), alias['id']))
         result, probe = self.collect({'duration': 600})
         self.assertEqual((1, 1, 1), (result['ranked'], result['processed'], result['added']))
         probe.assert_called_once()

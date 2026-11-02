@@ -20,6 +20,7 @@
 import subprocess
 import sys
 import time
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -29,6 +30,7 @@ from kb.youtube import (collector, discovery, llm_request, login, media, notes, 
                         throttle)
 from kb.youtube.diagnosis import LOCAL, ToolFailure
 from tests.youtube_fixture import YouTubeFixture
+from tests import youtube_tool_stub as tool_stub
 from tests.youtube_tool_stub import FakeToolCase
 
 #: 真机形态:429 的原话。分档由 `login.coded` 在完整诊断上算,这里直接给它结论。
@@ -295,8 +297,14 @@ class ThrottleIsRequestLevel(FakeToolCase):
         同一个出口刚说了「请求过于频繁」,换掉一个参数再问一次只是把惩罚加深。原先这条
         后路照旧跑,它要是成功了,限流就只留在被丢弃的原因列表里 —— `walls` 是空的,
         这一轮接着查下一个频道,面板上看不出自己正在挨罚(审查实测)。
+
+        **逐条解析如今只在指定日期那一轮走**(普通一轮的主路就是 flat,见 `discovery.fetch`),
+        所以这条要在指定日期的一轮里跑:普通一轮里压根没有「逐条解析之后」这回事,
+        用例会在第一个 flat 进程上红,验的却不是这件事。
         """
-        summary = self.sync([('--flat-playlist', 'ok'), ('--dump-json', 'limit')])
+        today = datetime.now(media.TZ).date().isoformat()
+        with patch.object(tool_stub, 'FetchScope', lambda: FetchScope(since=today, until=today)):
+            summary = self.sync([('--flat-playlist', 'ok'), ('--dump-json', 'limit')])
         self.assertEqual([], self.ran('--flat-playlist'), '后路还是起了进程')
         self.assertEqual(1, len(self.ran('--dump-json')), '只该有那一次逐条解析')
         self.assertEqual((1, 1), (summary['checked'], summary['skipped']))
