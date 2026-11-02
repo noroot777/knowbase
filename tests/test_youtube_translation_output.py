@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from kb.feeds.registry import text_language
-from kb.youtube import json_output, media, notes, transcripts, translation, translation_language
+from kb.youtube import json_output, media, model_response, notes, transcripts, translation, translation_language
 from tests.youtube_fixture import YouTubeFixture
 
 
@@ -65,6 +65,9 @@ class TranslationOutput(YouTubeFixture):
         with self.assertRaises(ValueError):
             json_output.object_payload(example, '格式示例：\n' + example)
         wrapped = '参考 {placeholder}\n' + example + '\n实际结果：\n```json\n' + answer + '\n```\n说明 {结束}'
+        with self.assertRaises(model_response.OutputError):
+            json_output.object_payload(wrapped, example)
+        wrapped = '参考 {placeholder}\n实际结果：\n```json\n' + answer + '\n```\n说明 {结束}'
         self.assertEqual(json.loads(answer), json_output.object_payload(wrapped, example))
         note = json.dumps({'title': '示例标题', 'summary': '示例摘要', 'body': '示例正文'}, ensure_ascii=False)
         with self.assertRaisesRegex(RuntimeError, '格式'):
@@ -181,9 +184,15 @@ class TranslationOutput(YouTubeFixture):
                     notes.translate(source, self.selected, 10**10, lambda: False)
         source = '作者说明应当核验结果。' * 20 + 'Today we build an agent from scratch and verify every generated change before use.'
         self.assertEqual('zh', text_language(source))
-        with patch.object(notes, 'call') as call:
-            self.assertEqual(source, notes.translate(source, self.selected, 10**10, lambda: False))
-            call.assert_not_called()
+        self.assertFalse(notes.native_chinese(source))
+        translated = '作者说明应当核验结果。' * 20 + '今天从零构建智能体，并在使用前核验每一项生成的修改。'
+        with patch.object(notes, 'call', return_value=json.dumps({'translations': [translated]})) as call:
+            self.assertEqual(translated, notes.translate(source, self.selected, 10**10, lambda: False))
+            call.assert_called_once()
+        with patch.object(notes, 'call', return_value=json.dumps({'translations': [source]})) as call, \
+                self.assertRaises(translation.LanguageError):
+            notes.translate(source, self.selected, 10**10, lambda: False)
+        self.assertEqual(2, call.call_count)
         self.assertTrue(translation_language.valid('先完整核对所有参数 ' + ' '.join(['token'] * 10) + '，再独立验证后使用。', [], source))
         self.assertFalse(translation_language.valid('先完整核对所有参数 ' + ' '.join(['token'] * 11) + '，再独立验证后使用。', [], source))
 

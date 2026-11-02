@@ -1,6 +1,18 @@
 # YouTube 低成本接入验证
 
-## 当前复修：模型服务完成凭据与混合兜底去重（Kr34QSo_Ybmb 第 1 轮）
+## 当前复修：结构化结果唯一性与跨行上下文（Kr34QSo_Ybmb 第 2 轮）
+
+- 翻译和最终笔记共用的 JSON 提取器只认唯一对象；正式答案与草稿、模板、示例或重复答案并列时抛 OutputError，不再固定挑最后一份，也不挑第一份。
+- 唯一对象前后的完整上下文共同排除格式承诺、示例和草稿，换行不再改变判据；正常围栏、客套话、中性收尾及对象内部嵌套或正文花括号保持兼容。
+- 歧义仍占原内容阶段预算；已有歧义缓存会重验拒收，只有恢复为唯一有效结果后才缓存和发布。三轮耗尽沿用明确标记的兜底，不把草稿冒充成品。
+- 新增解析器测试模块，并修改既有翻译输出模块，覆盖两消费方、批次与短段翻译、缓存重验、成稿预算和真实 collector 失败后恢复的 Markdown 导出；只登记这两个本轮新写或修改模块，整套与未改模块留验收。
+- 原始日志、实际计数、受测树与提交一致性归档到 `/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-Kr34QSo_Ybmb-round-2/`。不修改通用 extract_llm，不扩修非阻断和四条既有裁定；无浏览器操作，不复用历史截图。
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_json_output tests.test_youtube_translation_output -v
+```
+
+## 历史复修：模型服务完成凭据与混合兜底去重（Kr34QSo_Ybmb 第 1 轮）
 
 - 在 YouTube 模型响应边界区分服务未交付完整回复和模型已给出不合格内容；Responses 服务失败保留上游 error.message，Chat 缺完成标记或回复项、Anthropic 缺流结束事件/停止原因走 MODEL，不再消耗内容阶段三轮预算。
 - 模型明确截断、拒答、非正文及空正文仍按原内容预算处理；服务错误的父子进程归属、超时和取消保护保持原协议，不修改通用模型调用。
