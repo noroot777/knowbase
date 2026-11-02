@@ -255,6 +255,80 @@ class YouTubeSourceStatus(YouTubeFixture):
         self.assertTrue(collector.commit_notes(source, [], self.summary(), pending_failure=True))
         self.assertNotIn('当前视频登录受阻', reg.subscription('youtube', source['id'])['last_notice'])
 
+    def test_only_current_failed_state_can_supply_a_replayed_failure_notice(self):
+        source = self.sources[0]
+        message = 'Sign in to confirm you are not a bot'
+        for state in ('failed', 'candidate', 'deferred', 'processing', 'ready', 'filtered', 'excluded'):
+            row = {'state': state, 'last_error': message, 'excluded': False, 'reason': '等待本轮处理预算'}
+            with self.subTest(state=state):
+                note, notice = source_status.fields(source, self.summary(), pending=True, videos=[row])
+                self.assertEqual(state == 'failed', message in notice)
+                self.assertEqual('', note)
+                self.assertEqual(message, row['last_error'])
+        for pending, excluded, error in ((False, False, message), (True, True, message), (True, False, '')):
+            row = {'state': 'failed', 'last_error': error, 'excluded': excluded}
+            with self.subTest(pending=pending, excluded=excluded, error=error):
+                self.assertNotIn(message, source_status.fields(source, self.summary(), pending, [row])[1])
+
+    def test_commit_preserves_history_without_reporting_queue_states_as_current_failures(self):
+        source = self.sources[0]
+        entries = [self.entry(number) for number in (950, 951, 952, 953)]
+        storage.discover(source, entries)
+        states = ('failed', 'candidate', 'deferred', 'processing')
+        for entry, state in zip(entries, states):
+            storage.update(entry['video_id'], state=state, last_error=state + ' 的旧登录错误',
+                           reason='等待本轮处理预算', retry_at=10**12)
+        self.assertTrue(collector.commit_notes(source, [], self.summary(), pending_failure=True))
+        notice = reg.subscription('youtube', source['id'])['last_notice']
+        self.assertIn('failed 的旧登录错误', notice)
+        for state in states[1:]:
+            self.assertNotIn(state + ' 的旧登录错误', notice)
+        storage.update(entries[0]['video_id'], state='deferred', reason='本轮数量预算已用完，留待下轮')
+        self.assertTrue(collector.commit_notes(source, [], self.summary(), pending_failure=True))
+        notice = reg.subscription('youtube', source['id'])['last_notice']
+        self.assertNotIn('旧登录错误', notice)
+        self.assertIn('未完成处理', notice)
+        self.assertEqual({entry['video_id']: state + ' 的旧登录错误' for entry, state in zip(entries, states)},
+                         {row['video_id']: row['last_error'] for row in storage.rows([source['id']])})
+
+    def test_recovered_channel_with_budget_queue_does_not_replay_old_auth_failures(self):
+        source = self.sources[0]
+        entries = [self.entry(number) for number in (940, 941, 942)]
+        message = 'Sign in to confirm you are not a bot'
+        self.settings(max_videos=3)
+        with patch.object(discovery, 'fetch', side_effect=lambda selected, *arguments:
+                          entries if selected['id'] == source['id'] else []), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'firefox'}), \
+                patch.object(collector, 'DISCOVERY_SPACING', 0), patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(media, 'probe', return_value={'duration': 600}), \
+                patch.object(media, 'obtain', side_effect=media.ToolFailure(message, message, 'bot_wall')) as obtain, \
+                patch.object(notes, 'build', side_effect=self.note):
+            collector.collect(FetchScope(force=True))
+            rows = storage.rows([source['id']])
+            self.assertEqual(['failed'] * 3, [row['state'] for row in rows])
+            self.assertIn(message, reg.subscription('youtube', source['id'])['last_notice'])
+            self.settings(max_videos=1)
+            obtain.side_effect = None
+            obtain.return_value = self.complete_transcript()
+            for round_number in range(2):
+                with self.subTest(recovered_round=round_number):
+                    result = collector.collect(FetchScope(force=True))
+                    self.assertEqual((1, {}), (result['processed'], result['walls']))
+                    rows = storage.rows([source['id']])
+                    ready = [row for row in rows if row['state'] == 'ready']
+                    waiting = [row for row in rows if row['state'] != 'ready']
+                    self.assertEqual(round_number + 1, len(ready))
+                    self.assertEqual(2 - round_number, len(waiting))
+                    self.assertTrue(all(row['state'] == 'deferred' for row in waiting))
+                    self.assertTrue(all(message in row['last_error'] for row in waiting))
+                    self.assertTrue(all('本轮数量预算已用完' in row['reason'] for row in waiting))
+                    stored = reg.subscription('youtube', source['id'])
+                    self.assertNotIn(message, stored['last_notice'])
+                    self.assertIn('未完成处理', stored['last_notice'])
+                    self.assertEqual(('', 0, 0), tuple(stored[key] for key in ('last_error', 'failures', 'retry_at')))
+            self.assertEqual(5, obtain.call_count)
+        self.assertEqual(2, len(collector.YouTubeCollector('youtube').materialize()))
+
     def test_actual_listing_failure_keeps_error_and_backoff_instead_of_becoming_empty_success(self):
         source = self.sources[0]
         with reg.db() as connection:

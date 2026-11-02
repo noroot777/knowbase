@@ -1,6 +1,17 @@
 # YouTube 低成本接入验证
 
-## 当前复修：无日期条目与退避期原因保留（jHIfk1MBW8CO 第 1 轮）
+## 当前复修：区分历史错误与当前失败（jHIfk1MBW8CO 第 2 轮）
+
+- 频道内容提醒仅回读当前仍为 failed 且未永久排除的视频错误；candidate、deferred、processing 即使保留旧 last_error，也不把它当成本轮仍被登录墙阻断。
+- 不清除历史错误，不修改排名、重试目标、视频预算或通用失败结算；真实 failed 视频在退避期仍保留原因，恢复或转入预算队列后不再反复提示重新登录。
+- 修改的状态测试模块覆盖全状态判据、认领提交边界及真实 collector 三轮（全片登录失败后恢复、每轮只处理一条、余下视频只排队），保留历史字段并实际导出恢复后的 Markdown；未改模块和整套回归留验收。
+- 实际日志、计数、受测树与提交一致性归档到 `/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-jHIfk1MBW8CO-round-2/`。仅后端字段语义与 Markdown 文档，无浏览器操作，不复用历史截图。
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_source_status -v
+```
+
+## 历史复修：无日期条目与退避期原因保留（jHIfk1MBW8CO 第 1 轮）
 
 - 完整覆盖证据不再要求零 JSON 行或至少一条合法日期；仅有无日期条目时也可安全结束本轮列表，单片缺失/非法日期另记跳过说明，不把整个频道罚入退避。无完整结束证据、真实中断、AUTH/未知 ERROR 的保守边界保留。
 - 内容处理积压从认领写事务内回读本频道尚未解决的视频错误；机器人/登录墙在视频退避轮次仍有可读原因，不靠保留整份旧频道提醒。已恢复、过滤、排除、改指或其他频道的旧错误不复用。

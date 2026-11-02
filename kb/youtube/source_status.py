@@ -9,7 +9,7 @@ def fields(source, summary, pending=False, videos=()):
                if str(item.get('source_id', '')) == identity]
     if pending:
         notices.extend('视频处理未完成：' + row['last_error'] for row in videos
-                       if not row.get('excluded') and row['state'] not in ('ready', 'excluded', 'filtered')
+                       if not row.get('excluded') and row['state'] == 'failed'
                        and row.get('last_error'))
     browser = summary.get('browser', 'chrome')
     for code, identities in summary.get('walls', {}).items():
