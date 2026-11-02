@@ -1,6 +1,23 @@
 # YouTube 低成本接入验证
 
-## 当前复修：阶段预算、中文缓存兜底及引文内部字面（iGZ_ApeQUIGk 第 1 轮）
+## 当前复修：有界成品失败、共用叙述守卫与首次水位（oyGbBDVpsJfW 第 1 轮）
+
+- 模型生成的语种、结构/字段、缺段、压缩不收敛、未完成/拒答/空内容及传输失败均按当前阶段累计三轮，保留阶段成功清自己、模型/完整转录作用域和中文缓存兜底。不使用包含元数据/下载失败的总 attempts 提前耗尽内容预算；本机、停止、过期仍不发布。
+- 译文、native 模型缓存输出、要点和成稿共用叙述守卫，逗号不再切断长英文尾段；紧凑的源绑定术语清单保留，源字面/受限引文仍扣除。真正中文原文直通不被输出守卫强迫翻译；字符/词形仍不是语义完整性证明。
+- 合格引文的原文边界证据随翻译/要点/压缩传递，仅在当前资料仍保留原文片段时可用，不对中文压缩资料重新套原文额度；遗漏、重复及新造引文不扩权。初轮三处红项和修正均在外部报告保留：坏输出子场景独立预算、跨阶段引文资格，以及真实 collector 夹具的要点保留后续使用资料。
+- 重验发现带日韩专名的已验证中文资料被外文回声规则误拒；只在要点/成稿的已验证中文输入边界声明资料身份，原始外文回声检查不放宽，长英文尾段及中文占比仍共用。新增专名沿用正例与同边界长英文尾段反例。
+- 首次三天起点跨成功轮次保持，新发现下界不早于该起点；新增持久配置快照，仅用户调大 window_days 才放宽起点和历史 ID。旧表增列不自动扩窗，无起点的存量成功订阅、已入队候选、改指/停止与显式日期范围边界保留。
+- YouTube 从未成功的卡片有 notice 时仍是「待首次同步」，partial/error 优先级不变；真正成功过的跳过频道仍显示「已同步（有跳过）」，其他来源文案不变。
+- 本轮浏览器先选扩展、命名 `🔎 YouTube成品出口与首次状态复修`，以 `visible:false` 新建专用后台标签被拒绝 `Capability is not available: visibility`，未创建或接管标签、未激活窗口。降级独立 chrome-headless-shell、临时 profile、本地一次性夹具，无用户 cookie 或用户 Chrome CDP；不启有头浏览器。
+- 仅本轮修改测试模块登记，最终结果/受测树/原始日志/新截图归档到 `/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-oyGbBDVpsJfW/`。未改模块与整套留验收，不以历史截图替代本树证据。四项已裁定事项和本报告非阻断项不扩修。
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_notes tests.test_youtube_translation_output tests.test_youtube_output_fallback tests.test_youtube_initial_window tests.test_youtube_browser -v
+```
+
+cwd：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+
+## 历史复修：阶段预算、中文缓存兜底及引文内部字面（iGZ_ApeQUIGk 第 1 轮）
 
 - 第 2 项：翻译、分段/压缩要点与成稿分别累计语种失败预算；阶段成功只清自己的计数。旧共享计数不用于耗尽新阶段，正常模型/转录作用域不变。
 - 兜底先重验完整翻译缓存，再核对成功短段；保留有效中文，缺译部分单独标记未译原文，只有无可用中文才全篇退回原文。明确「整理待校验」而非已核验笔记，不再调用模型。取消和截止时间仍检查，坏缓存不晋升。

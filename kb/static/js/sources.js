@@ -516,7 +516,7 @@ function renderSubscription(s) {
   // feedgrab 翻页中途失败或者那一批里有几条没抓下来 —— 两条通道都会留下这一句。
   // 它排在 last_error 之后、已同步之前:抓到的条目确实入库了,但把它显示成
   // 「已同步」就等于宣布这一轮读完了 —— 而时间线下面那一段还没读到。
-  const status = !s.enabled ? '已停用' : s.configuration_error ? '待配置' : s.last_error ? '连接失败' : s.last_note ? '部分同步' : s.last_notice ? '已同步（有跳过）' : s.last_success ? '已同步' : '待首次同步';
+  const status = !s.enabled ? '已停用' : s.configuration_error ? '待配置' : s.last_error ? '连接失败' : s.last_note ? '部分同步' : s.last_notice && (s.kind !== 'youtube' || s.last_success) ? '已同步（有跳过）' : s.last_success ? '已同步' : '待首次同步';
   return `<article class="source-subscription ${!s.enabled ? 'is-paused' : ''}">
     <div class="source-avatar" aria-hidden="true">${esc(s.name.slice(0,1))}</div>
     <div class="source-subscription-body"><div class="source-row-title"><h3>${esc(s.name)}</h3><span class="source-state ${s.enabled && s.last_error ? 'failed' : ''}">${status}</span></div>

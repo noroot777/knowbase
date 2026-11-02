@@ -14,7 +14,9 @@ TZ = ZoneInfo('Asia/Shanghai')
 def initialize(connection):
     connection.execute('''CREATE TABLE IF NOT EXISTS youtube_sync_origins (
         source_id INTEGER PRIMARY KEY REFERENCES subscriptions(id) ON DELETE CASCADE,
-        source_url TEXT NOT NULL, initial_fetch_at TEXT NOT NULL)''')
+        source_url TEXT NOT NULL, initial_fetch_at TEXT NOT NULL, window_days INTEGER NOT NULL DEFAULT 0)''')
+    if 'window_days' not in {row[1] for row in connection.execute('PRAGMA table_info(youtube_sync_origins)')}:
+        connection.execute('ALTER TABLE youtube_sync_origins ADD COLUMN window_days INTEGER NOT NULL DEFAULT 0')
     connection.execute('''CREATE TABLE IF NOT EXISTS youtube_discovery_history (
         source_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
         source_url TEXT NOT NULL, video_id TEXT NOT NULL, published TEXT NOT NULL,
@@ -46,24 +48,28 @@ def prepare(source, scope, when=None, settings=None):
         if current is None:
             return source
         source = dict(current)
-        origin = connection.execute('''SELECT initial_fetch_at FROM youtube_sync_origins
+        origin = connection.execute('''SELECT initial_fetch_at,window_days FROM youtube_sync_origins
             WHERE source_id=? AND source_url=?''', (source['id'], source['url'])).fetchone()
         now = when or datetime.now(timezone.utc)
         previous = stamp(source['last_success'])
+        initial = stamp(origin['initial_fetch_at']) if origin else None
+        lookback = datetime.combine(now.astimezone(TZ).date() - timedelta(days=days), time.min, TZ)
+        if initial is not None and origin['window_days'] and days > origin['window_days']:
+            initial = min(initial, lookback)
         if previous is not None and previous <= now:
-            lookback = datetime.combine(now.astimezone(TZ).date() - timedelta(days=days), time.min, TZ)
             floor = min(previous - timedelta(days=1), lookback)
         else:
-            initial = origin['initial_fetch_at'] if origin else ''
-            if stamp(initial) is None:
+            if initial is None:
                 initial = datetime.combine(now.astimezone(TZ).date() - timedelta(days=INITIAL_DAYS),
-                                           time.min, TZ).isoformat()
-            source['initial_fetch_at'] = initial
-            floor = stamp(initial)
-            connection.execute('''INSERT INTO youtube_sync_origins(source_id,source_url,initial_fetch_at)
-                VALUES(?,?,?) ON CONFLICT(source_id) DO UPDATE SET
-                source_url=excluded.source_url,initial_fetch_at=excluded.initial_fetch_at''',
-                (source['id'], source['url'], initial))
+                                           time.min, TZ)
+            floor = initial
+        if initial is not None:
+            floor = max(initial, floor)
+            source['initial_fetch_at'] = initial.isoformat()
+            connection.execute('''INSERT INTO youtube_sync_origins(source_id,source_url,initial_fetch_at,window_days)
+                VALUES(?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET source_url=excluded.source_url,
+                initial_fetch_at=excluded.initial_fetch_at,window_days=excluded.window_days''',
+                (source['id'], source['url'], initial.isoformat(), days))
         known = connection.execute('''SELECT video_id FROM youtube_video_sources
             WHERE source_id=? AND source_url=?''', (source['id'], source['url'])).fetchall()
         history = connection.execute('''SELECT video_id,published FROM youtube_discovery_history

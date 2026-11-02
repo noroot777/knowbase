@@ -188,6 +188,7 @@ class YouTubeInitialWindow(YouTubeFixture):
         with reg.db() as connection:
             connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
                                ((self.now - timedelta(days=6)).isoformat(), source['id']))
+        self.settings(window_days=14)
         widened = self.prepare()
         self.assertEqual((), widened['checked_old_ids'])
         self.assertEqual([old], sync_window.recent(widened, [old], self.scope))
@@ -206,8 +207,8 @@ class YouTubeInitialWindow(YouTubeFixture):
             connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
                                (self.now.isoformat(), self.source['id']))
         ordinary = self.prepare()
-        self.assertEqual({entries[1]['video_id'], entries[2]['video_id']}, set(ordinary['checked_old_ids']))
-        self.assertEqual([entries[0]], sync_window.recent(ordinary, entries, self.scope))
+        self.assertEqual({entry['video_id'] for entry in entries}, set(ordinary['checked_old_ids']))
+        self.assertEqual([], sync_window.recent(ordinary, entries, self.scope))
         self.settings(window_days=30)
         widened = self.prepare()
         self.assertEqual((entries[2]['video_id'],), widened['checked_old_ids'])
@@ -215,8 +216,46 @@ class YouTubeInitialWindow(YouTubeFixture):
         storage.discover(widened, entries[:2])
         self.assertEqual({entry['video_id'] for entry in entries[:2]}, {row['video_id'] for row in storage.rows()})
         with reg.db() as connection:
-            self.assertEqual(original, connection.execute(
+            self.assertLess(widened['initial_fetch_at'], original)
+            self.assertEqual(widened['initial_fetch_at'], connection.execute(
                 'SELECT initial_fetch_at FROM youtube_sync_origins WHERE source_id=?', (self.source['id'],)).fetchone()[0])
+
+    def test_initial_floor_survives_first_success_same_day_and_following_days(self):
+        first = self.prepare()
+        entries = [self.entry(number, hours=hours) for number, hours in enumerate((5, 48, 120, 144), 1)]
+        self.assertEqual(entries[:2], sync_window.recent(first, entries, self.scope))
+        storage.discover(first, entries[:2])
+        with reg.db() as connection:
+            connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
+                               (self.now.isoformat(), self.source['id']))
+        for elapsed in (timedelta(hours=10), timedelta(days=1), timedelta(days=5)):
+            with self.subTest(elapsed=elapsed):
+                repeated = self.prepare(when=self.now + elapsed)
+                self.assertGreaterEqual(ranking.stamp(repeated['discovery_after']),
+                                        ranking.stamp(first['initial_fetch_at']))
+                self.assertEqual(entries[:2], sync_window.recent(repeated, entries, self.scope))
+                self.assertTrue({entries[2]['video_id'], entries[3]['video_id']} <= set(repeated['checked_old_ids']))
+                storage.discover(repeated, sync_window.recent(repeated, entries, self.scope))
+        self.assertEqual({entry['video_id'] for entry in entries[:2]}, {row['video_id'] for row in storage.rows()})
+
+    def test_existing_origin_schema_migrates_without_implicitly_widening(self):
+        first = self.prepare()
+        with reg.db() as connection:
+            connection.execute('DROP TABLE youtube_sync_origins')
+            connection.execute('''CREATE TABLE youtube_sync_origins(source_id INTEGER PRIMARY KEY,
+                source_url TEXT NOT NULL, initial_fetch_at TEXT NOT NULL)''')
+            connection.execute('INSERT INTO youtube_sync_origins VALUES(?,?,?)',
+                               (self.source['id'], self.source['url'], first['initial_fetch_at']))
+            sync_window.initialize(connection)
+            sync_window.initialize(connection)
+            connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
+                               (self.now.isoformat(), self.source['id']))
+        migrated = self.prepare()
+        self.assertEqual(first['initial_fetch_at'], migrated['initial_fetch_at'])
+        self.assertEqual(first['discovery_after'], migrated['discovery_after'])
+        self.settings(window_days=14)
+        widened = self.prepare()
+        self.assertLess(ranking.stamp(widened['discovery_after']), ranking.stamp(first['discovery_after']))
 
     def test_existing_lagging_watermark_is_never_shortened_by_a_small_lookback(self):
         self.settings(window_days=1)

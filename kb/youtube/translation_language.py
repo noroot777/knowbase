@@ -78,8 +78,16 @@ def quote_spans(text):
     return spans if quoted_letters * 3 <= sum(character.isalpha() for character in narrative) else []
 
 
-def contexts(text, blocks, quoted=False):
-    quotes = quote_spans(text)
+def contexts(text, blocks, quoted=False, inherited_quotes=()):
+    quotes = set(quote_spans(text))
+    cursors = {}
+    for fragment in inherited_quotes:
+        start = text.find(fragment, cursors.get(fragment, 0))
+        if fragment and start >= 0:
+            end = start + len(fragment)
+            quotes.add((start, end))
+            cursors[fragment] = end
+    quotes = sorted(quotes)
     spans = quotes if quoted else [(left, right) for left, right in literal_spans(text)
                                    if not any(start <= left <= right <= end for start, end in quotes)]
     cursor, result = 0, []
@@ -112,27 +120,40 @@ def _narrative(value, literals, quotes):
     return _without(quote_free, literals), quote_free != value
 
 
-def chinese_output(text, source=''):
-    literals = contexts(source, [source])[0] if source else []
-    quotes = contexts(source, [source], quoted=True)[0] if source else []
-    remainder, quoted = _narrative(text, literals, quotes)
-    return (not quoted or bool(_HAN.search(remainder))) and _chinese(remainder)
+def chinese_output(text, source='', inherited_quotes=(), chinese_source=False):
+    literals = contexts(source, [source], inherited_quotes=inherited_quotes)[0] if source else []
+    quotes = contexts(source, [source], quoted=True, inherited_quotes=inherited_quotes)[0] if source else []
+    return valid(text, literals, source, quotes, chinese_source=chinese_source)
 
 
-def valid(value, literals, source, quotes=None):
+def _term_list(span, source):
+    terms = [term.strip(' \t\r\n.：:「」『』“”"') for term in re.split(r'[、，,；;（）()]', span)]
+    for term in terms:
+        if not _FOREIGN_WORDS.search(term):
+            continue
+        if (len(_FOREIGN_WORDS.findall(term)) > 4 or term not in source or
+                not any(character.isupper() or character.isdigit() for character in term)):
+            return False
+        source = source.replace(term, '', 1)
+    return True
+
+
+def valid(value, literals, source, quotes=None, chinese_source=False):
     if quotes is None:
         quotes = contexts(source, [source], quoted=True)[0] if source else []
     remainder, quoted = _narrative(value, literals, quotes)
     if quoted and not _HAN.search(remainder):
         return False
-    if value.split() == source.split() and any(character.isalpha() for character in remainder):
+    if (not chinese_source and value.split() == source.split() and
+            any(character.isalpha() for character in remainder) and
+            not (_HAN.search(remainder) and not foreign_script(remainder))):
         return False
-    if any(len(re.findall(_FOREIGN_SCRIPTS.pattern + '+', sentence)) > 1 and
-           _HAN.search(sentence) and sentence.strip() in remainder
-           for sentence in re.split(r'[。！？.!?\n]', source) if sentence.strip()):
+    if not chinese_source and any(len(re.findall(_FOREIGN_SCRIPTS.pattern + '+', sentence)) > 1 and
+                                  _HAN.search(sentence) and sentence.strip() in remainder
+                                  for sentence in re.split(r'[。！？.!?\n]', source) if sentence.strip()):
         return False
-    if any(len(_FOREIGN_WORDS.findall(span)) > 10
-           for span in re.split(r'[\u4e00-\u9fff、，,；;（）()]', remainder)):
+    if any(len(_FOREIGN_WORDS.findall(span)) > 10 and not _term_list(span, source)
+           for span in re.split(r'[\u4e00-\u9fff]', remainder)):
         return False
     return _chinese(remainder)
 

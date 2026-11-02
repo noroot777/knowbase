@@ -483,18 +483,21 @@ try {
     partialCard.text.includes('下次按原时间窗口重查并跳过已发现条目') &&
     !partialCard.text.includes('从上次的位置'), JSON.stringify(partialCard));
   const backlogCard = statusCards['AI Search'];
-  check('内容积压不伪装成频道覆盖失败', backlogCard.state === '已同步（有跳过）' &&
+  check('内容积压不伪装成频道覆盖失败', backlogCard.state === '待首次同步' &&
     backlogCard.notice.includes('未完成处理') && !backlogCard.text.includes('部分同步') &&
     !backlogCard.text.includes('从上次的位置'), JSON.stringify(backlogCard));
-  check('数量预算留尾清旧失败且显示本轮跳过说明', backlogCard.state === '已同步（有跳过）' &&
+  check('数量预算留尾清旧失败且显示本轮跳过说明', backlogCard.state === '待首次同步' &&
     backlogCard.notice.includes('2 条视频无法读取') && backlogCard.notice.includes('未完成处理') &&
     !backlogCard.text.includes('上一轮连接失败') && !backlogCard.text.includes('查看失败原因') &&
     backlogCard.text.includes('尚未成功同步'), JSON.stringify(backlogCard));
   const emptyBacklog = statusCards['零新增积压测试频道'], contentFailed = statusCards['内容失败测试频道'];
   check('零新增或内容仍失败不再沿用旧连接错误', [emptyBacklog, contentFailed].every(card=>
-    card.state === '已同步（有跳过）' && card.notice.includes('未完成处理') &&
+    card.state === '待首次同步' && card.notice.includes('未完成处理') &&
     !card.text.includes('上一轮连接失败') && !card.text.includes('查看失败原因') &&
     card.text.includes('尚未成功同步')), JSON.stringify({emptyBacklog, contentFailed}));
+  check('未成功的频道有提醒也不冒称已同步', [backlogCard, emptyBacklog, contentFailed].every(card=>
+    card.state === '待首次同步' && card.text.includes('尚未成功同步') && card.notice),
+    JSON.stringify({backlogCard, emptyBacklog, contentFailed}));
   const connectionFailed = statusCards['连接失败说明测试频道'];
   check('真实连接失败不遮挡覆盖和跳过说明', connectionFailed.state === '连接失败' &&
     connectionFailed.text.includes('本轮频道列表无法读取') && connectionFailed.text.includes('上轮只列到 3 条') &&

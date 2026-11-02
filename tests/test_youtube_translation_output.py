@@ -92,6 +92,9 @@ class TranslationOutput(YouTubeFixture):
             with self.subTest(separator=separator):
                 self.assertEqual(expected, translation.render(source, output))
                 self.assertEqual(expected, translation.unit_output(source, 0, output))
+                self.assertEqual(expected, notes.summary_output(expected, source))
+                payload = {'title': '模型基准比较', 'summary': expected, 'body': expected}
+                self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=source))
                 with patch.object(notes, 'call', return_value=output) as call:
                     self.assertEqual(expected, notes.translate(source, self.selected, 10**10, lambda: False))
                 call.assert_called_once()
@@ -124,8 +127,15 @@ class TranslationOutput(YouTubeFixture):
                 self.assertEqual(value, translation.render(source, output))
                 self.assertEqual(value, translation.unit_output(source, 0, output))
                 self.assertEqual(value, notes.summary_output(value))
+                self.assertEqual(value, notes.summary_output(value, value, chinese_source=True))
                 payload = {'title': value, 'summary': value, 'body': value}
                 self.assertEqual(payload, notes.note_payload(json.dumps(payload)))
+                self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=value, chinese_source=True))
+                bad = value + 'the remaining explanation is still entirely in English and must not be published'
+                with self.assertRaises(RuntimeError):
+                    notes.summary_output(bad, value, chinese_source=True)
+                with self.assertRaises(RuntimeError):
+                    notes.note_payload(json.dumps(dict(payload, body=bad)), source=value, chinese_source=True)
 
     def test_source_bound_code_urls_and_commands_do_not_dilute_translated_narrative(self):
         narrative = 'The author explains how to verify the command before using it.'
@@ -235,6 +245,24 @@ class TranslationOutput(YouTubeFixture):
         self.assertIn(quote, translation.render(source, json.dumps({'translations': values})))
         for position, value in enumerate(values):
             self.assertEqual(value, translation.unit_output(source, position, json.dumps({'translations': [value]})))
+
+    def test_bounded_quote_evidence_survives_compression_without_licensing_new_quotes(self):
+        quote = 'the server must respond with a valid JSON-RPC object containing the field name and the field value'
+        source = ('Reviewers independently verify implementation constraints before deployment. ' * 4 +
+                  'The spec says: "' + quote + '".')
+        quotes = translation_language.contexts(source, [source], quoted=True)[0]
+        self.assertEqual([quote], quotes)
+        value = '规范要求：“' + quote + '”。作者要求独立核验。'
+        self.assertFalse(translation_language.chinese_output(value, value))
+        self.assertTrue(translation_language.chinese_output(value, value, quotes))
+        self.assertEqual(value, notes.summary_output(value, value, quotes))
+        payload = {'title': '核验规范', 'summary': value, 'body': value}
+        self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=value, quotes=quotes))
+        for original, output in (('作者要求独立核验。', value), (value, value + value),
+                                 (value, value + '模型补充：“a new statement that was never in the source '
+                                  'and contains far too many English words to pass”。')):
+            with self.subTest(source=original, output=output):
+                self.assertFalse(translation_language.chinese_output(output, original, quotes))
 
     def test_source_bound_flags_and_identifiers_never_swallow_surrounding_prose(self):
         source = 'Use packr add package_name --frozen before independently reviewing every generated change.'

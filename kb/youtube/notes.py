@@ -5,6 +5,8 @@ import time
 from kb import llm, llm_stages
 from kb.feeds.registry import text_language
 from kb.youtube import json_output, media, transcripts, translation, translation_language
+from kb.youtube.diagnosis import LOCAL
+from kb.youtube.faults import local_fault
 
 
 VERSION = 'youtube-notes-v3'
@@ -88,6 +90,8 @@ def translated_output(text, output):
         return translation.render(text, output)
     if not isinstance(output, str):
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
+    if output.strip() and output.strip() == text.strip():
+        return output.strip()
     if not output.strip() or not translation_language.chinese_output(output, text):
         raise translation.LanguageError('模型未返回中文译文，保留原始字幕等待重试')
     return output.strip()
@@ -100,17 +104,17 @@ def summary(text, title, selected, deadline, stopped):
                 '\n视频原题：' + title + '\n\n' + text, selected, deadline, stopped)
 
 
-def summary_output(output, source=None):
+def summary_output(output, source=None, quotes=(), chinese_source=False):
     if not isinstance(output, str) or not output.strip():
         raise RuntimeError('视频分段要点不是有效中文，原文和译文已缓存')
-    if not translation_language.chinese_output(output, source or ''):
+    if not translation_language.chinese_output(output, source or '', quotes, chinese_source=chinese_source):
         raise translation.LanguageError('视频分段要点不是有效中文，原文和译文已缓存', 'summary')
     if len(output) > 1000:
         raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
     return output
 
 
-def note_payload(output, prompt='', source=''):
+def note_payload(output, prompt='', source='', quotes=(), chinese_source=False):
     try:
         payload = json_output.object_payload(output, prompt)
     except (ValueError, TypeError, AttributeError):
@@ -118,7 +122,8 @@ def note_payload(output, prompt='', source=''):
     if (not isinstance(payload, dict) or any(not isinstance(payload.get(field), str) or
             not payload[field].strip() for field in ('title', 'summary', 'body'))):
         raise RuntimeError('视频笔记不是完整中文成品，未入库')
-    if any(not translation_language.chinese_output(payload[field], source) for field in ('title', 'summary', 'body')):
+    if any(not translation_language.chinese_output(payload[field], source, quotes, chinese_source=chinese_source)
+           for field in ('title', 'summary', 'body')):
         raise translation.LanguageError('视频笔记不是完整中文成品，未入库', 'note')
     return payload
 
@@ -138,19 +143,24 @@ def build(row, transcript, deadline, stopped):
         failures = {}
     attempts = {stage: value if isinstance(value := failures.get(key), int) and value >= 0 else 0
                 for stage, key in keys.items()}
+    stage = 'translation'
 
-    def completed(stage):
-        if keys[stage] in failures:
-            failures.pop(keys[stage])
+    def completed(finished):
+        nonlocal stage
+        if keys[finished] in failures:
+            failures.pop(keys[finished])
             media.save_json(path, failures)
+        stage = {'translation': 'summary', 'summary': 'note', 'note': 'note'}[finished]
 
     if all(value < MAX_LANGUAGE_TRIES for value in attempts.values()):
         try:
             result = build_chinese(row, transcript, deadline, stopped, directory, translator, summarizer, completed)
-        except translation.LanguageError as error:
+        except (RuntimeError, ValueError, TypeError) as error:
+            if (isinstance(error, media.Interrupted) or local_fault(error) or
+                    isinstance(error, media.ToolFailure) and error.origin == LOCAL):
+                raise
             if stopped() or time.monotonic() >= deadline:
                 raise media.Interrupted('视频处理已停止或时间预算用尽') from None
-            stage = error.stage
             attempts[stage] += 1
             failures[keys[stage]] = attempts[stage]
             media.save_json(path, failures)
@@ -194,14 +204,14 @@ def fallback(row, transcript, directory, translator, deadline, stopped):
         raise RuntimeError('没有可保留的视频原文')
     origin = ORIGINS.get(transcript['origin'], transcript['origin'])
     if any(chinese for chinese, value in sections):
-        body = ('> 自动中文整理的某个阶段连续三轮未通过语种校验，已停止该阶段自动重试。'
+        body = ('> 自动中文整理的某个阶段连续三轮未生成可用成品，已停止该阶段自动重试。'
                 '以下保留已通过校验的中文资料（原文或自动译文），不是已核验内容笔记；请结合原视频核对。\n\n')
         body += '\n\n'.join(f'### 第 {position} 段：' + ('中文资料（待核验）' if chinese else '原文（未翻译）') +
                             '\n\n' + value for position, (chinese, value) in enumerate(sections, 1))
         provenance = 'translation-fallback' if all(chinese for chinese, value in sections) else 'mixed-fallback'
         title = '整理待校验：'
     else:
-        body = ('> 自动中文整理连续三轮未通过语种校验，已停止自动重试。以下仅保留完整原文，'
+        body = ('> 自动中文整理连续三轮未生成可用成品，已停止自动重试。以下仅保留完整原文，'
                      '不是中文译文或已核验笔记；请结合原视频核对。\n\n'
                 '## 原文（未翻译）\n\n' + original)
         title, provenance = '原文待校验：', 'original-fallback'
@@ -218,7 +228,9 @@ def build_chinese(row, transcript, deadline, stopped, directory, translator, sum
     if not isinstance(cache, dict):
         cache = {}
     translated = []
-    for block in transcripts.blocks(transcript['segments']):
+    blocks = transcripts.blocks(transcript['segments'])
+    quotes = [block[start:end] for block in blocks for start, end in translation_language.quote_spans(block)]
+    for block in blocks:
         stage = 'translate' if native_chinese(block) else translation.STAGE
         key = signature(stage, translator, block)
         translated.append(cached(directory, cache, key,
@@ -231,7 +243,7 @@ def build_chinese(row, transcript, deadline, stopped, directory, translator, sum
         key = signature('summary', summarizer, row['entry']['title'] + '\n' + block)
         facts.append(cached(directory, cache, key,
                             lambda block=block: summary(block, row['entry']['title'], summarizer, deadline, stopped),
-                            lambda output, block=block: summary_output(output, block)))
+                            lambda output, block=block: summary_output(output, block, quotes, chinese_source=True)))
     combined = '\n\n'.join(facts)
     while len(combined) > 14000:
         reduced = []
@@ -240,7 +252,7 @@ def build_chinese(row, transcript, deadline, stopped, directory, translator, sum
             key = signature('reduce', summarizer, block)
             reduced.append(cached(directory, cache, key,
                                   lambda block=block: summary(block, row['entry']['title'], summarizer, deadline, stopped),
-                                  lambda output, block=block: summary_output(output, block)))
+                                  lambda output, block=block: summary_output(output, block, quotes, chinese_source=True)))
         smaller = '\n\n'.join(reduced)
         if len(smaller) >= len(combined):
             raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
@@ -252,7 +264,7 @@ def build_chinese(row, transcript, deadline, stopped, directory, translator, sum
               '\n原题：' + row['entry']['title'] + '\n\n' + combined)
     key = signature('note', summarizer, prompt)
     payload = cached(directory, cache, key, lambda: call(prompt, summarizer, deadline, stopped),
-                     lambda output: note_payload(output, prompt, combined))
+                     lambda output: note_payload(output, prompt, combined, quotes, chinese_source=True))
     origin = ORIGINS.get(transcript['origin'], transcript['origin'])
     complete = '\n\n'.join(translated)
     body = (payload['summary'] + '\n\n' + payload['body'] +

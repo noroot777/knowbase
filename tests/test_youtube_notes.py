@@ -49,10 +49,13 @@ class YouTubeNotes(YouTubeFixture):
         self.assertGreater(len(self.prompts), count)
 
     def test_empty_or_english_translation_not_published(self):
+        directory = media.cache_dir(self.row['video_id'])
         for output in ('', '   ', 'Still entirely English words.'):
+            media.save_json(directory / 'notes-language-failures.json', {})
             with self.subTest(output=output), self.assertRaises(RuntimeError):
                 self.build(lambda *args: output)
-        self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-cache.json').exists())
+            self.assertEqual([1], list(media.read_json(directory / 'notes-language-failures.json').values()))
+        self.assertFalse((directory / 'notes-cache.json').exists())
 
     def test_batch_shape_failures_recover_by_translating_each_original_unit(self):
         literal = 'https://example.test/tools/agent/install?version=latest'
@@ -332,7 +335,14 @@ class YouTubeNotes(YouTubeFixture):
                 'and finally we close with the roadmap, which the team has already published, '
                 'so you can read it yourself, if you want the full detail, and that is all for today.')
         source = '作者说明部署流程和独立核验。'
-        for value in ('欢迎回到本频道。' + tail, tail + '。好'):
+        report_tail = ('and then we are going to run the setup, which will install everything, '
+                       'after that you can open the dashboard, and you will see the metrics, '
+                       'the latency drops a lot, the memory stays flat, and the build is faster, '
+                       'but you still need to pin the version, otherwise the cache gets invalid, '
+                       'and that is the whole point of this demo, so please try it yourself, ') * 3
+        chinese = '本视频介绍新版打包器的性能提升，作者给出基准数据，并说明缓存共享的限制条件。' * 8
+        for value in ('欢迎回到本频道。' + tail, tail + '。好', chinese + report_tail,
+                      chinese + ' '.join(['untranslated'] * 201)):
             with self.subTest(value=value):
                 with self.assertRaises(translation.LanguageError):
                     notes.translated_output(source, value)
@@ -360,8 +370,10 @@ class YouTubeNotes(YouTubeFixture):
         original = self.build()
         directory = media.cache_dir(self.row['video_id'])
         original_cache = media.read_json(directory / 'notes-cache.json')
-        bad = ('The author describes deployment, reviews the numbers, records the limitations, '
-               'checks the rollout, and explains the next steps, before the team ships the result. 好')
+        bad = ('作者介绍打包器性能，并强调独立核验数据和限制。' * 8 +
+               ('and then we are going to run the setup, which will install everything, '
+                'after that you can open the dashboard, and you will see the metrics, '
+                'but you still need to pin the version, otherwise the cache gets invalid, ') * 3)
         summary_key = notes.signature('summary', self.selected, self.row['entry']['title'] + '\n' + source)
         native_key = notes.signature('translate', self.selected, source)
         note_key, = set(original_cache) - {summary_key, native_key}

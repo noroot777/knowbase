@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from kb.collectors import FetchScope
-from kb.youtube import collector, discovery, media, notes, products, storage, transcripts, translation
+from kb.youtube import collector, discovery, media, model_response, notes, products, storage, transcripts, translation
 from tests.youtube_fixture import YouTubeFixture
 from tests.youtube_translation_fixture import response
 
@@ -150,19 +150,66 @@ class OutputFallback(YouTubeFixture):
         self.assertEqual('youtube:original-fallback', result['body_provenance'])
         self.assertIn(block, result['body'])
 
-    def test_format_transport_local_and_interruption_failures_never_spend_the_language_budget(self):
-        for error in (media.ToolFailure('model transport unavailable', 'HTTP 429', origin='model'),
-                      OSError('disk full'), media.Interrupted('stopped'), RuntimeError('refused')):
+    def test_local_and_interruption_failures_never_spend_the_output_budget(self):
+        for error in (OSError('disk full'), media.Interrupted('stopped'),
+                      media.ToolFailure('cannot start worker', origin='local')):
             with self.subTest(error=error), patch.object(notes, 'model', return_value=self.selected), \
                     patch.object(notes, 'call', side_effect=error) as call:
                 for attempt in range(notes.MAX_LANGUAGE_TRIES + 1):
                     with self.assertRaises(type(error)):
                         notes.build(self.row, self.transcript, self.deadline, lambda: False)
                 self.assertEqual(notes.MAX_LANGUAGE_TRIES + 1, call.call_count)
-        for attempt in range(notes.MAX_LANGUAGE_TRIES + 1):
-            with self.assertRaises(RuntimeError):
-                self.build(lambda *arguments: json.dumps({'translations': []}))
         self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-language-failures.json').exists())
+
+    def test_all_output_failures_share_a_bounded_stage_exit(self):
+        cases = [('translation', json.dumps({'translations': []})),
+                 ('translation', json.dumps({'translations': [None]})),
+                 ('summary', ''), ('summary', '中文内容' * 400),
+                 ('note', 'not JSON'), ('note', json.dumps({'note': {'title': '嵌套笔记'}})),
+                 ('note', json.dumps({'title': '笔记', 'summary': '', 'body': '正文'})),
+                 ('translation', RuntimeError('refused')),
+                 ('translation', media.ToolFailure('model transport unavailable', 'HTTP 429', origin='model'))]
+        for number, (stage, failure) in enumerate(cases, 100):
+            self.row['video_id'] = f'{number:011d}'
+            requested = []
+
+            def reply(prompt, *arguments):
+                requested.append(prompt)
+                actual = 'translation' if prompt.startswith('将以下字幕') else 'note' if '只输出 JSON' in prompt else 'summary'
+                if actual == stage:
+                    if isinstance(failure, Exception):
+                        raise failure
+                    return failure
+                return self.reply(prompt)
+
+            with self.subTest(stage=stage, failure=failure):
+                for attempt in range(notes.MAX_LANGUAGE_TRIES - 1):
+                    with self.assertRaises(RuntimeError):
+                        self.build(reply)
+                result = self.build(reply)
+                self.assertIn('连续三轮未生成可用成品', result['body'])
+                self.assertEqual('youtube:original-fallback' if stage == 'translation' else
+                                 'youtube:translation-fallback', result['body_provenance'])
+                count = len(requested)
+                self.assertEqual(result, self.build(reply))
+                self.assertEqual(count, len(requested))
+
+    def test_incomplete_refused_nontext_and_empty_model_responses_are_bounded(self):
+        message = lambda content='', refusal=None: SimpleNamespace(content=content, refusal=refusal)
+        replies = [SimpleNamespace(choices=[SimpleNamespace(finish_reason=reason, message=message())])
+                   for reason in ('length', 'tool_calls')]
+        replies += [SimpleNamespace(choices=[SimpleNamespace(finish_reason='stop', message=value)])
+                    for value in (message(refusal='refused'), message(), message(['nontext']))]
+        for number, reply in enumerate(replies, 200):
+            self.row['video_id'] = f'{number:011d}'
+            with self.subTest(reply=reply), patch.object(model_response.llm, 'openai_conversion_enabled', return_value=True), \
+                    patch.object(model_response.llm_openai, '_create', return_value=reply):
+                call = lambda *arguments: model_response.complete(None, 'fixture', 'fixture', 'fixture')
+                for attempt in range(notes.MAX_LANGUAGE_TRIES - 1):
+                    with self.assertRaises(RuntimeError):
+                        self.build(call)
+                result = self.build(call)
+                self.assertEqual('youtube:original-fallback', result['body_provenance'])
 
     def test_language_budget_is_scoped_to_models_and_transcript_and_resets_on_success(self):
         for attempt in range(2):
@@ -261,7 +308,7 @@ class OutputFallback(YouTubeFixture):
             prompts.append(prompt)
             if prompt.startswith('将以下字幕'):
                 return response(prompt, value)
-            return json.dumps(payload) if '只输出 JSON' in prompt else payload['summary']
+            return json.dumps(payload) if '只输出 JSON' in prompt else payload['summary'] + value
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
@@ -331,11 +378,13 @@ class OutputFallback(YouTubeFixture):
 
     def test_collector_exports_cached_chinese_when_only_final_note_exhausts_its_budget(self):
         prompts = []
+        storage.discover(self.source, [self.entry_value])
+        storage.update(self.entry_value['video_id'], attempts=20)
 
         def reply(prompt, *arguments):
             prompts.append(prompt)
             if '只输出 JSON' in prompt and not prompt.startswith('将以下字幕'):
-                return json.dumps({'title': 'English title', 'summary': 'English summary', 'body': 'English note'})
+                return json.dumps({'note': {'title': '错误包装', 'summary': '错误包装', 'body': '不能采用的模型正文'}})
             return self.reply(prompt)
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
@@ -359,6 +408,7 @@ class OutputFallback(YouTubeFixture):
             self.assertIn('作者要求独立核验修改，并记录方法和局限。', body)
             self.assertNotIn('Verify every generated change', body)
             self.assertNotIn('English note', body)
+            self.assertNotIn('不能采用的模型正文', body)
             self.assertEqual(1, sum(prompt.startswith('将以下字幕') for prompt in prompts))
             count = len(prompts)
             collector.collect(FetchScope(force=True))
