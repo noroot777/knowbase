@@ -3,7 +3,6 @@ import json
 import time
 
 from kb import llm, llm_stages
-from kb.feeds.registry import text_language
 from kb.youtube import json_output, media, transcripts, translation, translation_language
 from kb.youtube.faults import local_fault
 
@@ -59,7 +58,14 @@ def translate(text, selected, deadline, stopped):
 
 
 def native_chinese(text):
-    return text_language(text) == 'zh' and not translation_language.foreign_script(text)
+    return (not translation_language.foreign_script(text) and
+            translation_language.chinese_output(text, text))
+
+
+def original_comparison(blocks):
+    if any(not native_chinese(block) for block in blocks):
+        return '\n\n## 原文对照（未改写）\n\n' + '\n\n'.join(blocks)
+    return ''
 
 
 def translation_request(text, selected, deadline, stopped, directory=None, cache=None):
@@ -89,8 +95,6 @@ def translated_output(text, output):
         return translation.render(text, output)
     if not isinstance(output, str):
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
-    if output.strip() and output.strip() == text.strip():
-        return output.strip()
     if not output.strip() or not translation_language.chinese_output(output, text):
         raise translation.LanguageError('模型未返回中文译文，保留原始字幕等待重试')
     return output.strip()
@@ -178,7 +182,8 @@ def fallback(row, transcript, directory, translator, deadline, stopped):
     if not isinstance(cache, dict):
         cache = {}
     sections = []
-    for block in transcripts.blocks(transcript['segments']):
+    blocks = transcripts.blocks(transcript['segments'])
+    for block in blocks:
         if stopped() or time.monotonic() >= deadline:
             raise media.Interrupted('视频处理已停止或时间预算用尽')
         stage = 'translate' if native_chinese(block) else translation.STAGE
@@ -198,7 +203,7 @@ def fallback(row, transcript, directory, translator, deadline, stopped):
             sections.append((True, value))
     if stopped() or time.monotonic() >= deadline:
         raise media.Interrupted('视频处理已停止或时间预算用尽')
-    original = '\n\n'.join(transcripts.blocks(transcript['segments']))
+    original = '\n\n'.join(blocks)
     if not original.strip():
         raise RuntimeError('没有可保留的视频原文')
     origin = ORIGINS.get(transcript['origin'], transcript['origin'])
@@ -207,6 +212,7 @@ def fallback(row, transcript, directory, translator, deadline, stopped):
                 '以下保留已通过校验的中文资料（原文或自动译文），不是已核验内容笔记；请结合原视频核对。\n\n')
         body += '\n\n'.join(f'### 第 {position} 段：' + ('中文资料（待核验）' if chinese else '原文（未翻译）') +
                             '\n\n' + value for position, (chinese, value) in enumerate(sections, 1))
+        body += original_comparison(blocks)
         provenance = 'translation-fallback' if all(chinese for chinese, value in sections) else 'mixed-fallback'
         title = '整理待校验：'
     else:
@@ -269,7 +275,7 @@ def build_chinese(row, transcript, deadline, stopped, directory, translator, sum
     body = (payload['summary'] + '\n\n' + payload['body'] +
             f'\n\n> 内容依据：{origin}；已进行中文整理，未分析视频画面。字幕和语音识别可能有误。'
             '自动译文未经逐段完整性核验，请结合原视频核对。'
-            + '\n\n## 中文译文（自动生成）\n\n' + complete)
+            + '\n\n## 中文译文（自动生成）\n\n' + complete + original_comparison(blocks))
     return {'url': row['entry']['url'], 'title': payload['title'], 'body': body,
             'published': row['entry']['published'], 'author': row['channel'],
             'content_kind': 'markdown', 'body_provenance': 'youtube:' + transcript['origin']}

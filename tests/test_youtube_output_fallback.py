@@ -68,7 +68,9 @@ class OutputFallback(YouTubeFixture):
                     self.assertEqual('youtube:translation-fallback', result['body_provenance'])
                     self.assertIn('不是已核验内容笔记', result['body'])
                     self.assertIn('作者要求独立核验修改，并记录方法和局限。', result['body'])
-                    self.assertNotIn('Verify every generated change', result['body'])
+                    chinese, original = result['body'].split('\n\n## 原文对照（未改写）\n\n')
+                    self.assertNotIn('Verify every generated change', chinese)
+                    self.assertIn('Verify every generated change', original)
                 self.assertNotIn('## 中文译文', result['body'])
                 self.assertNotIn('English note', result['body'])
                 count = len(requested)
@@ -125,9 +127,11 @@ class OutputFallback(YouTubeFixture):
                 self.build(self.untranslated)
         result = self.build(self.untranslated)
         self.assertEqual('youtube:mixed-fallback', result['body_provenance'])
-        self.assertIn(good, result['body'])
-        self.assertIn(units[1]['text'], result['body'])
-        self.assertNotIn(units[0]['text'], result['body'])
+        chinese, original = result['body'].split('\n\n## 原文对照（未改写）\n\n')
+        self.assertIn(good, chinese)
+        self.assertIn(units[1]['text'], chinese)
+        self.assertNotIn(units[0]['text'], chinese)
+        self.assertEqual(source, original.split('\n\n> 原文依据：', 1)[0])
         self.assertIn('第 1 段：中文资料（待核验）', result['body'])
         self.assertIn('第 2 段：原文（未翻译）', result['body'])
 
@@ -439,7 +443,9 @@ class OutputFallback(YouTubeFixture):
             body = files[0].read_text()
             self.assertIn('中文译文（自动生成）', body)
             self.assertIn('作者要求独立核验修改，并记录方法和局限。', body)
-            self.assertNotIn('Then we move on', body)
+            chinese, original = body.split('\n\n## 原文对照（未改写）\n\n')
+            self.assertNotIn('Then we move on', chinese)
+            self.assertIn(source, original)
             self.assertNotIn('原文待校验', body)
             self.assertEqual({}, media.read_json(directory / 'notes-language-failures.json'))
 
@@ -473,10 +479,81 @@ class OutputFallback(YouTubeFixture):
             self.assertIn('整理待校验：', body)
             self.assertIn('中文资料（待核验）', body)
             self.assertIn('作者要求独立核验修改，并记录方法和局限。', body)
-            self.assertNotIn('Verify every generated change', body)
+            chinese, original = body.split('\n\n## 原文对照（未改写）\n\n')
+            self.assertNotIn('Verify every generated change', chinese)
+            self.assertIn(self.transcript['segments'][0]['text'], original)
             self.assertNotIn('English note', body)
             self.assertNotIn('不能采用的模型正文', body)
             self.assertEqual(1, sum(prompt.startswith('将以下字幕') for prompt in prompts))
+            count = len(prompts)
+            collector.collect(FetchScope(force=True))
+            self.assertEqual(count, len(prompts))
+
+    def mixed_source(self):
+        english = ('so basically what we are going to do here is wire the agent into the editor and then '
+                   'let it rewrite the failing test until the suite goes green, which sounds great until '
+                   'you realise the cache gets invalidated on every single keystroke and the whole thing '
+                   'grinds to a halt, so please try it yourself before you trust any of these numbers. ')
+        source = ('好的，我们来看这个智能体编程的实际例子，先把环境准备好，然后一步一步演示整条流水线怎么跑起来。'
+                  '下面这段是作者的原话，我先放一遍，稍后再逐句解释其中的关键限制和容易踩的坑。' + english * 2).strip()
+        self.transcript['language'] = 'zh'
+        self.transcript['segments'][0]['text'] = source
+        return source
+
+    def test_mixed_original_echo_caches_never_become_chinese_fallback_material(self):
+        source = self.mixed_source()
+        directory = media.cache_dir(self.row['video_id'])
+        units = translation.units(source)
+        cache = {notes.signature('translate', self.selected, source): source,
+                 notes.signature(translation.STAGE, self.selected, source):
+                 json.dumps({'translations': [unit['text'] for unit in units]})}
+        cache.update({notes.signature('translate-unit-v1', self.selected, unit['text']):
+                      json.dumps({'translations': [unit['text']]}) for unit in units})
+        media.save_json(directory / 'notes-cache.json', cache)
+        prompts = []
+
+        def reply(prompt, *arguments):
+            prompts.append(prompt)
+            return self.untranslated(prompt)
+
+        for attempt in range(notes.MAX_LANGUAGE_TRIES - 1):
+            with self.assertRaises(translation.LanguageError):
+                self.build(reply)
+        result = self.build(reply)
+        self.assertEqual('youtube:original-fallback', result['body_provenance'])
+        self.assertIn(source, result['body'])
+        self.assertNotIn('中文资料（待核验）', result['body'])
+        self.assertNotIn('## 中文译文', result['body'])
+        count = len(prompts)
+        self.assertEqual(result, self.build(reply))
+        self.assertEqual(count, len(prompts))
+
+    def test_collector_exports_chinese_translation_and_original_for_a_mixed_chinese_transcript(self):
+        source = self.mixed_source()
+        prompts = []
+
+        def reply(prompt, *arguments):
+            prompts.append(prompt)
+            return self.reply(prompt)
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value={'duration': 600}), \
+                patch.object(media, 'obtain', return_value=self.transcript):
+            result = collector.collect(FetchScope(force=True))
+            self.assertEqual((1, 1), (result['processed'], result['added']), result)
+            self.assertEqual('ready', storage.rows()[0]['state'])
+            self.assertTrue(products.valid(storage.rows()[0]))
+            self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+            filename, = (self.root / 'vault' / 'source' / 'youtube').rglob('*.md')
+            chinese, original = filename.read_text().split('\n\n## 原文对照（未改写）\n\n')
+            self.assertIn('## 中文译文（自动生成）', chinese)
+            self.assertIn('作者要求独立核验修改，并记录方法和局限。', chinese)
+            self.assertNotIn('so basically', chinese)
+            self.assertEqual(source, original.strip())
+            self.assertTrue(any(prompt.startswith('将以下字幕') for prompt in prompts))
             count = len(prompts)
             collector.collect(FetchScope(force=True))
             self.assertEqual(count, len(prompts))

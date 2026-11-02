@@ -3,7 +3,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from kb.youtube import media, notes, translation
+from kb.youtube import media, notes, transcripts, translation
 from tests.youtube_fixture import YouTubeFixture
 from tests.youtube_translation_fixture import encoded, response
 
@@ -39,7 +39,9 @@ class YouTubeNotes(YouTubeFixture):
         self.assertIn('未分析视频画面', result['body'])
         self.assertNotIn('&t=', result['body'])
         self.assertNotRegex('\n'.join(self.prompts), r'\[\d{2}:\d{2}:\d{2}\]')
-        self.assertNotIn('Final conclusion', result['body'])
+        chinese, original = result['body'].split('\n\n## 原文对照（未改写）\n\n')
+        self.assertNotIn('Final conclusion', chinese)
+        self.assertIn('Final conclusion', original)
         self.assertIn('Final conclusion', '\n'.join(self.prompts))
         count = len(self.prompts)
         self.assertEqual(result, self.build())
@@ -266,19 +268,26 @@ class YouTubeNotes(YouTubeFixture):
         original = json.loads(json.dumps(self.transcript))
         result = self.build()
         self.assertIn('作者展示智能体如何编写代码。 最后强调人工核验结果与限制。', result['body'])
+        self.assertNotIn('## 原文对照', result['body'])
         self.assertFalse(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
         self.assertEqual(original, self.transcript)
 
-    def test_native_chinese_quotes_do_not_require_a_successful_translation(self):
+    def test_chinese_with_long_english_quotes_is_translated_and_preserves_the_original(self):
         quote = ('the compiler will analyze your component tree and automatically insert memoization '
                  'boundaries so that you do not have to write useMemo by hand any more')
         for words in (9, 10, 11, 12, 30):
             source = ('今天介绍这个框架的状态管理与渲染。官方文档原话是：' +
                       ' '.join(quote.split()[:words]) + '。这句话说明编译器负责插入缓存边界，接下来实际核验。')
             with self.subTest(words=words), patch.object(notes, 'call') as call:
-                self.assertTrue(notes.native_chinese(source))
-                self.assertEqual(source, notes.translate(source, self.selected, self.deadline, lambda: False))
-                call.assert_not_called()
+                self.assertEqual(words <= 10, notes.native_chinese(source))
+                if words <= 10:
+                    self.assertEqual(source, notes.translate(source, self.selected, self.deadline, lambda: False))
+                    call.assert_not_called()
+                else:
+                    call.return_value = response(translation.prompt(source), '编译器分析组件树并自动插入缓存边界。')
+                    self.assertEqual('编译器分析组件树并自动插入缓存边界。',
+                                     notes.translate(source, self.selected, self.deadline, lambda: False))
+                    call.assert_called_once()
         self.transcript['language'] = 'zh'
         self.transcript['segments'] = [{'start': 0, 'end': 120, 'text': source}]
         original = json.loads(json.dumps(self.transcript))
@@ -286,13 +295,59 @@ class YouTubeNotes(YouTubeFixture):
         key = notes.signature('translate', self.selected, source)
         media.save_json(directory / 'notes-cache.json', {key: source})
         result = self.build()
-        self.assertIn(source, result['body'])
-        self.assertFalse(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
+        chinese, comparison = result['body'].split('\n\n## 原文对照（未改写）\n\n')
+        self.assertIn('本段中文译文，保留事实和限制。', chinese)
+        self.assertNotIn(quote, chinese)
+        self.assertEqual(source, comparison)
+        self.assertTrue(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
         self.assertEqual(original, self.transcript)
         count = len(self.prompts)
         self.assertEqual(result, self.build())
         self.assertEqual(count, len(self.prompts))
         self.assertEqual(source, media.read_json(directory / 'notes-cache.json')[key])
+
+    def test_mixed_chinese_identity_and_legacy_caches_cannot_bypass_translation(self):
+        english = ('so basically what we are going to do here is wire the agent into the editor and then '
+                   'let it rewrite the failing test until the suite goes green, which sounds great until '
+                   'you realise the cache gets invalidated on every single keystroke and the whole thing '
+                   'grinds to a halt, so please try it yourself before you trust any of these numbers. ')
+        source = ('好的，我们来看这个智能体编程的实际例子，先把环境准备好，然后一步一步演示整条流水线怎么跑起来。'
+                  '下面这段是作者的原话，我先放一遍，稍后再逐句解释其中的关键限制和容易踩的坑。' + english * 2).strip()
+        self.transcript['language'] = 'zh'
+        self.transcript['segments'] = [{'start': 0, 'end': 600, 'text': source}]
+        self.assertFalse(notes.native_chinese(source))
+        with self.assertRaises(RuntimeError):
+            notes.translated_output(source, source)
+        directory = media.cache_dir(self.row['video_id'])
+        legacy = notes.signature('translate', self.selected, source)
+        covered = notes.signature(translation.STAGE, self.selected, source)
+        units = translation.units(source)
+        cache = {legacy: source, covered: json.dumps({'translations': [unit['text'] for unit in units]})}
+        cache.update({notes.signature('translate-unit-v1', self.selected, unit['text']):
+                      json.dumps({'translations': [unit['text']]}) for unit in units})
+        media.save_json(directory / 'notes-cache.json', cache)
+
+        def reply(prompt, *arguments):
+            if prompt.startswith('将以下字幕') and len(json.loads(prompt.split('\n\n', 1)[1])['segments']) > 1:
+                self.prompts.append(prompt)
+                return cache[covered]
+            return self.reply(prompt)
+
+        result = self.build(reply)
+        chinese, original = result['body'].split('\n\n## 原文对照（未改写）\n\n')
+        self.assertIn('本段中文译文，保留事实和限制。', chinese)
+        self.assertNotIn('so basically', chinese)
+        self.assertEqual('\n\n'.join(transcripts.blocks(self.transcript['segments'])), original)
+        self.assertGreater(sum(prompt.startswith('将以下字幕') for prompt in self.prompts), 1)
+        saved = media.read_json(directory / 'notes-cache.json')
+        self.assertEqual(source, saved[legacy])
+        self.assertNotEqual(cache[covered], saved[covered])
+        for unit in units:
+            key = notes.signature('translate-unit-v1', self.selected, unit['text'])
+            self.assertNotEqual(cache[key], saved[key])
+        count = len(self.prompts)
+        self.assertEqual(result, self.build(reply))
+        self.assertEqual(count, len(self.prompts))
 
     def test_japanese_summaries_and_note_fields_are_not_chinese_products(self):
         foreign = '今日は状態管理と描画の方法を説明します。'
