@@ -446,7 +446,7 @@ class ProbeRosterTests(unittest.TestCase):
         # 最重的那几个探针文件必须在册 —— 它们落进 fast 层,分层就白做了。
         self.assertIn("tests.test_subs_layout", names)
         self.assertIn("tests.test_probe_leak", names)
-        self.assertIn("tests.test_x_channels", names)
+        self.assertIn("tests.test_fav_snippets", names)
         # 审查抓到的那两个漏网文件:原生 Chrome 那组、借 dom.SHELL 的那组。
         self.assertIn("tests.test_chrome_shutdown", names)
         self.assertIn("tests.test_x_access_gate", names)
@@ -456,6 +456,8 @@ class ProbeRosterTests(unittest.TestCase):
         # 反面:不引用 tests.headless 的纯逻辑文件不许被圈进 probes 层。
         names = tiers.probe_modules()
         self.assertNotIn("tests.test_source_aliases", names)
+        # 页面探针删掉之后只剩纯逻辑用例的文件,也跟着退出名单(名单现算,不是手写)。
+        self.assertNotIn("tests.test_x_channels", names)
 
     def test_every_name_on_the_roster_is_a_real_file(self):
         for name in tiers.probe_modules():
