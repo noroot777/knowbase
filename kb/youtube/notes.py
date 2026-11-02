@@ -119,7 +119,7 @@ def summary_output(output, source=None, quotes=(), chinese_source=False):
 
 def note_payload(output, prompt='', source='', quotes=(), chinese_source=False):
     try:
-        payload = json_output.object_payload(output, prompt)
+        payload = json_output.object_payload(output, prompt, required_fields=('title', 'summary', 'body'))
     except (ValueError, TypeError, AttributeError):
         raise RuntimeError('视频笔记返回格式无效，原文与译文已缓存') from None
     if (not isinstance(payload, dict) or any(not isinstance(payload.get(field), str) or

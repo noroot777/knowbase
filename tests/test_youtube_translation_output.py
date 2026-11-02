@@ -20,7 +20,10 @@ class TranslationOutput(YouTubeFixture):
     def test_inline_result_wrappers_do_not_reintroduce_format_promises(self):
         answer = json.dumps({'translations': ['作者要求独立核验。']}, ensure_ascii=False)
         for output in ('好的，以下是译文：' + answer, answer + '  （以上为译文）',
-                       '好的，以下是译文：' + answer + '（以上为译文）'):
+                       '好的，以下是译文：' + answer + '（以上为译文）',
+                       answer + '\n以上是翻译结果，如有需要请告诉我。',
+                       answer + '\nLet me know if you would like any changes.',
+                       answer + '\nI hope this will be helpful!', answer + '\n注：要点 [1]；遗漏：[]'):
             with self.subTest(output=output):
                 self.assertEqual('作者要求独立核验。', translation.render('Verify every change.', output))
         note = {'title': '独立核验', 'summary': '核验改动。', 'body': '先核验，再使用。'}

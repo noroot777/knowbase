@@ -35,7 +35,7 @@ def prompt(text):
 
 def values(text, output):
     try:
-        payload = json_output.object_payload(output, prompt(text))
+        payload = json_output.object_payload(output, prompt(text), required_fields=('translations',))
         rows = payload['translations']
         expected = [unit['id'] for unit in units(text)]
         if not isinstance(rows, list) or not expected:
