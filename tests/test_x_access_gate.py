@@ -15,6 +15,7 @@ from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import Quick, tweet
 from tests.test_x_post import BODY, OLD, Page, preview, snapshot
 from tests.test_x_post_backfill import backfill_entry
+from tests.x_harvest_fixture import prefetched
 
 
 def gate(**kwargs):
@@ -78,6 +79,7 @@ class AccessGateTests(ChannelBase):
             self.assertEqual(row, dict(conn.execute('SELECT * FROM feed_items').fetchone()))
             self.assertEqual([row], backfill.candidates(conn))
 
+    @prefetched(x_browser.harvest)
     def test_detail_gate_never_advances_watermark_and_a_later_round_can_save_the_content(self):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
             source = self.sub('Example' + channel)

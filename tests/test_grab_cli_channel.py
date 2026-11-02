@@ -259,7 +259,7 @@ class GrabCliChannelTests(GrabCliCase):
         self.assertEqual(code, 0, out)
         self.assertLess(time.monotonic() - started, 2.5, '单次请求没有被剩余预算压短')
         self.assertIn('正在写入知识库', out)
-        self.assertNotIn('还没写成 vault 里那一篇', out, '那一次查询本该超时')
+        self.assertNotIn('还没导出成笔记文件', out, '那一次查询本该超时')
 
     def test_a_batch_of_slow_queries_does_not_each_get_its_own_wait(self):
         """预算是**整个等待阶段**的,不是每条各一份:一批 N 条慢查询不许继续执行

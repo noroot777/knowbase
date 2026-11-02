@@ -1818,8 +1818,8 @@ false**(抽屉渲染完沙箱才给盘上那一篇补的那一段,版本号当�
 - 正常原句能放进各层滚动区时保留整句可见；整段收藏比最小滚动区还大时，不可能同时展示
   全部文字，滚动目标退为 Range 开头，高亮仍保留完整原句。缺 Highlight API 时也照样定位。
 
-回归入口是 `tests.test_daily_material_browser` 中的长收藏测试及
-`tests/snip_scroll_probe.mjs`。隔离真实 kb-web 使用真实生成器、实际选区、收藏按钮、收藏 API
+回归入口原是 `tests.test_daily_material_browser` 中的长收藏测试及
+`tests/snip_scroll_probe.mjs`(这个页面探针已按仓库主人决定删除,见 `docs/decisions/test-tiers.md`「已删的浏览器回归」)。隔离真实 kb-web 使用真实生成器、实际选区、收藏按钮、收藏 API
 持久化和收藏卡回跳：长链接/无链接长段落 × 段首/段尾 × 390×844/1100×844 × 单层/嵌套，
 共 16 次回跳；逐个片段矩形与所有裁剪区、视口的交集比较，不只检查高亮存在。
 另有 5 组几何/契约检查：三层双向滚动(含 `overflow:hidden` 和跨文本节点原句)、无高亮 API、

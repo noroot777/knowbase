@@ -6,7 +6,7 @@ import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
 
 from kb import browser_capture as capture, pipeline
@@ -50,18 +50,36 @@ def invoke(action, *args):
         raise HTTPException(409, str(error)) from None
 
 
-@router.get('/browser-capture', dependencies=[Depends(app_access)])
-def capture_page():
-    return FileResponse(ROOT / 'kb/static/browser-capture.html',
-                        headers={'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer'})
+EXTENSION_DIR = ROOT / 'kb/static/browser-extension/knowbase-capture'
+
+
+@router.get('/api/browser-capture/setup', dependencies=[Depends(app_access)])
+def setup():
+    """装扩展这一步只要知道一件事:装哪个目录。
+
+    **目录给的是绝对路径,不是只给一个 ZIP。** 这个扩展是「加载已解压的扩展程序」
+    装的,而仓库里本来就躺着那个目录 —— 下载再解压一份等于把同一份代码在磁盘上放
+    两处,之后改了代码,装着的还是解压出来那一份,而人不会知道自己装的是旧的。指到
+    仓库里这一份,改完在扩展管理页点一次「重新加载」就生效(弹窗头部那个版本号就是
+    用来确认这一下点过没有的)。ZIP 留着,给「浏览器不在这台机器上」那种情形。
+
+    **这里不回答「配过没有」。** 它曾经捎一个 `used_before` 回去(判据是
+    `browser_capture_audit` 里有没有过一行),抽屉据此决定首次引导摆在哪 —— 而那是
+    **另一个范畴的事实**:回执是全库共享的历史,引导问的是此刻**这个浏览器**的配对
+    状态。服务端手上根本没有后者,它只知道密钥存在、以及有人拿着密钥来过 —— 换个
+    浏览器、重装一次扩展,它一个字都看不出来。那一问现在由扩展自己在页面上回答
+    (`present.js` 标一个 data 属性),这张回执表回到它本来的职责:记采集回执。
+    """
+    return {'extension_dir': str(EXTENSION_DIR)}
 
 
 @router.get('/api/browser-capture/extension.zip', dependencies=[Depends(app_access)])
 def extension_download():
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
-        for name in ('manifest.json', 'popup.html', 'popup.css', 'popup.js', 'api.js', 'extract.js', 'README.md'):
-            bundle.write(ROOT / 'kb/static/browser-extension/knowbase-capture' / name,
+        for name in ('manifest.json', 'popup.html', 'popup.css', 'popup.js', 'api.js',
+                     'extract.js', 'present.js', 'README.md'):
+            bundle.write(EXTENSION_DIR / name,
                          'knowbase-capture/' + name)
     return Response(archive.getvalue(), media_type='application/zip',
                     headers={'Content-Disposition': 'attachment; filename="knowbase-capture.zip"'})
@@ -70,7 +88,7 @@ def extension_download():
 @router.get('/api/browser-capture/pairing', dependencies=[Depends(app_access)])
 def pairing(request: Request):
     if request.headers.get('sec-fetch-site') != 'same-origin':
-        raise HTTPException(403, '请在知识库补抓页面主动显示配对密钥')
+        raise HTTPException(403, '请在知识库的采集抽屉里主动显示配对密钥')
     return Response(content='{"key":"' + capture.pairing_key() + '"}',
                     media_type='application/json', headers={'Cache-Control': 'no-store'})
 
@@ -138,6 +156,10 @@ def extension_pending():
 class HereRequest(BaseModel):
     model_config = ConfigDict(extra='forbid')
     url: str = Field(min_length=1, max_length=4096)
+    #: 人点过「这一页就是这一篇」之后带回来的那一下(`/here/adopt` 交回的待办 id)。
+    #: **这不是个可选的优化** —— 丢掉它,下一问就只能按创建时间在同页的几个待办里
+    #: 代选,而选错那一下是把这一页的正文写进另一篇(见 `capture.here`)。
+    intent_id: str = Field(default='', max_length=100)
 
 
 @router.post('/api/browser-capture/here', dependencies=[Depends(extension_access)])
@@ -148,21 +170,29 @@ def here(body: HereRequest):
     回答一遍是白跑三个界面(前因后果在 `capture.here` 的 docstring)。
 
     **POST 而不是 GET**,因为正文还欠着的那一档它会顺手把待办建好(`create`
-    幂等,同一(条目, 页面)上已有 pending 就复用)。扩展因此不必先去补抓页。
+    幂等,同一(条目, 页面)上已有 pending 就复用)。扩展因此不必先去采集抽屉。
+
+    带上 `intent_id` 就是「我已经点过要哪一篇了」。**这一问到 `precheck` / `upload`
+    之间,那个身份要一路不掉** —— 中间任何一次按别的规则重选,写进去的就可能是另
+    一篇,而那不可恢复。
     """
-    return invoke(capture.here, body.url)
+    return invoke(capture.here, body.url, body.intent_id)
 
 
 @router.post('/api/browser-capture/here/adopt', dependencies=[Depends(extension_access)])
 def adopt_here(body: IntentRequest):
     """**「等着的那个待办指着另一个地址,而我正站的这一页就是那一篇」。**
 
-    和补抓页上那颗「改用这个地址」是同一个动作、同一个 `create`(旧待办由服务端
+    和采集抽屉里那颗「改用这个地址」是同一个动作、同一个 `create`(旧待办由服务端
     顶掉,不是先取消再发起),只是把它搬到了人所在的地方 —— 站点按浏览器语言跳转
     那一类里,人手上拿着的恰恰就是对的地址。
 
-    **记住:这不是放行。** 改用要人点,正文照旧要过 `_admit_*` 全套、照旧要人核
-    对预览勾确认,所以「扩展不会用另一篇文章静默覆盖」一个字都没松。
+    **记住:这不是放行。** 改用要人点,正文照旧要过 `_admit_*` 全套,所以「扩展不会
+    用另一篇文章静默覆盖」一个字都没松。
+
+    **交回的那个待办就是「他选了哪一篇」的身份凭证,调用方必须接住。** 扩展扔掉它、
+    转头只按网址再问一次的后果实测过:下一问在同页的几个待办里按创建时间代选,
+    于是「采集」把这一页的正文写进了另一篇。
     """
     return invoke(capture.create, body.key, body.page_url)
 
@@ -199,11 +229,21 @@ class UploadRequest(BaseModel):
     title: str = Field(max_length=1000)
     body: str = Field(min_length=1, max_length=_TRANSPORT_BODY)
     method: str = Field(pattern=_METHOD_PATTERN)
-    confirmed_complete: bool
 
 
 @router.post('/api/browser-capture/upload', dependencies=[Depends(extension_access)])
 def upload(body: UploadRequest):
-    if not body.confirmed_complete:
-        raise HTTPException(400, '请先核对预览并确认这是目标文章的完整正文')
+    """把读到的正文写回原条目。
+
+    **原先这里还有一个 `confirmed_complete` 必须为真**,对应弹窗上那道「我已核对:
+    这是目标文章的完整正文」。那道勾连同预览区一起撤了(产品决定,取舍记在
+    `docs/decisions/browser-capture.md`),这个字段也跟着撤 —— 留着它只会变成
+    **扩展签给自己的证词**:界面不再问人,却照旧报一句「人已经核对过了」。
+    何况它从来挡不住非界面调用,随手填个 `true` 就过。
+
+    **撤掉的只有这一句,准入一道都没少**:正文够不够(`_admit_body`,按行去重后
+    的字数)、是不是指定的那一页(`_admit_page`)、条目还是绑定的那一版吗
+    (`_admit_item`),连同 `save` 那条 UPDATE 自己 WHERE 里的 CAS,全在
+    `capture.save` 里原样判。
+    """
     return invoke(capture.save, body.intent_id, body.page_url, body.title, body.body, body.method)

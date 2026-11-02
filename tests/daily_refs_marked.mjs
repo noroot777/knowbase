@@ -10,9 +10,16 @@
 // 页面实际是 `DOMPurify.sanitize(marked.parse(md))`,这里只跑 marked —— DOMPurify
 // 不改动 http(s) 链接的地址和文字,而这里比的就是这两样。
 import { readFileSync } from 'node:fs';
+import vm from 'node:vm';
 
-const mod = await import(new URL('../kb/static/vendor/marked.min.js', import.meta.url));
-const marked = mod.default ?? mod;
+// 照页面那样当**经典脚本**跑(UMD 挂到全局 `marked` 上),不走 `import()`:后者按
+// 最近一层 package.json 定格式,仓库被放到一个 `"type": "module"` 的目录下面时
+// (ash 的验收快照就是),这份 UMD 被当成 ESM 加载、什么都不导出,`marked.parse`
+// 当场 undefined —— 红的是摆放位置,不是日报的链接替换。
+const source = readFileSync(new URL('../kb/static/vendor/marked.min.js', import.meta.url), 'utf8');
+const context = vm.createContext({});
+vm.runInContext(source, context, { filename: 'marked.min.js' });
+const { marked } = context;
 
 // 内部写 `[\s\S]*?` 而不是 `[^<]*`:图片链接的内部是一个 `<img>`。改坏成链接套
 // 链接时这条会抓到半截(内层的 `</a>` 先收尾),集合当场对不上 —— 那正是要抓的。

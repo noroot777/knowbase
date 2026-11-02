@@ -122,7 +122,7 @@ def permits_link_body(kind: str) -> bool:
     (`markdown_source.enrich`)、浏览器采集的准入(`browser_capture.target`)、存量复查
     的分支选择(`feed_fulltext_recheck._plan`)、订阅上那颗「补抓原文」开关
     (`registry.save_subscription`、编辑表单、`fulltext._eligible`)、以及条目卡片上那个
-    「从浏览器补抓」入口(`source_reader.js` 读 catalog 里这一列)、以及「问题与待办」
+    「从浏览器采集」入口(`source_reader.js` 读 catalog 里这一列)、以及「问题与待办」
     详情里那两条人工出口(「从浏览器采集」和「手动补正文」,`intake_diag_api.item` 的
     `can_paste` —— **两颗共用这一道闸,不许一颗开一颗关**)。
     **真正写库的那几条 UPDATE 另有 SQL 形状的同一份判据,见 `link_body_sql`。**

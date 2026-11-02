@@ -1,41 +1,70 @@
-/* Tokens come from base.css; the standalone extension popup.css mirrors that palette. */
-:root { color-scheme:light; }
-main { max-width:820px; padding:30px 24px 60px; margin:auto; }
-header { display:flex; justify-content:space-between; gap:20px; padding-bottom:25px; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; }
-a { color:var(--brand); text-decoration:none; }
-header a { font-size:18px; font-weight:650; }
-h1 { font:900 34px/1.4 var(--font-display); margin:30px 0 0; }
-.steps { list-style:none; display:grid; grid-template-columns:repeat(3,1fr); padding:0; margin:28px 0 16px; gap:12px; font-size:12px; color:var(--muted); }
-.steps li { padding:10px 0; border-bottom:2px solid var(--line); }
-.steps .on { color:var(--brand); border-color:var(--brand); }
-.card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:24px; margin:18px 0; }
-.section-head { display:flex; justify-content:space-between; gap:10px; align-items:baseline; }
-h2 { font-size:15px; margin:0 0 15px; }
-h3 { font:900 23px/1.5 var(--font-display); margin:12px 0; }
-.section-head span, .hint, footer { font-size:12px; color:var(--muted); }
-.url, code, #intent-note, #receipt { overflow-wrap:anywhere; font:12px/1.8 var(--font-mono); color:var(--muted); }
-label { display:block; font-size:12px; margin:14px 0 6px; }
-input { width:100%; border:1px solid var(--line); border-radius:6px; padding:10px; font:inherit; font-size:13px; line-height:1.6; color:var(--ink); background-color:var(--card); }
-input:disabled { background-color:var(--paper); }
-button { border:1px solid var(--brand); border-radius:6px; padding:9px 14px; background:var(--brand); color:var(--card); font:inherit; font-size:13px; line-height:1.5; cursor:pointer; }
-button.secondary { background:var(--card); color:var(--brand); border-color:var(--line); }
-button:disabled { opacity:.5; cursor:not-allowed; }
-button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visible { outline:2px solid var(--brand); outline-offset:3px; }
-.actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:18px; }
-.instructions { padding-left:20px; }
-.instructions li { padding:4px 0; }
-details { border-top:1px solid var(--line); padding-top:15px; margin-top:18px; }
-summary { cursor:pointer; color:var(--brand); }
-.download { display:inline-block; padding:5px 0; border-bottom:1px solid var(--line); }
-.warning { border-left:3px solid var(--warn); background:var(--warn-soft); padding:12px 15px; font-size:12px; margin-top:12px; }
-#message { min-height:25px; color:var(--brand); overflow-wrap:anywhere; }
-#message.error, #run-note.error { color:var(--danger); }
-footer { padding-top:20px; }
-.pending-list { list-style:none; padding:0; margin:0; }
-.pending-list li { border-top:1px solid var(--line); padding-top:12px; margin-top:12px; }
-.pending-list p { margin:6px 0; }
-.mismatch { border-left:3px solid var(--warn); background:var(--warn-soft); padding:12px 15px; margin:12px 0 4px; }
-.mismatch button { margin-top:8px; }
-#pending { margin-top:22px; }
-[hidden] { display:none !important; }
-@media(max-width:520px) { main { padding:18px 15px 40px; } h1 { font-size:27px; } .card { padding:18px; } .steps { font-size:11px; gap:8px; } }
+/* 从浏览器采集 · 左侧抽屉
+   色值一律走 base.css 的 token;扩展那份 popup.css 另抄一份色板(它装在浏览器里,
+   取不到这边的文件),改 :root 要连它一起改。
+
+   **所有选择器都锁在 #cap-drawer / #cap-mask 里面。** 这份样式原先服务于一个独立
+   页面(`/browser-capture`),写的是裸标签 —— main、header、h1、button、input、
+   details、summary 全在列。那个页面退役、内容搬进主界面之后,这些选择器会命中全站
+   的同名标签。作用域在这里不是洁癖,是搬家本身的前置条件。 */
+#cap-mask { position: fixed; inset: 0; background: rgba(20, 32, 43, .32); z-index: 32; backdrop-filter: blur(3px); }
+#cap-drawer {
+  position: fixed; top: 0; left: 0; bottom: 0; width: min(560px, 96vw); z-index: 33;
+  background: var(--paper); box-shadow: 14px 0 44px rgba(20, 32, 43, .2);
+  display: flex; flex-direction: column; animation: capslide .2s ease;
+}
+/* 从左边推出来 —— 位移方向跟着抽屉贴的那一边走,否则开合看着像从错误的一侧弹回去。 */
+@keyframes capslide { from { transform: translateX(-48px); opacity: 0; } }
+@media (max-width: 580px) { #cap-drawer { width: 100vw; } }
+
+#cap-drawer .cap-head {
+  display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 12px 20px;
+  border-bottom: 1px solid var(--line); background: var(--card);
+}
+#cap-drawer .cap-head b { font-size: 14px; }
+#cap-drawer .cap-head .cap-close { margin-left: auto; background: transparent; border: 0; color: var(--muted); cursor: pointer; padding: 4px 10px; font: inherit; }
+#cap-drawer .cap-scroll { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 20px; }
+
+#cap-drawer h2 { font-size: 15px; margin: 0 0 14px; }
+#cap-drawer h3 { font: 900 22px/1.5 var(--font-display); margin: 10px 0; }
+#cap-drawer .cap-block { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin-bottom: 16px; }
+#cap-drawer .cap-block-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+#cap-drawer .hint, #cap-drawer .cap-block-head span { font-size: 12px; color: var(--muted); }
+#cap-drawer .url, #cap-drawer code, #cap-drawer .mono { overflow-wrap: anywhere; font: 12px/1.8 var(--font-mono); color: var(--muted); }
+#cap-drawer label { display: block; font-size: 12px; margin: 14px 0 6px; }
+#cap-drawer input[type=url], #cap-drawer input[type=password], #cap-drawer input[type=text] {
+  width: 100%; border: 1px solid var(--line); border-radius: 6px; padding: 10px;
+  font: inherit; font-size: 13px; line-height: 1.6; color: var(--ink); background-color: var(--card);
+}
+#cap-drawer input:disabled { background-color: var(--paper); }
+#cap-drawer button { border: 1px solid var(--brand); border-radius: 6px; padding: 9px 14px; background: var(--brand); color: var(--card); font: inherit; font-size: 13px; line-height: 1.5; cursor: pointer; }
+#cap-drawer button.secondary { background: var(--card); color: var(--brand); border-color: var(--line); }
+#cap-drawer button:disabled { opacity: .5; cursor: not-allowed; }
+#cap-drawer button:focus-visible, #cap-drawer a:focus-visible, #cap-drawer input:focus-visible, #cap-drawer summary:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+#cap-drawer .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; align-items: center; }
+#cap-drawer .cap-also { display: flex; gap: 8px; align-items: center; font-size: 12px; color: var(--muted); margin-top: 14px; }
+#cap-drawer .cap-also input { width: auto; margin: 0; }
+#cap-drawer ol { padding-left: 20px; margin: 0; }
+#cap-drawer ol li { padding: 4px 0; }
+#cap-drawer details { border-top: 1px solid var(--line); padding-top: 15px; margin-top: 18px; }
+#cap-drawer summary { cursor: pointer; color: var(--brand); }
+#cap-drawer a { color: var(--brand); text-decoration: none; }
+#cap-drawer .download { display: inline-block; padding: 5px 0; border-bottom: 1px solid var(--line); }
+#cap-drawer .warning { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: 12px 15px; font-size: 12px; margin-top: 12px; }
+#cap-drawer #cap-message { min-height: 25px; color: var(--brand); overflow-wrap: anywhere; margin: 0 0 16px; }
+#cap-drawer #cap-message.error, #cap-drawer #cap-run-note.error { color: var(--danger); }
+#cap-drawer .pending-list { list-style: none; padding: 0; margin: 0; }
+#cap-drawer .pending-list li { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 12px; }
+#cap-drawer .pending-list p { margin: 6px 0; }
+#cap-drawer .mismatch { border-left: 3px solid var(--warn); background: var(--warn-soft); padding: 12px 15px; margin: 12px 0 4px; }
+#cap-drawer .mismatch button { margin-top: 8px; }
+#cap-drawer #cap-pending { margin-top: 22px; }
+
+/* 首次使用那一块。**没采成过就摆在最上面、而且是摊开的**(需求:这块要显眼)——
+   扩展没装、密钥没配的人,剩下那一栏网址和「发起采集」对他毫无意义,他点下去只会
+   一直等一个永远不来的采集。采成过一次之后它收进下面的 <details>。 */
+#cap-drawer .cap-setup { border: 1px solid var(--brand); border-radius: 10px; padding: 20px; margin-bottom: 16px; background: var(--card); }
+#cap-drawer .cap-setup h2 { color: var(--brand); }
+#cap-drawer .cap-path { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0 4px; }
+#cap-drawer .cap-path .mono { flex: 1; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; margin: 0; }
+#cap-drawer .cap-path button { white-space: nowrap; }
+#cap-drawer [hidden] { display: none !important; }

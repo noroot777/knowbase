@@ -231,10 +231,18 @@ function navigateReader(url) {
   readerPendingDestination = null;
   frame.dataset.readerNavigation = String(++readerNavigationId);
   setReaderUnavailable(true, true);
-  if (source && source.href.split('#')[0] === readerRequestedDocument.split('#')[0]) {
+  if (source && sameReaderDocument(source.href, readerRequestedDocument)) {
     if (source.href !== readerRequestedDocument) frame.src = url;
     bindReaderScrollAway();
   } else frame.src = url;
+}
+// 「是不是同一篇」只有这一个判据:两边都过一次 URL 序列化再去掉片段。请求地址是
+// new URL 规范化过的,拿另一边的原始字符串直接比,中文、空格这类路径写法一不同就判成两篇。
+function sameReaderDocument(a, b) {
+  if (a == null || b == null) return false;
+  try {
+    return new URL(a, location.href).href.split('#')[0] === new URL(b, location.href).href.split('#')[0];
+  } catch { return false; }
 }
 function readerDocumentUrl(doc) {
   try {
@@ -274,8 +282,7 @@ function protectReaderDocument(doc) {
     if (!link || link.hasAttribute('download')) return;
     let destination;
     try { destination = new URL(link.href, doc.URL); } catch { return; }
-    if (!/^https?:$/.test(destination.protocol)
-        || destination.href.split('#')[0] === doc.URL.split('#')[0]) return;
+    if (!/^https?:$/.test(destination.protocol) || sameReaderDocument(destination.href, doc.URL)) return;
     link.setAttribute('target', '_blank');
     link.setAttribute('rel', [...new Set((link.getAttribute('rel') || '').split(/\s+/)
       .filter(Boolean).concat('noopener'))].join(' '));
@@ -289,7 +296,7 @@ function protectReaderDocument(doc) {
   });
   if (frame.contentWindow.navigation) listen(frame.contentWindow.navigation, 'navigate', event => {
     if (!current() || event.hashChange || event.downloadRequest != null) return;
-    if (event.destination.url.split('#')[0] !== doc.URL.split('#')[0]) notify(event.destination.url);
+    if (!sameReaderDocument(event.destination.url, doc.URL)) notify(event.destination.url);
   });
 }
 function watchReaderDocument(generation) {
@@ -315,8 +322,7 @@ function watchReaderDocument(generation) {
   inspect();
 }
 function readerOwnsDocument(doc) {
-  return !readerRequestPending
-    || doc.URL.split('#')[0] === readerRequestedDocument?.split('#')[0];
+  return !readerRequestPending || sameReaderDocument(doc.URL, readerRequestedDocument);
 }
 function recordReaderNavigation(event) {
   const frame = $('reader-frame');
@@ -327,7 +333,7 @@ function recordReaderNavigation(event) {
   let source;
   try { source = new URL(message.documentUrl); } catch { return; }
   if (source.origin !== location.origin
-      || (readerLastDocument && source.href.split('#')[0] !== readerLastDocument.split('#')[0])) return;
+      || (readerLastDocument && !sameReaderDocument(source.href, readerLastDocument))) return;
   if (message.destination === null) {
     readerPendingDestination = null;
     let doc;

@@ -262,13 +262,19 @@ class FetchTests(FullTextCase):
         self.assertEqual('', self.row(fresh)['fulltext_at'])
 
     def test_nothing_to_do_when_no_source_opted_in(self):
+        # 键名不在这里另抄一份:契约是「早退那条路和真干了活的那条路**同一套键**」
+        # (`summarize` 和采集器按键取数)。抄一份的话 `fetch_pending` 每加一档就红
+        # 一次,红的却不是缺陷 —— 加 `shelved` 那一档时正是这样。
         self.put(self.plain, url='https://k.org/post', title='Deep dive')
         with patch.object(fulltext, 'request', Mock()) as req:
-            summary = fulltext.fetch_pending('rss')
+            idle = fulltext.fetch_pending('rss')
         self.assertEqual(0, req.call_count)
-        self.assertEqual({'done': 0, 'failed': 0, 'empty': 0, 'left': 0, 'stale': 0,
-                          'held': 0, 'errors': [], 'failed_keys': [],
-                          'stopped': False}, summary)
+        self.assertEqual({}, {k: v for k, v in idle.items() if v})
+        self.put()
+        with patch.object(fulltext, 'request', Mock(return_value=page(PAGE))):
+            worked = fulltext.fetch_pending('rss')
+        self.assertEqual(1, worked['done'])
+        self.assertEqual(sorted(worked), sorted(idle))
 
 
 class ReadingStateTests(FullTextCase):

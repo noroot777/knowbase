@@ -29,6 +29,7 @@ let scheduled;
 let resolveConfirmation;
 const context = vm.createContext({
   URLSearchParams, Date, JSON,
+  window: {},
   document: {getElementById: element, createElement: node},
   location: {search: '?item=k1', origin: 'http://127.0.0.1'},
   navigator: {clipboard: {writeText: async () => {}}},
@@ -39,8 +40,10 @@ const context = vm.createContext({
 });
 const source = await readFile(new URL('../kb/static/js/browser_capture.js', import.meta.url), 'utf8');
 vm.runInContext(source, context);
+// 搬进抽屉之后这段脚本不再自启动(条目 key 原先从地址栏取)——由外壳调它。
+context.window.startCapture('k1');
 await new Promise(resolve => setImmediate(resolve));
-const field = element('page-url');
+const field = element('cap-page-url');
 
 // ① 反向钉:没人动过的空框照旧填上条目原网址
 assert.equal(field.value, ORIGINAL);
@@ -61,7 +64,7 @@ assert.equal(field.value, 'https://real.example.org/final');
 // ④ 草稿态(已保存 + 点过「重新采集正文」)是第二个触发点
 state = {...state, saved: {id: 's1', receipt: {characters: 666, captured_at: '2026-10-26T12:00:00+08:00'}}};
 await scheduled();
-const restarting = element('restart').click();
+const restarting = element('cap-restart').click();
 resolveConfirmation(true);
 await restarting;
 assert.equal(field.disabled, false, '草稿态下这一栏应当可以改');

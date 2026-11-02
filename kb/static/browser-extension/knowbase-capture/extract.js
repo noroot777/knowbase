@@ -47,7 +47,7 @@ function readKnowbaseArticle(mode) {
   }
   // 「够不够」「超不超」由服务端判(`kb/browser_capture._admit_body`:按**行**去重后的
   // 字数门槛)。在这里再写一遍数字就是两份口径 —— 实测复读的登录提示页在这边 1367
-  // 字过线、那边去重只剩 260 字,于是人读完整页、勾完确认才被拒。提取器只回答
+  // 字过线、那边去重只剩 260 字,于是人读完整页才被拒。提取器只回答
   // 「有没有从这一页读到东西」,上面两个分支各自已经挡住空正文。
   return {page_url: location.href, title, body, method: mode};
 }

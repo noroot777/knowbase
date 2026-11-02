@@ -174,9 +174,24 @@ def _seed_defaults(conn) -> None:
 
 
 @contextmanager
-def db():
+def read_db(timeout=30):
+    """Read an initialized WAL database without schema writes or a reserved writer lock."""
+    if not DB_PATH.exists():
+        with db(timeout=timeout):
+            pass
+    conn = sqlite3.connect(DB_PATH.resolve().as_uri() + '?mode=ro', uri=True, timeout=timeout)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute('PRAGMA query_only=ON')
+        yield conn
+    finally:
+        conn.close()
+
+
+@contextmanager
+def db(timeout=30):
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn = sqlite3.connect(DB_PATH, timeout=timeout)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
     # 切 journal 模式要的是**排他锁**,而 SQLite 对这条语句**不走 busy handler**

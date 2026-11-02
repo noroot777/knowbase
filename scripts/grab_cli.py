@@ -244,7 +244,7 @@ def verdict(res: dict, state: dict | None, *, refetch: bool = False,
         return 'unknown', res.get('detail') or '没核到这一篇的结果'
     owes = state.get('owing') or '还没写进知识库'
     # 重抓没换成那一条也会落到这儿(好正文、还欠后半条链)。**动作那个事实要留着**
-    # —— 不写这一句的话,一次明确要求的重抓会只剩一句「还没写成 vault 里那一篇」,
+    # —— 不写这一句的话,一次明确要求的重抓会只剩一句「还没导出成笔记文件」,
     # 看不出「我要的那次替换到底做了没有」。
     head = ('这次重抓没换成（库里那一份本来就是正文）；'
             if res.get('replaced') is False else '')

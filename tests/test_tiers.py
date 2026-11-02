@@ -326,7 +326,7 @@ class TierVerdictTests(unittest.TestCase):
         with mock.patch.object(tiers, "build_suite", lambda t: make_suite()), \
                 mock.patch.dict(os.environ), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = tiers.main([tier])
+            rc = tiers.main([tier, "--selftest=run"])
         return rc, err.getvalue()
 
     def _partial_suite(self):
@@ -350,7 +350,8 @@ class TierVerdictTests(unittest.TestCase):
         self.assertEqual(0, rc, err)
 
     def test_full_keeps_the_natural_skip_policy(self):
-        rc, err = self._main("full", self._partial_suite)
+        # full 的浏览器那一路(tests/tier_split.py 起的子进程)沿用这条政策。
+        rc, err = self._main("full-browser", self._partial_suite)
         self.assertEqual(0, rc, err)
         self.assertIn("真跑 1/2", err)   # 但覆盖数要如实打出来
 
@@ -393,7 +394,7 @@ class TierVerdictTests(unittest.TestCase):
         # setUpClass 抛普通异常:rc 本来就红(wasSuccessful 为假),但覆盖数
         # 也得如实 —— 一条都没开始就是 0/2,不许打成 2/2。
         load = unittest.defaultTestLoader.loadTestsFromTestCase
-        rc, err = self._main("full", lambda: load(self._fixture_broken_class(
+        rc, err = self._main("full-browser", lambda: load(self._fixture_broken_class(
             RuntimeError("夹具坏了"), "ClassErrorViaMain")))
         self.assertEqual(1, rc, err)
         self.assertIn("真跑 0/2", err)
@@ -445,7 +446,7 @@ class ProbeRosterTests(unittest.TestCase):
         # 最重的那几个探针文件必须在册 —— 它们落进 fast 层,分层就白做了。
         self.assertIn("tests.test_subs_layout", names)
         self.assertIn("tests.test_probe_leak", names)
-        self.assertIn("tests.test_x_channels", names)
+        self.assertIn("tests.test_fav_snippets", names)
         # 审查抓到的那两个漏网文件:原生 Chrome 那组、借 dom.SHELL 的那组。
         self.assertIn("tests.test_chrome_shutdown", names)
         self.assertIn("tests.test_x_access_gate", names)
@@ -455,6 +456,8 @@ class ProbeRosterTests(unittest.TestCase):
         # 反面:不引用 tests.headless 的纯逻辑文件不许被圈进 probes 层。
         names = tiers.probe_modules()
         self.assertNotIn("tests.test_source_aliases", names)
+        # 页面探针删掉之后只剩纯逻辑用例的文件,也跟着退出名单(名单现算,不是手写)。
+        self.assertNotIn("tests.test_x_channels", names)
 
     def test_every_name_on_the_roster_is_a_real_file(self):
         for name in tiers.probe_modules():

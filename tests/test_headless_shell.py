@@ -114,7 +114,7 @@ class HeadlessShellTests(unittest.TestCase):
 
     def test_the_three_browser_regressions_share_this_one_copy(self):
         """口径只写一份:三处都不许再自己探测。"""
-        for name in ["test_catgraph_browser.py", "test_chat_height.py", "test_retired_channel.py"]:
+        for name in ["test_catgraph_browser.py", "test_subs_layout.py", "test_retired_channel.py"]:
             src = (Path(__file__).resolve().parent / name).read_text(encoding="utf-8")
             with self.subTest(name=name):
                 self.assertIn("from tests.headless import", src)

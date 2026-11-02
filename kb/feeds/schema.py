@@ -24,10 +24,11 @@
 from __future__ import annotations
 
 from kb.feeds.exclusion import SCHEMA as EXCLUSION_SCHEMA
+from kb.feeds.x_intake_schema import SCHEMA as X_INTAKE_SCHEMA
 from kb.intake_diag.ledger import SCHEMA as CARE_LOG_SCHEMA
 from kb.intake_diag.shelf import SCHEMA as SHELF_SCHEMA
 
-SCHEMA = '''
+SCHEMA = X_INTAKE_SCHEMA + '''
 CREATE TABLE IF NOT EXISTS feed_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscriptions (
  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, name TEXT NOT NULL,
@@ -83,6 +84,17 @@ CREATE TABLE IF NOT EXISTS feed_runs (
 # 的 IF NOT EXISTS 对它们不生效,只能逐列 ALTER 补——补不上就不是"少个字段",
 # 而是整个翻译流程在老库上永远报 no such column。
 _ADDED_COLUMNS = {
+    'x_intake_candidates': (
+        ('unavailable', "TEXT NOT NULL DEFAULT ''"),
+    ),
+    'x_intake_sources': (
+        ('window_end', "TEXT NOT NULL DEFAULT ''"),
+        ('block', "TEXT NOT NULL DEFAULT ''"),
+        ('screen_waits', "TEXT NOT NULL DEFAULT '{}'"),
+    ),
+    'x_intake_batches': (
+        ('block_token', "TEXT NOT NULL DEFAULT ''"),
+    ),
     # 这一条是新订阅的历史下界(见 `history_floor`)。老库里的订阅补成空串 =
     # 不设下界:它们的存档早就抓完了,回头给它们钉一个下界只会在源站补发旧文
     # 时静默丢内容,挡不住任何已经发生的事。
@@ -260,4 +272,3 @@ def _migrate(conn) -> None:
         " WHEN new.life='' BEGIN"
         f"  UPDATE feed_items SET life={_LIFE} WHERE key=new.key;"
         " END")
-

@@ -110,7 +110,7 @@ class TimelineEvidenceTests(unittest.TestCase):
         self.assertIn('下次同步重试', incomplete)
 
     def test_existing_scroll_and_stall_notes_survive_the_item_note(self):
-        for scrolls, bottom_at, reason in ((1, 3, '滚动次数用完'),
+        for scrolls, bottom_at, reason in ((1, 3, '本次 1 次滚动用完'),
                                           (10, 99, '页面不再长出新内容')):
             with self.subTest(reason=reason), patch.object(x_browser, 'MAX_SCROLLS', scrolls):
                 result = self.collect(bottom_at=bottom_at)['example']

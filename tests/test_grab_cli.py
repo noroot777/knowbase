@@ -52,7 +52,7 @@ class GrabCliTests(GrabCliCase):
         self.assertEqual(code, 0, out)
         self.assertIn('已存下，还没写进知识库', out)
         self.assertNotIn('已写入知识库', out)
-        self.assertIn('还没写成 vault 里那一篇', out)
+        self.assertIn('还没导出成笔记文件', out)
         self.assertIn('点一次「写入知识库」', out)       # 下一步要指得出来
 
     def test_content_that_does_not_look_like_an_article_offers_refetch(self):
@@ -307,7 +307,7 @@ class GrabCliTests(GrabCliCase):
         # **断在档位和那条补写请求上**:只验那句话的话,把这一档说成「库里那一份
         # 没动」照旧绿 —— 而那正是「动作回答冒充交付结果」的形状。
         self.assertEqual(rec['status'], 'pending', rec)
-        self.assertIn('还没写成 vault 里那一篇', rec['detail'])
+        self.assertIn('还没导出成笔记文件', rec['detail'])
         self.assertIn('没换成', rec['detail'])   # 动作那个事实一样要留着
         # 打的是 `/api/grab/restore` 这条**不创建内容**的独立路径,不是再投一次。
         # 恰好两次 = `MAX_RENEWS`:这一条在夹具里永远补不上(state 恒为欠账),

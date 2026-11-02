@@ -24,7 +24,7 @@ DIGEST_SECONDS = 240
 # profile 只能被一个实例打开 —— 而单个账号要滚时间线、必要时还要等懒加载,
 # 90 秒连五个号都跑不完。这条通道按天同步(见 `source_types` 里 social 的
 # interval),所以给得宽;用完的账号记成"留待下次",靠 last_attempt 轮转补齐。
-X_LOCAL_SECONDS = float(os.environ.get('KB_X_LOCAL_SECONDS', '1200'))
+X_LOCAL_SECONDS = float(os.environ.get('KB_X_LOCAL_SECONDS', '480'))
 
 
 def _prefetch_x(kind, sources, settings, scope):

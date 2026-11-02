@@ -12,6 +12,7 @@ from tests.test_x_page_policy import Clock, PolicySession
 from tests.test_x_page_state import response
 from tests.test_x_post import OLD, PREVIEW, URL
 from tests.test_x_response_ownership import OwnershipSession
+from tests.x_harvest_fixture import prefetched
 
 
 class CombinedSession(OwnershipSession):
@@ -28,6 +29,7 @@ class CombinedSession(OwnershipSession):
 
 
 class SyncMergeTests(ChannelBase):
+    @prefetched(x_browser.harvest)
     def test_late_errors_preserve_both_kinds_of_skip_evidence_through_actual_sync(self):
         sources = [self.sub(name) for name in ['Example', 'Next', 'Last']]
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:

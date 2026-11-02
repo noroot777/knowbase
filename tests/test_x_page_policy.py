@@ -12,6 +12,7 @@ from tests.test_x_channels import ChannelBase
 from tests.test_x_collectors import tweet
 from tests.test_x_page_state import EventSession, response
 from tests.test_x_post import BODY, OLD, URL
+from tests.x_harvest_fixture import prefetched
 
 
 class Clock:
@@ -255,6 +256,7 @@ class StoredPolicyTests(ChannelBase):
         super().setUp()
         self.sources = [self.sub('Example'), self.sub('Other')]
 
+    @prefetched(x_browser.harvest)
     def run_batch(self, channel, cases, *, sources=None, budget=None, account_seconds=1.0):
         sources = self.sources if sources is None else sources
         for source in sources:

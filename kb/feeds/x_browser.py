@@ -185,30 +185,34 @@ def _entry(item: dict) -> dict | None:
     return x_body.record(out, text, prefix=prefix)
 
 
-def _wait_state(page: Chrome, handle: str, deadline: float) -> dict:
-    return wait_state(page, handle, deadline, _STATE_JS)
+def _wait_state(page: Chrome, handle: str, deadline: float, *, budget_limited=False) -> dict:
+    return wait_state(page, handle, deadline, _STATE_JS, budget_limited=budget_limited)
 
 
-def _harvest_one(page: Chrome, handle: str,
-                 floor: datetime | None) -> tuple[list[dict], str]:
-    """抓一个账号。返回 (条目, 没读完的原因)。
-
-    **原因非空 = 这一轮没有读到水位的证据**,调用方据此不推进水位(见 `harvest`)。
-    三种"没读完":滚动次数用完、这个账号的时间预算用完、页面不再长出新内容而又
-    不在底部(懒加载卡住/被限流)。没有下界(floor 为空)时无从谈起"读到水位",
-    那是新订阅的首轮,按读到的为准。逐条来源证据不足也算没读完:保留其余条目,
-    留着原下界重试,不让无法确认的内容拖垮整个账号。
-    """
+def _harvest_one(page: Chrome, handle: str, floor: datetime | None, *,
+                 deadline=None, max_scrolls=None, should_stop=None, on_ready=None, precise=False,
+                 account_seconds=None, budget_limited=None) -> tuple[list[dict], str]:
+    """Return selected previews and an honest coverage gap, with optional scheduler limits."""
+    ready_started = time.monotonic()
+    account_seconds = min(ACCOUNT_SECONDS, ACCOUNT_SECONDS if account_seconds is None else account_seconds)
+    budget_limited = deadline is not None and deadline < ready_started + account_seconds if budget_limited is None else budget_limited
+    deadline = min(deadline or float('inf'), ready_started + account_seconds)
+    effective_seconds = max(0, deadline - ready_started)
+    scroll_limit = MAX_SCROLLS if max_scrolls is None else max_scrolls
     navigate(page, f'https://x.com/{handle}')
-    deadline = time.monotonic() + ACCOUNT_SECONDS
-    state = _wait_state(page, handle, deadline)
+    state = _wait_state(page, handle, deadline, budget_limited=True) if budget_limited else _wait_state(page, handle, deadline)
+    if on_ready:
+        on_ready(time.monotonic() - ready_started)
     page = TimelineState(page, handle, state, _STATE_JS)
     page.eval(_RESET_JS)
     seen_articles = parsed = 0
     items: list[dict] = []
-    incomplete = '滚动次数用完,没有读到上次的位置' if floor else ''
+    incomplete = f'本次 {scroll_limit} 次滚动用完,没有读到上次的位置' if floor else ''
     dry = 0                                        # 连着几次"滚完没长出新东西"
-    for _ in range(MAX_SCROLLS):
+    for _ in range(scroll_limit):
+        if should_stop and should_stop():
+            incomplete = '已按停止请求中断,时间线未读完'
+            break
         snap = json.loads(page.eval(_COLLECT_JS))
         seen_articles, parsed, items = snap['articles'], snap['parsed'], snap['items']
         if page.incomplete:
@@ -219,7 +223,7 @@ def _harvest_one(page: Chrome, handle: str,
             break
         if time.monotonic() > deadline:
             if floor:
-                incomplete = f'单个账号的 {int(ACCOUNT_SECONDS)} 秒用完,没有读到上次的位置'
+                incomplete = f'单个账号的 {effective_seconds:.3g} 秒用完,没有读到上次的位置'
             break
         before = len(items)
         bottom = json.loads(page.eval(_SCROLL_JS))['bottom']
@@ -248,6 +252,10 @@ def _harvest_one(page: Chrome, handle: str,
                             '一条都解析不出来),X 可能改版了')
     rejected: list[str] = []
     entries = _select(items, floor, handle, rejected=rejected)
+    if precise:
+        stamps = {item.get('url'): item.get('datetime', '') for item in items}
+        for entry in entries:
+            entry['x_observed_at'] = stamps.get(entry['url'], '')
     if rejected:
         note = (f'@{handle} 有 {len(rejected)} 条推文的来源或上下文无法确认,'
                 f'本轮已跳过(如 {rejected[0]});其余推文照常收录,'

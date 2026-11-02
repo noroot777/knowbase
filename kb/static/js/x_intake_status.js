@@ -1,0 +1,29 @@
+function xIntakeStatus(source) {
+  const state = source.x_intake;
+  if (!state) return '';
+  const parts = [state.discovery === 'complete' ? '最新发现已完成' : state.discovery === 'partial' ? '最新发现未读完' : '时间线尚未轮到'];
+  const observed = state.blocks || {discovery: state.block};
+  const stages = {discovery: '最新发现', history: '历史追补', body: '正文补全'};
+  const labels = {throttled: '启动限流，等待冷却', rate: '访问限流，稍后重试', challenge: '安全验证，需人工处理', account: '账号不可用', login: '登录失效', session: '会话不可用'};
+  for (const [phase, block] of Object.entries(observed)) {
+    if (block?.kind) parts.unshift(`${stages[phase] || phase}：${labels[block.kind] || '访问受阻'}`);
+  }
+  if (state.gap) parts.push(`历史缺口：${state.gap}`);
+  if (state.capacity_limited === true && state.coverage_warning) parts.push(state.coverage_warning);
+  if (state.pending) parts.push(`正文待补 ${state.pending} 条`);
+  if (state.unconfirmed) parts.push(`候选待确认 ${state.unconfirmed} 条`);
+  if (state.outside) parts.push(state.outside);
+  else if (state.expired) parts.push(`最近24小时超出五天自动窗口 ${state.expired} 条（未计完成）`);
+  if (state.error && state.error !== state.block?.reason) parts.push(state.error);
+  return `<p class="source-row-meta x-intake-status">${esc(parts.join(' · '))}</p>`;
+}
+
+function xIntakeTiming(run) {
+  if (!run) return '';
+  const labels = {prepare: '准备', startup: '启动', discovery: '发现', history: '历史', body: '正文', cleanup: '关闭', finalize: '落盘确认', delivery: '成品投递'};
+  const stages = Object.entries(run.phases || {}).map(([name, value]) => {
+    const wait = value.cooldown_seconds ? `（含冷却 ${value.cooldown_seconds.toFixed(1)}s）` : '';
+    return `${labels[name] || name} ${(value.wall_seconds || 0).toFixed(1)}s${wait}`;
+  });
+  return ` · X ${run.elapsed_seconds}s：${stages.join(' / ')} · 待补 ${run.counts?.pending || 0} 条 · 有界重扫，非原生游标续页`;
+}

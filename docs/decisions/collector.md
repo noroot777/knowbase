@@ -34,7 +34,7 @@
   `daily.json` 里写的正是旧名字,丢掉的话**公众号从此不再定时同步、不再进日报,而面
   板上完全看不出少了什么**。配套:①退役名也要能翻成人话(`channel_labels()`,API 的 `labels`);②别名
   表要发到浏览器(`/api/pipeline/channels` 的 `aliases`),前端不许写死 `wechat_oa`。
-- **「我的订阅」的公众号视图不信 `kb-sync-channel` 那份全局选择**(`sources.js` 的
+- **「我的订阅」的公众号视图不信 `kb-sync-channel` 那份全局选择**(`subs_wechat.js` 的
   `wechatSubsChannel()` 按来源目录声明的通道过别名表解析)。**检查/重试入口同理**自己按目录现解析
   (`refreshPipeSource()`,「检查连接」重跑整个 `openWechatSubs`)。
 - **逐号「就绪」那套在主干上永久是空的**(一律 `ready=None` / `state=""`)。
@@ -91,6 +91,11 @@
   裂开,而外键全合法)。它返回**实际入库的档案键**,调用方据此区分「新添加」和「这就是那个改了名的号」。
 - 别把 `collector/data` 或 `collector/.venv` 加进版本库 —— 它们是符号链接,`data/` 那条带斜杠的规则挡不
   住,.gitignore 里另有不带斜杠的显式两行,别删。
+- **接入目录(`KB_WECHAT_RUNTIME`,放访问材料和备份)的路径上只许有 root 的符号链接**
+  (`wechat_runtime._foreign_link`)。防的是接入目录或某一级上层被换成链接、把材料引到别处;按内核解析
+  顺序逐段走,链接目标里途经的链接一样过判据,Windows 看不出属主一律拦。**别退回「上层任何一级是链接就
+  拒」**:macOS 的 `/var`、`/tmp` 是系统链接,`tempfile` 给的目录全在 `/var/folders` 下,那样整块接入在
+  `/tmp`、`/var` 下一律报错,测试也全红。回归 `tests/test_wechat_setup.py` 的 `PrivateDirTests`。
 - 详细见 `docs/decisions/collector.md`。
 
 ## 事故形态与实测证据
@@ -121,7 +126,7 @@
   全局、没有 `tgt-ready-bar`/`tgt-refresh` 这些节点、页面上不出现「凭证」二字、
   删掉的那两个端点一次都没被请求)。
   **「我的订阅」的公众号视图不信 `kb-sync-channel` 里那份全局选择**
-  (`sources.js` 的 `wechatSubsChannel()`:按来源目录声明的通道过别名表解析)——
+  (`subs_wechat.js` 的 `wechatSubsChannel()`:按来源目录声明的通道过别名表解析)——
   那是旧版同步中心记「上次看哪个来源」用的,存量值可能是 rss/social(都是合法
   通道,别名迁移不会动它们),沿用的话公众号视图的连接卡、订阅列表、「同步全部」
   全跟着串到别的来源上。探针里存量 rss/social/未知值各走一遍:通道绑回

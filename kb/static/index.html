@@ -29,6 +29,7 @@
 <link rel="stylesheet" href="/static/css/snip.css">
 <link rel="stylesheet" href="/static/css/egress.css">
 <link rel="stylesheet" href="/static/css/diag.css">
+<link rel="stylesheet" href="/static/css/browser_capture.css">
 </head>
 <body>
 
@@ -661,6 +662,9 @@
 <script src="/static/js/daily_sched.js"></script>
 <script src="/static/js/daily_body.js"></script>
 <script src="/static/js/daily_chip.js"></script>
+<script src="/static/js/x_intake_status.js"></script>
+<!-- subs_wechat.js 排在 sources.js 之前:它那个 let 有 TDZ(理由写在它文件头上) -->
+<script src="/static/js/subs_wechat.js"></script>
 <script src="/static/js/sources.js"></script>
 <script src="/static/js/scrollaway.js"></script>
 <script src="/static/js/source_body.js"></script>
@@ -678,6 +682,8 @@
 <script src="/static/js/diag_list.js"></script>
 <script src="/static/js/diag_detail.js"></script>
 <script src="/static/js/diag_actions.js"></script>
+<script src="/static/js/browser_capture.js"></script>
+<script src="/static/js/capture_drawer.js"></script>
 <script src="/static/js/workspace.js"></script>
 <script>
 loadMeta().catch(() => { $('stats').textContent = '统计暂不可用'; });

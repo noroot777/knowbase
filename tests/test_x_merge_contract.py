@@ -11,6 +11,7 @@ from tests.test_x_collectors import tweet
 from tests.test_x_empty_post import empty
 from tests.test_x_post import OLD, Page, snapshot
 from tests.test_x_post_backfill import backfill_entry, linked_snapshot
+from tests.x_harvest_fixture import prefetched
 
 
 class MergeContractTests(ChannelBase):
@@ -126,6 +127,7 @@ class MergeContractTests(ChannelBase):
         self.assertEqual('empty', receipt['state'])
         self.assertEqual('confirmed_empty', receipt['reason'])
 
+    @prefetched(x_browser.harvest)
     def test_quote_and_unavailable_notices_coexist_without_hiding_real_incompletion(self):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
             for incomplete in ['', '滚动次数用完']:

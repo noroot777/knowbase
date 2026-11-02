@@ -530,7 +530,7 @@ await evalJs(`loadPipeHistory(); true`);
 await setup("那份落后的清单已经应用上去了",
             until(`document.querySelectorAll('.pipe-history-row').length === 2`, 8000));
 check("applied 记的是清单那一轮,不是页面快照那一轮",
-      await evalJs(`PIPE_FRESH.history.applied === 'run-evening'`),
+      await evalJs(`PIPE_FRESH.history.applied === pipeHistoryVersionOf('run-evening')`),
       await evalJs(`JSON.stringify({ applied: PIPE_FRESH.history.applied,
                                      desired: PIPE_FRESH.history.desired })`));
 check("所以它算落后、补读还会继续",
@@ -557,10 +557,10 @@ await evalJs(`refreshPipe(); loadPipeHistory(); true`);
 // 等「状态查询回来了」是摆局前提,「清单追平到它」才是下面要验的
 await setup("那份旧格式清单没应用上去",
             until(`document.querySelectorAll('.pipe-history-row').length === 2
-                   && PIPE_FRESH.history.desired === ${JSON.stringify(OLD_A.finished_at)}`, 8000));
+                   && PIPE_FRESH.history.desired === pipeHistoryVersionOf(${JSON.stringify(OLD_A.finished_at)})`, 8000));
 check("没有身份的记录按收尾时间追平,不留一个永久缺口", await evalJs(
   `PIPE_FRESH.history.applied === PIPE_FRESH.history.desired
-   && PIPE_FRESH.history.applied === ${JSON.stringify(OLD_A.finished_at)}`),
+   && PIPE_FRESH.history.applied === pipeHistoryVersionOf(${JSON.stringify(OLD_A.finished_at)})`),
   await evalJs(`PIPE_FRESH.history.applied + ' vs ' + PIPE_FRESH.history.desired`));
 // 选择键得逐行不同:原来按 `run_id`(这种记录属性里是空字符串,点下去要求
 // `undefined === ''`,那一行看得到却打不开),换成完成版本之后这两行又会**撞**。

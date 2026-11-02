@@ -33,6 +33,11 @@ class ReplySession(EventSession):
 
 
 class RepairContractTests(ChannelBase):
+    def setUp(self):
+        super().setUp()
+        from tests.x_harvest_fixture import prefetched
+        self.enterContext(prefetched(x_browser.harvest))
+
     def seed(self, body):
         source = self.sub()
         reg.put_items(source, [backfill_entry(tweet('123', text=body))])

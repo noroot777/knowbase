@@ -21,7 +21,7 @@
   会话冷却(`x_cooldown`:45 秒起,反复撞上翻倍到最多 180 秒),而且
   `x_browser` **已经会**等冷却、并在预算允许时把受影响账号排到队尾重试一次 ——
   文案不许写成「完全没有自动重试」,也不许承诺「冷却结束就会成功」。
-- 覆盖未完成(`last_note`):浏览器时间线最多滚 40 次、每账号 50 秒预算,连续 3 次
+- 旧路径覆盖未完成(`last_note`):浏览器时间线按实际调用的滚动次数、账号预算读取,连续 3 次
   没长出新内容又没到底也算没读完。现有实现**重新导航账号页、不是从上次像素位置
   续滚**,所以那颗按钮叫「重试此范围」,**不许承诺断点续传**。
 
@@ -31,7 +31,10 @@
 照搬),通用档**一个字都不提重新登录**:判不准时多说一句「去登录」就是把限流说成
 掉登录,而那正是要防的那件事。
 
-**`last_note` 不过限流那道关键词。** 它那句话里**会原样嵌着限流那段文案**(实测:
+**自动 X 只消费采集器的结构化事实,不从 `last_note` 推断覆盖或阻断。** 正文待补、候选
+待确认、五天历史缺口和最近24小时超窗分档；启动/内容限流、安全验证、账号/登录/会话不可用
+各有持久阻断档，原话不丢失，也不复制给未访问来源。超窗不承诺普通同步可追回，未知说明不发问题。
+其他路径的 **`last_note` 不过限流那道关键词。** 它那句话里**会原样嵌着限流那段文案**(实测:
 某账号的 note 是「滚动次数用完,没有读到上次的位置;有 67 条折叠推文暂缓补全(X
 限制了访问频率,页面应用没能启动…),留到下次同步再试」)—— 拿关键词去搜它会把一个
 「成功但没读完」判成「启动限流」,于是屏幕上说「本轮没读到这个账号」,而它其实读到了
@@ -41,6 +44,7 @@ from __future__ import annotations
 
 from kb.feeds import registry as reg, x_page_state as xstate
 from kb.intake_diag import warrant
+from kb.feeds.x_intake_diagnostics import PROBLEMS as X_PROBLEMS
 
 #: 「这一轮没读完」那句话里,时间线覆盖那一档会出现的字样(产生处在
 #: `kb/feeds/x_browser.py`:滚动次数用完 / 单账号秒数用完 / 不再长出新内容)。
@@ -104,6 +108,7 @@ PROBLEMS = {
         'step': 2,
     },
 }
+PROBLEMS.update(X_PROBLEMS)
 
 #: 来源级问题自己那四步(**不套文章那四步**)。
 SOURCE_STEPS = ('访问来源', '读取时间线', '检查覆盖', '结束检查')
@@ -123,7 +128,7 @@ def _kind_of_note(note: str) -> str:
 
 
 def problems(kind: str) -> list[dict]:
-    """这个来源里**此刻有问题**的那几条订阅。一条订阅最多出现两次(失败 + 没读完)。
+    """Current source failures plus owner-supplied automatic-X queue facts, never inferred from prose.
 
     **停用的订阅照旧列出来,但不给重试出口**:它上一次确实失败过,把它从屏幕上
     抹掉等于让人再也看不到那笔红;而单独同步一条停用的订阅会被 `/{kind}/sync`
@@ -133,7 +138,11 @@ def problems(kind: str) -> list[dict]:
     """
     out: list[dict] = []
     settings = reg.get_settings(reg.check_kind(kind))
-    for source in reg.subscriptions(kind):
+    sources = reg.subscriptions(kind)
+    if kind == 'social':
+        from kb.feeds import x_channels, x_intake_store
+        x_intake_store.statuses(sources, x_channels.channel_of(settings))
+    for source in sources:
         # **「待配置」也得先说出来。** 这一条的出口是 `/{kind}/sync`,而那个端点
         # 在通道没配好时以 400 拒掉(`reg.configuration_error`)。不先问一遍的
         # 后果是:确认框照常承诺「冷却后重试这一个账号」,点下去却弹一句「浏览器
@@ -164,11 +173,23 @@ def problems(kind: str) -> list[dict]:
             # `warrant.source_sig` 一份。
             'sig': warrant.source_sig(source, kind, settings),
         }
-        if reason := (source['last_error'] or ''):
+        if (reason := (source['last_error'] or '')) and reason != source.get('x_intake', {}).get('block', {}).get('reason'):
             name = _kind_of_failure(reason)
             out.append({**shared, 'id': f"source:{source['id']}:{name}",
                         'problem': name, 'evidence': reason, **PROBLEMS[name]})
-        if note := (source['last_note'] or ''):
+        automatic_x = kind == 'social' and x_channels._handle(source) and not source.get('feed_url') and \
+            x_channels.channel_of(settings) in ('browser', 'attach', 'feedgrab')
+        if automatic_x:
+            for issue in source.get('x_intake', {}).get('issues', []):
+                name = issue['kind']
+                metadata = PROBLEMS.get(name) or dict(state='需检查', label=name, explanation='', advice='', step=0)
+                actionable = shared['actionable'] and issue['retryable']
+                suffix = f":{issue['phase']}" if issue.get('phase') else ''
+                out.append({**shared, 'id': f"source:{source['id']}:{name}{suffix}", 'problem': name,
+                            'evidence': issue['evidence'], **metadata, 'actionable': actionable,
+                            'step': issue.get('step', metadata['step']),
+                            'blocked': shared['blocked'] or ('' if issue['retryable'] else metadata['advice'])})
+        elif note := (source['last_note'] or ''):
             name = _kind_of_note(note)
             out.append({**shared, 'id': f"source:{source['id']}:{name}",
                         'problem': name, 'evidence': note, **PROBLEMS[name]})

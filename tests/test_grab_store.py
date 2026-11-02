@@ -126,7 +126,7 @@ class SaveTests(GrabCase):
         # 三件事分开报:导出过(hash 相等)、文件没了、于是也谈不上索引。
         self.assertEqual((seen['exported'], seen['stored'], seen['indexed'], seen['done']),
                          (True, False, False, False))
-        self.assertEqual(grab.owing(seen), 'vault 里那一篇不见了')
+        self.assertEqual(grab.owing(seen), '导出的那个笔记文件不见了')
         self.assertFalse(self.pending_export())          # 这才是那个洞
         self.assertTrue(grab.reclaim_export(seen))
         self.assertTrue(self.pending_export())           # 下一轮 export 真会选中它
@@ -191,7 +191,7 @@ class SaveTests(GrabCase):
         other = 'https://example.org/posts/short-one'
         reg.put_items(social, [{'url': other, 'title': 'A', 'body': short, 'published': ''}])
         self.assertTrue(grab.known(other)['content_ok'])
-        self.assertEqual(grab.owing(grab.known(other)), '还没写成 vault 里那一篇')
+        self.assertEqual(grab.owing(grab.known(other)), '还没导出成笔记文件')
         # ③ 反过来:手动收录按网页正文收下的那一条,短/复读就是坏内容。
         grab.save({'url': PAGE, 'title': 'Sign in', 'body': WALL, 'author': 'x',
                    'published': '', 'content_kind': 'content'})
@@ -350,7 +350,7 @@ class PipelineTests(GrabCase):
         self.assertEqual(self.pending_export(), 1)        # 欠账必须还在
         seen = grab.known(PAGE)
         self.assertFalse(seen['exported'])
-        self.assertEqual(grab.owing(seen), '还没写成 vault 里那一篇')
+        self.assertEqual(grab.owing(seen), '还没导出成笔记文件')
         self.assertFalse(seen['done'])
         # 下一轮导出(谁也不插手)把新正文落盘,欠账这才清掉。
         sync.export(grab.KIND)

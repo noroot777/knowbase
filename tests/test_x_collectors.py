@@ -271,7 +271,7 @@ class ReadToTheWatermarkTests(unittest.TestCase):
         with Quick():
             entries, incomplete = x_browser._harvest_one(page, 'Example', self.floor(24))
         self.assertEqual(x_browser.MAX_SCROLLS, page.scrolls)
-        self.assertIn('滚动次数', incomplete)
+        self.assertIn('本次 40 次滚动用完', incomplete)
         self.assertTrue(entries)                       # 抓到的照旧要入库
 
     def test_a_timeline_that_stops_growing_short_of_the_bottom_is_incomplete(self):

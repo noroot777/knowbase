@@ -311,6 +311,11 @@ class PostTests(unittest.TestCase):
 
 
 class StoredPostTests(ChannelBase):
+    def setUp(self):
+        super().setUp()
+        from tests.x_harvest_fixture import prefetched
+        self.enterContext(prefetched(x_browser.harvest))
+
     def test_session_errors_reach_failure_details_without_advancing_the_stored_watermark(self):
         source = self.sub()
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:

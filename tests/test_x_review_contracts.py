@@ -15,6 +15,7 @@ from tests.test_x_page_state import response
 from tests.test_x_post import BODY, OLD, PREVIEW
 from tests.test_x_post_backfill import backfill_entry
 from tests.test_x_post_scope import OpenTimeline
+from tests.x_harvest_fixture import prefetched
 
 
 class ReviewContractsTests(ChannelBase):
@@ -88,6 +89,7 @@ class ReviewContractsTests(ChannelBase):
         self.assertNotIn('remaining', receipt)
         self.assertEqual(original, self.row())
 
+    @prefetched(x_browser.harvest)
     def test_notices_survive_collect_without_partial_summary_or_frozen_watermarks(self):
         source = self.sub()
         self.settings(x_channels.BROWSER)

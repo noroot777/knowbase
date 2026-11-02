@@ -35,7 +35,8 @@ async page => {
     // 这里原来是「填一组桥接模板 → 保存 → 51 个账号当场从待配置变成就绪」。
     // 桥接那一档删掉之后没有等价的"一次保存让全部就绪"的设置了(三条通道各自
     // 要在机器上准备东西,不是页面上填个值)。「保存之后不刷新就生效」那条口径
-    // 改由 `tests/x_channel_probe.mjs` 钉(它连同"先保存再执行"一起验)。
+    // 改由 `tests/x_channel_probe.mjs` 钉(它连同"先保存再执行"一起验)—— 那份
+    // 探针后来按仓库主人决定删了,见 docs/decisions/test-tiers.md「已删的浏览器回归」。
 
     // No metadata changes and no manual reload between the failure and recovery.
     mode = 'fail'; hits = 0;

@@ -2,9 +2,10 @@
 import time
 
 from kb.feeds import x_account, x_page_state
+from kb.feeds.x_cdp import XBudgetExceeded
 
 
-def wait_state(page, handle: str, deadline: float, script: str) -> dict:
+def wait_state(page, handle: str, deadline: float, script: str, *, budget_limited=False) -> dict:
     last, previous = {}, None
     errors = x_page_state.ProblemConfirmation()
     confirmed = ''
@@ -30,6 +31,8 @@ def wait_state(page, handle: str, deadline: float, script: str) -> dict:
         time.sleep(0.3)
     if error := x_page_state.escalate(last, confirmed, failure, expired=True):
         raise error
+    if budget_limited:
+        raise XBudgetExceeded(f'@{handle} 的时间线切片预算用完，首屏尚未确认，留待下轮')
     if (last.get('account') or {}).get('state') == 'unknown':
         raise x_page_state.XBrowserError(
             f'@{handle} 的个人页结构无法识别,尚未确认账号状态,留待下次同步重试;未能判出原因')
@@ -43,6 +46,7 @@ class TimelineState:
         self.script = script
         self.failure = x_page_state.XBrowserError(f'@{handle} 的 X 页面请求出错,请稍后重试')
         self.incomplete = state.get('incomplete', '')
+        self.blocker = None
         self.active = True
         self.result = None
         self.watermark = ''
@@ -71,6 +75,8 @@ class TimelineState:
 
     def consume(self, state, confirmed):
         error = x_page_state.escalate(state, confirmed, self.failure, content_pending=False)
+        if isinstance(error, (x_page_state.XRateLimited, x_page_state.XAccessBlocked, x_page_state.XSessionThrottled)):
+            self.blocker = error
         if isinstance(error, (x_page_state.XRateLimited, x_page_state.XAccessBlocked)):
             if self.result is not None:
                 evidence = {key: self.result[key] for key in (

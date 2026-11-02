@@ -319,21 +319,81 @@ class SetupTests(unittest.TestCase):
         self.assertNotIn('secret_key', str(error.exception))
 
 
+@unittest.skipIf(os.name == 'nt', '建符号链接要特权;Windows 上一律拦,不分属主')
+class PrivateDirTests(unittest.TestCase):
+    """接入目录路径上只许有 root 的链接(系统布局);别人放的链接,在哪一级、藏在哪个链接目标里都拦。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.base = Path(self.tmp.name).resolve()
+        (self.base / 'real').mkdir()
+
+    def as_root(self, *links):
+        """让这几条自建链接在判据眼里属于 root;别的路径照常 lstat。"""
+        lstat = os.lstat
+        def fake(path, *args, **kwargs):
+            info = lstat(path, *args, **kwargs)
+            if Path(path) in links:
+                return SimpleNamespace(st_mode=info.st_mode, st_uid=0)
+            return info
+        return patch.object(runtime.os, 'lstat', fake)
+
+    def test_default_temp_dir_behind_system_link_is_accepted(self):
+        # macOS 的 TMPDIR 在 /var/folders 下,/var -> private/var 是系统自带的;Linux 上一般没有这一级。
+        raw = Path(self.tmp.name)
+        if raw.resolve() == raw.absolute():
+            self.skipTest('临时目录路径上没有系统链接')
+        made = runtime.private_dir(raw / 'runtime' / 'backups')
+        self.assertTrue((self.base / 'runtime' / 'backups').is_dir())
+        self.assertEqual(0o700, made.stat().st_mode & 0o777)
+
+    def test_root_owned_link_above_runtime_is_accepted(self):
+        link = self.base / 'system'; link.symlink_to('real')
+        with self.as_root(link):
+            runtime.private_dir(link / 'runtime')
+        self.assertTrue((self.base / 'real' / 'runtime').is_dir())
+
+    def test_user_owned_link_is_rejected_at_any_level(self):
+        (self.base / 'real' / 'runtime').mkdir()
+        (self.base / 'mine').symlink_to('real')
+        (self.base / 'real' / 'alias').symlink_to('runtime')
+        for path in (self.base / 'mine' / 'runtime', self.base / 'mine' / 'runtime' / 'backups',
+                     self.base / 'real' / 'alias'):
+            with self.subTest(path=path), self.assertRaisesRegex(runtime.SetupError, '符号链接'):
+                runtime.private_dir(path)
+        self.assertEqual([], list((self.base / 'real' / 'runtime').iterdir()))
+
+    def test_user_link_behind_a_root_link_is_rejected(self):
+        (self.base / 'mine').symlink_to('real')
+        link = self.base / 'system'; link.symlink_to(self.base / 'mine')
+        with self.as_root(link), self.assertRaisesRegex(runtime.SetupError, '符号链接'):
+            runtime.private_dir(link / 'runtime')
+        self.assertFalse((self.base / 'real' / 'runtime').exists())
+
+
+# 只把 os.name 打成 'nt' 不够:CREATE_NO_WINDOW 只在 Windows 的 subprocess 里有,模拟时得一起补上。
+NO_WINDOW = 0x08000000
+
+
 class RuntimeTimeoutTests(unittest.TestCase):
     def test_timeout_uses_platform_specific_process_cleanup(self):
         for system in ('nt', 'posix'):
             proc = Mock(pid=4321)
             proc.communicate.side_effect = [subprocess.TimeoutExpired('reader', .1), ('', '')]
             with self.subTest(system=system), patch.object(runtime.os, 'name', system), \
-                 patch.object(runtime.subprocess, 'Popen', return_value=proc), \
+                 patch.object(runtime.subprocess, 'CREATE_NO_WINDOW', NO_WINDOW, create=True), \
+                 patch.object(runtime.subprocess, 'Popen', return_value=proc) as popen, \
                  patch.object(runtime.subprocess, 'run') as taskkill, \
                  patch.object(runtime.os, 'killpg', create=True) as killpg:
                 with self.assertRaises(runtime.SetupError):
                     runtime.run(['reader'], timeout=.1)
             if system == 'nt':
+                self.assertEqual(NO_WINDOW, popen.call_args.kwargs['creationflags'])
                 self.assertEqual(['taskkill', '/PID', '4321', '/T', '/F'], taskkill.call_args.args[0])
                 killpg.assert_not_called()
             else:
+                self.assertEqual(0, popen.call_args.kwargs['creationflags'])
                 killpg.assert_called_once_with(4321, runtime.signal.SIGTERM)
                 taskkill.assert_not_called()
 
@@ -341,6 +401,7 @@ class RuntimeTimeoutTests(unittest.TestCase):
         proc = Mock(pid=4321)
         proc.communicate.side_effect = [subprocess.TimeoutExpired('reader', .1), ('', '')]
         with patch.object(runtime.os, 'name', 'nt'), \
+             patch.object(runtime.subprocess, 'CREATE_NO_WINDOW', NO_WINDOW, create=True), \
              patch.object(runtime.subprocess, 'Popen', return_value=proc), \
              patch.object(runtime.subprocess, 'run', side_effect=FileNotFoundError):
             with self.assertRaises(runtime.SetupError):

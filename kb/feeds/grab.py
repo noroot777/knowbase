@@ -453,11 +453,14 @@ def from_page(url: str, title: str, body: str) -> dict:
 
     **超上限一律拒,不许截了之后接着存**(口径同 `browser_capture._admit_body`
     的 `MAX_BODY`,也同 `link-grab.md` 那条「判据要落在最后真写进库的那一份上」)。
-    `_grab_web` 那边可以截(`admit(limit=)`),是因为那份正文从头到尾没人看过,
-    截多截少都只是我们自己抓到的一段;**这条路相反,人在预览里核对过才点的确认**,
-    悄悄只存前一半会让 `confirmed=True` 变成一句假证 —— 库里那条看着是人核对过的
-    完整正文,实际尾巴没了,而且**正文不可恢复**(`put_items` 的 `DO NOTHING` 挡着
-    重投)。拒掉顶多让他重选一段再读一次。
+    `_grab_web` 那边可以截(`admit(limit=)`),是因为那一段是我们自己发 HTTP 抓的,
+    截多截少都只是我们抓到的一段;**这条路相反,这一段是人指着那一页交过来的**,
+    悄悄只存前一半,库里那条就不是他指的那一页上的东西了 —— 而且**正文不可恢复**
+    (`put_items` 的 `DO NOTHING` 挡着重投)。拒掉顶多让他重选一段再读一次。
+
+    (这条约束原先的理由是「人在预览里逐段核对过」,而那道核对连同预览区一起撤了。
+    **约束本身一个字都没松**:不可恢复那一半没变,而「库里那份 == 他指的那一页」
+    是这条路唯一还在担保的东西,截一刀正是把它也拿掉。)
 
     **X 不接**:单条推文有自己的取法(`_grab_x`:`x_post_meta`、
     `content_kind='post'`、引文与媒体行),从这里进来会绕开那一整套,在库里留下
@@ -481,9 +484,12 @@ def from_page(url: str, title: str, body: str) -> dict:
     host = (urlsplit(url).hostname or '').lower().removeprefix('www.')
     return {'url': url, 'title': grab_page.title_fallback(title.strip(), body, host),
             'body': body, 'author': host, 'published': '',
+            # `confirmed=False`:扩展上那道「我已核对」撤掉之后,这份正文确实没有人
+            # 逐字看过 —— 人选的是**这一页**,正文是提取器读的。只有「手动粘贴」那条
+            # 路还记 True(断言正文属于这篇文章的是人自己)。
             'content_kind': 'content', 'body_provenance': json.dumps(
                 dict(method='browser_grab', page_url=url, page_title=title.strip(),
-                     captured_at=reg.now(), confirmed=True), ensure_ascii=False)}
+                     captured_at=reg.now(), confirmed=False), ensure_ascii=False)}
 
 
 # -------------------------------------------------------------------------- 入口

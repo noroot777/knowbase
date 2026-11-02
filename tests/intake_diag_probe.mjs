@@ -387,7 +387,7 @@ await until(`CARE.group === 'attention' && CARE.sections.some(s => s.lane.id ===
 const capRow = JSON.parse(await evalJs(`(() => {
   const s = CARE.sections.find(s => s.lane.id === 'body_exhausted');
   const row = s.items[0];
-  return JSON.stringify({ id: 'item:' + row.key, key: row.key });
+  return JSON.stringify({ id: 'item:' + row.key, key: row.key, url: row.url });
 })()`));
 const capPick = name =>
   `document.querySelector('#care-detail .care-exits button[data-exit="${name}"]')`;
@@ -421,23 +421,24 @@ const capNote = await evalJs(
   `document.querySelector('#care-detail .care-exit-note')?.textContent || ''`);
 check("按钮旁边就写着前提:文章此刻开着 + 装过配对好的扩展 + 条件不凑手用兜底那颗",
       /开着/.test(capNote) && /扩展/.test(capNote) && /手动补正文/.test(capNote), capNote);
-// 点下去那一下:**不弹确认框**(确认之后再 open 已经不是用户手势,会被弹窗拦截挡掉),
-// 直接开新标签。这里把 `window.open` 拦下来看它要去哪儿,所以没有真的开标签。
-const opened = JSON.parse(await evalJs(`(() => {
-  const real = window.open;
-  let got = null;
-  window.open = (url, target, feat) => { got = [url, target, feat]; return null; };
-  try { ${capPick("capture")}?.click(); } finally { window.open = real; }
-  return JSON.stringify(got);
-})()`));
+// 点下去那一下:**就地开出左侧采集抽屉,不跳走,也不弹确认框**。原先这里
+// `window.open('/browser-capture?item=<key>')` 去一个独立页面 —— 人正在逐条看问题,
+// 点一下就被带离现场。**连带钉住它绑的是哪一条**:抽屉里那行原网址必须等于列表上
+// 这一条的网址;只问「抽屉开没开」的话,交接时把 key 丢了照样全绿。
 check("那个 key 是真实的 feed_items.key(32 位 hex),不是展示编号",
       /^[0-9a-f]{32}$/.test(capRow.key), capRow.key);
-check("点下去进的是带这个 key 的补抓页、开在新标签、不带 opener",
-      !!opened && opened[0] === "/browser-capture?item=" + capRow.key
-        && opened[1] === "_blank" && String(opened[2]).includes("noopener"),
-      JSON.stringify(opened));
+await evalJs(`${capPick("capture")}.click()`);
+const landed = await until(
+  `!!document.getElementById('cap-drawer') && document.getElementById('cap-original-url')`
+  + `.textContent === ${JSON.stringify(capRow.url)}`);
+check("点下去就地开出采集抽屉,而且绑的是这一条",
+      landed,
+      await evalJs(`document.getElementById('cap-original-url')?.textContent || '(没开出抽屉)'`));
 check("点下去没有弹确认框(弹了就会被弹窗拦截挡住)",
       !(await evalJs(`!!document.querySelector('.confirm-mask')`)));
+// 抽屉是模态浮层(遮罩 + 给其余部分打 inert),**留着会把下面几节全挡住**。
+await evalJs(`closeCaptureDrawer()`);
+await until(`!document.getElementById('cap-drawer')`);
 // **批量栏里压根不给这一颗**:一个浏览器标签就是一篇文章,勾 20 条采不了 20 篇。
 await evalJs(`(() => {
   const s = CARE.sections.find(s => s.lane.id === 'body_exhausted');
@@ -498,6 +499,48 @@ const reopened = JSON.parse(await evalJs(`(() => {
 check("合格的那几类照旧两颗都开,旁边那行写的是前提",
       reopened.capture === false && reopened.body === false && /扩展/.test(reopened.note),
       JSON.stringify(reopened));
+
+// ── 10e. 选中那条从这一屏上消失了:右边**不许留一块白** ───────────────────
+// 这是这块面板最常见的那一刻:在「待决定」里点开一条、用「从浏览器采集」把正文补
+// 上 —— 它当场就不属于这一档了(`body_exhausted` → `ingest_queued`,连分组都换到
+// 了「待执行」)。刷新之后左边那一行消失、右边同时变成一块什么都没有的白,两件事
+// 一起发生,看着就是界面坏了。
+//
+// **先直接问 `careRenderDetail` 自己**:把选中设成一条这一屏上没有的记录,当场重画。
+// 同步、不等任何重载。不走「换分组」那条路问这一条,是因为 `careSetGroup` 会**自己**
+// 先把 `CARE.selected` 清掉(`diag.js`)—— 拿它来问「清没清」问的是另一个函数,恒绿。
+await reselect();
+const orphan = JSON.parse(await evalJs(`(() => {
+  CARE.selected = 'item:' + 'f'.repeat(32);
+  careRenderDetail();
+  return JSON.stringify({ selected: CARE.selected,
+    text: ($('care-detail').textContent || '').trim(),
+    nodes: $('care-detail').children.length });
+})()`));
+check("选中那条摆不出来时,右边摆的是「点左边任意一条」而不是一块白",
+      /点左边任意一条/.test(orphan.text) && orphan.nodes > 0, JSON.stringify(orphan));
+// **选中状态要一起放掉。** 留着的话它会一直指着一条摆不出来的记录,下一次刷新还是
+// 这一幕 —— 而且他回到那一档时那一行会凭空带着选中样式。
+check("那条摆不出来的选中状态要一起放掉", orphan.selected === "", JSON.stringify(orphan));
+
+// 再走一遍**真实那条路**:换一个分组,那一行确实不在新这一组里了。
+// 等法照 10c —— `careSetGroup` 同步改 `CARE.group`、异步才取数,只等 `group` 的话
+// 读到的是重载落地**之前**那一帧:右边还原样摆着上一条连同它那几颗出口按钮(实测
+// 如此)。那一瞬间不归这条约束管,它管的是落地之后;所以这里连「旧那一屏详情已经
+// 让出来了」一起等(`.care-exits` 没了),而「让出来之后摆的是什么」才是判据。
+await reselect();
+await evalJs(`careSetGroup('resolved')`);
+await until(`CARE.group === 'resolved' && CARE.sections.length > 0
+             && CARE.sections.every(s => s.lane.group === 'resolved')
+             && !document.querySelector('#care-detail .care-exits')`);
+const vanished = JSON.parse(await evalJs(`JSON.stringify({
+  selected: CARE.selected,
+  text: ($('care-detail').textContent || '').trim(),
+  nodes: $('care-detail').children.length })`));
+check("换一组之后那一条不在这一屏上了,右边照旧是那句话",
+      /点左边任意一条/.test(vanished.text) && vanished.nodes > 0, JSON.stringify(vanished));
+await evalJs(`careSetGroup('attention')`);
+await until(`CARE.group === 'attention' && CARE.sections.length > 0`);
 
 // ── 11. 四个宽度无横向溢出 ────────────────────────────────────────────────
 for (const [w, h] of [[320, 760], [390, 844], [768, 1024], [1440, 900]]) {

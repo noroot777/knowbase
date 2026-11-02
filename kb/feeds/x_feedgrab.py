@@ -340,15 +340,16 @@ def _incomplete(output: str, folder: Path) -> str:
     return ';'.join(notes)
 
 
-def _run(binary: str, handle: str, env: dict, cwd: Path) -> str:
+def _run(binary: str, handle: str, env: dict, cwd: Path, *, timeout=None) -> str:
     """跑一次抓取。返回它的输出(给失败时的文案用)。"""
+    effective_timeout = ACCOUNT_SECONDS if timeout is None else timeout
     try:
         proc = subprocess.run(
             [binary, f'https://x.com/{handle}'], env=env, cwd=cwd,
-            capture_output=True, text=True, timeout=ACCOUNT_SECONDS,
+            capture_output=True, text=True, timeout=effective_timeout,
             stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
-        raise FeedgrabError(f'@{handle}:feedgrab 超过 {int(ACCOUNT_SECONDS)} 秒没有返回') from None
+        raise FeedgrabError(f'@{handle}:feedgrab 超过 {effective_timeout:g} 秒没有返回') from None
     except OSError as e:
         raise FeedgrabError(f'feedgrab 执行失败:{e}') from None
     output = ((proc.stdout or '') + '\n' + (proc.stderr or '')).strip()
@@ -362,7 +363,7 @@ def _run(binary: str, handle: str, env: dict, cwd: Path) -> str:
 
 def harvest(jobs: list[tuple[str, str]], *, binary: str = '', data_dir: str,
             workdir: str, budget: float = 0.0, on_progress=None,
-            should_stop=None) -> dict[str, dict]:
+            should_stop=None, complete_articles=True, account_seconds=None) -> dict[str, dict]:
     """逐个账号跑 feedgrab,返回和浏览器通道同形状的结果。
 
     jobs:  [(handle, 水位 'YYYY-MM-DD' 或空串)]
@@ -405,7 +406,9 @@ def harvest(jobs: list[tuple[str, str]], *, binary: str = '', data_dir: str,
         since = (water or (datetime.now(timezone.utc)
                            - timedelta(days=FIRST_DAYS)).strftime('%Y-%m-%d'))[:10]
         try:
-            output = _run(exe, handle, _env(out, data_dir, since), base)
+            output = (_run(exe, handle, _env(out, data_dir, since), base) if account_seconds is None else
+                      _run(exe, handle, _env(out, data_dir, since), base,
+                           timeout=max(0.1, min(account_seconds, deadline - time.monotonic()))))
             entries = _read_output(out, handle)
             # 长文(Article)推文的产物正文就是一条指向 `x.com/i/article/<id>` 的
             # 链接,正文要单独取一次(见 `x_article`)。
@@ -413,8 +416,10 @@ def harvest(jobs: list[tuple[str, str]], *, binary: str = '', data_dir: str,
             # 发请求,两条通道各挂一次,漏哪一条就是那条通道上的长文把整轮
             # 拖垮。**不传 `session`** —— 它是子进程调用,手里没有任何 CDP
             # 会话,后路对它压根不成立。
-            entries, missing = x_article.fill(
-                entries, deadline=deadline, should_stop=should_stop)
+            missing = ''
+            if complete_articles:
+                entries, missing = x_article.fill(
+                    entries, deadline=deadline, should_stop=should_stop)
             # **没抓全就不推进水位 —— 存回这一轮真正用过的那个下界**(口径同浏览器
             # 通道那句 `started if incomplete`)。抓到的照旧入库,漏掉的那几条下
             # 一轮重叠重抓,`put_items` 按 `sha256(kind:url)` +

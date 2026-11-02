@@ -199,7 +199,7 @@ test('Windows shows platform-specific consent and a safe native onboarding promp
   const consent = element('wechat-authorization-hint').textContent;
   assert.match(consent, /只读.*最多 3 分钟/);
   assert.ok(!consent.includes('重签名副本'));
-  assert.match(consent, /不会自动提权/);
+  assert.match(consent, /不(?:会)?自动提权/);
   assert.equal(element('wechat-acquire').disabled, true);
   assert.equal(element('wechat-authorization').hidden, false);
   assert.match(element('wechat-source-hint').textContent, /Windows x64/);

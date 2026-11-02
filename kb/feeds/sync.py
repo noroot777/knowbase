@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-import os
+import os as os
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -13,7 +13,8 @@ import yaml
 from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
-from kb.feeds import digest, fulltext, translate, x_channels
+from kb.feeds import digest as digest, x_channels as x_channels
+from kb.feeds import fulltext, source_failure, translate, x_intake_commit
 # 选源判据(本文件越过 700 行硬上限时拆出去的,见那边的模块头)。
 from kb.feeds.sync_select import pick_sources
 # 交付层那道搁置闸门(`_export` 里那一句)。判据只有 `shelf` 那一份。
@@ -138,29 +139,37 @@ def _claim_write(c, source) -> bool:
 
 def _save_result(source, result, scope):
     entries, validators = result
+    validators['x_save_started'] = time.monotonic()
     if scope.ranged:
         entries = [e for e in entries if e['published'] and scope.since <= e['published'][:10] <= scope.until]
         # A ranged import must not cache away entries outside the selected dates.
         # 重建这一份也顺手丢掉 `config_patch`(登录态通道的水位):区间补抓读的
         # 是用户点名的那段日期,拿它当增量进度就是宣布中间那段已经收过。
         validators = {k: source[k] for k in ('etag', 'modified', 'resolved_url')}
-    # 存盘整段在维护锁里:存量清理和索引持同一把锁,两边交错的话它删掉的旧文
-    # 会被这一轮按旧快照原样写回去(见 `kb.maintenance`)。锁内再现读一次下界,
-    # 所以对方不持锁的旁路同样挡得住 —— 两道各管一段,缺一不可。
-    with maintenance_lock():
-        if not scope.ranged:
+    x_intake_commit.check_budget(validators)
+    with (maintenance_lock(wait=0) if validators.get('x_intake') else maintenance_lock()):
+        if not scope.ranged and not validators.get('x_intake'):
             entries = _within_history(source, entries)
         # **条目、水位、成功时间戳一个事务**。分成两个的话,`put_items` 失败那
         # 一轮水位已经推进了,而这批推文一条都没入库 —— 它们比旧水位新、又比
         # 新水位老,从此任何一轮增量都选不到(见 `x_channels.watermark_patch`)。
-        with reg.db() as c:
+        with (reg.db(timeout=0) if validators.get('x_intake') else reg.db()) as c:
             if not _claim_write(c, source):
                 # 这条订阅在本轮采集期间被改指到别的源了 —— 手里这份属于旧的那个。
                 # 一个字都不写(条目、水位、成功时间戳一样都不写):这一轮作废,
                 # 下一轮按新身份重新抓。
                 return None
+            if validators.get('x_intake') and not x_intake_commit.store.current(c, source):
+                return None
+            entries = x_intake_commit.filtered(c, source, entries, validators)
             added = reg.put_items(source, entries, conn=c)
-            reg.merge_config(source['id'], validators.get('config_patch') or {}, conn=c)
+            if not validators.get('x_failure'):
+                reg.merge_config(source['id'], validators.get('config_patch') or {}, conn=c)
+            partial = x_intake_commit.partial(c, source, entries, validators)
+            if failure := validators.get('x_failure'):
+                source_failure.write(c, source, failure, now=time.time())
+            if partial:
+                return added
             c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
                 failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=?,last_notice=? WHERE id=?''',
                 (reg.now(),reg.now(),validators['etag'],validators['modified'],
@@ -173,7 +182,7 @@ def _save_result(source, result, scope):
     return added
 
 
-FAILURE_CAP = 1200  #: 失败文案落库上限。来源侧要先把文本压到它之内再交过来(理由在那一侧)
+FAILURE_CAP = source_failure.CAP
 
 
 def _save_failure(source, error, summary) -> bool:
@@ -182,21 +191,11 @@ def _save_failure(source, error, summary) -> bool:
     被改指之后把旧账号那次失败记在新账号头上,是把一条好订阅按别人的毛病推进
     退避(最长 24 小时),面板上还显示"连接失败" —— 而新账号一次都没被访问过。
     """
-    reason = str(error)[:FAILURE_CAP] or type(error).__name__
     with reg.db() as c:
         if not _claim_write(c, source):
             return False
-        if unavailable := getattr(error, 'unavailable', None):
-            summary.setdefault('notices', []).append({
-                'title': source['name'], 'reason': error.notice,
-                'count': len(unavailable), 'items': unavailable})
-        summary['errors'].append({'title': source['name'], 'reason': reason, 'url': source['url']})
-        # 「重试失败项」靠这份身份收窄下一轮的范围(见 `note_retry_targets`)。
-        # 记 id 而不是名字:名字会被改,而改完之后这条订阅还是同一条。
-        summary['failed_ids'].append(str(source['id']))
-        c.execute('''UPDATE subscriptions SET last_attempt=?,last_error=?,failures=failures+1,
-            retry_at=? WHERE id=?''', (reg.now(),reason,
-            time.time() + min(86400, 1800 * 2 ** min(source['failures'], 6)),source['id']))
+        source_failure.write(c, source, error, now=time.time())
+    source_failure.note(summary, source, error)
     return True
 
 
@@ -224,14 +223,8 @@ def collect(kind, scope):
                'unconfigured': 0, 'skipped': 0, 'message': '', 'skip_reasons': [],
                'errors': [], 'partial': [], 'notices': [], 'repointed': 0,
                'stopped': False,
-               # 确认之后被改掉、这一轮**作废**的那几条(上面那段注释)。它不是
-               # 失败:退避一格没动、水位一个字没改,下一轮按新身份照常跑。
                'stale': len(stale_names),
-               # 这一轮失败的那几条订阅的稳定身份,留给「重试失败项」收窄范围
                'failed_ids': [],
-               # 这一轮**真取过文而且成了**的那几条。失败的、退避跳过的、缺配置
-               # 的、预算没轮到的、采集期间被改指的都不在里面 —— 它是「哪几格的
-               # 旧失败可以结清」的唯一依据(契约在 `kb.collectors.Coverage`)。
                'succeeded_ids': []}
     pending, unconfigured_why = [], ''
     for source in sources:
@@ -280,11 +273,7 @@ def collect(kind, scope):
                         summary['repointed'] += 1
                         continue
                     summary['added'] += saved
-                    # **真取过文而且成了的那一条**:只有它敢去结清这条订阅今天早些
-                    # 时候那笔失败(见 `kb.collectors.Coverage`)。记在这儿而不是
-                    # 事后按 `checked - errors` 反推 —— `checked` 把失败的也算进去
-                    # 了,而反推出来的那份名单说不出是哪几条。
-                    summary['succeeded_ids'].append(str(source['id']))
+                    x_intake_commit.saved(summary, source, result[1])
                     # **「没读完」不是失败,但也不许静默**:抓到的照旧入库、水位
                     # 留在原处(下一轮接着读),可"停在时间线半中间"和"全读完了"
                     # 在面板上不该长得一模一样。记成 error 更不对 —— 那会显示
@@ -306,12 +295,15 @@ def collect(kind, scope):
                     _note_skip(summary, str(e) or BUDGET_MESSAGE)
                     continue
                 except Exception as e:
+                    if x_intake_commit.local(source, e, summary):
+                        continue
                     if not _save_failure(source, e, summary):
                         summary['repointed'] += 1
                         continue
                 summary['checked'] += 1
                 _stage('crawl', 'running', f"{reg.KINDS[kind]} {summary['checked']}/{len(sources)} · {source['name']}")
     summary['stopped'] |= halted()
+    x_intake_commit.telemetry(kind, summary)
     with reg.db() as c:
         c.execute('INSERT INTO feed_runs(kind,started_at,finished_at,summary) VALUES(?,?,?,?)',
                   (kind,started,reg.now(),json.dumps(summary,ensure_ascii=False)))
@@ -346,7 +338,7 @@ def collect(kind, scope):
         label += f"，待配置 {summary['unconfigured']} 个（{unconfigured_why}）"
     if summary['message']:
         label += f"，跳过 {summary['skipped']} 个；{summary['message']}"
-    status = 'error' if summary['errors'] else 'skipped' if summary['unconfigured'] else 'ok'
+    status = 'error' if summary['errors'] or summary.get('local_error') else 'skipped' if summary['unconfigured'] else 'ok'
     _stage('crawl', 'stopped' if summary['stopped'] else status,
            label, failures=summary['errors'])
     return summary

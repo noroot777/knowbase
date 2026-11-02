@@ -16,6 +16,7 @@ from tests.test_x_collectors import Quick, Timeline, tweet
 from tests.test_x_page_state import EventSession, response
 from tests.test_x_post import BODY, OLD, URL, Page, preview, snapshot
 from tests.test_x_post_backfill import backfill_entry
+from tests.x_harvest_fixture import prefetched
 
 
 class OpenTimeline(Timeline):
@@ -144,6 +145,7 @@ class StoredScopeTests(ChannelBase):
             return dict(conn.execute('SELECT * FROM feed_items WHERE url=?',
                                      (f'https://x.com/Example/status/{identity}',)).fetchone())
 
+    @prefetched(x_browser.harvest)
     def test_one_command_error_withholds_one_post_but_saves_other_accounts(self):
         sources = [self.sub(), self.sub('Other')]
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
@@ -175,6 +177,7 @@ class StoredScopeTests(ChannelBase):
                 self.assertEqual(OLD, x_channels.watermark(first, channel))
                 self.assertNotEqual(OLD, x_channels.watermark(second, channel))
 
+    @prefetched(x_browser.harvest)
     def test_quote_only_skips_are_informational_and_do_not_stall_either_channel(self):
         for channel in [x_channels.BROWSER, x_channels.ATTACH]:
             with self.subTest(channel=channel), Quick():

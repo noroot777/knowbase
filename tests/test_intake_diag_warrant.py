@@ -172,7 +172,8 @@ class ChannelWarrantTests(WarrantCase):
         patched.start()
         self.addCleanup(patched.stop)
         self.source = reg.save_subscription('social', {
-            'name': 'X 账号（样例）', 'url': 'https://x.com/sample'})
+            'name': 'X 专用订阅（旧通道票据样例）', 'url': 'https://x.com/sample',
+            'feed_url': 'https://legacy.example.org/x.xml'})
         with reg.db() as c:
             # **两条通道都留过水位**:浏览器到分钟、feedgrab 只到天。
             c.execute('UPDATE subscriptions SET last_note=?,config=? WHERE id=?',

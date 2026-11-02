@@ -245,7 +245,10 @@ await evalJs(`document.querySelectorAll('.toast').forEach(e => e.remove()); true
 state = { ...state, running: true };
 await evalJs(`refreshPipe(); true`);
 await setup("最新一轮正在运行", until(`pipeSnapshot.running === true`));
-await setup("点中了上一轮那一行", clickAt(".pipe-history-row:nth-child(2)"));
+// 点**来源那一格**,不点行正中:历史是一张一列一类的表(`pipe_matrix.js`),点在哪一格上
+// 就顺手选中哪一类 —— 行正中落在「入库处理」那一列,导出那一步随即收进详情里看不见。
+await setup("点中了上一轮那一行", clickAt(
+  `#pipe-history-list .pipe-history-row:nth-child(2) [data-node="src:${CHANNEL}"]`));
 await setup("整屏换成了上一轮",
             until(`!$('pipe-viewing').hidden`));
 await evalJs(`$('pipe-stage-export').querySelector('details').open = true; true`);

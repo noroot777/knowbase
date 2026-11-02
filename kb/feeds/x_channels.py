@@ -278,7 +278,11 @@ def prefetch(sources: list[dict], settings: dict, *, since: str = '',
         with _lock:
             _harvest.clear()
         return {}
-    if channel in (BROWSER, ATTACH):
+    if not since:
+        from kb.feeds import x_intake
+        result = x_intake.harvest(picked, settings, budget=budget or 480,
+                                  on_progress=on_progress, should_stop=should_stop)
+    elif channel in (BROWSER, ATTACH):
         from kb.feeds import x_browser
         result = x_browser.harvest(
             jobs, profile=str(BROWSER_PROFILE), budget=budget,
@@ -324,7 +328,7 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
         got = _harvest.get(handle)
     if got is None:
         raise LookupError(f'{label(channel)} 这一轮没有抓到 @{handle}')
-    if got.get('error'):
+    if got.get('error') and not (got.get('x_intake') and got.get('entries')):
         raise XCollectionError(got)
     if note := got.get('skipped'):
         from kb.feeds.fetching import CollectionBudgetExceeded
@@ -333,6 +337,12 @@ def take(source: dict, settings: dict) -> tuple[list[dict], dict]:
     # 写回空串会把这条订阅之前走 HTTP 时攒下的缓存信息抹掉,等它哪天又填了
     # 专用订阅链接、走回 HTTP 时就要白拉一次全量。
     meta = {k: source.get(k, '') for k in ('etag', 'modified', 'resolved_url')}
+    if got.get('x_intake'):
+        meta.update(x_intake=True, x_pending=got.get('pending', False),
+                    x_local_error=got.get('local_error', ''), x_deadline=got.get('deadline'),
+                    x_run_started=got.get('run_started'), x_run_monotonic=got.get('run_monotonic'))
+        if got.get('error'):
+            meta['x_failure'] = str(XCollectionError(got))
     # 水位作为"要并进 config 的补丁"交回去,由存盘那一步和条目同一个事务提交
     # (见 `watermark_patch`)。这里是工作线程,当场写盘就和条目脱钩了。
     if patch := watermark_patch(channel, got.get('watermark', '')):

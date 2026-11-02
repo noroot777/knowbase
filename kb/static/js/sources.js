@@ -15,7 +15,6 @@ let sourceItemsVersion = 0, sourceItemsFailed = false, sourceTranslating = 0, so
 // 它**不跟搜索词走**(见后端注释):这行提示底下那颗按钮的射程得可预测。
 let sourceBusy = false;
 let sourceNoticesAutoOpened = false;
-let wechatNoticesAutoOpened = false;
 let sourceNoticeGesture = null;
 const sourceFilters = new Map();
 const sourceViewState = new Map();
@@ -103,98 +102,8 @@ $('subs-switch').addEventListener('keydown', event => {
   openSubsPanel(subsCatalog[next].id);
 });
 
-function closeWechatNotices(restoreFocus = false) {
-  const notices = $('subs-wechat-notices');
-  const focused = restoreFocus && notices.contains(document.activeElement);
-  notices.open = false;
-  notices.classList.remove('is-auto-open');
-  wechatNoticesAutoOpened = false;
-  if (focused) notices.querySelector('summary').focus({ preventScroll:true });
-}
-function updateWechatNotices(detailChanged = false) {
-  const detail = !$('src-detail').hidden, running = !$('subs-wechat-progress').hidden;
-  const notices = $('subs-wechat-notices'), summary = $('subs-wechat-notices-summary');
-  notices.hidden = !detail && !running;
-  if (notices.hidden || (!detail && wechatNoticesAutoOpened)) closeWechatNotices();
-  notices.classList.toggle('has-error', detail && $('src-detail').classList.contains('error'));
-  summary.textContent = detail ? $('src-detail').textContent : $('subs-wechat-progress-text').textContent;
-  summary.title = summary.textContent;
-  if (detail && detailChanged) {
-    if (!notices.open) wechatNoticesAutoOpened = true;
-    notices.open = true;
-  }
-  notices.classList.toggle('is-auto-open', wechatNoticesAutoOpened && notices.open);
-}
-
-// ── 公众号视图:连接卡 + 订阅列表 + 同步全部 ────────────────────────────────
-let subsWechatBusy = false;
-// 这个视图管的通道由**来源目录**决定(模块声明的 channels,退役名过别名表),
-// 不信 `kb-sync-channel` 里那份全局选择 —— 旧版同步中心用它记「上次看哪个来源的
-// 连接状态」,存量值可能是 rss/social(都是合法通道,别名迁移不会动它们)。
-// 沿用的话公众号视图的连接卡、订阅列表、「同步全部」全跟着串到别的来源上。
-function wechatSubsChannel() {
-  const spec = subsCatalog.find(m => m.id === subsKind && m.manager !== 'feeds');
-  return adoptChannels(spec?.channels || []).find(id => pipeChannels.some(c => c.id === id)) || '';
-}
-async function openWechatSubs() {
-  renderWechatSubsStatus();
-  // 失败要留重试入口:初始化失败后通道还没绑上,这时唯一能把视图带回正轨的
-  // 就是重新跑一遍本函数(连接卡那颗「检查连接」按的也是它)。
-  const retry = '<button class="text-button" onclick="openWechatSubs()">重新读取</button>';
-  try { await loadPipeChannels(); } catch (e) {
-    refreshPipeSource();   // 连接卡如实落「连接未确认」,不许停在「检查中…」
-    $('tgt-list').innerHTML = `<div class="empty">${esc(e.message)}。${retry}</div>`;
-    return;
-  }
-  const channel = wechatSubsChannel();
-  if (!channel) {
-    refreshPipeSource();
-    $('tgt-list').innerHTML = `<div class="empty">这个来源的采集通道暂不可用，请确认采集器配置后重试。${retry}</div>`;
-    return;
-  }
-  // 绑到全局选择上:channelUrl(连接卡、订阅列表的请求)和运行态判断都读它
-  setPipeChannel(channel);
-  renderWechatSubsStatus();
-  refreshPipeSource();
-  loadTargets();
-}
-// 同步状态由 renderPipeButtons 顺手驱动(pipe.js 的轮询回路),这里只管画。
-function renderWechatSubsStatus() {
-  const section = $('subs-wechat');
-  if (!section || section.hidden) return;
-  const running = !!pipeSnapshot?.running;
-  const mine = wechatSubsChannel();
-  // 整份快照递进去，不是只递 crawl_filter：一轮只跑 index/extract 的运行里，
-  // filter 上那个来源名是 `start_pipeline` 自动盖的，照着念会把公众号说成正在同步。
-  const ours = running && !!mine && pipeRunScopes(pipeSnapshot).some(s => s.channel === mine);
-  $('subs-wechat-sync').disabled = subsWechatBusy || running || !!pipeAction;
-  $('subs-wechat-sync').textContent = ours ? '同步中…' : '同步全部';
-  $('subs-wechat-progress').hidden = !running;
-  // 全库那一轮(索引/提取)不归任何来源,但它做的正是这些内容 —— 不能跟
-  // 「别的来源在抓取」共用一句话。判据和文案都在 pipe_channels.js。
-  $('subs-wechat-progress-text').textContent = ours
-    ? pipeRunNote(pipeSnapshot, '正在同步公众号')
-    : pipeLibraryOnly(pipeSnapshot)
-    ? pipeRunNote(pipeSnapshot) + '，新任务会顺延。'
-    : '其他来源正在同步，新任务会顺延。';
-  updateWechatNotices();
-}
-// 公众号那一页的「同步全部」:**也走起跑弹窗**,锁定在本机绿泡泡那条通道上。
-// 改之前它直接起跑而**不带步骤清单**,被后端兜底成六段全跑 —— 顺手跑掉几十分钟的
-// 全库整理和 Wiki,页面上一个字都不说(`docs/decisions/sync-entry.md`)。
-async function syncWechatSubs() {
-  if (subsWechatBusy || pipeSnapshot?.running) return;
-  subsWechatBusy = true; renderWechatSubsStatus();
-  try {
-    await loadPipeChannels();
-    // 提交的通道同样按来源目录现解析,不拿全局选择当然值
-    const channel = wechatSubsChannel();
-    if (!channel) throw new Error('这个来源的采集通道暂不可用，请确认采集器配置后重试');
-    setPipeChannel(channel);
-    await openPipeModal({ channel, accounts: [], stages: PIPE_INTAKE_STAGES });
-  } catch (e) { toast('未能打开同步', { detail: e.message }); }
-  finally { subsWechatBusy = false; renderWechatSubsStatus(); }
-}
+//: 公众号那一个视图(连接卡 + 订阅列表 + 「同步全部」+ 它那块提示条)住在
+//: `subs_wechat.js` —— 它是这一页上唯一不走 feeds 那套接口的视图。
 
 async function openSourceModule(kind) {
   rememberSourceView();
@@ -352,6 +261,7 @@ async function loadSourceModule(reset = false, selectedId = null) {
     if (reset) fillSourceSettings(data.settings);
     const run = data.last_run;
     $('source-last-run').textContent = run ? `上次检查 ${sourceTime(run.finished_at)} · 新增 ${run.summary.added} 条${run.summary.errors.length ? ' · ' + run.summary.errors.length + ' 个来源失败' : ''}${run.summary.message ? ' · ' + run.summary.message : ''}` : '尚未同步。';
+    $('source-last-run').textContent += xIntakeTiming(run?.summary?.x_intake?.started === data.x_intake?.started ? data.x_intake : null);
     // 显式把已加载条数传过去。**这一处今天是冗余带,如实记着**:
     // `renderSourceView` 不给 `visibleCount` 时自己会回落到 `sourceOffset`,而
     // 它和 `sourceRows.length` 在这条路上恒等(两者一起累加)—— 定点注入去掉这
@@ -523,7 +433,8 @@ function renderSubscription(s) {
     <a class="source-url" href="${esc(safeUrl(s.url))}" title="${esc(s.url)}" target="_blank" rel="noopener noreferrer">${esc(s.url)}</a>
     <div class="source-row-meta">${esc(s.group_name || '未分组')} · ${s.item_count} 条 · ${s.last_success ? '最近成功 '+sourceTime(s.last_success) : '尚未成功同步'}${s.fulltext && sourceModules.get(s.kind)?.body_from_link ? ' · 补抓原文正文' : ''}${s.extract ? ' · 提取知识标签' : ''}</div>
     ${s.configuration_error ? `<p class="source-row-meta">${esc(s.configuration_error)}</p>` : ''}
-    ${(!s.last_error || s.kind === 'youtube') && s.last_note ? `<p class="source-row-meta">${esc(s.last_note)}；${s.kind === 'youtube' ? '下次按原时间窗口重查并跳过已发现条目。' : '下次同步从上次的位置接着读。'}</p>` : ''}
+    ${xIntakeStatus(s)}
+    ${(!s.last_error || s.kind === 'youtube' || s.x_intake) && s.last_note ? `<p class="source-row-meta">${esc(s.last_note)}；${s.kind === 'youtube' ? '下次按原时间窗口重查并跳过已发现条目。' : s.x_intake ? '五天内尽力重扫，不保证补齐；正文待办独立重试。' : '下次同步从上次的位置接着读。'}</p>` : ''}
     ${(!s.last_error || s.kind === 'youtube') && s.last_notice ? `<p class="source-row-meta source-skip-notice">${esc(s.last_notice)}</p>` : ''}
     ${s.last_error ? `<details class="source-failure"><summary>查看失败原因与重试时间</summary><p>${esc(s.last_error)}</p><p>${sourceTime(s.retry_at*1000)} 之后的同步才会再试它；也可点击“同步”立即重试。</p></details>` : ''}</div>
     <div class="source-row-actions"><button class="text-button" data-source-action="edit" data-source-id="${s.id}">编辑</button><button class="text-button" data-source-action="toggle" data-source-id="${s.id}">${s.enabled ? '停用' : '启用'}</button><button class="text-button" data-source-action="sync" data-source-id="${s.id}" ${!s.enabled?'disabled':''}>同步</button><button class="text-button source-delete" data-source-action="delete" data-source-id="${s.id}">删除</button></div></article>`;
@@ -625,6 +536,16 @@ $('source-list').addEventListener('click', e => {
   if (e.target.closest('[data-retry-translate]')) retryTranslate();
   const read = e.target.closest('[data-read-item]');
   if (read) readSourceItem(read.dataset.readItem);
+  const capture = e.target.closest('[data-capture-item]');
+  // 抽屉关掉之后把这一屏文章重读一遍:采集发生在扩展弹窗里,这块面板收不到回包。
+  // 不重读的话,刚补完正文的那张卡片还挂着「正文缺失」,上面还摆着「从浏览器采集」。
+  // 口径同「问题与待办」那一侧(`diag_actions.careAfterCapture`)。
+  if (capture) {
+    openCaptureDrawer(capture.dataset.captureItem, {
+      onClose: renderSourceView,
+      onSettled: note => toast(note, { type: 'ok' }),
+    });
+  }
   const entry = e.target.closest('[data-source-key]');
   // **拖选不是点击。** 卡片整块可点(点开右侧阅读器),而卡片里那一截正文现在能
   // 选来收藏(`kb/static/js/snip_cards.js`)—— 一次拖选松手时浏览器照样派一个

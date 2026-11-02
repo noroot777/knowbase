@@ -56,7 +56,7 @@ from urllib.error import URLError
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
-from kb.feeds.x_cdp import CdpError, CdpTransportError, Session
+from kb.feeds.x_cdp import CdpError, CdpResponseTimeout, CdpTransportError, Session
 from kb.feeds.ws_client import WebSocket, WsError, WsTimeoutError
 
 #: 用户自己去开那个开关的办法。三处文案(面板就绪说明、检查连接、登录端点的
@@ -352,6 +352,6 @@ class Attached(Session):
         try:
             return json.loads(self._ws.recv(deadline))
         except WsTimeoutError as e:
-            raise CdpError(str(e)) from None
+            raise CdpResponseTimeout(str(e)) from None
         except WsError as e:
             raise CdpTransportError(str(e)) from None

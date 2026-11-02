@@ -12,6 +12,11 @@ from tests.test_x_post import OLD, URL, Page, preview
 
 
 class UnavailableNoteTests(ChannelBase):
+    def setUp(self):
+        super().setUp()
+        from tests.x_harvest_fixture import prefetched
+        self.enterContext(prefetched(x_browser.harvest))
+
     def collect(self, channel, outcomes, entries=None):
         source = reg.subscriptions('social')[0] if reg.subscriptions('social') else self.sub()
         self.settings(channel)

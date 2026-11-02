@@ -5,7 +5,7 @@ import re
 import time
 
 from kb.feeds import x_article, x_body, x_cooldown, x_page_state, x_post_meta
-from kb.feeds.x_cdp import CdpError, CdpTransportError
+from kb.feeds.x_cdp import CdpError, CdpTransportError, XBudgetExceeded
 from kb.feeds.x_errors import PostUnavailable
 from kb.feeds.x_page_state import STATE_JS, ProblemConfirmation, navigate, read
 from kb.feeds.x_page_state import XRateLimited as XRateLimited
@@ -227,6 +227,8 @@ def fetch(url: str, session, *, deadline=None, should_stop=None, evidence=None) 
             if unknown_since is not None and time.monotonic() - unknown_since >= STRUCTURE_SECONDS:
                 raise PostStructureUnknown('详情页正文结构尚未确认,未把选择器缺失当作无自写文字')
             time.sleep(min(STEP, max(0.0, until - time.monotonic())))
+    except XBudgetExceeded:
+        raise
     except (CdpTransportError, OSError, EOFError) as exc:
         raise PostSessionUnavailable(f'浏览器会话中断:{exc}') from exc
     except CdpError as exc:
@@ -262,7 +264,7 @@ def merge(entry: dict, text: str) -> dict:
                              author_text=x_post_meta.AuthorText(text, 'detail'))
 
 
-def fill(entries: list[dict], *, session, deadline=None, should_stop=None, unavailable=None):
+def fill(entries: list[dict], *, session, deadline=None, should_stop=None, unavailable=None, on_block=None):
     kept, missed, request_failed = [], 0, 0
     deferred, halt = 0, ''
     for entry in entries:
@@ -288,6 +290,8 @@ def fill(entries: list[dict], *, session, deadline=None, should_stop=None, unava
         except PostSessionUnavailable:
             raise
         except x_page_state.XSessionThrottled as exc:
+            if on_block:
+                on_block(exc)
             # 应用启动请求被限流。**已经抓到的时间线条目要留住** —— 让它穿到
             # `harvest` 的 `except XBrowserError` 去,这个账号整轮的收获会连同
             # 那一句话一起被丢掉,而这一档实测几分钟就自己恢复。并进"暂缓补全"
@@ -333,9 +337,9 @@ def unavailable_report(unavailable: list[dict]) -> dict:
                 note=unavailable_note(unavailable))
 
 
-def complete(entries: list[dict], *, session, deadline=None, should_stop=None, unavailable=None):
+def complete(entries: list[dict], *, session, deadline=None, should_stop=None, unavailable=None, on_block=None):
     entries, post_note = fill(entries, session=session, deadline=deadline,
-                              should_stop=should_stop, unavailable=unavailable)
+                              should_stop=should_stop, unavailable=unavailable, on_block=on_block)
     entries, article_note = x_article.fill(
         entries, session=session, deadline=deadline, should_stop=should_stop)
     unresolved = sum(HINT in entry for entry in entries)

@@ -1,0 +1,43 @@
+/** 扩展弹窗那几条探针共用的假 DOM(`browser_capture_gate.mjs`,以及经 `popup_host.mjs`
+ *  进来的 `grab_from_page_gate.mjs`、`popup_close_tab_gate.mjs`)。
+ *
+ *  **共用是因为被咬过。** 两处原先各写一份:「指着别的地址」那一块改成按服务端交回
+ *  几条就摆几条之后,`setBusy` 要从那张列表上现读那些按钮,给一处的桩补上
+ *  `querySelectorAll` —— 另一处当场 `TypeError`,而那条探针根本不碰这一块。
+ *
+ *  **它真的记住 children**:那些行是现画出来的、逐行自带一颗按钮,只认得 id 的桩问
+ *  不出「点第二行那颗,交的是第二条的 key 吗」。
+ */
+export function node(tag = '') {
+  return {
+    tag, value: '', textContent: '', className: '', type: '', dataset: {},
+    checked: false, disabled: false, hidden: false, open: false, children: [],
+    focused: false,
+    classList: {toggle() {}, add() {}, remove() {}},
+    //: 「关掉这一页」一露面就要接焦点(那一下是采完之后最该点的)。记下来而不是空
+    //: 函数,是为了让探针钉得住「露面的同时真的接了焦点」,而不只是「调它不报错」。
+    //:
+    //: **而且照真实 DOM 的规矩拒绝:disabled 或 hidden 的元素收不了焦点。** 不管这
+    //: 两样的话,这个桩会把一次**静默落空**的调用记成成功 —— 实测过的形态就是这个:
+    //: 三条成功路径都是 `setBusy(true)` → 写进去 → 放出按钮并 `focus()` → 最后才
+    //: `setBusy(false)`,真实 Chromium 在那一刻不给焦点(`document.activeElement` 还是
+    //: body、回车没有反应),而假 DOM 这边一路全绿。
+    focus() { if (!this.disabled && !this.hidden) this.focused = true; },
+    append(...kids) { this.children.push(...kids); },
+    replaceChildren(...kids) { this.children = kids; },
+    querySelectorAll(selector) {
+      return this.children.flatMap(kid =>
+        (kid.tag === selector ? [kid] : []).concat(kid.querySelectorAll(selector)));
+    },
+    addEventListener(name, callback) { this[name] = callback; }
+  };
+}
+
+export function popupDom() {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, node());
+    return elements.get(id);
+  };
+  return {element, document: {getElementById: element, createElement: node}};
+}

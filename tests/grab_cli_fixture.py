@@ -48,7 +48,7 @@ def _state(**over) -> dict:
     """`/api/grab/state` 的一份回包。默认:收下了、内容是正文、还没走完后半条链。"""
     base = {'ok': True, 'url': URL, 'known': True, 'done': False, 'content_ok': True,
             'kind': 'inbox', 'title': '把链接存进知识库', 'exported': False,
-            'stored': False, 'indexed': False, 'owing': '还没写成 vault 里那一篇',
+            'stored': False, 'indexed': False, 'owing': '还没导出成笔记文件',
             'resume': '，稍后在「手动收录」里点一次「写入知识库」'}
     return {**base, **over}
 

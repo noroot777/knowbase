@@ -198,7 +198,7 @@ function focusOverlay(el) {
 }
 
 function syncOverlays() {
-  const dialogs = [...document.querySelectorAll('.modal-mask,#tool-drawer,#reader')];
+  const dialogs = [...document.querySelectorAll('.modal-mask,#tool-drawer,#reader,#cap-drawer')];
   const visible = dialogs.filter(el => el.style.display !== 'none' && el.isConnected);
   if (document.body.classList.contains('nav-open') && compactNavigation.matches) visible.push($('sidebar'));
   visible.sort((a, b) => Number(getComputedStyle(a).zIndex) - Number(getComputedStyle(b).zIndex));

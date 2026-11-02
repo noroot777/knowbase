@@ -635,8 +635,8 @@ C 另外还有两处说不通:它**管不到公众号**(`feed_types()` 只收 `m
   「仅列前 N 条」、落盘降级在面板上有一句(各带一条反向钉边)。
 - `tests/subs_editor_view_checks.mjs` —— 订阅设置面板:没有 X 取法的来源不显示
   一张空表单。原来那几条拿「同步间隔」当草稿字段验"开编辑窗口不覆盖未保存草稿",
-  控件没了就没有判据了;同一条不变量在 social 那一类仍成立,由 `x_channel_probe`
-  那一组钉。
+  控件没了就没有判据了;同一条不变量在 social 那一类仍成立,原由 `x_channel_probe`
+  那一组钉(这个页面探针已按仓库主人决定删除,见 `docs/decisions/test-tiers.md`「已删的浏览器回归」)。
 - `tests/test_subs_layout.py` 的沙箱服务走
   `tests.headless.fixture_server`:**那份临时库由起它的这一侧拥有**(服务进程被
   SIGTERM 收掉时它自己的清理一行都不跑)。同类的 profile 目录归 `launchShell`,
