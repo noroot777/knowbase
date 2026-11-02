@@ -398,9 +398,16 @@ class ContentionIsItsOwnErrorTest(unittest.TestCase):
         真的环境故障(句柄坏了、文件系统没有锁)被报成「另一个任务正在执行」——
         人去等一个压根不存在的任务。坏句柄两个平台都抛 OSError(POSIX 是 EBADF,
         Windows 上 `msvcrt.get_osfhandle` 自己就抛),而两边都不该是 BlockingIOError。
+
+        **坏句柄要用一个刚关掉的 fd,不能用 -1。** CPython 把 fd 转成整数那一步
+        (`PyObject_AsFileDescriptor`)就拒负数、抛 `ValueError`,`fcntl.flock(-1)`
+        压根到不了系统调用;只有 Windows 的 `get_osfhandle(-1)` 恰好抛 OSError。
+        刚关掉的 fd 是合法的非负整数,两个平台都真的走到内核那一步再报 EBADF。
         """
+        fd = os.open(self.lockfile, os.O_RDWR)
+        os.close(fd)
         with self.assertRaises(OSError) as caught:
-            filelock.flock(-1, filelock.LOCK_EX | filelock.LOCK_NB)
+            filelock.flock(fd, filelock.LOCK_EX | filelock.LOCK_NB)
         self.assertNotIsInstance(
             caught.exception, BlockingIOError,
             '坏句柄被报成了「有人占着」—— 调用方会让人去等一个不存在的任务')
