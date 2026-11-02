@@ -7,7 +7,6 @@
 子进程入口;判定逻辑一行不打桩。
 """
 import json
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -28,12 +27,7 @@ from kb import maintenance, pipeline_state
 from kb.collectors import FetchScope
 from kb.feeds import fetching, registry as reg, sync, x_browser, x_channels, x_feedgrab
 from kb.web import intake_api
-from tests.headless import probe_env, requires_headless, run_probe
 from tests.x_harvest_fixture import prefetched
-
-# 页面那一侧:probe 自带 mock 后端,CDP 直连 chrome-headless-shell
-# (不装 playwright、不连网、始终无头、临时 profile)。见 tests/headless.py。
-_PROBE = Path(__file__).resolve().parent / 'x_channel_probe.mjs'
 
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 # 样本时间跟着今天走:新订阅只收最近 `reg.HISTORY_DAYS` 天(见 sync._within_history),
@@ -597,17 +591,6 @@ class CollectIntegrationTests(ChannelBase):
         self.assertEqual(1, summary['unconfigured'])
         self.assertIn('登录', stages[-1][2])
         self.assertNotIn('桥接', stages[-1][2])
-
-
-@requires_headless
-class BrowserTests(unittest.TestCase):
-    """面板上那一块:三条通道各要填什么互斥显示、改了选择不冒充当前事实、
-    保存真把三个字段发出去、两个按钮各打各的端点、待配置横幅按当前通道说话。"""
-
-    def test_the_channel_picker_works_on_a_real_page(self):
-        r = run_probe([shutil.which('node'), str(_PROBE)],
-                       timeout=300, env=probe_env())
-        self.assertEqual(0, r.returncode, r.stdout + r.stderr)
 
 
 if __name__ == '__main__':

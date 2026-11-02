@@ -86,7 +86,7 @@ YouTube 的订阅、预算、字幕校验和模型设置见 `docs/decisions/yout
 
 上一轮修复后运行全量 `unittest discover -s tests -p 'test_*.py'`，275 项全部通过。
 
-浏览器修复脚本为 `tests/sources_review_probe.js`（桥接那一档删掉后少了一项，「保存设置不刷新即生效」改由 `tests/x_channel_probe.mjs` 钉）、无未捕获页面异常：注入一次 `/items` 503，保持概览不变，验证 15 秒轮询自动恢复和按钮重试；延迟旧请求验证切模块、视图、关键词后不串数据；验证默认待配置，以及纯文本与 Markdown 渲染的 XSS 防护；最后通过界面添加订阅、执行真实管道并验证 RSS 全文检索。使用隔离服务 `tests/serve_sources.py`，截图保存在 `output/playwright/review-*.png`，全量测试日志在 `output/playwright/review-unittest.log`，浏览器结果在 `output/playwright/review-browser.log`（均为本地忽略产物）。
+浏览器修复脚本为 `tests/sources_review_probe.js`（桥接那一档删掉后少了一项，「保存设置不刷新即生效」改由 `tests/x_channel_probe.mjs` 钉，该探针后已删除，见 `docs/decisions/test-tiers.md`「已删的浏览器回归」）、无未捕获页面异常：注入一次 `/items` 503，保持概览不变，验证 15 秒轮询自动恢复和按钮重试；延迟旧请求验证切模块、视图、关键词后不串数据；验证默认待配置，以及纯文本与 Markdown 渲染的 XSS 防护；最后通过界面添加订阅、执行真实管道并验证 RSS 全文检索。使用隔离服务 `tests/serve_sources.py`，截图保存在 `output/playwright/review-*.png`，全量测试日志在 `output/playwright/review-unittest.log`，浏览器结果在 `output/playwright/review-browser.log`（均为本地忽略产物）。
 
 2026-09-28 针对 `ZD5P011_F36S/round-1` 的修复曾验证：34 项 feed 回归、20 项绿泡泡通道回归、11 项管道停止回归共 65 项通过；当时允许已启动尾批跨越总预算，并修正了零错误仍标红的问题。
 

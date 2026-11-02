@@ -563,21 +563,6 @@ class LiveBrowserTests(unittest.TestCase):
             self.assertEqual(before, left, f'初始化失败留下了标签页:{left}')
             self.assertIsNone(proc.poll(), '退出之后用户的浏览器被关掉了')
 
-    def test_probe_goes_through_the_same_path(self):
-        """`x_browser.probe(attach=True)` 和抓取走同一条路。这里连的是一个
-        没有 X 登录态的空浏览器,所以结论必然是"不就绪" —— 要验的是它**真连上
-        了**并给出成品文案,而不是在前置检查上就返回。
-        """
-        with _live_browser() as (_proc, browser, _tab):
-            found = A.discover(browsers=[browser], env={})
-            self.assertIsNotNone(found)
-            with mock.patch.object(A, 'discover', return_value=found):
-                ready, detail = x_browser.probe('', '', attach=True)
-        self.assertFalse(ready)
-        self.assertTrue(detail)
-        # 没连上的话报的是「没有发现开着远程调试的浏览器」那句前置检查。
-        self.assertNotIn('没有发现开着远程调试的浏览器', detail)
-
 
 def _pages(page) -> list[str]:
     """当前的 page 型 target 列表(按 url)。只在测试里用 —— 产品代码不列用户的标签页。"""

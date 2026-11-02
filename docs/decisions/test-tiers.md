@@ -98,6 +98,20 @@
   只按单条用例记恰好看不见最贵的那一截);接力记账,各文件合起来就是整轮。代价是
   上一个文件的类级收尾落在下一个文件头上,通常不到一秒。
 
+## 已删的浏览器回归
+
+浏览器那一路是验收墙钟的瓶颈。下面这几份是当初各自任务里写的真页面探针,仓库主人
+判定它们没有继续存在的必要,2026-11-02 删掉(验收少跑约 230 秒)。**删的只是页面那
+一侧**;同一块的纯逻辑回归一条没动。各决策文档里还指着它们的那几处都标了一句。
+
+| 删掉的 | 原来在页面上验什么 | 留下的 |
+|---|---|---|
+| `test_chat_height` + `chat_height_probe.mjs` | 问答面板二十几档视口 × 首次配置横幅在/不在,输入区都在首屏内 | 无 |
+| `test_stage_presets_probe` + `stage_*_probe.mjs`、`serve_stage_presets.py`、`stage_race_gates.py` | 模型组切换/改名/保存恢复,旧读取与迟到的保存不覆盖新面板(含 3 条「拿掉保护后探针必红」) | 无 |
+| `test_daily_material_browser` + 六份 `daily_material_*`/`snip_scroll` 探针 | 日报素材清单的快照计数、198 条素材、长收藏回跳的几何、旧锚点兼容、歧义素材 | `test_daily_material*.py` 的纯逻辑那几份;`serve_daily_materials.py` 仍被别的探针用 |
+| `test_x_channels.BrowserTests` + `x_channel_{probe,kit,mock,race}.mjs` | X 取法面板:三条通道互斥显示、保存发三个字段、两颗按钮各打各的端点、异步回包归属 | `test_x_channels.py` 其余 45 条(`ChannelBase` 被四十来份测试共用) |
+| `test_cdp_attach` 里 `test_probe_goes_through_the_same_path` | `x_browser.probe(attach=True)` 真连上并给出成品文案 —— 它真去开 x.com,等满 `ACCOUNT_SECONDS` 才判「没登录」,一条 53 秒,还依赖外网 | 同类另两条真浏览器用例(退出后浏览器还活着、用户标签页没动、初始化失败不留标签页,合计一两秒)和其余纯逻辑用例 |
+
 ## 三层的分工
 
 | 层 | 跑什么 | 什么时候跑 |

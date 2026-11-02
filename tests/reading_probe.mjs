@@ -11,7 +11,7 @@
 // 标题、列表、外链、行内代码、围栏代码、表格一个都不许退化成纯文字。
 //
 // CDP 直连 playwright 缓存里的 chrome-headless-shell(不装 playwright、不连网、
-// 始终无头、临时 profile),口径同 tests/chat_height_probe.mjs。
+// 始终无头、临时 profile),口径在 tests/headless.py 与 tests/probe_shell.mjs。
 //
 //   HEADLESS_SHELL=<bin> node tests/reading_probe.mjs <baseURL> <manifest.json>
 import { readFileSync, writeSync } from "node:fs";
@@ -210,7 +210,7 @@ ws.close();
 proc.kill();
 const bad = results.filter(r => !r.ok);
 // 收尾一律 writeSync、不许 process.exit:node 对管道上的 stdout/stderr 是异步写的,
-// exit() 会把还没刷出去的那部分直接丢掉(原委见 tests/chat_height_probe.mjs)。
+// exit() 会把还没刷出去的那部分直接丢掉(原委见 docs/decisions/frontend-feedback.md 讲 64 KB 管道那段)。
 for (const r of results)
   writeSync(2, `${r.ok ? "  ok" : "FAIL"}  ${r.name}${r.detail ? " — " + r.detail : ""}\n`);
 writeSync(2, `${results.length - bad.length} ok, ${bad.length} failed\n`);

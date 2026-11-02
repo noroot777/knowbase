@@ -1678,7 +1678,7 @@
   审查那份证据 `0 != 127 : /bin/sh: feedgrab: command not found`)、数据目录带空格时
   比的是假 CLI **真正收到**的那个值、没填时回落 PATH 再回落裸命令、填错的路径原样
   显示、`readiness` 那条横幅走的是另一条路所以单独再钉一遍;
-  `tests/x_channel_probe.mjs`(真页面 + 无头 Chrome;**入口是它**,浏览器外壳和判据
+  `tests/x_channel_probe.mjs`(这个页面探针已按仓库主人决定删除,见 `docs/decisions/test-tiers.md`「已删的浏览器回归」)(真页面 + 无头 Chrome;**入口是它**,浏览器外壳和判据
   工具在 `x_channel_kit.mjs`、异步归属那一族的时序在 `x_channel_race.mjs`,三份都受
   单文件 700 行上限管:三块互斥显示、改了选择
   不冒充当前事实、保存真把三个字段发出去、**两个按钮各打各的端点而且是 POST、
