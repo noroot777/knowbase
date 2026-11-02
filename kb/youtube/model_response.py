@@ -1,7 +1,7 @@
 from kb import llm, llm_openai
 
 
-def complete(client, provider, model, prompt, max_tokens=6000):
+def complete(client, provider, model, prompt, max_tokens=16000):
     if provider == 'anthropic':
         ended = False
         with client.messages.stream(model=model, max_tokens=max_tokens,

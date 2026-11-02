@@ -103,6 +103,42 @@ class YouTubeSourceStatus(YouTubeFixture):
         self.assertEqual(('', ''), (stored['last_note'], stored['last_notice']))
         self.assertTrue(stored['last_success'])
 
+    def test_partial_with_real_entries_clears_old_connection_failure_but_not_current_content_errors(self):
+        previous = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+        old_entry = self.entry(990, hours=24 * 40)
+        for position, (content_error, auth_error) in enumerate(((False, False), (True, False), (False, True))):
+            source = self.sources[position]
+            with reg.db() as connection:
+                connection.execute("UPDATE subscriptions SET last_success=?,last_error='上轮连接失败',"
+                                   'failures=3,retry_at=1 WHERE id=?', (previous, source['id']))
+            if content_error:
+                entry = self.entry(980)
+                storage.discover(source, [entry])
+                storage.update(entry['video_id'], state='failed', last_error='仍未修复的视频处理错误')
+
+            def fetch(selected, settings, timeout, estimates, evidence):
+                if selected['id'] == source['id']:
+                    if auth_error:
+                        diagnosis.record('WARNING: failed to decrypt cookies')
+                    evidence.append('只列到 9 条就中断了：等待下轮续扫')
+                    return [old_entry]
+                return []
+
+            with self.subTest(content_error=content_error, auth_error=auth_error), patch.object(
+                    media, 'probe', return_value={'duration': 600}):
+                result = self.collect(fetch)
+                stored = reg.subscription('youtube', source['id'])
+                self.assertEqual(previous, stored['last_success'])
+                self.assertIn('9 条', stored['last_note'])
+                self.assertNotIn(str(source['id']), result['succeeded_ids'])
+                self.assertEqual(('上轮连接失败', 3, 1) if content_error or auth_error else ('', 0, 0),
+                                 tuple(stored[key] for key in ('last_error', 'failures', 'retry_at')))
+                problems = [item['problem'] for item in source_diagnostics.problems('youtube')
+                            if item['source_id'] == source['id']]
+                self.assertIn('partial', problems)
+                if not content_error and not auth_error:
+                    self.assertEqual(['partial'], problems)
+
     def test_content_backlog_is_not_a_source_coverage_problem(self):
         source = self.sources[0]
         entries = [self.entry(number) for number in range(1, 6)]

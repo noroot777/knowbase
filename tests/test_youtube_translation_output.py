@@ -17,6 +17,45 @@ class TranslationOutput(YouTubeFixture):
         super().setUp()
         self.selected = SimpleNamespace(provider='fixture', model_id='fixture')
 
+    def test_inline_result_wrappers_do_not_reintroduce_format_promises(self):
+        answer = json.dumps({'translations': ['作者要求独立核验。']}, ensure_ascii=False)
+        for output in ('好的，以下是译文：' + answer, answer + '  （以上为译文）',
+                       '好的，以下是译文：' + answer + '（以上为译文）'):
+            with self.subTest(output=output):
+                self.assertEqual('作者要求独立核验。', translation.render('Verify every change.', output))
+        note = {'title': '独立核验', 'summary': '核验改动。', 'body': '先核验，再使用。'}
+        self.assertEqual(note, notes.note_payload('以下是笔记：' + json.dumps(note) + '（以上为笔记）'))
+        for output in ('我会按 ' + answer + ' 的格式输出。', 'I will output ' + answer,
+                       '以下是结果：[' + answer + ']'):
+            with self.subTest(output=output), self.assertRaises(ValueError):
+                json_output.object_payload(output)
+        with self.assertRaises(ValueError):
+            json_output.object_payload('以下是结果：' + answer, answer)
+
+    def test_technical_narrative_is_not_blocked_by_a_chinese_character_ratio(self):
+        cases = (
+            ('okay so first you do pip install -U yt-dlp and then pip install -r requirements.txt '
+             'after that uv sync --frozen and uv run pytest -q, and finally pnpm add drizzle-orm '
+             'postgres drizzle-kit, then pnpm dlx drizzle-kit generate and pnpm dlx drizzle-kit push',
+             '好，首先执行 pip install -U yt-dlp，然后 pip install -r requirements.txt，'
+             '接着 uv sync --frozen 和 uv run pytest -q，最后 pnpm add drizzle-orm postgres '
+             'drizzle-kit，再执行 pnpm dlx drizzle-kit generate 和 pnpm dlx drizzle-kit push'),
+            ('the repo is github.com/anthropics/claude-code and the docs live at '
+             'docs.anthropic.com/en/docs/claude-code/overview, the registry is '
+             'registry.npmjs.org/@anthropic-ai/claude-code and mirrors sit on jsdelivr and unpkg',
+             '仓库在 github.com/anthropics/claude-code，文档在 '
+             'docs.anthropic.com/en/docs/claude-code/overview，'
+             '注册表是 registry.npmjs.org/@anthropic-ai/claude-code，镜像放在 jsdelivr 和 unpkg'))
+        for source, value in cases:
+            output = json.dumps({'translations': [value]}, ensure_ascii=False)
+            with self.subTest(source=source):
+                self.assertEqual('en', text_language(value))
+                self.assertEqual(value, translation.render(source, output))
+                self.assertEqual(value, translation.unit_output(source, 0, output))
+                with patch.object(notes, 'call', return_value=output) as call:
+                    self.assertEqual(value, notes.translate(source, self.selected, 10**10, lambda: False))
+                self.assertEqual(1, call.call_count)
+
     def test_only_independent_result_objects_are_extracted_and_prompt_echoes_are_rejected(self):
         example = json.dumps({'translations': ['第一段译文', '第二段译文']}, ensure_ascii=False)
         answer = json.dumps({'translations': ['作者要求逐项验证。', '最后核验结果。']}, ensure_ascii=False)

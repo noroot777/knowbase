@@ -6,9 +6,9 @@ def object_payload(output, prompt=''):
     if not isinstance(output, str):
         raise ValueError('model output is not text')
     decoder = json.JSONDecoder()
-    candidates, consumed = [], 0
-    for matched in re.finditer(r'(?m)^[ \t]*(?=[\{\[])', output):
-        start = matched.end()
+    candidates, wrapped, consumed = [], [], 0
+    for matched in re.finditer(r'[\{\[]', output):
+        start = matched.start()
         if start < consumed:
             continue
         try:
@@ -16,9 +16,17 @@ def object_payload(output, prompt=''):
         except ValueError:
             continue
         consumed = end
+        prefix = output[output.rfind('\n', 0, start) + 1:start].strip()
         tail = output[end:].split('\n', 1)[0].strip()
-        if isinstance(payload, dict) and not tail:
-            candidates.append((output[start:end], payload))
+        if not isinstance(payload, dict):
+            continue
+        candidate = (output[start:end], payload)
+        if not prefix and not tail:
+            candidates.append(candidate)
+        elif not re.search(r'我会|我将|的格式|示例|\b(?:will|would|example|template)\b',
+                           prefix + ' ' + tail, re.I):
+            wrapped.append(candidate)
+    candidates = candidates or wrapped
     if not candidates:
         raise ValueError('model output has no JSON object')
     raw, payload = candidates[-1]

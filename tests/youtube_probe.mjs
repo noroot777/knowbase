@@ -475,6 +475,10 @@ try {
   check('没列完的频道显示部分同步而不是成功', partialCard.state === '部分同步' &&
     partialCard.text.includes('频道没列完') && partialCard.text.includes('7 条') && !partialCard.notice,
     JSON.stringify(partialCard));
+  check('取回数据后的部分同步不再显示旧连接失败',
+    partialCard.state === '部分同步' && !partialCard.text.includes('上一轮连接失败') &&
+    !partialCard.text.includes('查看失败原因') && partialCard.text.includes('尚未成功同步'),
+    JSON.stringify(partialCard));
   check('YouTube覆盖提示说明按窗口重查而非接续位置',
     partialCard.text.includes('下次按原时间窗口重查并跳过已发现条目') &&
     !partialCard.text.includes('从上次的位置'), JSON.stringify(partialCard));

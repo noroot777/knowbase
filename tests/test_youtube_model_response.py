@@ -19,9 +19,11 @@ class YouTubeModelResponse(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.paths = []
+        self.requests = []
 
     def ask(self, protocol, reason, *, terminal=True, refusal=False):
         paths = self.paths
+        requests = self.requests
         text = '接口预算为六十四。'
 
         class Handler(BaseHTTPRequestHandler):
@@ -29,7 +31,7 @@ class YouTubeModelResponse(unittest.TestCase):
                 pass
 
             def do_POST(self):
-                self.rfile.read(int(self.headers['Content-Length']))
+                requests.append(json.loads(self.rfile.read(int(self.headers['Content-Length']))))
                 paths.append(self.path)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream' if protocol == 'anthropic'
@@ -111,9 +113,12 @@ class YouTubeModelResponse(unittest.TestCase):
         self.assertEqual(['/v1/messages'] * 5, self.paths)
 
     def test_all_protocols_accept_normal_completion_and_natural_chinese(self):
-        for protocol, reason in (('chat', 'stop'), ('responses', 'completed'), ('anthropic', 'end_turn')):
+        for protocol, reason, field in (('chat', 'stop', 'max_completion_tokens'),
+                                         ('responses', 'completed', 'max_output_tokens'),
+                                         ('anthropic', 'end_turn', 'max_tokens')):
             with self.subTest(protocol=protocol):
                 self.assertEqual('接口预算为六十四。', self.ask(protocol, reason))
+                self.assertEqual(16000, self.requests[-1][field])
 
     def test_refusal_is_not_a_success_even_with_a_normal_status(self):
         for protocol, reason in (('chat', 'stop'), ('responses', 'completed')):

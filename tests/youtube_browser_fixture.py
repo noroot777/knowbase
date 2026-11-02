@@ -16,6 +16,9 @@ def install():
         reg.save_subscription('youtube', {'name': label, 'group_name': '状态验证'}, selected['id'])
         status_sources[label] = selected['id']
     published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    with reg.db() as connection:
+        connection.execute("UPDATE subscriptions SET last_error='上一轮连接失败',failures=3,retry_at=1 WHERE id=?",
+                           (status_sources['部分同步测试频道'],))
     entries = [{'video_id': f'{number:011d}', 'url': 'https://www.youtube.com/watch?v=' + f'{number:011d}',
                 'title': title, 'description': title, 'published': published, 'views': 10000 // number}
                for number, title in enumerate(('AI agent coding tutorial', 'AI model research benchmark',
@@ -29,19 +32,20 @@ def install():
                     for number in range(count)]
         if selected['id'] == status_sources['部分同步测试频道']:
             arguments[-1].append('只列到 7 条就中断了：频道预算用尽')
+            return [{**entries[0], 'published': (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()}]
         return entries if selected['id'] == source['id'] else []
 
     def reply(prompt, *arguments):
         if prompt.startswith('将以下字幕'):
             segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-            return json.dumps({'translations': [
+            return '好的，以下是译文：' + json.dumps({'translations': [
                 '作者演示智能体编程，强调每次修改都要测试，不能仅凭生成结果认定正确。接口预算为六十四。'
                 if 'The AI agent' in segment or 'Verify the result' in segment else segment
-                for segment in segments]}, ensure_ascii=False)
+                for segment in segments]}, ensure_ascii=False) + '（以上为译文）'
         if '只输出 JSON' in prompt:
-            return json.dumps({'title': '智能体编程：先验证再采用',
+            return '以下是笔记：' + json.dumps({'title': '智能体编程：先验证再采用',
                                'summary': '作者展示智能体编程方法，并强调测试与人工核验的重要性。',
-                               'body': '## 方法与限制\n生成代码后运行测试；模型声称正确不等于结果经过验证。'}, ensure_ascii=False)
+                               'body': '## 方法与限制\n生成代码后运行测试；模型声称正确不等于结果经过验证。'}, ensure_ascii=False) + '（以上为笔记）'
         return '作者演示智能体编程，指出必须运行测试并核验生成结果。'
 
     # ── 登录态与工具那一块:钉成一个「配好了、但那个浏览器里没登录」的确定局面 ──

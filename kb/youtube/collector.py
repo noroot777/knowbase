@@ -292,7 +292,8 @@ def process(rows, settings, scope, summary, deadline):
     return failures
 
 
-def commit_notes(source, completed, summary, pending_failure=False, ranged=False, record_success=True):
+def commit_notes(source, completed, summary, pending_failure=False, ranged=False, record_success=True,
+                 clear_failure=False):
     with maintenance_lock():
         entries = [json.loads(row['note']) for row in completed]
         if not ranged:
@@ -314,7 +315,8 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
             pending_failure |= summary['stopped']
             note, notice = source_status.fields(source, summary, pending_failure)
             if pending_failure or not record_success:
-                connection.execute('UPDATE subscriptions SET last_attempt=?,last_note=?,last_notice=? WHERE id=?',
+                reset = ",last_error='',failures=0,retry_at=0" if clear_failure and not summary['stopped'] else ''
+                connection.execute('UPDATE subscriptions SET last_attempt=?,last_note=?,last_notice=?' + reset + ' WHERE id=?',
                                    (reg.now(), note, notice, source['id']))
             else:
                 connection.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
@@ -391,7 +393,7 @@ def _round(scope):
             connection.execute('INSERT INTO feed_runs(kind,started_at,finished_at,summary) VALUES(?,?,?,?)',
                                ('youtube', started, reg.now(), json.dumps(summary, ensure_ascii=False)))
         return summary
-    succeeded, incomplete = [], set()
+    succeeded, incomplete, returned = [], set(), set()
     per_source = 90.0 if scope.ranged else DISCOVERY_PER_SOURCE
     discovery_started = time.monotonic()
     ceiling = RANGE_DISCOVERY_CEILING if scope.ranged else None
@@ -424,6 +426,8 @@ def _round(scope):
                 if source.get('initial_fetch_at'):
                     summary['initial_fetch_at'][str(source['id'])] = source['initial_fetch_at']
                 listed = discovery.fetch(source, settings, per_source, not scope.ranged, told)
+                if listed:
+                    returned.add(source['id'])
                 entries = sync_window.recent(source, listed, scope)
                 summary['outside_initial_window'] += len(listed) - len(entries)
             storage.discover(source, entries)
@@ -530,6 +534,13 @@ def _round(scope):
     completed_sources = []
     for source in succeeded:
         try:
+            rows = storage.rows([source['id']])
+            current_failure = (summary['stopped'] or source['id'] in failures or
+                               str(source['id']) in summary.get('local_ids', []) or
+                               any(code in login.AUTH_CODES and str(source['id']) in {str(identity) for identity in identities}
+                                   for code, identities in summary.get('cautions', {}).items()) or
+                               any(not row['excluded'] and (row['last_error'] or row['state'] in ('failed', 'processing'))
+                                   for row in rows))
             outstanding = (summary['stopped'] or source['id'] in incomplete or source['id'] in failures or
                        str(source['id']) in summary.get('local_ids', []) or
                        any(not row['excluded'] and
@@ -537,11 +548,12 @@ def _round(scope):
                             row['state'] not in ('ready', 'excluded', 'filtered') and
                             (row.get('metadata_pending') or row['video_id'] in prepared['unfinished_ids'] or
                              row['state'] == 'deferred' and row['video_id'] not in waiting_metadata))
-                           for row in storage.rows([source['id']])))
+                           for row in rows))
             completed = storage.ready(source)
             if scope.ranged:
                 completed = [row for row in completed if scope.since <= row['entry']['published'][:10] <= scope.until]
-            if not commit_notes(source, completed, summary, outstanding, scope.ranged, record_success=False):
+            if not commit_notes(source, completed, summary, outstanding, scope.ranged, record_success=False,
+                                clear_failure=source['id'] in returned and source['id'] in incomplete and not current_failure):
                 summary['repointed'] += 1
                 continue
             if source['id'] in failures:

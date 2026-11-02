@@ -1,9 +1,6 @@
 import ast
 import re
 
-from kb.feeds.registry import text_language
-
-
 _LITERALS = re.compile(r'```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]+`|https?://[^\s<>`]+')
 _COMMAND = re.compile(
     r'(?<![\w-])(?:npm\s+(?:install|run|exec|test|ci)\b|npx\s+\S+|'
@@ -49,7 +46,7 @@ def valid(value, literals):
     remainder = value
     for literal in sorted(literals, key=len, reverse=True):
         remainder = remainder.replace(literal.strip(), '')
-    return text_language(remainder) == 'zh'
+    return not any(character.isalpha() for character in remainder) or bool(re.search(r'[\u4e00-\u9fff]', remainder))
 
 
 def joined(text, blocks, values):

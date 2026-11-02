@@ -1,6 +1,26 @@
 # YouTube 低成本接入验证
 
-## 当前复修：结果提取、保守覆盖与源文感知语种（erGDaoGvR8ol 第 2 轮）
+## 当前复修：同一行包装、技术叙述与旧连接错误（Q6aANIwNFZIj）
+
+- JSON 提取优先独立顶层结果，没有独立结果时兼容同一行的前后说明；格式承诺、数组内嵌对象和提示回声仍拒绝。翻译与最终笔记共用入口。
+- 译文不再因汉字占比小于固定阈值被否决，也不恢复原译文长度比。仍核对源文分段、条数、非空及中文叙述信号；已识别的纯源文字面片段可原样保留。结构与中文信号不证明语义保真。
+- 部分列表实际返回了有效条目、且没有当前内容/本机错误或停止时，清除旧连接错误和退避，但不推进覆盖水位；空返回及未解决的内容错误继续保留原失败账。
+- YouTube 模型出口默认输出预算统一为 16000，三个协议均核对真实本地 HTTP 请求体；截断仍不能发布。
+- 本轮扩展会话 `🔎 YouTube包装响应与恢复状态复修` 的后台创建请求被拒 `Capability is not available: visibility`，未创建标签。降级独立无头壳、临时 profile 和本地夹具，不使用用户登录态或接管普通标签。
+- 覆盖安全口径未放宽：带视频 ID 不等于已拿到可用日期、通过鉴权或可安全跳过，AUTH/未知 ERROR 仍扣留水位。报告第 1 项的全面放行建议另交裁定；扫描性能按既有裁定不动。
+
+仅本轮修改测试模块登记：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_translation_output tests.test_youtube_model_response tests.test_youtube_source_status tests.test_youtube_browser -v
+```
+
+cwd：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+真实结果、冻结受测树、失败与通过日志及新截图在
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-Q6aANIwNFZIj/`。
+其余未改测试模块与整套回归留给验收；未访问真实模型、YouTube 或用户 cookie，未修改生产环境。
+
+## 历史复修：结果提取、保守覆盖与源文感知语种（erGDaoGvR8ol 第 2 轮）
 
 - 翻译提示取消可解析的答案样例；共用提取器选最后一个独立顶层对象，拒绝内嵌格式承诺及提示对象回声，最终笔记同样带提示上下文验证。正文不混入示例、客套话和说明里的花括号。
 - 通用 cookie 错误特征须有同一行 cookie 语境。视频级未知错误不能证明覆盖完成，只有明确良性条目不可用可跳过；全空失败和有数据部分覆盖都验证，包含进程退 0 与退 1 两侧。
