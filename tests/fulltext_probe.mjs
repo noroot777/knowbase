@@ -80,7 +80,7 @@ check("开了的订阅打开弹窗是勾上的",
       await evalJs(`document.getElementById('source-edit-fulltext').checked === true`));
 check("开关旁边写清楚了它是给谁用的、以及打开之后存量条目会怎样", await evalJs(`(() => {
   const t = document.getElementById('source-edit-fulltext').closest('label')?.nextElementSibling?.textContent || '';
-  return t.includes('聚合源') && t.includes('已收录的旧条目');
+  return t.includes('聚合源') && /旧条目.*补抓/.test(t);
 })()`));
 await evalJs(`closeSourceEditor()`);
 await evalJs(`openSourceEditor(${PLAIN})`);
