@@ -12,6 +12,10 @@ class ShapeError(RuntimeError):
     pass
 
 
+class LanguageError(RuntimeError):
+    pass
+
+
 def units(text):
     return [{'id': f'{position}-{hashlib.sha256(block.encode()).hexdigest()[:16]}', 'text': block}
             for position, block in enumerate(transcripts.blocks([{'text': text}], limit=450), 1)]
@@ -59,7 +63,7 @@ def render(text, output):
     literals = translation_language.contexts(text, blocks)
     if any(not translation_language.valid(value, context, block)
            for value, context, block in zip(translated, literals, blocks)):
-        raise RuntimeError(INVALID)
+        raise LanguageError(INVALID)
     return translation_language.joined(text, blocks, translated)
 
 
@@ -67,5 +71,5 @@ def unit_output(text, position, output):
     blocks = [unit['text'] for unit in units(text)]
     value = values(blocks[position], output)[0]
     if not translation_language.valid(value, translation_language.contexts(text, blocks)[position], blocks[position]):
-        raise RuntimeError(INVALID)
+        raise LanguageError(INVALID)
     return value

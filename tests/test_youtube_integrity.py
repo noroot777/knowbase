@@ -215,7 +215,8 @@ class YouTubeIntegrity(YouTubeFixture):
                 patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
                 patch.object(media, 'probe', return_value=self.metadata), \
                 patch.object(media, 'obtain', return_value={'origin': 'uploaded_captions', 'language': 'en',
-                                                           'segments': segments}):
+                                                           'segments': segments}), \
+                patch.object(notes, 'MAX_LANGUAGE_TRIES', 5):
             for broken in (lambda value: value, lambda value: '好。' + value,
                            lambda value: value + '完', lambda value: '欢迎回来。' + value.partition('.')[2]):
                 incomplete = json.dumps({'translations': [broken(block) for block in blocks]})

@@ -81,6 +81,45 @@ class TranslationOutput(YouTubeFixture):
             notes.translate(source, self.selected, 10**10, lambda: False)
         self.assertEqual(2, call.call_count)
 
+    def test_term_lists_and_source_bound_quotes_survive_batch_and_unit_validation(self):
+        source = ('We compare GPT 4o, Claude 3.5 Sonnet, Gemini 1.5 Pro, Llama 3.1, Mistral Large, '
+                  'Command R, DeepSeek V2, Qwen 2.5, Phi 3 and Yi 34B on the same benchmark.')
+        value = ('我们在同一套基准上对比 GPT 4o、Claude 3.5 Sonnet、Gemini 1.5 Pro、Llama 3.1、'
+                 'Mistral Large、Command R、DeepSeek V2、Qwen 2.5、Phi 3 和 Yi 34B。')
+        for separator in ('、', '；', '，', ', ', '; ', '（说明）'):
+            expected = value.replace('、', separator)
+            output = json.dumps({'translations': [expected]})
+            with self.subTest(separator=separator):
+                self.assertEqual(expected, translation.render(source, output))
+                self.assertEqual(expected, translation.unit_output(source, 0, output))
+                with patch.object(notes, 'call', return_value=output) as call:
+                    self.assertEqual(expected, notes.translate(source, self.selected, 10**10, lambda: False))
+                call.assert_called_once()
+        quote = 'the server must respond with a valid JSON object containing the field name and the field value'
+        source = 'The spec says: "' + quote + '".'
+        value = '规范原文写的是：“' + quote + '”。'
+        self.assertEqual(value, translation.render(source, json.dumps({'translations': [value]})))
+        with self.assertRaises(translation.LanguageError):
+            translation.render('The author describes the server.', json.dumps({'translations': [value]}))
+        source = 'The spec says: "' + (quote + ' ') * 12 + '".'
+        values = [unit['text'].replace('The spec says:', '规范原文写的是：') for unit in translation.units(source)]
+        self.assertGreater(len(values), 2)
+        rendered = translation.render(source, json.dumps({'translations': values}))
+        self.assertIn((quote + ' ') * 10, rendered)
+
+    def test_translated_names_do_not_share_the_native_input_script_gate(self):
+        for name in ('ソフトバンク', '삼성전자', 'ｿﾌﾄﾊﾞﾝｸ'):
+            source = '今日は' + name + 'の投資について説明します。今後の方法を検証します。'
+            value = '作者介绍' + name + '的投资，并要求独立核验结果。'
+            output = json.dumps({'translations': [value]})
+            with self.subTest(name=name):
+                self.assertFalse(notes.native_chinese(source))
+                self.assertEqual(value, translation.render(source, output))
+                self.assertEqual(value, translation.unit_output(source, 0, output))
+                self.assertEqual(value, notes.summary_output(value))
+                payload = {'title': value, 'summary': value, 'body': value}
+                self.assertEqual(payload, notes.note_payload(json.dumps(payload)))
+
     def test_source_bound_code_urls_and_commands_do_not_dilute_translated_narrative(self):
         narrative = 'The author explains how to verify the command before using it.'
         source = narrative + '\n\n' + CODE * 10

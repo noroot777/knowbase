@@ -303,6 +303,27 @@ class YouTubeNotes(YouTubeFixture):
             with self.subTest(field=field), self.assertRaises(RuntimeError):
                 notes.note_payload(json.dumps(payload))
 
+    def test_output_names_and_long_source_quotes_are_accepted_and_cached(self):
+        quote = 'the server must respond with a valid JSON object containing the field name and the field value'
+        source = 'The spec says: "' + quote + '". SoftBank and Samsung fund this service.'
+        value = '规范要求：“' + quote + '”。作者讨论 ソフトバンク 与 삼성전자 的投资。'
+        self.transcript['segments'] = [{'start': 0, 'end': 120, 'text': source}]
+        payload = {'title': 'ソフトバンク 的服务投资', 'summary': value, 'body': value}
+
+        def reply(prompt, *rest):
+            self.prompts.append(prompt)
+            if prompt.startswith('将以下字幕'):
+                return response(prompt, value)
+            return json.dumps(payload) if '只输出 JSON' in prompt else value
+
+        result = self.build(reply)
+        self.assertIn(value, result['body'])
+        self.assertEqual(payload['title'], result['title'])
+        self.assertEqual(1, sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
+        count = len(self.prompts)
+        self.assertEqual(result, self.build(reply))
+        self.assertEqual(count, len(self.prompts))
+
     def test_new_translation_policy_invalidates_notes_but_preserves_transcript_cache(self):
         directory = media.cache_dir(self.row['video_id'])
         media.save_json(directory / 'transcript.json', self.transcript)

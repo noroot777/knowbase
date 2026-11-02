@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 
 from kb import llm, llm_stages
 from kb.feeds.registry import text_language
@@ -7,6 +8,7 @@ from kb.youtube import json_output, media, transcripts, translation, translation
 
 
 VERSION = 'youtube-notes-v3'
+MAX_LANGUAGE_TRIES = 3
 ORIGINS = {'local_cache': '已有本地原文转录', 'uploaded_captions': '作者提供的字幕',
            'automatic_captions': 'YouTube 自动字幕', 'local_asr': '本地语音转录'}
 
@@ -86,8 +88,8 @@ def translated_output(text, output):
         return translation.render(text, output)
     if not isinstance(output, str):
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
-    if not output.strip() or not native_chinese(output):
-        raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
+    if not output.strip() or not translation_language.chinese_output(output):
+        raise translation.LanguageError('模型未返回中文译文，保留原始字幕等待重试')
     return output.strip()
 
 
@@ -99,8 +101,10 @@ def summary(text, title, selected, deadline, stopped):
 
 
 def summary_output(output, source=None):
-    if not isinstance(output, str) or not output.strip() or not native_chinese(output):
+    if not isinstance(output, str) or not output.strip():
         raise RuntimeError('视频分段要点不是有效中文，原文和译文已缓存')
+    if not translation_language.chinese_output(output):
+        raise translation.LanguageError('视频分段要点不是有效中文，原文和译文已缓存')
     if len(output) > 1000:
         raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
     return output
@@ -112,18 +116,62 @@ def note_payload(output, prompt=''):
     except (ValueError, TypeError, AttributeError):
         raise RuntimeError('视频笔记返回格式无效，原文与译文已缓存') from None
     if (not isinstance(payload, dict) or any(not isinstance(payload.get(field), str) or
-            not payload[field].strip() for field in ('title', 'summary', 'body')) or
-            any(not native_chinese(payload[field]) for field in ('title', 'summary', 'body'))):
+            not payload[field].strip() for field in ('title', 'summary', 'body'))):
         raise RuntimeError('视频笔记不是完整中文成品，未入库')
+    if any(not translation_language.chinese_output(payload[field]) for field in ('title', 'summary', 'body')):
+        raise translation.LanguageError('视频笔记不是完整中文成品，未入库')
     return payload
 
 
 def build(row, transcript, deadline, stopped):
+    if stopped() or time.monotonic() >= deadline:
+        raise media.Interrupted('视频处理已停止或时间预算用尽')
     directory = media.cache_dir(row['video_id'])
+    translator, summarizer = model('translate'), model('youtube_summary')
+    key = signature('language-failure-v1', translator,
+                    json.dumps(transcript, ensure_ascii=False, sort_keys=True) + '\n' +
+                    summarizer.provider + '\n' + summarizer.model_id)
+    path = directory / 'notes-language-failures.json'
+    failures = media.read_json(path)
+    if not isinstance(failures, dict):
+        failures = {}
+    attempts = failures.get(key, 0)
+    if not isinstance(attempts, int) or attempts < 0:
+        attempts = 0
+    if attempts < MAX_LANGUAGE_TRIES:
+        try:
+            result = build_chinese(row, transcript, deadline, stopped, directory, translator, summarizer)
+        except translation.LanguageError:
+            if stopped() or time.monotonic() >= deadline:
+                raise media.Interrupted('视频处理已停止或时间预算用尽') from None
+            attempts += 1
+            failures[key] = attempts
+            media.save_json(path, failures)
+            if attempts < MAX_LANGUAGE_TRIES:
+                raise
+        else:
+            if key in failures:
+                failures.pop(key)
+                media.save_json(path, failures)
+            return result
+    if stopped() or time.monotonic() >= deadline:
+        raise media.Interrupted('视频处理已停止或时间预算用尽')
+    original = '\n\n'.join(transcripts.blocks(transcript['segments']))
+    if not original.strip():
+        raise RuntimeError('没有可保留的视频原文')
+    origin = ORIGINS.get(transcript['origin'], transcript['origin'])
+    return {'url': row['entry']['url'], 'title': '原文待校验：' + row['entry']['title'],
+            'body': ('> 自动中文整理连续三轮未通过语种校验，已停止自动重试。以下仅保留完整原文，'
+                     '不是中文译文或已核验笔记；请结合原视频核对。\n\n'
+                     f'> 原文依据：{origin}；未分析视频画面。\n\n## 原文（未翻译）\n\n' + original),
+            'published': row['entry']['published'], 'author': row['channel'],
+            'content_kind': 'markdown', 'body_provenance': 'youtube:original-fallback'}
+
+
+def build_chinese(row, transcript, deadline, stopped, directory, translator, summarizer):
     cache = media.read_json(directory / 'notes-cache.json')
     if not isinstance(cache, dict):
         cache = {}
-    translator, summarizer = model('translate'), model('youtube_summary')
     translated = []
     for block in transcripts.blocks(transcript['segments']):
         stage = 'translate' if native_chinese(block) else translation.STAGE

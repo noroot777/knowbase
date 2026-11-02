@@ -12,6 +12,9 @@ _COMMAND_ARG = re.compile(r'''[ \t]*("(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_@%+=:/
 _FOREIGN_WORDS = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
 _FOREIGN_SCRIPTS = re.compile(r'[\u3041-\u3096\u309d-\u309f\u30a1-\u30fa\u30fc-\u30ff\u31f0-\u31ff\uff66-\uff9d'
                              r'\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]')
+_QUOTES = re.compile(r'"[^"\n]+"|“[^”]+”|「[^」]+」|『[^』]+』')
+_HAN = re.compile(r'[\u4e00-\u9fff]')
+_WORDS = re.compile(r'[^\W\d_]+')
 
 
 def literal_spans(text):
@@ -48,7 +51,8 @@ def literal_spans(text):
 
 
 def contexts(text, blocks):
-    spans, cursor, result = literal_spans(text), 0, []
+    spans = literal_spans(text) + [(quoted.start() + 1, quoted.end() - 1) for quoted in _QUOTES.finditer(text)]
+    cursor, result = 0, []
     for block in blocks:
         start = text.index(block, cursor)
         cursor = start + len(block)
@@ -63,21 +67,38 @@ def foreign_script(text):
     return bool(_FOREIGN_SCRIPTS.search(text))
 
 
+def chinese_output(text):
+    if not any(character.isalpha() for character in text):
+        return True
+    return any(_HAN.search(word) and
+               len(re.findall(_FOREIGN_SCRIPTS.pattern + '+', word)) <= 1
+               for word in _WORDS.findall(text))
+
+
 def valid(value, literals, source):
     remainder = value
     for literal in sorted(literals, key=len, reverse=True):
         remainder = remainder.replace(literal.strip(), '')
-    if _FOREIGN_SCRIPTS.search(remainder):
+    for quoted in _QUOTES.finditer(source):
+        content = quoted[0][1:-1]
+        for output_quote in _QUOTES.finditer(remainder):
+            if output_quote[0][1:-1] == content:
+                remainder = remainder.replace(output_quote[0], '')
+    if value.split() == source.split() and any(character.isalpha() for character in remainder):
         return False
-    if value.split() == source.split() and re.search(r'[A-Za-z]', remainder):
+    if any(len(re.findall(_FOREIGN_SCRIPTS.pattern + '+', sentence)) > 1 and
+           _HAN.search(sentence) and sentence.strip() in remainder
+           for sentence in re.split(r'[。！？.!?\n]', source) if sentence.strip()):
         return False
-    if any(len(_FOREIGN_WORDS.findall(span)) > 10 for span in re.split(r'[\u4e00-\u9fff]', remainder)):
+    if any(len(_FOREIGN_WORDS.findall(span)) > 10
+           for span in re.split(r'[\u4e00-\u9fff、，,；;（）()]', remainder)):
         return False
-    return not any(character.isalpha() for character in remainder) or bool(re.search(r'[\u4e00-\u9fff]', remainder))
+    return chinese_output(remainder)
 
 
 def joined(text, blocks, values):
-    spans, cursor, result = literal_spans(text), 0, ''
+    spans = literal_spans(text) + [(quoted.start() + 1, quoted.end() - 1) for quoted in _QUOTES.finditer(text)]
+    cursor, result = 0, ''
     for block, value in zip(blocks, values):
         start = text.index(block, cursor)
         if result:
