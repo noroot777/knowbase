@@ -96,7 +96,7 @@ class ReadIsolationTests(IsolationFixture):
 
     def test_twenty_four_concurrent_overviews_all_return_200(self):
         self.prepare()
-        self.stage([self.entry()])
+        self.stage([self.entry()], phase='discovery')
         with patch.object(reg, 'configuration_error', return_value=''), ThreadPoolExecutor(max_workers=24) as pool:
             responses = list(pool.map(lambda index: self.client.get('/api/intake/social'), range(24)))
         self.assertEqual([response.status_code for response in responses], [200] * 24)

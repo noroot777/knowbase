@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_browser, x_channels
 from tests.test_x_channels import FRESH, FRESH_LOCAL, ChannelBase, tweet
+from tests.x_harvest_fixture import prefetched
 
 
 class BrowserRound(ChannelBase):
@@ -46,7 +47,7 @@ class BrowserRound(ChannelBase):
         **不能用 `harvested()` 摆盘**:`collect` 自己会先调 `_prefetch_x`,那一步
         `reset()` + 真预取,摆好的缓存当场被清掉(而且会去起一个真 Chrome)。
         """
-        with patch.object(x_browser, 'harvest', lambda jobs, **kw: dict(by_handle)):
+        with prefetched(lambda jobs, **kw: dict(by_handle)):
             return sync.collect('social', scope or FetchScope(force=True))
 
     def repoint(self, source_id, handle='Other'):
@@ -131,7 +132,7 @@ class RangedScopeTests(BrowserRound):
             return {h: {'entries': [], 'error': '',
                         'watermark': '2026-10-08T00:00:00+00:00'} for h, _ in jobs}
 
-        with patch.object(x_browser, 'harvest', fake):
+        with prefetched(fake):
             sync._prefetch_x('social', reg.subscriptions('social'),
                              self.settings(x_channels.BROWSER), scope)
         # 交下去的是**换算过**的下界(项目时区的零点、且把零点算在内),不是裸
@@ -147,7 +148,7 @@ class RangedScopeTests(BrowserRound):
             return {h: {'entries': [], 'error': '',
                         'watermark': '2026-10-08T00:00:00+00:00'} for h, _ in jobs}
 
-        with patch.object(x_browser, 'harvest', fake):
+        with prefetched(fake):
             sync._prefetch_x('social', reg.subscriptions('social'),
                              self.settings(x_channels.BROWSER), scope)
             _, meta = x_channels.take(reg.subscription('social', s['id']),
@@ -161,12 +162,12 @@ class RangedScopeTests(BrowserRound):
         """它不改日常增量的任何状态,这条提示也算 —— 清掉等于替日常同步宣布
         "读完了",而那一边的进度一点没动。"""
         s = self.sub()
-        with patch.object(x_browser, 'harvest', lambda jobs, **kw: {
+        with prefetched(lambda jobs, **kw: {
                 'example': {'entries': [], 'error': '', 'watermark': '',
                             'incomplete': '滚动次数用完'}}):
             sync.collect('social', FetchScope(force=True))
         self.assertIn('滚动次数', reg.subscription('social', s['id'])['last_note'])
-        with patch.object(x_browser, 'harvest', lambda jobs, **kw: {
+        with prefetched(lambda jobs, **kw: {
                 'example': {'entries': [], 'error': ''}}):
             sync.collect('social', FetchScope(since='2026-10-05', until='2026-10-06'))
         self.assertIn('滚动次数', reg.subscription('social', s['id'])['last_note'])
@@ -181,7 +182,7 @@ class RangedScopeTests(BrowserRound):
             seen.update(dict(jobs))
             return {h: {'entries': [], 'error': ''} for h, _ in jobs}
 
-        with patch.object(x_browser, 'harvest', fake):
+        with prefetched(fake):
             sync._prefetch_x('social', reg.subscriptions('social'),
                              self.settings(x_channels.BROWSER), FetchScope())
         self.assertEqual({'alpha': '2026-10-01T00:00:00+00:00', 'beta': ''}, seen)
@@ -206,7 +207,7 @@ class RepointedSubscriptionTests(BrowserRound):
                                 'watermark': '2026-10-07T00:00:00+00:00'}}
 
         stages = []
-        with patch.object(x_browser, 'harvest', harvest), \
+        with prefetched(harvest), \
                 patch.object(sync, '_stage', lambda *a, **k: stages.append(a)):
             summary = sync.collect('social', FetchScope(force=True))
         row = reg.subscription('social', s['id'])
@@ -232,7 +233,7 @@ class RepointedSubscriptionTests(BrowserRound):
             return {'example': {'entries': [self.entry()], 'error': '',
                                 'watermark': FRESH.strftime('%Y-%m-%dT%H:%M:%SZ')}}
 
-        with patch.object(x_browser, 'harvest', harvest):
+        with prefetched(harvest):
             sync.collect('social', FetchScope(force=True))
         row = reg.subscription('social', s['id'])
         floor = x_channels.watermark(row, x_channels.BROWSER)
@@ -252,7 +253,7 @@ class RepointedSubscriptionTests(BrowserRound):
             self.repoint(s['id'])
             return {'example': {'entries': [], 'error': '登录态已失效,请重新登录'}}
 
-        with patch.object(x_browser, 'harvest', harvest):
+        with prefetched(harvest):
             summary = sync.collect('social', FetchScope(force=True))
         row = reg.subscription('social', s['id'])
         self.assertEqual(('', 0, 0), (row['last_error'], row['failures'], row['retry_at']))
@@ -266,7 +267,7 @@ class RepointedSubscriptionTests(BrowserRound):
             return {'example': {'entries': [self.entry()], 'error': '',
                                 'watermark': '2026-10-07T00:00:00+00:00'}}
 
-        with patch.object(x_browser, 'harvest', harvest):
+        with prefetched(harvest):
             summary = sync.collect('social', FetchScope(force=True))
         self.assertEqual((0, 1), (summary['added'], summary['repointed']))
         with reg.db() as c:
@@ -294,7 +295,7 @@ class RepointedSubscriptionTests(BrowserRound):
             return {'example': {'entries': [self.entry()], 'error': '',
                                 'watermark': '2026-10-07T00:00:00+00:00'}}
 
-        with patch.object(x_browser, 'harvest', harvest):
+        with prefetched(harvest):
             summary = sync.collect('social', FetchScope(force=True))
         self.assertEqual((1, 0), (summary['added'], summary['repointed']))
         self.assertEqual('2026-10-07T00:00:00+00:00',

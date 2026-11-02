@@ -13,7 +13,7 @@ CREATE TABLE IF NOT EXISTS x_intake_sources (
 CREATE TABLE IF NOT EXISTS x_intake_candidates (
  post_id TEXT PRIMARY KEY, entry TEXT NOT NULL, published TEXT NOT NULL,
  state TEXT NOT NULL, attempted REAL NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
- failures INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT ''
+ failures INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', unavailable TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS x_intake_links (
  source_id INTEGER NOT NULL, identity TEXT NOT NULL, post_id TEXT NOT NULL,

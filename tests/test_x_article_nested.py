@@ -427,8 +427,7 @@ class MultiUrlShareValueTests(FeedgrabRound):
         self.assertEqual(first, rows[0].get('body') or '',
                          '第二轮把库里那一行改坏了')
         self.assertIn(ref, rows[0].get('body') or '')
-        self.assertEqual(1, len(calls.urls),
-                         '第二轮照旧要为自己那条地址问一次(入库那一步才 DO NOTHING)')
+        self.assertEqual(0, len(calls.urls), '同版正文及完整证明可复用，不重复请求长文')
 
     def test_every_multi_url_shape_hides_the_nested_address(self):
         """逐形态直测两个消费方 —— 端到端一轮只摆得下一种,而这几种各有一个内层

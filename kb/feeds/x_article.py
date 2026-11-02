@@ -72,7 +72,7 @@ from kb.feeds.x_article_links import (  # noqa: F401  (re-export)
 from kb.feeds.x_article_shape import (
     ArticleUnavailable, _code_body, _entities, _entity_image, _fence,
     _media_urls, _must_block, _must_text, _rows)
-from kb.feeds import x_cooldown
+from kb.feeds import x_body, x_cooldown
 from kb.feeds.x_cdp import CdpError, XBudgetExceeded
 from kb.feeds.x_post_meta import stamp
 
@@ -461,6 +461,8 @@ def merge(entry: dict, got: dict) -> dict:
     complete = {**entry, 'title': (got['title'] or entry.get('title') or '')[:500],
                 'body': '\n\n'.join(p for p in parts if p)}
     complete.pop(POST_HINT, None)
+    complete = x_body.record(complete, '\n\n'.join(part for part in parts[1:] if part),
+                             prefix=f'{parts[0]}\n\n' if parts[0] else '')
     return stamp(complete, 'article', '')
 
 

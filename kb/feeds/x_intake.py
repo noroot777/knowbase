@@ -6,6 +6,7 @@ import logging
 import time
 from uuid import uuid4
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from kb.feeds import x_account, x_browser, x_cooldown, x_page_state, x_post
 from kb.feeds import x_intake_store as store
@@ -410,7 +411,9 @@ class Intake:
                 result['skipped'] = reason or '；'.join(phase_notes) or ('已按停止请求中断' if self.stop() else
                                      '本轮未轮到，待下轮' if source['id'] not in self.attempted else '本轮未读到，待下轮')
             if not result['pending'] and not source_error and not core_error and source['id'] in checkpoints:
-                result['watermark'] = checkpoints[source['id']]
+                checkpoint = checkpoints[source['id']]
+                result['watermark'] = (store.utc(checkpoint).astimezone(ZoneInfo('Asia/Shanghai')).date().isoformat()
+                                       if self.channel == 'feedgrab' else checkpoint)
             self.results[handle] = result
             self.metrics.count('pending', pending)
             self.metrics.count('unconfirmed', progress.get('unconfirmed', 0))

@@ -84,6 +84,9 @@ CREATE TABLE IF NOT EXISTS feed_runs (
 # 的 IF NOT EXISTS 对它们不生效,只能逐列 ALTER 补——补不上就不是"少个字段",
 # 而是整个翻译流程在老库上永远报 no such column。
 _ADDED_COLUMNS = {
+    'x_intake_candidates': (
+        ('unavailable', "TEXT NOT NULL DEFAULT ''"),
+    ),
     'x_intake_sources': (
         ('window_end', "TEXT NOT NULL DEFAULT ''"),
         ('block', "TEXT NOT NULL DEFAULT ''"),

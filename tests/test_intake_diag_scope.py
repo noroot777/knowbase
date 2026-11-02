@@ -220,6 +220,9 @@ class SourceProblemTests(DiagCase):
     def setUp(self):
         super().setUp()
         self.ids = self.seed()
+        with reg.db() as conn:
+            conn.execute('UPDATE subscriptions SET feed_url=? WHERE id=?',
+                         ('https://legacy.example.org/x.xml', self.ids['cover']))
 
     def problem(self, kind: str, name: str) -> dict:
         return next(p for p in sources.problems(kind) if p['problem'] == name)
@@ -465,6 +468,9 @@ class SourceTicketTests(DiagCase):
     def setUp(self):
         super().setUp()
         self.ids = self.seed()
+        with reg.db() as conn:
+            conn.execute('UPDATE subscriptions SET feed_url=? WHERE id=?',
+                         ('https://legacy.example.org/x.xml', self.ids['cover']))
         self.sid = self.ids['page']
 
     def problem(self, kind='web', source_id=None) -> dict:

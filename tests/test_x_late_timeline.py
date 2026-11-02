@@ -12,6 +12,7 @@ from tests.test_x_collectors import tweet
 from tests.test_x_page_policy import Clock, PolicySession
 from tests.test_x_page_state import response
 from tests.test_x_post import BODY, OLD
+from tests.x_harvest_fixture import prefetched
 
 
 class LateSession(PolicySession):
@@ -135,6 +136,7 @@ class LateTimelineTests(unittest.TestCase):
 
 
 class StoredLateTimelineTests(ChannelBase):
+    @prefetched(x_browser.harvest)
     def batch(self, sources, channel, session):
         settings = self.settings(channel)
         clock = Clock()

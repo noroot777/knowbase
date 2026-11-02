@@ -234,12 +234,16 @@ class CoverageAndNoticeTests(IntakeBase):
 
     def test_expiration_notice_uses_shanghai_date_and_real_expired_count(self):
         self.now = datetime(2026, 10, 31, 20, 30, tzinfo=timezone.utc)
+        self.source['history_floor'] = '2026-10-26'
+        with reg.db() as conn:
+            conn.execute('UPDATE subscriptions SET history_floor=? WHERE id=?',
+                         (self.source['history_floor'], self.source['id']))
         store.prepare([self.source], 'browser', self.now - timedelta(hours=2))
         self.stage([self.entry(age=121, truncated=True)])
         store.prepare([self.source], 'browser', self.now)
         progress = store.progress(self.source)
         self.assertEqual(progress['expired'], 1)
-        self.assertEqual(progress['outside'], '2026-10-27 以前的 1 条待办已超出自动窗口，未计为完成')
+        self.assertEqual(progress['outside'], '2026-10-27 以前的 1 条待办最近24小时超出自动窗口，未计为完成')
         self.assertNotIn('T', progress['outside'])
         self.assertNotIn('+00:00', progress['outside'])
 

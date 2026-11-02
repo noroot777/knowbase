@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import patch
 
 from kb.feeds import cdp_attach, registry as reg, x_browser, x_channels
+from kb.feeds.x_cdp import CdpError
 from kb.source_types import SOURCE_TYPES
 from tests.test_x_channels import ChannelBase
 
@@ -121,11 +122,11 @@ class DispatchTests(ChannelBase):
         self.sub()
         seen = {}
 
-        def fake(jobs, **kw):
+        def fake(profile, chrome_path='', **kw):
             seen.update(kw)
-            return {}
+            raise CdpError('只检查通道选择，不创建浏览器')
 
-        with patch.object(x_browser, 'harvest', fake):
+        with patch.object(x_browser, 'browser_session', fake):
             x_channels.prefetch(reg.subscriptions('social'), self.settings(ATTACH))
         self.assertIs(seen.get('attach'), True)
 
@@ -134,11 +135,11 @@ class DispatchTests(ChannelBase):
         self.sub()
         seen = {}
 
-        def fake(jobs, **kw):
+        def fake(profile, chrome_path='', **kw):
             seen.update(kw)
-            return {}
+            raise CdpError('只检查通道选择，不创建浏览器')
 
-        with patch.object(x_browser, 'harvest', fake):
+        with patch.object(x_browser, 'browser_session', fake):
             x_channels.prefetch(reg.subscriptions('social'), self.settings(BROWSER))
         self.assertIs(seen.get('attach'), False)
 

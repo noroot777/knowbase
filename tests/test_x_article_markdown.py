@@ -181,8 +181,7 @@ class MarkdownLinkBoundaryTests(FeedgrabRound):
         self.assertEqual(1, len(rows))
         self.assertEqual(first, rows[0].get('body') or '', '第二轮把库里那一行改坏了')
         self.assertIn(FULL, rows[0].get('body') or '')
-        self.assertEqual(1, len(calls.urls),
-                         '第二轮照旧要为自己那条地址问一次(入库那一步才 DO NOTHING)')
+        self.assertEqual(0, len(calls.urls), '同版正文及完整证明可复用，不重复请求长文')
 
     def test_a_nested_address_inside_one_link_is_still_left_alone(self):
         """**反过来钉一边,而且这一条承重**:边界之后那一段是**同一条链接的目标**,

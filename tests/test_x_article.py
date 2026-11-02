@@ -483,24 +483,28 @@ class FeedgrabEndToEndTests(FeedgrabRound):
         self.assertEqual(TODAY, self.water(s['id']))
         self.assertEqual(['https://api.fxtwitter.com/Example/status/10001'], calls.urls)
 
-    def test_an_article_we_could_not_read_freezes_the_watermark(self):
-        """取不到的那一轮:水位一步不动、面板上说得出原因、下一轮还取得到。"""
+    def test_an_unread_article_keeps_a_durable_retry_independent_of_discovery(self):
+        """发现与正文分账；完整扫描推进发现，未取得的正文仍持久排队。"""
         s = self.start_from()
         self.cli(example={'display': 'Example Person',
                           'tweets': [tweet(title='', body=self.ARTICLE)]})
         req, _ = answering(FeedError('HTTP 500'))
         with req:
             summary = self.collect()
-        self.assertEqual(self.day(4), self.water(s['id']),
-                         '动了的话这条长文从此任何一轮增量都选不到')
+        self.assertEqual(TODAY, self.water(s['id']))
         self.assertEqual(0, summary['added'])
         self.assertEqual(0, self.rows(s['id'])['total'],
                          '空正文入库之后 put_items 再也更新不了它')
         self.assertEqual([], summary['errors'], '这不是一次失败,只是没读完')
-        self.assertIn('长文正文没取到', summary['partial'][0]['reason'])
+        self.assertIn('正文待补', summary['partial'][0]['reason'])
+        with reg.db() as conn:
+            pending = dict(conn.execute('SELECT * FROM x_intake_candidates').fetchone())
+        self.assertEqual(pending['state'], 'pending')
+        self.assertIn('长文正文没取到', pending['reason'])
+        self.assertGreater(pending['retry_at'], pending['attempted'])
         page = self.client.get('/api/intake/social').json()
         rows = {row['name']: row for row in page['sources']}
-        self.assertIn('长文正文没取到', rows['Example']['last_note'])
+        self.assertIn('正文待补', rows['Example']['last_note'])
 
     def test_the_article_comes_back_once_the_endpoint_recovers(self):
         """上一条留着的旧水位就是这一条的全部依据。"""
@@ -509,6 +513,8 @@ class FeedgrabEndToEndTests(FeedgrabRound):
                           'tweets': [tweet(title='', body=self.ARTICLE)]})
         with answering(FeedError('HTTP 500'))[0]:
             self.collect()
+        with reg.db() as conn:
+            conn.execute('UPDATE x_intake_candidates SET retry_at=0')
         with answering(article_payload())[0]:
             summary = self.collect()
         self.assertEqual(1, summary['added'])

@@ -320,17 +320,21 @@ def finish(source, task, entries, unavailable, reason, *, block_tokens=None):
         if not progress or utc(task['published']) < utc(progress['floor']):
             return
         entry = next((entry for entry in entries if complete(entry)), None)
+        audit = next((item for item in unavailable if item.get('url') == json.loads(task['entry'])['url']), None)
         state = 'excluded' if excluded(conn, json.loads(task['entry'])) else (
-            'ready' if entry else 'unavailable' if unavailable else 'pending')
+            'ready' if entry else 'unavailable' if audit else 'pending')
+        if state == 'unavailable':
+            reason = audit.get('reason', '')
         if state == 'ready' and needs_repair(conn, entry):
             state = 'repair'
             reason = '存量正文缺少同版完整证明，需走版本化回填；未覆盖旧正文'
         failures = task['failures'] + (state == 'pending')
         changed = conn.execute('''UPDATE x_intake_candidates SET entry=?,state=?,attempted=?,failures=?,
-            retry_at=?,reason=? WHERE post_id=? AND entry=? AND state='pending' AND failures=?''',
+            retry_at=?,reason=?,unavailable=? WHERE post_id=? AND entry=? AND state='pending' AND failures=?''',
             (json.dumps(entry, ensure_ascii=False) if entry else task['entry'], state, time.time(), failures,
              time.time() + min(3600, 60 * 2 ** min(failures, 6)) if state == 'pending' else 0,
-             reason[:500], task['post_id'], task['entry'], task['failures'])).rowcount
+             reason[:500], json.dumps(audit, ensure_ascii=False) if state == 'unavailable' else '',
+             task['post_id'], task['entry'], task['failures'])).rowcount
         if changed and state in ('ready', 'unavailable') and block_tokens:
             conn.execute('UPDATE x_intake_sources SET block=? WHERE source_id=? AND identity=?',
                          (json.dumps(blocks.clear(progress['block'], block_tokens), ensure_ascii=False),
@@ -352,7 +356,8 @@ def delivery(source):
             entries.append(entry)
         pending_count += row['state'] in ('pending', 'repair')
         if row['state'] == 'unavailable':
-            unavailable.append(dict(url=entry['url'], reason=row['reason']))
+            unavailable.append(json.loads(row['unavailable']) if row['unavailable'] else
+                               dict(url=entry['url'], reason=row['reason']))
     return entries, pending_count, unavailable, expired
 
 

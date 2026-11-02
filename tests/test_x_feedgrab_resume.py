@@ -20,7 +20,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from kb.feeds import registry as reg, x_feedgrab
+from kb.feeds import registry as reg, x_feedgrab, x_intake_store
 from tests.test_x_feedgrab_contract import TODAY, YESTERDAY, FeedgrabRound, tweet
 
 
@@ -433,13 +433,16 @@ class FirstRoundFloorTests(FeedgrabRound):
         _LaterClock.days = self.LATER
         return patch.object(x_feedgrab, 'datetime', _LaterClock)
 
-    def test_an_unfinished_first_round_stores_the_boundary_it_used(self):
-        """存下来的得是**这一轮真正交给上游的那个下界**,不是空串、也不是"现在"。"""
+    def test_an_unfinished_automatic_round_keeps_a_five_day_receipt_not_a_fake_watermark(self):
+        """自动路径的范围存在扫描账中，未完整扫描不冒充已确认水位。"""
         s = self.sub()
         self.cli(**self.plan())
         summary = self.collect()
-        self.assertEqual(self.floor_now(), self.water(s['id']),
-                         '首轮没读完,这一轮用过的下界没存下来')
+        self.assertEqual('', self.water(s['id']))
+        progress = x_intake_store.progress(reg.subscription('social', s['id']))
+        elapsed = datetime.now(timezone.utc) - x_intake_store.utc(progress['floor'])
+        self.assertAlmostEqual(elapsed.total_seconds(), timedelta(days=5).total_seconds(), delta=5)
+        self.assertEqual('', progress['covered'])
         self.assertEqual(1, summary['added'])
         self.assertEqual(['Example'], [p['title'] for p in summary['partial']])
 

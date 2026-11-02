@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os as os
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -146,13 +147,13 @@ def _save_result(source, result, scope):
         # 是用户点名的那段日期,拿它当增量进度就是宣布中间那段已经收过。
         validators = {k: source[k] for k in ('etag', 'modified', 'resolved_url')}
     x_intake_commit.check_budget(validators)
-    with maintenance_lock(wait=0 if validators.get('x_intake') else None):
+    with (maintenance_lock(wait=0) if validators.get('x_intake') else maintenance_lock()):
         if not scope.ranged and not validators.get('x_intake'):
             entries = _within_history(source, entries)
         # **条目、水位、成功时间戳一个事务**。分成两个的话,`put_items` 失败那
         # 一轮水位已经推进了,而这批推文一条都没入库 —— 它们比旧水位新、又比
         # 新水位老,从此任何一轮增量都选不到(见 `x_channels.watermark_patch`)。
-        with reg.db(timeout=0 if validators.get('x_intake') else 30) as c:
+        with (reg.db(timeout=0) if validators.get('x_intake') else reg.db()) as c:
             if not _claim_write(c, source):
                 # 这条订阅在本轮采集期间被改指到别的源了 —— 手里这份属于旧的那个。
                 # 一个字都不写(条目、水位、成功时间戳一样都不写):这一轮作废,
@@ -166,7 +167,7 @@ def _save_result(source, result, scope):
                 reg.merge_config(source['id'], validators.get('config_patch') or {}, conn=c)
             partial = x_intake_commit.partial(c, source, entries, validators)
             if failure := validators.get('x_failure'):
-                source_failure.write(c, source, failure)
+                source_failure.write(c, source, failure, now=time.time())
             if partial:
                 return added
             c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
@@ -193,7 +194,7 @@ def _save_failure(source, error, summary) -> bool:
     with reg.db() as c:
         if not _claim_write(c, source):
             return False
-        source_failure.write(c, source, error)
+        source_failure.write(c, source, error, now=time.time())
     source_failure.note(summary, source, error)
     return True
 

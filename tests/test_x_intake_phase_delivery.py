@@ -1,5 +1,4 @@
 """Phase-owned blockers, replayable observations and qualified first-screen timeouts."""
-import fcntl
 import json
 import shutil
 import subprocess
@@ -12,7 +11,7 @@ from uuid import uuid4
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from kb import maintenance
+from kb import filelock, maintenance
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, x_account, x_browser, x_channels, x_cooldown, x_intake
 from kb.feeds import x_intake_blocks as blocks, x_intake_metrics, x_intake_store as store
@@ -49,11 +48,11 @@ class PhaseDeliveryTests(RuntimeFixture):
             lockfile = maintenance.DATA_DIR / maintenance.LOCK_NAME
             lockfile.parent.mkdir(parents=True, exist_ok=True)
             with lockfile.open('a+') as held:
-                fcntl.flock(held, fcntl.LOCK_EX)
+                filelock.flock(held, filelock.LOCK_EX)
                 try:
                     return real(source, event)
                 finally:
-                    fcntl.flock(held, fcntl.LOCK_UN)
+                    filelock.flock(held, filelock.LOCK_UN)
         with patch.object(store, 'set_block', side_effect=locked):
             yield
 
@@ -211,10 +210,14 @@ class PhaseDeliveryTests(RuntimeFixture):
             self.collect_runtime(lambda *args, **kwargs: (_ for _ in ()).throw(x_page_state.XAccessBlocked('旧身份验证墙')))
         source = reg.subscription('social', self.source['id'])
         store.statuses([source], 'feedgrab')
-        self.assertNotIn('x_intake', source)
+        self.assertEqual(source['x_intake']['discovery'], 'unattempted')
+        self.assertFalse(source['x_intake']['issues'])
+        self.assertNotIn('旧身份验证墙', json.dumps(source['x_intake'], ensure_ascii=False))
         source = reg.save_subscription('social', {'url': 'https://x.com/NewAuthor'}, self.source['id'])
         store.statuses([source], 'browser')
-        self.assertNotIn('x_intake', source)
+        self.assertEqual(source['x_intake']['discovery'], 'unattempted')
+        self.assertFalse(source['x_intake']['issues'])
+        self.assertNotIn('旧身份验证墙', json.dumps(source['x_intake'], ensure_ascii=False))
 
 
 class ScreenTimeoutTests(RuntimeFixture):
