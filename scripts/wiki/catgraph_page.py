@@ -44,7 +44,7 @@ _TMPL = """<!DOCTYPE html>
   <div class="hrow">
     <div>
       <h1>{h1}</h1>
-      <div class="sub">{sub}</div>
+{sub}
     </div>
     <div class="controls">
       <input id="q" type="search" placeholder="搜名字 / 简介 / 主题…  (/)">
@@ -114,7 +114,8 @@ def render(data: dict, *, title: str, h1: str, sub: str, accent: str,
            "appBase": app_base, "hotCap": hot_cap}
     meta = data["meta"]
     return _TMPL.format(
-        title=html.escape(title), h1=h1, sub=html.escape(sub), accent=accent,
+        title=html.escape(title), h1=h1, accent=accent,
+        sub=f'      <div class="sub">{html.escape(sub)}</div>' if sub else '',
         mark=_MARK.format(nodes=meta["total"], classified=meta["classified"],
                           built=meta["built"]),
         css=(ASSETS / "catgraph.css").read_text(encoding="utf-8"),

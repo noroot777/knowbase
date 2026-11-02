@@ -22,6 +22,7 @@
 .pipe-viewing .ghost { flex: none; }
 .pipe-overview-main { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
 .pipe-section-label { font-size: 12px; color: var(--muted); }
+.pipe-section-label:empty { display: none; }
 .pipe-overview h2 { font-size: 20px; line-height: 1.4; margin: 6px 0; }
 /* `#pipe-state-title` 是 `tabindex="-1"` 的**程序化**焦点目标(翻历史时 `viewPipeRun`
    把焦点挪过来,好让读屏和键盘用户跟上这一屏换了哪一轮),Tab 键到不了它。它原来在
@@ -61,7 +62,6 @@
 .pipe-stage[data-status=running] .pipe-stage-number { color: white; background: var(--brand); }
 .pipe-stage[data-status=error] .pipe-stage-number { background: var(--warn-soft); color: var(--danger); }
 .pipe-stage h3 { font-size: 15px; font-weight: 650; line-height: 1.8; }
-.pipe-stage-desc { color: var(--muted); font-size: 12px; }
 .pipe-stage-detail { font-size: 13px; line-height: 1.7; margin-top: 5px; overflow-wrap: anywhere; white-space: pre-wrap; }
 .pipe-stage-status { font-size: 12px; font-weight: 600; color: var(--muted); padding-top: 4px; white-space: nowrap; }
 .pipe-stage[data-status=running] .pipe-stage-status { color: var(--brand); }
@@ -248,6 +248,9 @@
 /* 步骤多选沿用来源那套勾选块(`.pipe-channel`),只多两样:会烧额度 / 要跑几十分钟
    的标记,以及「跑完出日报」那一行 —— 它不是第七个步骤,所以单独一行、不混进网格 */
 .pipe-chip {
+  /* inline-block + nowrap:标记本身不许被折行(卡片上去掉描述之后更明显,
+     「几十分钟」会在「几」后面断开,看着像两枚标记) */
+  display: inline-block; white-space: nowrap;
   margin-left: 6px; padding: 1px 6px; border-radius: 6px; font-style: normal;
   font-size: 11px; font-weight: 500; color: var(--warn); border: 1px solid var(--warn);
 }

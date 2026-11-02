@@ -30,11 +30,15 @@ function careRenderList() {
     const empty = document.createElement('div');
     empty.className = 'care-empty';
     empty.textContent = CARE.q ? '这个搜索词在这一组里没有命中。'
-      : CARE.group === 'attention' ? '这一组现在是空的——没有等着你决定的内容。'
-        : CARE.group === 'archived' ? '还没有搁置过任何内容。'
-          : '这一组现在是空的。';
+      : CARE.group === 'archived' ? '还没有搁置过任何内容。'
+        : '这一组现在是空的。';
     host.appendChild(empty);
     careRenderBatch();
+    //: **这一支也要重画右边。** 原来它直接 return:整组被清空之后(刚处理完最后
+    //: 一条、或者换了个搜不到东西的词),左边写着「这一组现在是空的」,右边却还
+    //: 整整齐齐摆着那条已经不在这儿的记录连同它的几颗出口按钮 —— 点下去作用在
+    //: 一条人已经处理过的内容上。
+    careRenderDetail();
     return;
   }
   for (const section of CARE.sections) host.appendChild(careSectionNode(section));
@@ -264,7 +268,8 @@ function careRenderRunningPane(host) {
   const hint = document.createElement('p');
   hint.textContent = live.running
     ? '进度只以阶段为粒度公布，所以这里不猜「正在处理哪一条」：条目仍然留在它自己那一档里。'
-    : '「待执行」只表示这几条已经排上了，不表示有东西在运行。要开始请用「立即执行」或到同步中心新建一次同步。';
+    // 留的是口径(「待执行」≠「在跑」),去掉的是「要开始请用立即执行」—— 那颗按钮就在这一屏上。
+    : '「待执行」只表示这几条已经排上了，不表示有东西在运行。';
   head.appendChild(hint);
   box.appendChild(head);
   for (const stage of (live.stages || [])) {

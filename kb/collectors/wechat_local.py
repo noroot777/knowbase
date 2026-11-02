@@ -482,7 +482,9 @@ class WeChatLocalCollector:
                 detail=f"最近采集 {row.get('latest_crawl_at') or '—'}",
                 # 本机库读得动 ≠ 每个号都有推送,不能把全局可用伪装成逐号就绪。
                 # ready=None 让面板完全不显示那一列(见 Target.ready 的注释)。
-                ready=None, state="按本机推送采集", tone="",
+                # state 也留空:主干上它对每一行都是同一句话,43 行各挂一份等于
+                # 什么也没区分(`targets.js` 用 filter(Boolean) 把它整段摘掉)。
+                ready=None, state="", tone="",
             )
             for row in (data.get("accounts") or [])
             if row.get("name")

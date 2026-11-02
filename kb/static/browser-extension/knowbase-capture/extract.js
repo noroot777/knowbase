@@ -8,7 +8,7 @@ function readKnowbaseArticle(mode) {
   let body = '';
   if (mode === 'selection') {
     body = window.getSelection()?.toString().trim() || '';
-    if (!body) throw new Error('请先在文章里选中正文，再点击读取所选文字');
+    if (!body) throw new Error('请先在文章里选中正文，再点一次「所选文字」那一颗');
   } else {
     const selector = 'article,[itemprop="articleBody"],#js_content,.rich_media_content,.entry-content,.post-content,.article-body,.markdown-body,main,[role="main"]';
     const candidates = [...document.querySelectorAll(selector)].filter(node => {
@@ -43,11 +43,11 @@ function readKnowbaseArticle(mode) {
       return {text, score: text.length - linkText * 1.5 + (node.matches('article,[itemprop="articleBody"],#js_content') ? 150 : 0)};
     }).sort((first, second) => second.score - first.score);
     body = scored[0]?.text || '';
-    if (!body) throw new Error('没有识别出文章区域；请在页面选好全文，再使用读取所选文字');
+    if (!body) throw new Error('没有识别出文章区域；请先在页面选好全文，再点「所选文字」那一颗');
   }
   // 「够不够」「超不超」由服务端判(`kb/browser_capture._admit_body`:按**行**去重后的
   // 字数门槛)。在这里再写一遍数字就是两份口径 —— 实测复读的登录提示页在这边 1367
-  // 字过线、那边去重只剩 260 字,于是人读完整页、勾完确认才被拒。提取器只回答
+  // 字过线、那边去重只剩 260 字,于是人读完整页才被拒。提取器只回答
   // 「有没有从这一页读到东西」,上面两个分支各自已经挡住空正文。
   return {page_url: location.href, title, body, method: mode};
 }

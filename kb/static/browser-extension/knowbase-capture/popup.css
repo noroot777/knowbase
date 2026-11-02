@@ -18,19 +18,35 @@ h2 { font-size:13px; } h3 { font-size:15px; margin-bottom:6px; }
 section { border-top:1px solid var(--line); margin-top:18px; padding-top:14px; }
 label { display:block; margin:10px 0 5px; font-size:12px; }
 input,select,textarea { width:100%; background-color:var(--card); color:var(--ink); border:1px solid var(--line); border-radius:5px; padding:8px; font:inherit; font-size:12px; line-height:1.6; }
-textarea { height:200px; resize:vertical; }
 .actions { display:flex; flex-wrap:wrap; gap:8px; }
+/* 这一行上的按钮**按单颗换行,不按组**:`display:contents` 把这一组摊进外层 flex。
+   分成两个 .actions 的那一版里「重新确认」永远独占第二行,而且和「采集」一样粗 ——
+   三颗等重的按钮摞成两排,看不出这一页该点的是哪一颗。
+   整组藏起来那一档照旧由 [hidden] 的 display:none !important 盖过这一条。 */
+.act-set { display:contents; }
 button { background:var(--brand); border:1px solid var(--brand); color:var(--card); padding:8px 12px; border-radius:5px; cursor:pointer; font:inherit; font-size:12px; line-height:1.5; }
 .secondary { color:var(--brand); background:var(--card); border-color:var(--line); }
+/* 「重新确认」不是对这一页做什么,只是再问服务端一次 —— 降成无框的一行字,
+   和上面那个 <summary> 同一种「可点的字」。描边留着(transparent)好让它和旁边
+   几颗一样高;左右内边距清零,是因为 complete / undecided / saved 那几档它**独自
+   占这一行**,有内边距就比上面的标题和网址往右错开几个像素。前面真有按钮时才补
+   一点间距 —— 只隔 8px 的话,那行字贴着上一颗的描边像是它的一部分。 */
+.quiet { background:none; border-color:transparent; color:var(--brand); padding-left:0; padding-right:0; }
+.act-set:not([hidden]) ~ .quiet,
+.actions > button:not([hidden]) ~ .quiet { margin-left:6px; }
+.quiet:hover:not(:disabled) { text-decoration:underline; }
 button:disabled { opacity:.45; cursor:not-allowed; }
 button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible { outline:2px solid var(--brand); outline-offset:2px; }
 summary { color:var(--brand); cursor:pointer; }
 .url { overflow-wrap:anywhere; font-size:11px; color:var(--muted); }
-#here .t { font-weight:600; font-size:13px; margin:0 0 4px; line-height:1.5; }
+.t { font-weight:600; font-size:13px; margin:0 0 4px; line-height:1.5; }
+#elsewhere-list { list-style:none; margin:0; padding:0; }
+#elsewhere-list li { padding:10px 0; border-top:1px solid var(--line); }
+#elsewhere-list li:first-child { padding-top:0; border-top:0; }
+#elsewhere-list button { margin-top:8px; }
 #here-state { margin:0 0 6px; }
-.check { display:flex; gap:8px; align-items:flex-start; }
-.check input { width:auto; margin:5px 0 0; }
-#status { color:var(--brand); min-height:22px; }
+#status { color:var(--brand); }
+#status:empty { display:none; }
 #status.error { color:var(--danger); }
 #connect { margin-top:10px; }
 [hidden] { display:none !important; }

@@ -24,16 +24,17 @@
 /* 折角方块:和图鉴卡片上那枚类型标记同一个形状语言 */
 .brand-icon { display: grid; place-items: center; width: 32px; height: 35px; border-radius: 9px 9px 4px 9px; color: white; background: var(--brand); }
 .brand-icon .icon { width: 22px; height: 22px; }
-.wordmark, .wordmark small, .nav-label { display: none; }
+.wordmark { display: none; }
 /* 名字在导轨上不画出来,但要留给屏幕阅读器和 syncNavTip 取用 */
 .nav-text { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 /* ── 分组 ──
-   80px 宽放不下组标题(宽屏 .nav-label 就是隐藏的),而组和组之间原来只有和项
-   与项之间一样的 3px 间隙 —— 11 个入口读下来是一长串,看不出「信息来源」是
-   从哪里开始的。用一道居中的短线当节拍记号:贯穿整条栏的分割线会把这么窄的
-   栏切成一格一格,短线只负责说「这里换组了」。窄屏抽屉里有真的组标题,这道
-   线是冗余,隐藏掉。 */
+   组标题整条去掉了(「我的工作区」「信息来源」「发现关联」三行只是在重述下
+   面那几个入口自己写着的名字),组名留在各 <nav> 的 aria-label 上给屏幕阅读
+   器。组和组之间原来只有和项与项之间一样的 3px 间隙 —— 11 个入口读下来是一
+   长串,看不出「信息来源」是从哪里开始的。用一道居中的短线当节拍记号:贯穿
+   整条栏的分割线会把这么窄的栏切成一格一格,短线只负责说「这里换组了」。
+   窄屏抽屉里也是这道线(标题没了,它不再是冗余)。 */
 .nav-section, .sidebar-bottom { position: relative; }
 .nav-section::before, .sidebar-bottom::before { content: ''; position: absolute; top: 0; left: 50%; width: 22px; height: 1px; margin-left: -11px; background: var(--line); }
 .nav-section { margin-top: 13px; padding-top: 13px; }
@@ -116,13 +117,7 @@
   /* 抽屉有的是宽度,名字回到常驻标签,浮层那条路整个停掉 */
   .nav-text { position: static; width: auto; height: auto; overflow: visible; clip-path: none; }
   #nav-tip { display: none; }
-  .wordmark small { display: block; font: 10px/1.6 var(--font-body); letter-spacing: .16em; color: var(--muted); }
   .mobile-close { display: grid; font-size: 22px; }
-  /* 三个组标题一个节奏:原来只有「发现关联」有 24px 上边距,「信息来源」紧贴
-     着上一组最后一项,看着像是「每日日报」的小标题 */
-  .nav-label { display: block; margin: 20px 10px 8px; font-size: 12px; color: var(--muted); }
-  .nav-section { margin-top: 0; padding-top: 0; }
-  .nav-section::before, .sidebar-bottom::before { display: none; }
   .tabs button, .explore-links a { justify-content: flex-start; gap: 10px; min-height: 44px; padding: 10px; font-size: 14px; }
   .tabs .icon, .explore-links .icon { width: 18px; height: 18px; }
   #nav-sync-dot, #nav-daily-dot { position: static; margin-left: auto; }

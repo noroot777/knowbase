@@ -1,11 +1,11 @@
 // Live progress never waits for collector probes or filesystem backlog scans.
 const STAGE_META = {
-  crawl: { name: '抓取内容', desc: '从所选来源收集文章' },
-  export: { name: '导出文章', desc: '保存到本地知识库' },
-  index: { name: '建立索引', desc: '让全文与语义检索可用' },
-  extract: { name: '提取知识', desc: '识别实体、主题与摘要' },
-  projects: { name: '整理工具', desc: '拆分工具与项目条目' },
-  wiki: { name: '更新 Wiki', desc: '生成关联页面与知识图谱' },
+  crawl: { name: '抓取内容' },
+  export: { name: '导出文章' },
+  index: { name: '建立索引' },
+  extract: { name: '提取知识' },
+  projects: { name: '整理工具' },
+  wiki: { name: '更新 Wiki' },
 };
 let pipeTimer = null, pipeSnapshot = null, pipePending = {};
 let pipeRequest = null, pipeStatusAbort = null, pipeStatusVersion = 0;

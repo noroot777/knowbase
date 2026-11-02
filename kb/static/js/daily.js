@@ -280,7 +280,7 @@ function renderDailyList() {
     <span>${r.docs} 条素材${r.total > r.docs ? ` / 窗口内 ${r.total}` : ''}${r.late ? ` · 补录 ${r.late}` : ''}</span>
     <small>${esc(Object.entries(r.sources || {}).map(([k, n]) => `${k} ${n}`).join(' · ') || '—')}${
       r.sync_failed?.length ? ` · ${r.sync_failed.length} 项未完成` : ''}</small></button>`).join('')
-    || '<div class="daily-empty"><h3>还没有日报</h3><p>选好日期，点右上角生成。</p></div>';
+    || '<div class="daily-empty"><h3>还没有日报</h3></div>';
 }
 
 // 「这次正文读取是不是还算数」。**两道各管一段,缺一不可**:
@@ -357,7 +357,7 @@ async function deleteDailyReport() {
     $('daily-copy').hidden = $('daily-del').hidden = true;
     $('daily-reader-title').textContent = '还没有选中日报';
     $('daily-reader-meta').textContent = '';
-    setDailyBody('<div class="daily-empty"><h3>已删除</h3><p>可以重新生成这一天的日报。</p></div>');
+    setDailyBody('<div class="daily-empty"><h3>已删除</h3></div>');
     // 删一份日报会把它带走的条目放回队列,所以按钮上那个计数也得重新问一次
     // ——不问的话页面上还写着「没有新内容」,而此刻明明又有了。
     await Promise.all([loadDailyReports(false), loadDailyWindow()]);
@@ -383,8 +383,10 @@ async function runDaily() {
   // 话说在按钮边上。
   const channels = pickedDailyChannels();
   if (sync && !channels.length) {
+    // 「在哪儿勾」不用写:紧接着那一行把抽屉拉开了,那几个勾选框自己会出现。
+    // 留下的是**另一条路** —— 不勾也能出报,那一下人看不出来。
     toast('先勾选至少一个同步范围', { key: 'daily',
-      detail: '同步范围在页头「改定时」那一扇里（已经替你打开）；只想用已经入库的内容出报，把「先同步一轮」的勾去掉再点。' });
+      detail: '只想用已经入库的内容出报，就把「先同步一轮」的勾去掉。' });
     // 话说在按钮边上还不够:要改的那几个勾选框此刻收在抽屉里,看不见就等于没说。
     setDailyDrawer('sched', true);
     return;
@@ -398,8 +400,8 @@ async function runDaily() {
   try {
     await pipePost('/api/daily/run', { ...custom, sync, channels,
       overwrite_day: approval.day, overwrite_version: approval.version });
-    toast(sync ? '已开始同步并生成日报' : '已开始生成日报',
-      { key: 'daily', type: 'ok', detail: sync ? '依次同步所选来源后生成，离开页面不影响。' : '直接用已入库的内容生成。' });
+    // 两句 detail 原来各自把标题重说一遍(同步+生成 / 直接生成),标题自己已经分开了。
+    toast(sync ? '已开始同步并生成日报' : '已开始生成日报', { key: 'daily', type: 'ok' });
   } catch (e) {
     toast('未能开始', { key: 'daily', detail: e.message });
   } finally { dailyBusy = false; refreshDailyStatus(); }

@@ -21,3 +21,4 @@ class YouTubeBrowser(unittest.TestCase):
             files = list((Path(base.root) / 'vault/source/youtube').rglob('*.md'))
             self.assertEqual(1, len(files))
             self.assertIn('完整中文转录', files[0].read_text())
+            self.assertNotIn('&t=', files[0].read_text())

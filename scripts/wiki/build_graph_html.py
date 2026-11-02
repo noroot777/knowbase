@@ -113,7 +113,6 @@ header{display:flex;flex-wrap:wrap;gap:14px;align-items:baseline;
   padding:26px 36px 6px;position:relative;z-index:4;transition:margin-right .22s ease}
 header h1{font-size:24px;margin:0;font-weight:800;letter-spacing:.2px}
 header h1 em{font-style:normal;color:var(--c-tools)}
-header .sub{color:var(--muted);font-size:13.5px;max-width:520px}
 .controls{margin-left:auto;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 #q{width:220px;padding:8px 14px;border:1px solid var(--line);border-radius:20px;
   background:var(--card);font-size:14px;outline:none}
@@ -189,8 +188,7 @@ footer b{color:#66727c}
 <svg id="edges"></svg>
 <header>
   <div>
-    <h1>公众号 AI 图谱<em> · Connected</em></h1>
-    <div class="sub">最近两周的公众号文章都在聊什么。点任意节点:看它是什么、和谁有关、出自哪些文章;顺着右侧面板可以一直点下去。</div>
+    <h1>公众号 AI 图谱</h1>
   </div>
   <div class="controls">
     <input id="q" type="search" placeholder="搜索节点…">

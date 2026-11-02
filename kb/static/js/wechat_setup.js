@@ -74,15 +74,14 @@ function renderWechatSetup() {
   const windows = s.platform === 'windows';
   $('wechat-agent-prompt').value = windows ? WECHAT_WINDOWS_AGENT_PROMPT : WECHAT_AGENT_PROMPT;
   $('wechat-authorization-hint').textContent = windows ?
-    '确认后，固定版本工具仅只读访问本人绿泡泡进程中的数据库访问材料，最多 3 分钟；不会注入、退出、重启或修改客户端，不会自动提权。若权限不足或版本不兼容会停止。页面不接收密码或明文 key，失败不会自动再次获取。' :
-    '固定版本 wxkey 会请求 macOS 管理员授权、访问绿泡泡进程，可能退出或重启绿泡泡并创建重签名副本。请先保存正在编辑的消息。密码仅在系统授权框输入，页面不接收密码或明文 key；失败不会自动再次获取。';
+    '固定版本工具只读访问本人绿泡泡进程中的数据库访问材料，最多 3 分钟；不注入、不重启客户端、不自动提权。' :
+    '固定版本 wxkey 会请求 macOS 管理员授权，可能退出或重启绿泡泡并创建重签名副本。请先保存正在编辑的消息。';
   $('wechat-method-title').textContent = docker ? '请在 Mac 本机完成绿泡泡接入' : '方式一：在此页面接入';
   $('wechat-title').textContent = docker ? '配置 Docker 知识库' : '接入你的绿泡泡';
   $('wechat-welcome-title').textContent = docker ? '让文章进入你的知识库' : '让知识库接上你的绿泡泡';
-  $('wechat-intro').textContent = docker ? '在 Mac 采集文章，在容器中索引、检索和分析。' : '从本机已同步的公众号推送中发现文章，收进知识库。';
   $('wechat-source-title').textContent = docker ? '导入文章目录' : '接入本机绿泡泡';
   $('wechat-source-hint').textContent = docker ? '挂载 Mac 导出的 vault，再运行知识库索引' : windows ? 'Windows x64 · 绿泡泡 4.x；已有材料优先复用，获取前需本人确认' : '已有配置直接复用，缺 key 时自动准备获取工具';
-  $('wechat-runtime-hint').textContent = docker ? '挂载与索引步骤见项目的 Docker 部署说明。' : '可以关闭窗口，任务继续在后台执行。获取和验证不需要大模型 API。';
+  $('wechat-runtime-hint').textContent = docker ? '挂载与索引步骤见项目的 Docker 部署说明。' : '可以关窗，任务在后台继续。';
   $('wechat-status').textContent = s.message || '正在读取绿泡泡接入状态…';
   $('wechat-status').setAttribute('aria-busy', String(busy));
   $('wechat-provider-state').textContent = s.provider_ready ? '已配置' : '待配置';
@@ -112,8 +111,9 @@ function renderWechatSetup() {
   let dismissed = false;
   try { dismissed = localStorage.getItem('kb-wechat-welcome-dismissed') === '1'; } catch {}
   $('wechat-welcome').hidden = s.ready || dismissed;
-  $('wechat-welcome-status').textContent = s.can_connect === false ? 'Docker 已就绪。配置模型、挂载文章目录后即可建立知识索引；绿泡泡 key 在 Mac 本机获取。' : s.running ? s.message :
-    '配置供应商和模型后，接入本机绿泡泡，开始收集公众号文章。';
+  $('wechat-welcome-status').textContent = s.can_connect === false
+    ? 'Docker 已就绪，绿泡泡 key 在 Mac 本机获取。' : s.running ? s.message
+    : '配置供应商和模型后，接入本机绿泡泡。';
 }
 
 async function refreshWechatSetup() {

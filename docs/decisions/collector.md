@@ -34,10 +34,10 @@
   `daily.json` 里写的正是旧名字,丢掉的话**公众号从此不再定时同步、不再进日报,而面
   板上完全看不出少了什么**。配套:①退役名也要能翻成人话(`channel_labels()`,API 的 `labels`);②别名
   表要发到浏览器(`/api/pipeline/channels` 的 `aliases`),前端不许写死 `wechat_oa`。
-- **「我的订阅」的公众号视图不信 `kb-sync-channel` 那份全局选择**(`sources.js` 的
+- **「我的订阅」的公众号视图不信 `kb-sync-channel` 那份全局选择**(`subs_wechat.js` 的
   `wechatSubsChannel()` 按来源目录声明的通道过别名表解析)。**检查/重试入口同理**自己按目录现解析
   (`refreshPipeSource()`,「检查连接」重跑整个 `openWechatSubs`)。
-- **逐号「就绪」那套在主干上永久是空的**(一律 `ready=None` / `state="按本机推送采集"`)。
+- **逐号「就绪」那套在主干上永久是空的**(一律 `ready=None` / `state=""`)。
   `Target.ready/tone/state` 和前端那条 `ready === null` 分支留着 —— 契约是通用的。别再把「刷新凭证」
   「去 Mac 绿泡泡里各点开一篇文章」那类文案加回来。
 - **「翻过、确实没有图文」和「这一次没翻」不是一件事**(`local_accounts.discover` 给每行一个 `probe`:
@@ -121,7 +121,7 @@
   全局、没有 `tgt-ready-bar`/`tgt-refresh` 这些节点、页面上不出现「凭证」二字、
   删掉的那两个端点一次都没被请求)。
   **「我的订阅」的公众号视图不信 `kb-sync-channel` 里那份全局选择**
-  (`sources.js` 的 `wechatSubsChannel()`:按来源目录声明的通道过别名表解析)——
+  (`subs_wechat.js` 的 `wechatSubsChannel()`:按来源目录声明的通道过别名表解析)——
   那是旧版同步中心记「上次看哪个来源」用的,存量值可能是 rss/social(都是合法
   通道,别名迁移不会动它们),沿用的话公众号视图的连接卡、订阅列表、「同步全部」
   全跟着串到别的来源上。探针里存量 rss/social/未知值各走一遍:通道绑回
@@ -136,7 +136,8 @@
   `openWechatSubs`(连接 + 订阅列表一起恢复),失败文案里留「重新读取」入口。
   探针 6.8 节钉住:503 恢复后点检查,请求全部点名公众号、列表重新读出来。
 - **逐号「就绪」那套在主干上永久是空的。** 采集器一律返回 `ready=None` /
-  `state="按本机推送采集"`,`refresh_readiness` 从 `TargetManager` 契约里摘掉了,
+  `state=""`(写成同一句话挂在 43 行上等于什么也没区分),`refresh_readiness`
+  从 `TargetManager` 契约里摘掉了,
   `POST /api/sources/targets/refresh` 也没了。`Target.ready/tone/state` 这三个字段
   和前端那条 `ready === null` 的渲染分支留着——契约是通用的,别的来源用得上。
   别再把「刷新凭证」「去 Mac 绿泡泡里各点开一篇文章」那类文案加回来:它指的是

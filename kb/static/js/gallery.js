@@ -134,7 +134,6 @@ function applyGalleryFilter() {
   $('g-grid').innerHTML = '';
   $('g-empty').style.display = list.length ? 'none' : '';
   $('g-count').textContent = `${list.length.toLocaleString()} 个结果`;
-  $('g-section-title').textContent = gState.kind ? kindLabel(gState.kind) : '全部工具';
   $('g-reset').hidden = !['q', 'kind', 'topic', 'src'].some(k => gState[k]);
   if (typeof saveWorkspaceLocation === 'function') saveWorkspaceLocation();
   renderGalleryBatch();
@@ -149,7 +148,7 @@ function gcardHtml(t) {
     <span class="gcard-body">
       <span class="gcard-top"><span class="gmark ${kc}">${icon(glyph)}</span><span class="gcard-heading"><span class="gname">${esc(t.name)}</span><span class="gkind ${kc}">${esc(kindLabel(t.kind))}</span></span></span>
       ${t.promo_soft ? '<span class="gpromo" title="这个工具的每一条记录都出自疑似软广">全部出自软广?</span>' : ''}
-      <span class="gsum">${esc(t.summary || '还没有简介，打开收录记录了解更多。')}</span>
+      <span class="gsum">${esc(t.summary || '还没有简介。')}</span>
       <span class="gtags">${tags}</span>
       <span class="gstat"><span class="gtally">${tallySvg(Math.min(t.n, 5), 13)}</span>
         <span class="gcount">${t.n} 次提及 · ${t.accounts} 个来源</span>
@@ -185,7 +184,7 @@ async function loadGallery() {
       return r.json();
     });
   } catch (e) {
-    $('g-grid').innerHTML = `<div class="empty-state"><h3>图鉴暂时没有加载成功</h3><p>请检查服务连接，然后重试。${esc(e.message)}</p><button onclick="loadGallery()">重新加载</button></div>`;
+    $('g-grid').innerHTML = `<div class="empty-state"><h3>图鉴没有加载出来</h3><p>${esc(e.message)}</p><button onclick="loadGallery()">重新加载</button></div>`;
     $('g-grid').setAttribute('aria-busy', 'false');
     return;
   }

@@ -13,7 +13,7 @@ class YouTubeStageCache(YouTubeFixture):
         self.row = {'video_id': self.entry()['video_id'], 'entry': self.entry(), 'channel': '测试频道'}
         self.selected = SimpleNamespace(provider='fixture', model_id='fixture')
         self.payload = {'title': '具体中文标题', 'summary': '保留事实与限制的中文概述。', 'body': '具体中文内容。'}
-        self.blocks = [f'[{position:02d}:00:00] 中文原文内容{position}。' for position in range(16)]
+        self.blocks = [f'中文原文内容{position}。' for position in range(16)]
         self.transcript = self.complete_transcript()
 
     def build(self, reply):
@@ -65,9 +65,9 @@ class YouTubeStageCache(YouTubeFixture):
 
     def test_bad_cached_translation_and_final_json_are_revalidated(self):
         directory = media.cache_dir(self.row['video_id'])
-        cache = {'translation': '[00:00:00] English only', 'note': '{bad json'}
-        source = '[00:00:00] The original AI tutorial has important facts.'
-        translation = notes.cached(directory, cache, 'translation', lambda: '[00:00:00] 中文事实和限制。',
+        cache = {'translation': 'English only', 'note': '{bad json'}
+        source = 'The original AI tutorial has important facts.'
+        translation = notes.cached(directory, cache, 'translation', lambda: '中文事实和限制。',
                                    lambda output: notes.translated_output(source, output))
         payload = notes.cached(directory, cache, 'note', lambda: json.dumps(self.payload), notes.note_payload)
         self.assertIn('中文', translation)

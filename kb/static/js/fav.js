@@ -131,9 +131,14 @@ function favOriginal(item) {
 }
 
 function favDescription(item, detail = false) {
+  // **取不到就空着**:「打开原文,重新发现这条收藏」「更多内容藏在原文里」原来是
+  // 两句占位文案,念的都是旁边那颗链接。卡片靠 `.fv-card-desc` 的 min-height 对齐,
+  // 空着不塌版(详情和「灵感起步」那一处则整段不画)。
+  // **原文没了那一句照旧由这里说。** 它不是占位:卡片、详情、起步三处的描述位都
+  // 各有一条探针盯着「这里必须写着原文已不在索引里」,不许在原文缺失时拿正文的
+  // 口吻顶上(`tests/favorites_state_test.mjs`、`favorite_lifecycle_probe.mjs`)。
   return (!detail && item.quote) || item.action?.what || item.summary || item.quote
-    || (favOriginal(item).detached ? '原文已不在索引里,可继续整理已保存的收藏内容。'
-      : detail ? '这条收藏的更多内容，藏在原文里。' : '打开原文，重新发现这条收藏。');
+    || (favOriginal(item).detached ? '原文已不在索引里。' : '');
 }
 
 function favDocAHtml(f, labelHtml, cls = '') {

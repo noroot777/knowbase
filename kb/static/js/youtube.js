@@ -99,7 +99,7 @@ function youtubeEditor(source, kind) {
     fields.innerHTML = `<legend>YouTube 排名规则</legend><label for="youtube-pool">频道分组</label>
       <select id="youtube-pool">${Object.entries(youtubePoolLabels).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select>
       <label for="youtube-weight">排名权重（0.1–3）</label><input id="youtube-weight" type="number" min="0.1" max="3" step="0.05">
-      <p class="hint">分组决定是否进入候选排名，权重直接乘在候选分上。启用订阅不等于批准下载全部视频。</p>`;
+      <p class="hint">权重乘在候选分上。启用订阅不等于批准下载全部视频。</p>`;
     $('source-edit-error').before(fields);
   }
   fields.hidden = kind !== 'youtube'; fields.disabled = kind !== 'youtube';
@@ -125,26 +125,25 @@ function fillYouTubeSettings(settings, sent) {
   if (!fields) {
     fields = document.createElement('div'); fields.id = 'youtube-settings-fields';
     fields.innerHTML = `<h3>登录态与工具</h3>
-      <p class="hint">元数据、字幕和音频都用你浏览器里的 YouTube 登录态读取。不登录时 YouTube 会对本机出口要求验证，整轮采集一条也处理不了。</p>
+      <p class="hint">不登录时 YouTube 会对本机出口要求验证，整轮采集一条也处理不了。</p>
       <label for="youtube-cookies_browser">从哪个浏览器读登录态</label>
       <select id="youtube-cookies_browser"></select>
       <label for="youtube-cookies_profile">浏览器用户资料（可选）</label>
       <input id="youtube-cookies_profile" maxlength="48" placeholder="留空用默认资料，例如 Profile 1">
-      <p class="hint">只读取 cookie 交给 yt-dlp，不会打开或接管浏览器窗口。YouTube 登在哪个用户资料里，
-        就把那个资料名填在上面（Chrome 的地址栏输入 chrome://version 可以看到「个人资料路径」的末段）。</p>
+      <p class="hint">只读 cookie 交给 yt-dlp，不打开也不接管浏览器窗口。资料名在 chrome://version 的「个人资料路径」末段。</p>
       <p id="youtube-browser-err" class="field-err"></p>
       <p id="youtube-login" class="hint" role="status"></p>
       <p id="youtube-login-detail" class="hint"></p>
       <button type="button" class="ghost" id="youtube-login-check">检查登录态</button>
       <p id="youtube-ytdlp" class="hint" role="status"></p>
       <button type="button" class="ghost" id="youtube-ytdlp-upgrade">更新 yt-dlp</button>
-      <h3>排名与处理预算</h3><p class="hint">只对候选榜入选的视频花算力。先复用字幕，需要时仅下载音频；英文译成中文后才入库。画面理解关闭。</p>
+      <h3>排名与处理预算</h3><p class="hint">只对候选榜入选的视频花算力：先复用字幕，需要时才下载音频，不做画面理解。</p>
       ${Object.entries(youtubeNumberFields).map(([key,[label,min,max]]) => `<label for="youtube-${key}">${label}</label><input id="youtube-${key}" type="number" min="${min}" max="${max}" step="1">`).join('')}
       <label><input id="youtube-ai_only" type="checkbox"> 仅纳入标题或简介明确与 AI 相关的视频</label>
       <label><input id="youtube-asr_enabled" type="checkbox"> 字幕不可用时允许本地语音转录</label>
       <label for="youtube-whisper_model">Whisper 模型文件路径（可选）</label>
       <input id="youtube-whisper_model" maxlength="2048" placeholder="留空尝试已有本地模型">
-      <p class="hint">英文专用模型不能用于其他语言；本地转录不消耗模型 token，但会占用 CPU 和内存。缓存字幕和译文可在重试时复用。</p>
+      <p class="hint">英文专用模型不能用于其他语言。本地转录不花 token，但吃 CPU 和内存。</p>
       <p id="youtube-tools" class="hint" role="status"></p>`;
     $('source-settings-error').before(fields);
   }
@@ -221,8 +220,8 @@ async function renderYouTubeRanking() {
       processing:'正在处理', ready:'中文笔记已完成', failed:'处理失败，待重试'};
     // **只有一张榜**(仓库主人拍板:不再区分热度和价值),所以这里没有排序下拉 ——
     // 一张榜只有一个顺序,给它配个「排序」反而让人以为还有另一种排法。
-    panel.innerHTML = `<h3>候选排名 · ${result.total} 条</h3><p class="hint">同一视频只处理一次；未入选的视频不下载、不转录。下方仅显示前 100 条候选。</p>
-      <div id="youtube-rank-items"></div><p class="hint">${result.total ? '频道管理' : '尚未检查频道。点击同步全部，先获取轻量候选；不会直接处理全部视频。'}</p>`;
+    panel.innerHTML = `<h3>候选排名 · ${result.total} 条</h3><p class="hint">未入选的不下载、不转录；下面只列前 100 条。</p>
+      <div id="youtube-rank-items"></div>${result.total ? '' : '<p class="hint">点一次「同步全部」先取轻量候选，不会直接处理全部视频。</p>'}`;
     $('source-list').prepend(panel);
     $('youtube-rank-items').innerHTML = [...items].sort((left,right) => (left.score_rank || 100000) - (right.score_rank || 100000))
       .map(item => `<article class="youtube-rank-item"><a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a>

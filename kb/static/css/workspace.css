@@ -87,13 +87,11 @@ h1 { font-family: var(--font-display); font-size: 19px; font-weight: 900; letter
 #search-submit .icon { width: 17px; }
 .filters { padding: 10px 0; }
 .empty-state { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 48px 20px; color: var(--muted); background: var(--card); border: 1px dashed var(--line); border-radius: 12px; }
-.empty-state h3 { color: var(--ink); font-size: 16px; font-weight: 600; margin: 14px 0 6px; }
+.empty-state h3 { color: var(--ink); font-size: 16px; font-weight: 600; margin-bottom: 6px; }
 .empty-state p { font-size: 13px; }
 .empty-state > button { margin-top: 18px; }
-.empty-icon { display: grid; place-items: center; width: 46px; height: 50px; background: var(--brand-soft); border-radius: 12px 12px 4px 12px; color: var(--brand); }
-.empty-icon .icon { width: 22px; height: 22px; }
-.search-suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 9px; margin-top: 20px; }
-.search-suggestions button { font-size: 12px; }
+.search-welcome { display: flex; flex-wrap: wrap; gap: 9px; }
+.search-welcome button { font-size: 12px; }
 .hit { padding: 16px 18px; border-radius: 10px; margin-bottom: 10px; }
 .hit h3 { margin-bottom: 8px; font-size: 15px; }
 .hit .summary { line-height: 1.75; }
@@ -134,9 +132,6 @@ body.chat-mode #askpanel { display: flex; flex-direction: column; width: 100%; f
 .chat-side { width: 192px; }
 .chat-main { border-radius: 12px; }
 .chat-empty { padding: 55px 22px 20px; }
-.chat-empty-title { font: 900 22px var(--font-display); letter-spacing: .02em; margin: 18px 0 15px; }
-.chat-empty .empty-icon { margin: auto; }
-.chat-empty-sub { font-size: 13px; line-height: 1.9; max-width: 350px; }
 .chat-suggest { background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 10px 15px; font-size: 12.5px; white-space: normal; text-align: left; width: min(400px,100%); }
 .chat-suggest:hover { border-color: var(--brand); color: var(--brand); }
 .fav-sub { flex-wrap: wrap; align-items: center; padding: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
@@ -199,7 +194,7 @@ body.overlay-open { overflow: hidden; }
   h1 { font-size: 22px; }
   .gallery-controls { padding: 14px 14px 0; }
   .gfilters { gap: 8px; }
-  .select-field > span, .gallery-search kbd { display: none; }
+  .gallery-search kbd { display: none; }
   .select-field select { max-width: 98px; padding: 6px 28px 6px 6px; font-size: 11px; }
   .gallery-search { padding: 0 10px; gap: 8px; }
   #g-q { font-size: 14px; }
@@ -246,7 +241,6 @@ body.overlay-open { overflow: hidden; }
   #chat-msgs { padding: 14px 15px 8px; }
   .chat-inputbar { margin: 4px 10px 10px; }
   .chat-empty { padding: 25px 5px 10px; }
-  .chat-empty-title { font-size: 22px; }
   .fav-tools { width: 100%; gap: 7px; }
   .fav-cards { grid-template-columns: minmax(0,1fr); }
   .fav-tools select { max-width: 145px; }

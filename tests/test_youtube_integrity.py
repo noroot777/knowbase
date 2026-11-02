@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from kb.collectors import FetchScope
@@ -44,12 +45,40 @@ class YouTubeIntegrity(YouTubeFixture):
         captions.assert_called_once()
         self.assertEqual(self.complete, result['segments'])
 
-    def test_translation_must_have_substance_for_each_marker(self):
-        text = '[00:00:00] ' + 'Every change needs verification and testing. ' * 40 + '\n[00:05:00] Important final conclusion.'
-        for output in ('[00:00:00] 中文摘要。\n[00:05:00] 结论。',
-                       '[00:00:00] ' + '完整中文内容。' * 80 + '\n[00:05:00] '):
+    def test_translation_must_have_substance_for_each_text_block(self):
+        text = 'Every change needs verification and testing. ' * 40 + 'Important final conclusion.'
+        for output in ('中文摘要。结论。', 'Important final conclusion.'):
             with self.subTest(output=output), patch.object(notes, 'call', return_value=output), self.assertRaises(RuntimeError):
                 notes.translate(text, None, time.monotonic() + 5, lambda: False)
+
+    def test_timestamp_free_notes_are_published_and_exported(self):
+        selected = SimpleNamespace(provider='fixture', model_id='fixture')
+        translated = '作者演示智能体生成代码并运行测试，强调必须核验结果与限制。'
+        payload = {'title': '智能体代码生成的实践', 'summary': '作者展示方法并提示核验限制。',
+                   'body': '## 核验要求\n每次生成的改动都需要验证。'}
+        prompts = []
+
+        def reply(prompt, *arguments):
+            prompts.append(prompt)
+            return json.dumps(payload, ensure_ascii=False) if '只输出 JSON' in prompt else translated
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value=self.metadata), \
+                patch.object(media, 'obtain', return_value={'origin': 'uploaded_captions', 'language': 'en',
+                                                           'segments': self.complete}):
+            result = collector.collect(FetchScope(force=True))
+        self.assertEqual((1, 1), (result['processed'], result['added']))
+        self.assertFalse(result['errors'])
+        self.assertNotRegex('\n'.join(prompts), r'\[\d{2}:\d{2}:\d{2}\]')
+        exported = collector.YouTubeCollector('youtube').materialize()
+        self.assertEqual(1, len(exported))
+        files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
+        self.assertEqual(1, len(files))
+        self.assertIn('## 完整中文转录\n\n' + translated, files[0].read_text())
+        self.assertNotIn('&t=', files[0].read_text())
 
     def test_aliases_share_content_and_survive_disable_delete_and_repoint(self):
         alias = reg.save_subscription('youtube', {'name': '别名频道', 'url': 'https://www.youtube.com/@same-channel'})

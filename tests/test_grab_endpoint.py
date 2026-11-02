@@ -11,63 +11,16 @@ import json
 import unittest
 from unittest.mock import patch
 
-from kb import config, pipeline
+from kb import config
 from kb.feeds import grab, grab_page, registry as reg
 from kb.feeds.fetching import Response
 from tests.grab_fixtures import (BODY, DIGEST_SUMMARY, SOFT_WALL, TWEET_FULL, WALL,
-                                 GrabCase, PAGE, TWEET, html_resp, page_html,
+                                 EndpointCase, PAGE, TWEET, html_resp, page_html,
                                  tweet_payload)
 
 
-class EndpointTests(GrabCase):
+class EndpointTests(EndpointCase):
     """收录端点:**重复投递时按真实进度回答**,别把暂存说成已完成。"""
-
-    def setUp(self):
-        super().setUp()
-        from fastapi.testclient import TestClient
-
-        from kb.server import app
-        self.client = self.enterContext(TestClient(app))
-        # 扩展那条路(`/from-page`)在密钥之前还有一道 `local`:只认本机回环。
-        # 默认那个 client 的 Host 是 `testserver`,一个字都打不进来 —— 所以这里
-        # 单配一个真实形状的,那一道由 `needs_the_pairing_key` 正面钉。
-        self.local_client = self.enterContext(
-            TestClient(app, base_url='http://127.0.0.1', client=('127.0.0.1', 54321)))
-        self.runs: list[list[str]] = []
-
-    def pipeline_patch(self, started=True, reason='其他同步正在运行'):
-        """**打桩也要还原那条契约**:`start_pipeline` 返回的是**这一轮的 id**,
-        不是 True —— 前端要拿它核对那一轮 export/index 的结果。回 True 的打桩会
-        让「端点把 run 原样交出去」这件事测不出来。"""
-        def fake(stages, refused=None, crawl_filter=None, **kwargs):
-            self.runs.append((list(stages), (crawl_filter or {}).get('channel')))
-            if not started and refused is not None:
-                refused.append(reason)
-            return 'run-7' if started else ''
-        return patch.object(pipeline, 'start_pipeline', fake)
-
-    def post(self, url=PAGE, **body):
-        return self.client.post('/api/grab', json={'url': url, **body})
-
-    def restore(self, url=PAGE):
-        """「只把欠的那一步补上」那条**独立路径**。
-
-        它不是 `/api/grab` 上的一个字段:字段会被**更新了文件却没重启**的那个
-        kb-web 静默忽略(Pydantic 默认丢掉不认识的键),于是降级成「不在就抓一篇
-        新的」。独立路径在那种服务上回 404,客户端据此失败关闭 —— 口径见
-        `kb.web.grab_api.RestoreRequest`。
-        """
-        return self.client.post('/api/grab/restore', json={'url': url})
-
-    def from_page(self, url=PAGE, title='浏览器里那一页', body=BODY, auth=True, path=''):
-        """扩展那条路:正文由人打开着的标签提供,服务端一次 HTTP 都不发。"""
-        from kb import browser_capture as capture
-
-        headers = ({'Authorization': 'Bearer ' + capture.pairing_key(),
-                    'Origin': 'chrome-extension://fixture'} if auth else {})
-        return self.local_client.post(f'/api/grab/from-page{path}',
-                                      json={'url': url, 'title': title, 'body': body},
-                                      headers=headers)
 
     def test_a_page_from_the_browser_is_collected_without_fetching_anything(self):
         """人浏览器里那一页 → 一条新条目。**一次 HTTP 都不发**,后半条链照旧跑。
@@ -156,9 +109,9 @@ class EndpointTests(GrabCase):
         """超上限**直接拒**,不许截了之后当成「人核对过的完整正文」存进去。
 
         判据落在**库里那一行**和**预检那个字数**上,不是「有没有报错」:
-        截断的事故形态恰恰是一切看着都正常 —— 预览里是全文、人勾了确认、
-        接口回 200、`confirmed=True`,只有尾巴在 SQLite 里不见了,而
-        `put_items` 的 `DO NOTHING` 让重投救不回来。
+        截断的事故形态恰恰是一切看着都正常 —— 扩展上报的是全文、接口回 200、
+        面板上那一条齐齐整整,只有尾巴在 SQLite 里不见了,而 `put_items` 的
+        `DO NOTHING` 让重投救不回来。
 
         反过来钉一边:正好压线的那一份照旧收得进去,且**一个字符都没少**
         (否则「一律拒」也能让上面那半条绿)。
@@ -229,8 +182,8 @@ class EndpointTests(GrabCase):
         self.assertEqual(data['run'], 'run-7')
         # **欠哪一步要说出来**(`grab.owing` 那一份口径):笼统一句「还没写进知识
         # 库」把「还没导出」和「文件不见了」说成同一件事,而后者补跑一轮撞不到它。
-        self.assertIn('还没写成 vault 里那一篇', data['detail'])
-        self.assertEqual(data['owing'], '还没写成 vault 里那一篇')
+        self.assertIn('还没导出成笔记文件', data['detail'])
+        self.assertEqual(data['owing'], '还没导出成笔记文件')
         # **后果断言**:后半条链真被跑起来了 —— 只改一句文案的话这里红。
         self.assertEqual(self.runs, [(['export', 'index', 'extract'], 'inbox')])
 
@@ -398,7 +351,7 @@ class EndpointTests(GrabCase):
         with self.pipeline_patch():
             data = self.post().json()
         self.assertEqual((data['duplicate'], data['done']), (True, False))
-        self.assertEqual(data['owing'], 'vault 里那一篇不见了')
+        self.assertEqual(data['owing'], '导出的那个笔记文件不见了')
         self.assertTrue(data['reclaimed'])
         # **后果断言**:这一轮 export 真会选中它(只回一个标志位的话这里红)。
         self.assertEqual(self.pending_export(), 1)
@@ -436,7 +389,7 @@ class EndpointTests(GrabCase):
         with self.pipeline_patch():
             got = self.client.get('/api/grab/state', params={'url': PAGE}).json()
         self.assertEqual((got['known'], got['done'], got['owing']),
-                         (True, False, '还没写成 vault 里那一篇'))
+                         (True, False, '还没导出成笔记文件'))
         self.mark_exported(PAGE, path)
         self.index_doc(path)
         with self.pipeline_patch():
@@ -450,7 +403,7 @@ class EndpointTests(GrabCase):
         (config.VAULT_ROOT / path).unlink()
         with self.pipeline_patch():
             got = self.client.get('/api/grab/state', params={'url': PAGE}).json()
-        self.assertEqual((got['done'], got['owing']), (False, 'vault 里那一篇不见了'))
+        self.assertEqual((got['done'], got['owing']), (False, '导出的那个笔记文件不见了'))
         self.assertEqual((got['exported'], got['stored']), (True, False))
         # **只读**:这一问不许顺手把水位清掉(那是投递那颗按钮的事)。
         self.assertEqual(self.pending_export(), 0)

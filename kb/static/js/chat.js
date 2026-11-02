@@ -45,7 +45,6 @@ function stopChat() { if (chatAbort) chatAbort.abort(); }
 // 那是给第一次访问的访客写的;这是自己每天开的工具,说明文案第二次看就是噪音。
 const CHAT_EMPTY = `
   <div class="chat-empty">
-    <div class="chat-empty-sub">问点什么，回答会带上出处。</div>
     <button class="chat-suggest" onclick="suggestChat(this)">最近一周公众号都提过哪些开源项目？</button>
     <button class="chat-suggest" onclick="suggestChat(this)">知识库里有哪些可以生成视频的开源模型？</button>
     <button class="chat-suggest" onclick="suggestChat(this)">Claude Code 有哪些实用技巧？</button>

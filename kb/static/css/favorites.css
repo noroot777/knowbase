@@ -85,13 +85,7 @@
 .fv-aside-heading > span:first-child { display: inline-flex; align-items: center; gap: 7px; }
 .fv-aside-heading .icon { width: 15px; height: 15px; }
 .fv-tiny-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--brand); }
-.fv-start-intro { padding: 26px 22px 20px; }
-.fv-start-mark { display: grid; place-items: center; width: 42px; height: 45px; color: var(--brand); background: var(--brand-soft); border: 1px solid var(--line); border-radius: 12px 12px 12px 3px; margin-bottom: 18px; transform: rotate(-6deg); }
-.fv-start-mark .icon { width: 23px; height: 23px; }
-.fv-start-intro h2 { font: 900 25px/1.5 var(--font-display); letter-spacing: -.03em; color: var(--brand-deep); }
-.fv-start-intro h2 span { display: block; font: 14px/1.8 var(--font-body); font-weight: 400; color: var(--ink-2); margin-top: 2px; letter-spacing: 0; }
-.fv-start-intro > p { margin-top: 13px; font-size: 12px; line-height: 1.9; color: var(--ink-2); }
-.fv-recommendation { margin: 0 16px 22px; padding: 17px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); box-shadow: 0 3px 0 var(--brand-soft); }
+.fv-recommendation { margin: 16px 16px 22px; padding: 17px; border: 1px solid var(--line); border-radius: 10px; background: var(--card); box-shadow: 0 3px 0 var(--brand-soft); }
 .fv-rec-label { display: flex; justify-content: space-between; gap: 8px; margin-bottom: 10px; font-size: 11px; color: var(--muted); }
 .fv-rec-label > span:last-child { white-space: nowrap; }
 .fv-recommendation h3 { font-size: 17px; font-weight: 650; overflow-wrap: anywhere; }
@@ -110,9 +104,6 @@
 .fv-suggestion summary::-webkit-details-marker { display: none; }
 .fv-suggestion p { color: var(--muted); margin: 9px 0; line-height: 1.8; }
 .fv-suggestion .text-button { display: flex; align-items: center; justify-content: space-between; gap: 10px; text-align: left; padding: 3px 0; width: 100%; font-size: 10px; }
-.fv-aside-footnote { display: flex; align-items: center; gap: 7px; padding: 15px 20px; border-top: 1px solid var(--line-soft); color: var(--muted); font-size: 9px; }
-.fv-aside-footnote .icon { width: 12px; height: 12px; }
-.fv-aside-tip { font-size: 12px; color: var(--muted); padding: 0 22px 24px; line-height: 1.9; }
 .fv-detail { max-height: calc(100vh - 48px); overflow-y: auto; overscroll-behavior: contain; scrollbar-width: thin; }
 .fv-detail > .fv-aside-heading { padding-top: 10px; padding-bottom: 10px; background: var(--card); position: sticky; top: 0; z-index: 1; border-bottom-color: var(--line-soft); }
 /* 常驻返回按钮的外观自己写一份:`#favpanel .fv-icon-button` 那条特异性 (1,1,0)
@@ -153,9 +144,8 @@
 .fv-extract button { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; padding: 0; }
 .fv-extract .icon { width: 14px; height: 14px; }
 .fv-note-editor { border-top: 1px solid var(--line-soft); margin-top: 23px; padding-top: 18px; }
-.fv-note-editor > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 9px; }
+.fv-note-editor > div:first-child { margin-bottom: 9px; }
 .fv-note-editor label { font-size: 12px; font-weight: 600; }
-.fv-note-editor > div:first-child > span { font-size: 10px; color: var(--muted); }
 #fav-note { width: 100%; padding: 11px; min-height: 110px; resize: vertical; border: 1px solid var(--line); border-radius: 7px; font: 14px/1.8 var(--font-body); background: var(--card); }
 #fav-note::placeholder { color: var(--muted); }
 .fv-note-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
@@ -224,7 +214,6 @@
   .fv-detail > .fv-aside-heading { position: sticky; top: var(--topbar-h); }
   /* 窄屏滚的是整页,absolute 的常驻返回按钮会跟着内容滚出视口 —— 钉在视口上 */
   .fv-detail-exit { position: fixed; top: calc(var(--topbar-h) + 8px); right: 12px; z-index: 9; }
-  .fv-start-intro { display: none; }
   .fv-recommendation { margin-top: 16px; }
   #favpanel .fv-detail-back { display: inline-flex; align-items: center; gap: 5px; width: auto; font-size: 11px; }
   .fv-detail-back > span { display: inline; }

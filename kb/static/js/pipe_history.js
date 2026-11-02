@@ -75,7 +75,7 @@ function renderPipeHistory() {
   renderPipeMatrixFrame();
   renderPipeHistoryLive();
   if (!pipeHistory.length) {
-    list.innerHTML = '<p class="pipe-history-empty">还没有跑完过一轮。同步结束后这里会按轮次留档。</p>';
+    list.innerHTML = '<p class="pipe-history-empty">还没有跑完过一轮。</p>';
     note.textContent = '';
     pipeHistoryRunState = pipeHistorySig();
     if (typeof renderPipeHeadFacts === 'function') renderPipeHeadFacts();

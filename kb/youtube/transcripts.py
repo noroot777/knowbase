@@ -104,25 +104,20 @@ def validate(segments, duration):
     return segments
 
 
-def timestamp(seconds_value):
-    value = int(seconds_value)
-    hours, remainder = divmod(value, 3600)
-    minutes, seconds_part = divmod(remainder, 60)
-    return f'{hours:02}:{minutes:02}:{seconds_part:02}'
-
-
 def blocks(segments, limit=3000):
-    result, current = [], ''
-    for segment in segments:
-        text = segment['text']
-        while text:
-            prefix = f"[{timestamp(segment['start'])}] "
-            piece, text = text[:limit - len(prefix)], text[limit - len(prefix):]
-            line = prefix + piece
-            if current and len(current) + len(line) + 2 > limit:
-                result.append(current)
-                current = ''
-            current += ('\n\n' if current else '') + line
-    if current:
-        result.append(current)
+    if limit < 1:
+        raise ValueError('正文分块长度必须为正数')
+    text = ' '.join(segment['text'].strip() for segment in segments).strip()
+    result = []
+    while len(text) > limit:
+        head = text[:limit]
+        boundaries = [head.rfind(ending) + len(ending)
+                      for ending in ('。', '！', '？', '. ', '! ', '? ', '\n\n') if ending in head]
+        boundary = max(boundaries, default=0)
+        if boundary < max(1, limit // 2):
+            boundary = head.rfind(' ') + 1 or limit
+        result.append(text[:boundary].strip())
+        text = text[boundary:].lstrip()
+    if text:
+        result.append(text)
     return result

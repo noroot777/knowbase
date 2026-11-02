@@ -99,7 +99,6 @@
 .source-failure p { margin-top:6px; }
 .source-subscription.is-paused { background:transparent; }
 .source-empty { border:1px dashed var(--line); border-radius:14px; text-align:center; padding:70px 28px; color:var(--muted); }
-.source-empty .icon { width:32px; height:32px; margin-bottom:15px; }
 .source-empty h3 { font:600 18px var(--font-display); color:var(--ink); margin-bottom:12px; }
 .source-empty p { font-size:13px; max-width:320px; margin:auto; line-height:1.9; }
 .source-banner { display:flex; align-items:center; flex-wrap:wrap; gap:12px; padding:12px 16px; border-radius:10px; background:var(--brand-soft); margin-bottom:16px; font-size:13px; }

@@ -246,8 +246,8 @@ async function careRelease(kind, keys, decisions) {
   }
 }
 
-/** 从浏览器采集:把这一条交给补抓页(`/browser-capture?item=<key>`),由人在那篇
-    文章自己的标签上点扩展、预览确认,正文补回原条目。
+/** 从浏览器采集:把这一条交给左侧的采集抽屉,由人在那篇文章自己的标签上点扩展,
+    正文补回原条目。
 
     **这里只是一次交接,不做任何判断。**
     - **准入**是后端那一份(`browser_capture._admit_body` / `target()`),界面上由
@@ -257,16 +257,48 @@ async function careRelease(kind, keys, decisions) {
       `life` 过去 —— 捎过去就是在同一个问题上判第二遍,而两份判据的洞不一样
       (口径见 `docs/decisions/browser-capture.md` 与 `intake-diagnostics.md`)。
     - **key 用这一条真实的 `feed_items.key`**(和 `/body`、`/requeue` 发出去的
-      是同一个值),不是列表上的展示编号 —— 补抓页按它绑定条目。
+      是同一个值),不是列表上的展示编号 —— 抽屉按它绑定条目。
 
-    **不弹确认框**:前提(文章开着、扩展装好)写在按钮旁边那行提示里,而确认框里
-    点「开始」之后再 `window.open` 已经不是用户手势,会被弹窗拦截挡掉。
+    **开的是左侧抽屉,不再跳走。** 原来这里 `window.open('/browser-capture?item=…')`
+    去一个独立页面:人正在「问题与待办」里逐条看,点一下就被带离现场,补完正文还要
+    自己找回刚才那一条。抽屉贴在左边,底下这一页原样留着。
 
-    新标签用 `window.open(..., 'noopener')`:补抓页拿不到 `window.opener`,口径同
-    `fav.js` 那一处。 */
+    **不弹确认框**:前提(文章开着、扩展装好)写在按钮旁边那行提示里。
+
+    **交接完还要接回来**:采集发生在扩展弹窗里,这块面板既收不到回包也不轮询
+    (`careSchedule` 只在同步真跑着的时候才排下一轮)。不接的话,人关掉抽屉之后
+    左边那一行还写着补抓失败的原话、右边还摆着「从浏览器采集」—— 而这一条此刻
+    已经换了档。见 `careAfterCapture`。 */
 function careOpenCapture(row) {
-  const url = '/browser-capture?item=' + encodeURIComponent(row.key);
-  window.open(url, '_blank', 'noopener');
+  openCaptureDrawer(row.key, {
+    onClose: () => refreshCare(false),
+    onSettled: note => careAfterCapture(row.key, note),
+  });
+}
+
+/** 采集抽屉关掉之后那句「它去哪了」。列表重读不在这儿 —— 那是 `onClose` 那一下的事。
+
+    **重画无条件,报喜有条件,所以是两个口子**(`onClose` / `onSettled`):漏刷新的
+    代价是人照着一屏假状态按下一颗按钮,而那一下必须同步、不许等抽屉去问服务端;
+    「采成了」那句话要等问出来才知道,到得晚一点没有代价。空串不会叫到这儿来
+    (判在 `capture_drawer.js`)。
+
+    **「它去哪了」要说出来,但话不自己编。** 补完正文的那一条当场离开「待决定」:
+    `body_exhausted`(重试已停止)→ `ingest_queued`(写入知识库 · 待执行),连分组都
+    换了,所以它**不在这一屏上了** —— 左边那一行消失、右边退回「点左边任意一条」。
+    只让它静默消失是最糟的一种:这块面板自己的硬约束写着**补抓成功 ≠ 已交付**
+    (此刻库里躺的还是那个几十字的壳,检索里搜不到),消失看着就像「这件事办完了」。
+    所以问一次 `/items/<key>`,把**服务端给的那一档的名字**原样摆进那句话里,措辞和
+    列表上那行小标题同一个口径(`${lane.stage} · ${lane.state}`,见
+    `diag_list.careSectionNode`)。问不到就只说做了什么,不猜。 */
+async function careAfterCapture(key, note) {
+  let where = '';
+  try {
+    const now = await careGet('/items/' + encodeURIComponent(key));
+    const lane = now.lane;
+    if (lane) where = lane.stage ? `${lane.stage} · ${lane.state}` : lane.state;
+  } catch (e) { /* 问不到这一条此刻在哪一档,下面就只说做了什么 */ }
+  toast(where ? `${note}；这一条现在排在「${where}」` : note, { type: 'ok', ms: 6000 });
 }
 
 /** 手动补正文(**兜底那一颗**,主入口是上面那个「从浏览器采集」)。

@@ -21,10 +21,9 @@
 function egressMarkup() {
   return `<div class="modal" role="dialog" aria-modal="true" aria-labelledby="egress-title">
   <h2 id="egress-title">出口与解析</h2>
-  <div class="row hint">本机 DNS 给错地址时,抓取会敲错门 —— 症状是超时或者「无法解析订阅
-    服务器地址」。这里改成问一台可信的 DoH 解析器,并指定抓取走哪个代理。只存本机
-    <code>data/secrets.json</code>,<b>保存后下一条抓取就用新值,不用重启</b>;留空的项回落
-    到环境变量。</div>
+  <div class="row hint">本机 DNS 给错地址时,抓取会超时或者报「无法解析订阅服务器地址」。
+    只存本机 <code>data/secrets.json</code>,<b>保存后下一条抓取就用新值,不用重启</b>;留空的
+    项回落到环境变量。</div>
   <div class="eg-row">
     <span class="eg-label">状态</span>
     <span id="egress-state" class="eg-state off">读取中…</span>
@@ -47,7 +46,7 @@ function egressMarkup() {
     <span class="eg-label">单次上限</span>
     <input id="egress-seconds" type="number" min="1" max="60" step="1"
            aria-label="单次解析上限(秒)" placeholder="8" disabled>
-    <span class="eg-hint">秒。整次解析还受这一次抓取自己的截止时间管,取小的那个。</span>
+    <span class="eg-hint">秒,与这次抓取自己的截止时间取小。</span>
     <span class="eg-src" id="egress-seconds-src"></span>
   </div>
   <div class="field-err" id="egress-seconds-err" role="alert"></div>
@@ -64,8 +63,7 @@ function egressMarkup() {
            aria-label="测哪个域名" placeholder="mistral.ai" disabled>
     <span class="eg-hint">换成你抓不到的那个。</span>
   </div>
-  <div class="eg-probe" id="egress-probe">点「测一下」:按上面这几项真解析一次(用的是抓取时的
-同一条判据),报解析出来的地址和耗时 —— 不写盘、不改配置。</div>
+  <div class="eg-probe" id="egress-probe">按上面这几项真解析一次,用抓取时的同一条判据;不写盘、不改配置。</div>
   <div class="eg-foot">
     <span id="egress-msg" class="hint"></span>
     <button type="button" class="ghost" onclick="closeEgress()">关闭</button>

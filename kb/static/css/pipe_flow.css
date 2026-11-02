@@ -67,7 +67,6 @@
 .pipe-flow-detail #pipe-stages .pipe-stage:not([hidden]):last-of-type, .pipe-flow-detail #pipe-flow-extra .pipe-stage { border-bottom: none; }
 .pipe-flow-detail .pipe-stage-number { width: 24px; height: 24px; font-size: 11.5px; margin-top: 1px; }
 .pipe-flow-detail .pipe-stage h3 { font-size: 14.5px; line-height: 1.6; display: inline; }
-.pipe-flow-detail .pipe-stage-desc { display: inline; margin-left: 8px; }
 .pipe-flow-detail .pipe-stage-detail { margin-top: 2px; color: var(--ink-2); }
 .pipe-flow-detail .pipe-stage[data-status=ok] .pipe-stage-number { background: var(--brand-soft); color: var(--brand-deep); }
 .pipe-flow-detail .pipe-stage[data-status=skipped] .pipe-stage-number,

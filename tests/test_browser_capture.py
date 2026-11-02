@@ -5,55 +5,14 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
 from kb import browser_capture as capture
 from kb.feeds import readable, registry as reg
 from kb.web import browser_capture_api
 from kb.source_types import catalog, permits_link_body
-from tests.test_feed_fulltext import FullTextCase
-
-BODY = '\n\n'.join([
-    'Browser capture reads the article that a person has already opened. The user chooses a target item before any text is collected, so the content cannot silently replace an unrelated document. The preview shows the actual address rather than trusting metadata supplied by a website.',
-    'An extension keeps its pairing secret in its own local storage. It sends text only to the explicitly configured loopback service, without cookies or form values. Navigation redirects are refused on that connection so a local service cannot send the credential to another server.',
-    'A replacement compares both the original content fingerprint and a monotonically increasing revision. If a background worker changes the document while the person is reading, the older request loses permission to overwrite it. This also protects changes that later return to identical text.',
-    'Existing translations describe an earlier version and must be invalidated when the source changes. The export receipt remains historical evidence rather than being erased. Later stages regenerate the document and its index; simply storing text is never reported as a completed knowledge-base update.',
-    'A selected paragraph is not necessarily a whole article. The person must inspect the complete preview and explicitly confirm its scope. A length threshold helps reject empty pages, but cannot prove that a subscription wall or lazy-loaded section contains everything the author published.',
-])
+from tests.browser_capture_case import BODY, CaptureCase
 
 
-class BrowserCaptureTests(FullTextCase):
-    def setUp(self):
-        super().setUp()
-        capture._intents.clear()
-        self.addCleanup(capture._intents.clear)
-        app = FastAPI()
-        app.include_router(browser_capture_api.router)
-        self.client = TestClient(app, base_url='http://127.0.0.1',
-                                 client=('127.0.0.1', 54321),
-                                 headers={'Sec-Fetch-Site': 'same-origin'})
-        self.key = self.put()
-        self.auth = {'Authorization': 'Bearer ' + capture.pairing_key(),
-                     'Origin': 'chrome-extension://fixture'}
-
-    def intent(self):
-        result = self.client.post('/api/browser-capture/intents',
-                                  json={'key': self.key, 'page_url': 'https://e.org/post'})
-        self.assertEqual(200, result.status_code)
-        return result.json()
-
-    def precheck(self, intent, body='', method='article', **overrides):
-        payload = dict(intent_id=intent['id'], page_url='https://e.org/post',
-                       body=body, method=method)
-        payload.update(overrides)
-        return self.client.post('/api/browser-capture/precheck', json=payload, headers=self.auth)
-
-    def upload(self, intent, **overrides):
-        body = dict(intent_id=intent['id'], page_url='https://e.org/post',
-                    title='Browser title', body=BODY, method='article', confirmed_complete=True)
-        body.update(overrides)
-        return self.client.post('/api/browser-capture/upload', json=body, headers=self.auth)
+class BrowserCaptureTests(CaptureCase):
 
     def test_saves_original_item_with_provenance_and_idempotent_receipt(self):
         with reg.db() as conn:
@@ -187,13 +146,57 @@ class BrowserCaptureTests(FullTextCase):
             self.assertEqual(404, self.precheck(expired).status_code)
         self.assertEqual(422, self.precheck(self.intent(), method='screenshot').status_code)
 
-    def test_wrong_page_unconfirmed_and_short_body_cannot_write(self):
+    def test_wrong_page_and_short_body_cannot_write(self):
+        """弹窗上那道「我已核对」撤掉之后,**拦截全靠服务端这几道**。
+
+        原来这条还验一项 `confirmed_complete=False`,那是扩展报给服务端的一句
+        「人已经核对过了」。界面不再问人,那个字段也就跟着撤了(理由见
+        `browser_capture_api.upload` 的 docstring)—— 留着它只会变成扩展签给
+        自己的证词。所以这里改钉**仅剩的那两道**,外加反过来那一边。
+        """
         intent = self.intent()
         before = self.row(self.key)
-        for overrides in ({'page_url': 'https://e.org/another'},
-                          {'confirmed_complete': False}, {'body': 'short'}):
+        for overrides in ({'page_url': 'https://e.org/another'}, {'body': 'short'}):
             self.assertGreaterEqual(self.upload(intent, **overrides).status_code, 400)
         self.assertEqual(before['body'], self.row(self.key)['body'])
+        # 反过来钉一边:该放行的照旧放行 —— 不带任何「已核对」字段也写得进去,
+        # 否则上面那两条在「这个端点整个坏了」时同样全绿。
+        self.assertEqual(200, self.upload(self.intent()).status_code)
+        self.assertEqual(BODY, self.row(self.key)['body'])
+
+    def test_a_self_signed_confirmation_field_is_refused_not_believed(self):
+        """别把那道撤掉的勾当成凭证偷偷加回来。
+
+        `extra='forbid'` 让多出来的字段当场 422。钉它是因为「加回一个布尔字段
+        并在服务端信它」是这类回退最自然的写法,而那一刻界面上并没有人在核对
+        —— 服务端会拿到一句永远为真的证词,还以为自己多了一道闸。
+        """
+        intent = self.intent()
+        before = self.row(self.key)
+        self.assertEqual(422, self.upload(intent, confirmed_complete=True).status_code)
+        self.assertEqual(before['body'], self.row(self.key)['body'])
+
+    def test_who_vouched_for_this_body_is_recorded_as_it_actually_happened(self):
+        """**谁给这份正文背书**,库里要如实记着。
+
+        `body_provenance.confirmed` 记的是「有没有人逐字看过」。扩展上那道
+        「我已核对」连同预览区撤掉之后,那两条路上确实没人看过 —— 人选的是
+        **这一页**,正文是提取器读的,所以它们记 `False`。只有「手动补正文」
+        那条还记 `True`:那一段是人自己粘进来的,断言它属于这篇文章的就是他。
+
+        两者要分得出来,否则事后谁也说不清某一篇的正文是人担保的还是机器读的。
+        正反都钉:只问「有没有这个键」的话,两条路一起记 `True` 也全绿。
+        """
+        intent = self.intent()
+        self.assertEqual(200, self.upload(intent).status_code)
+        grabbed = json.loads(self.row(self.key)['body_provenance'])
+        self.assertEqual('browser_article', grabbed['method'])
+        self.assertIs(False, grabbed['confirmed'])
+
+        capture.save_pasted(self.key, BODY + '\nPasted by a person who vouches for it.')
+        pasted = json.loads(self.row(self.key)['body_provenance'])
+        self.assertEqual('manual_paste', pasted['method'])
+        self.assertIs(True, pasted['confirmed'])
 
     def test_revision_change_even_with_same_hash_blocks_overwrite(self):
         intent = self.intent()
@@ -226,7 +229,7 @@ class BrowserCaptureTests(FullTextCase):
     def test_requires_local_same_origin_and_paired_extension(self):
         intent = self.intent()
         data = dict(intent_id=intent['id'], page_url='https://e.org/post', title='title',
-                    body=BODY, method='article', confirmed_complete=True)
+                    body=BODY, method='article')
         self.assertEqual(401, self.client.post('/api/browser-capture/upload', json=data).status_code)
         self.assertEqual(403, self.client.get('/api/browser-capture/pairing',
                                              headers={'Origin': 'https://evil.example'}).status_code)
@@ -413,14 +416,16 @@ class BrowserCaptureTests(FullTextCase):
         self.assertEqual(200, result.status_code)
         self.assertEqual(['export', 'index'], start.call_args.args[0])
         self.assertEqual({'channel': 'rss'}, start.call_args.kwargs['crawl_filter'])
-        page = (browser_capture_api.ROOT / 'kb/static/browser-capture.html').read_text(encoding='utf-8')
+        # 三处话必须对得上。补抓页退役成抽屉之后,「页面」那一份在抽屉模板里
+        # (`capture_drawer.js`),确认框那一份在状态机里(`browser_capture.js`)。
+        shell = (browser_capture_api.ROOT / 'kb/static/js/capture_drawer.js').read_text(encoding='utf-8')
         script = (browser_capture_api.ROOT / 'kb/static/js/browser_capture.js').read_text(encoding='utf-8')
-        for place in (page, script, result.json()['detail']):
+        for place in (shell, script, result.json()['detail']):
             self.assertIn('条目化提取不在这一步', place)
             self.assertNotIn('提取模型', place)
 
-    def test_extension_bundle_and_both_pages_carry_the_shared_error_reader(self):
-        """下发的 ZIP 要带上扩展目录里的每个文件;两个页面都要在 `ui.js` 之前引 `api.js`。
+    def test_extension_bundle_and_the_page_carry_the_shared_error_reader(self):
+        """下发的 ZIP 要带上扩展目录里的每个文件;页面要在 `ui.js` 之前引 `api.js`。
 
         `apiFail` / `apiResponse` 只有一份实现,住在扩展目录(扩展装在浏览器里,取不到
         `kb/static/js/` 下的文件)。页面漏引它的后果是**所有失败请求当场
@@ -434,9 +439,33 @@ class BrowserCaptureTests(FullTextCase):
         self.assertEqual(200, archive.status_code)
         with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
             self.assertEqual(shipped, sorted(name.split('/')[-1] for name in bundle.namelist()))
-        for page in ('kb/static/index.html', 'kb/static/browser-capture.html'):
-            text = (browser_capture_api.ROOT / page).read_text(encoding='utf-8')
-            self.assertLess(text.index('knowbase-capture/api.js'), text.index('/static/js/ui.js'), page)
+        # 补抓页退役之后只剩这一个页面(采集那一块搬进了它的左侧抽屉)。
+        page = 'kb/static/index.html'
+        text = (browser_capture_api.ROOT / page).read_text(encoding='utf-8')
+        self.assertLess(text.index('knowbase-capture/api.js'), text.index('/static/js/ui.js'), page)
+
+    def test_setup_answers_where_to_install_and_nothing_about_pairing(self):
+        """`/setup` 只答一件事:装哪个目录。
+
+        它曾经捎一个 `used_before` 回去(判据是 `browser_capture_audit` 里有没有过一
+        行),抽屉据此决定首次引导摆在哪 —— 而那是**另一个范畴的事实**:回执是全库
+        共享的历史,引导问的是此刻**这个浏览器**的配对状态。错位出来的两种形态:
+        ①另一个浏览器采成过一次,于是这个还没配对的也看不到引导,他只会点下「发起
+        采集」然后等一个永远不来的采集;②只用「改用这一页的正文」收录新链接的人一直
+        有配对,那条路只写 `body_provenance`、从不插审计表,引导就永远摊在他眼前。
+        那一问搬去扩展自己在页面上答(`present.js`,回归 `tests/capture_present_mark.mjs`)。
+
+        **按整个键集比,不只问「有没有 `used_before`」** —— 换个名字再捎同一个事实
+        回去是同一个错,而那样写只问有无的用例会全绿。
+        """
+        self.assertEqual(200, self.upload(self.intent()).status_code)
+        with reg.db() as conn:
+            self.assertEqual(1, conn.execute('SELECT count(*) FROM browser_capture_audit')
+                             .fetchone()[0], '回执确实写进去了 —— 下面那一答照旧不许提它')
+        answer = self.client.get('/api/browser-capture/setup')
+        self.assertEqual(200, answer.status_code)
+        self.assertEqual({'extension_dir'}, set(answer.json()))
+        self.assertTrue(answer.json()['extension_dir'].endswith('knowbase-capture'))
 
     def test_item_state_restores_latest_saved_receipt_without_an_intent_id(self):
         original = self.intent()

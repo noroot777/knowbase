@@ -53,9 +53,11 @@ def migrate(connection):
 def initialize(connection):
     from kb.youtube.channels import seed
     from kb.youtube.products import quarantine
+    from kb.youtube import sync_window
     seed(connection, reg.now(), reg.history_floor())
     connection.execute(SCHEMA)
     connection.execute(OWNERS)
+    sync_window.initialize(connection)
     columns = {column['name'] for column in connection.execute('PRAGMA table_info(youtube_videos)')}
     for name, definition in (('validation', "TEXT NOT NULL DEFAULT ''"),
                              ('repair_pending', 'INTEGER NOT NULL DEFAULT 0'),
@@ -162,16 +164,18 @@ def rows(source_ids=None, connection=None):
                 AND item.url=json_extract(candidate.entry,'$.url')) AS committed,
             EXISTS(SELECT 1 FROM feed_item_exclusions removed WHERE removed.kind='youtube'
                 AND removed.url=json_extract(candidate.entry,'$.url')) AS excluded,
-            source.name AS channel,source.config,source.history_floor,
+            source.name AS channel,source.config,source.history_floor,origin.initial_fetch_at,
             source.id AS owner_id
             FROM youtube_videos candidate JOIN youtube_video_sources owner ON owner.video_id=candidate.video_id
             JOIN subscriptions source ON source.id=owner.source_id
+            LEFT JOIN youtube_sync_origins origin ON origin.source_id=source.id AND origin.source_url=source.url
             WHERE source.enabled=1 AND source.url=owner.source_url''' + where + ' ORDER BY owner.source_id',
             arguments).fetchall()
     grouped = {}
     for item in result:
         row = dict(item)
-        owner = {key: row[key] for key in ('source_id', 'source_url', 'committed', 'channel', 'config', 'history_floor')}
+        owner = {key: row[key] for key in ('source_id', 'source_url', 'committed', 'channel', 'config',
+                                         'history_floor', 'initial_fetch_at')}
         candidate = grouped.setdefault(row['video_id'], {**row, 'entry': json.loads(row['entry']), 'owners': []})
         candidate['owners'].append(owner)
     return list(grouped.values())
