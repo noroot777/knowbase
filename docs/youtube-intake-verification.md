@@ -1,6 +1,26 @@
 # YouTube 低成本接入验证
 
-## 当前复修：半译拦截与列表连接状态独立结算（sJYB8ObBe4Vx 第 2 轮）
+## 当前复修：原文语种与译文校验分离（L0hlOqeUYWrL 第 1 轮）
+
+- 第 1 项：原文本来是中文时不复用模型译文的连续英文词数判据，中文口播中的长英文引文可按原文发布，既有 native 原文缓存与时间信息保留，不依赖翻译模型配合。
+- 第 2 项：只在 YouTube 侧识别假名、片假名、半角片假名和谚文叙述；原文不再因此误走中文免译。批次、短段恢复、旧缓存及要点/最终笔记出口均拒绝把这类叙述当作中文成品，源文中的代码/URL 字面例外保留。
+- 模型返回长英文半译的硬闸保留，不把所有源文里的英文句子都自动当作可免译引文，也不宣称逐句语义完整。
+- 不更改正常 stage/version、不全量废弃有效缓存，不自动重写已经发布的生产条目。
+- 第 3 项的共享失败写库层 `kb/feeds/sync.py:_save_failure` 与待办读取层在任务基线即存在且本任务未修改；按本轮范围未修改该项，修完前两项后提交转出建议，由用户裁定。既有冷启动性能与带 ID AUTH/未知 ERROR 全面放行政策仍未改。
+- 本轮没有修改网页代码或浏览器夹具，验证针对真实 notes/collector/Markdown 链路，不补跑未修改的 browser 模块，不沿用历史截图冒充本轮证据。
+
+仅本轮修改的三个测试模块登记：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_notes tests.test_youtube_translation_output tests.test_youtube_integrity -v
+```
+
+cwd：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+真实结果、冻结受测树、原始日志与范围说明归档在
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-L0hlOqeUYWrL/`。
+未改模块和整套回归仍留验收，未访问真实 YouTube/模型/cookie，未改生产环境。
+
+## 历史复修：半译拦截与列表连接状态独立结算（sJYB8ObBe4Vx 第 2 轮）
 
 - 共用语种出口在扣除源文字面后，不允许汉字间隔内超过十个英文词；中文前后缀、只译首句不能掩盖长段英文。批次、逐段恢复和旧缓存重验用同一判据，不恢复汉字占比或长度比。
 - 原文免翻译分支同样核对叙述规则，疑似中文但仍含长英文的字幕改走覆盖翻译，不让原文语种比例判断绕过共用出口。

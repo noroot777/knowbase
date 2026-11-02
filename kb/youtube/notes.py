@@ -56,11 +56,7 @@ def translate(text, selected, deadline, stopped):
 
 
 def native_chinese(text):
-    if text_language(text) != 'zh':
-        return False
-    blocks = [unit['text'] for unit in translation.units(text)]
-    return all(translation_language.valid(block, literals, '') for block, literals in
-               zip(blocks, translation_language.contexts(text, blocks)))
+    return text_language(text) == 'zh' and not translation_language.foreign_script(text)
 
 
 def translation_request(text, selected, deadline, stopped, directory=None, cache=None):
@@ -90,7 +86,7 @@ def translated_output(text, output):
         return translation.render(text, output)
     if not isinstance(output, str):
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
-    if not output.strip() or text_language(output) != 'zh':
+    if not output.strip() or not native_chinese(output):
         raise RuntimeError('模型未返回中文译文，保留原始字幕等待重试')
     return output.strip()
 
@@ -103,7 +99,7 @@ def summary(text, title, selected, deadline, stopped):
 
 
 def summary_output(output, source=None):
-    if not isinstance(output, str) or not output.strip() or text_language(output) != 'zh':
+    if not isinstance(output, str) or not output.strip() or not native_chinese(output):
         raise RuntimeError('视频分段要点不是有效中文，原文和译文已缓存')
     if len(output) > 1000:
         raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
@@ -117,7 +113,7 @@ def note_payload(output, prompt=''):
         raise RuntimeError('视频笔记返回格式无效，原文与译文已缓存') from None
     if (not isinstance(payload, dict) or any(not isinstance(payload.get(field), str) or
             not payload[field].strip() for field in ('title', 'summary', 'body')) or
-            any(text_language(payload[field]) != 'zh' for field in ('title', 'summary', 'body'))):
+            any(not native_chinese(payload[field]) for field in ('title', 'summary', 'body'))):
         raise RuntimeError('视频笔记不是完整中文成品，未入库')
     return payload
 

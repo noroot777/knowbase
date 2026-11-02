@@ -266,6 +266,43 @@ class YouTubeNotes(YouTubeFixture):
         self.assertFalse(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
         self.assertEqual(original, self.transcript)
 
+    def test_native_chinese_quotes_do_not_require_a_successful_translation(self):
+        quote = ('the compiler will analyze your component tree and automatically insert memoization '
+                 'boundaries so that you do not have to write useMemo by hand any more')
+        for words in (9, 10, 11, 12, 30):
+            source = ('今天介绍这个框架的状态管理与渲染。官方文档原话是：' +
+                      ' '.join(quote.split()[:words]) + '。这句话说明编译器负责插入缓存边界，接下来实际核验。')
+            with self.subTest(words=words), patch.object(notes, 'call') as call:
+                self.assertTrue(notes.native_chinese(source))
+                self.assertEqual(source, notes.translate(source, self.selected, self.deadline, lambda: False))
+                call.assert_not_called()
+        self.transcript['language'] = 'zh'
+        self.transcript['segments'] = [{'start': 0, 'end': 120, 'text': source}]
+        original = json.loads(json.dumps(self.transcript))
+        directory = media.cache_dir(self.row['video_id'])
+        key = notes.signature('translate', self.selected, source)
+        media.save_json(directory / 'notes-cache.json', {key: source})
+        result = self.build()
+        self.assertIn(source, result['body'])
+        self.assertFalse(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
+        self.assertEqual(original, self.transcript)
+        count = len(self.prompts)
+        self.assertEqual(result, self.build())
+        self.assertEqual(count, len(self.prompts))
+        self.assertEqual(source, media.read_json(directory / 'notes-cache.json')[key])
+
+    def test_japanese_summaries_and_note_fields_are_not_chinese_products(self):
+        foreign = '今日は状態管理と描画の方法を説明します。'
+        with self.assertRaises(RuntimeError):
+            notes.summary_output(foreign)
+        with self.assertRaises(RuntimeError):
+            notes.translated_output('作者介绍状态管理。', foreign)
+        for field in ('title', 'summary', 'body'):
+            payload = {'title': '状态管理的方法', 'summary': '作者说明核验限制。', 'body': '正文说明实际方法。'}
+            payload[field] = foreign
+            with self.subTest(field=field), self.assertRaises(RuntimeError):
+                notes.note_payload(json.dumps(payload))
+
     def test_new_translation_policy_invalidates_notes_but_preserves_transcript_cache(self):
         directory = media.cache_dir(self.row['video_id'])
         media.save_json(directory / 'transcript.json', self.transcript)

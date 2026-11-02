@@ -125,11 +125,33 @@ class TranslationOutput(YouTubeFixture):
                     notes.translate(source, self.selected, 10**10, lambda: False)
         source = '作者说明应当核验结果。' * 20 + 'Today we build an agent from scratch and verify every generated change before use.'
         self.assertEqual('zh', text_language(source))
-        with patch.object(notes, 'call', return_value=json.dumps({'translations': ['作者介绍智能体并要求核验每次改动。']})) as call:
-            self.assertEqual('作者介绍智能体并要求核验每次改动。', notes.translate(source, self.selected, 10**10, lambda: False))
-            call.assert_called_once()
+        with patch.object(notes, 'call') as call:
+            self.assertEqual(source, notes.translate(source, self.selected, 10**10, lambda: False))
+            call.assert_not_called()
         self.assertTrue(translation_language.valid('先核对 ' + ' '.join(['token'] * 10) + '，再使用。', [], source))
         self.assertFalse(translation_language.valid('先核对 ' + ' '.join(['token'] * 11) + '，再使用。', [], source))
+
+    def test_non_chinese_cjk_narrative_must_be_translated_not_echoed(self):
+        sources = ('今日は新しい技術を紹介します。状態管理と描画を分離するのが基本の考え方です。',
+                   '오늘은 人工智能 技術과 狀態管理를 설명합니다. 실제로 확인해 보겠습니다.',
+                   'ｱｲｳｴｵ 人工知能の実装を紹介します。')
+        for source in sources:
+            with self.subTest(source=source):
+                self.assertEqual('zh', text_language(source))
+                self.assertFalse(notes.native_chinese(source))
+                for value in (source, '作者介绍：' + source):
+                    output = json.dumps({'translations': [value]})
+                    with self.assertRaises(RuntimeError):
+                        translation.render(source, output)
+                    with self.assertRaises(RuntimeError):
+                        translation.unit_output(source, 0, output)
+                with patch.object(notes, 'call', return_value=json.dumps({'translations': ['作者介绍技术并要求核验。']})) as call:
+                    self.assertEqual('作者介绍技术并要求核验。', notes.translate(source, self.selected, 10**10, lambda: False))
+                    call.assert_called_once()
+        literal = 'https://example.test/人工知能/アイウエオ'
+        self.assertTrue(notes.native_chinese('作者给出原始地址：' + literal))
+        self.assertTrue(notes.native_chinese('作者说明状态管理・渲染分离。'))
+        self.assertEqual(literal, translation.render(literal, json.dumps({'translations': [literal]})))
 
     def test_cleaned_single_line_captions_do_not_turn_command_tails_into_literals(self):
         lines = ['Welcome back to the channel. Today we examine an AI agent framework.',

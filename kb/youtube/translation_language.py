@@ -10,6 +10,8 @@ _COMMAND = re.compile(
 _COMMAND_END = re.compile(r'[.!?。！？](?=\s|$)|[;\r\n]')
 _COMMAND_ARG = re.compile(r'''[ \t]*("(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_@%+=:/.$~*?{}\\-]+)''')
 _FOREIGN_WORDS = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
+_FOREIGN_SCRIPTS = re.compile(r'[\u3041-\u3096\u309d-\u309f\u30a1-\u30fa\u30fc-\u30ff\u31f0-\u31ff\uff66-\uff9d'
+                             r'\u1100-\u11ff\u3130-\u318f\ua960-\ua97f\uac00-\ud7ff]')
 
 
 def literal_spans(text):
@@ -55,10 +57,18 @@ def contexts(text, blocks):
     return result
 
 
+def foreign_script(text):
+    for start, end in reversed(literal_spans(text)):
+        text = text[:start] + text[end:]
+    return bool(_FOREIGN_SCRIPTS.search(text))
+
+
 def valid(value, literals, source):
     remainder = value
     for literal in sorted(literals, key=len, reverse=True):
         remainder = remainder.replace(literal.strip(), '')
+    if _FOREIGN_SCRIPTS.search(remainder):
+        return False
     if value.split() == source.split() and re.search(r'[A-Za-z]', remainder):
         return False
     if any(len(_FOREIGN_WORDS.findall(span)) > 10 for span in re.split(r'[\u4e00-\u9fff]', remainder)):

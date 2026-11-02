@@ -241,6 +241,86 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertNotIn('The planner', body)
         self.assertNotIn('The executor', body)
 
+    def test_native_chinese_quote_reaches_ready_and_export_without_translation(self):
+        selected = SimpleNamespace(provider='fixture', model_id='fixture')
+        source = ('今天介绍状态管理与渲染的分离。官方文档原话是：the compiler will analyze your component '
+                  'tree and automatically insert memoization boundaries so that you do not have to write '
+                  'useMemo by hand any more in most of the cases we have measured so far。'
+                  '这意味着编译器会自己插入缓存边界，下面实际核验结果。')
+        transcript = {'origin': 'uploaded_captions', 'language': 'zh',
+                      'segments': [{'start': 0, 'end': 600, 'text': source}]}
+        prompts = []
+
+        def reply(prompt, *arguments):
+            prompts.append(prompt)
+            if prompt.startswith('将以下字幕'):
+                raise AssertionError('中文原文不依赖翻译模型配合')
+            if '只输出 JSON' in prompt:
+                return json.dumps({'title': '状态管理与渲染分离', 'summary': '作者说明缓存边界并要求实际核验。',
+                                   'body': '## 方法\n保留文档原话，实际核验编译器的缓存行为。'})
+            return '作者说明编译器插入缓存边界，需要独立核验结果。'
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value=self.metadata), \
+                patch.object(media, 'obtain', return_value=transcript):
+            result = collector.collect(FetchScope(force=True))
+        self.assertEqual((1, 1), (result['processed'], result['added']), result)
+        self.assertEqual('ready', storage.rows()[0]['state'])
+        self.assertFalse(any(prompt.startswith('将以下字幕') for prompt in prompts))
+        self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+        files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
+        self.assertEqual(1, len(files))
+        self.assertIn(source, files[0].read_text())
+
+    def test_japanese_echo_cache_cannot_publish_and_recovers_with_chinese_translation(self):
+        selected = SimpleNamespace(provider='fixture', model_id='fixture')
+        source = '今日は新しい技術を紹介します。状態管理と描画を分離するのが基本の考え方です。'
+        transcript = {'origin': 'uploaded_captions', 'language': 'ja',
+                      'segments': [{'start': 0, 'end': 600, 'text': source}]}
+        directory = media.cache_dir(self.row['video_id'])
+        old_key = notes.signature('translate', selected, source)
+        key = notes.signature(translation.STAGE, selected, source)
+        media.save_json(directory / 'notes-cache.json', {
+            old_key: source, key: json.dumps({'translations': [source]})})
+        broken, prompts = True, []
+
+        def reply(prompt, *arguments):
+            prompts.append(prompt)
+            if prompt.startswith('将以下字幕'):
+                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
+                return json.dumps({'translations': segments if broken else ['作者说明状态管理与渲染的分离。']})
+            if '只输出 JSON' in prompt:
+                return json.dumps({'title': '状态管理的方法', 'summary': '作者说明状态管理与渲染的分离。',
+                                   'body': '## 方法\n先分离状态与渲染，再实际核验。'})
+            return '作者说明状态管理与渲染的分离，要求实际核验。'
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value=self.metadata), \
+                patch.object(media, 'obtain', return_value=transcript):
+            result = collector.collect(FetchScope(force=True))
+            self.assertEqual(0, result['added'])
+            self.assertEqual('failed', storage.rows()[0]['state'])
+            self.assertTrue(prompts)
+            self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in prompts))
+            self.assertNotIn(key, media.read_json(directory / 'notes-cache.json'))
+            self.assertFalse(collector.YouTubeCollector('youtube').materialize())
+            broken = False
+            result = collector.collect(FetchScope(force=True))
+        self.assertEqual((1, 1), (result['processed'], result['added']), result)
+        self.assertEqual('ready', storage.rows()[0]['state'])
+        self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+        files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
+        self.assertEqual(1, len(files))
+        body = files[0].read_text()
+        self.assertIn('作者说明状态管理与渲染的分离。', body)
+        self.assertNotIn(source, body)
+
     def test_code_heavy_translation_reaches_ready_and_export_without_language_ratio_failure(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
         narrative = ('The author explains why every generated change requires independent verification. ' * 4).strip()
