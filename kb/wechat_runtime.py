@@ -10,6 +10,7 @@ import platform
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import tarfile
 import tempfile
@@ -33,9 +34,43 @@ def runtime_home() -> Path:
                 Path.home() / ".local/share/knowbase/wechat").expanduser()
 
 
+def _foreign_link(path: Path) -> bool:
+    """按内核的解析顺序逐段走 path，途经的符号链接里有没有 root 以外的人放的。
+
+    防的是接入目录或它的某一级上层被换成链接、把访问材料引到别处。root 的链接是系统布局
+    (macOS 的 /var、/tmp、/etc 都是)，不拦；别人把它换掉，属主就跟着变了，照样拦得住。
+    链接目标里途经的链接一样要过这道判据。Windows 的 st_uid 恒为 0、看不出属主，一律拦。
+    """
+    path = Path(path).absolute()
+    current, pending, hops = Path(path.anchor), list(reversed(path.parts[1:])), 0
+    while pending:
+        part = pending.pop()
+        if part == "..":
+            current = current.parent
+            continue
+        candidate = current / part
+        try:
+            info = os.lstat(candidate)
+        except (FileNotFoundError, NotADirectoryError):
+            return False  # 余下几段还不存在，mkdir 会建成真实目录
+        if not stat.S_ISLNK(info.st_mode):
+            current = candidate
+            continue
+        hops += 1
+        if os.name == "nt" or info.st_uid != 0 or hops > 40:
+            return True
+        target = Path(os.readlink(candidate))
+        if target.is_absolute():
+            current, rest = Path(target.anchor), target.parts[1:]
+        else:
+            rest = target.parts
+        pending.extend(reversed(rest))
+    return False
+
+
 def private_dir(path: Path) -> Path:
-    if any(p.is_symlink() for p in (path, *path.parents)):
-        raise SetupError("接入目录不能是符号链接，请检查 KB_WECHAT_RUNTIME。")
+    if _foreign_link(path):
+        raise SetupError("接入目录的路径里有非系统的符号链接，请检查 KB_WECHAT_RUNTIME。")
     path.mkdir(parents=True, exist_ok=True, mode=0o700)
     path.chmod(0o700)
     if os.name == 'nt':
