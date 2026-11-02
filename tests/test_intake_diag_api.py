@@ -89,7 +89,9 @@ class OverviewTests(CareApiCase):
         self.assertIn('同步中心', over['note'])
         self.assertIn('条内容', over['note'])
         self.assertIn('步', over['note'])
-        self.assertIn('来源连接问题单独计数', over['note'])
+        # 来源连接问题那半句只钉事实:它的量词是订阅。措辞按「让布局解释界面」压短过,
+        # 不钉字面。
+        self.assertRegex(over['note'], r'来源连接问题[^。]*订阅')
 
     def test_one_subscription_can_contribute_two_source_problems_and_no_items(self):
         """同一条订阅同时有 `last_error` 和 `last_note` 时**贡献两条来源问题**。

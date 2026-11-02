@@ -91,6 +91,11 @@
   裂开,而外键全合法)。它返回**实际入库的档案键**,调用方据此区分「新添加」和「这就是那个改了名的号」。
 - 别把 `collector/data` 或 `collector/.venv` 加进版本库 —— 它们是符号链接,`data/` 那条带斜杠的规则挡不
   住,.gitignore 里另有不带斜杠的显式两行,别删。
+- **接入目录(`KB_WECHAT_RUNTIME`,放访问材料和备份)的路径上只许有 root 的符号链接**
+  (`wechat_runtime._foreign_link`)。防的是接入目录或某一级上层被换成链接、把材料引到别处;按内核解析
+  顺序逐段走,链接目标里途经的链接一样过判据,Windows 看不出属主一律拦。**别退回「上层任何一级是链接就
+  拒」**:macOS 的 `/var`、`/tmp` 是系统链接,`tempfile` 给的目录全在 `/var/folders` 下,那样整块接入在
+  `/tmp`、`/var` 下一律报错,测试也全红。回归 `tests/test_wechat_setup.py` 的 `PrivateDirTests`。
 - 详细见 `docs/decisions/collector.md`。
 
 ## 事故形态与实测证据

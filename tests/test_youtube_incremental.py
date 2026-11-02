@@ -173,7 +173,12 @@ class IncrementalMetadata(IncrementalFixture):
         self.assertEqual(1, result['stats']['failed'])
         first, second = storage.rows()
         self.assertEqual('failed', first['state'])
-        self.assertEqual('deferred', second['state'])
+        # 没发出去的那条只附说明、不改状态(`candidate`;真实处理延后才是 `deferred`),
+        # 但限流那句话要留在它身上,本轮也不许把它算成「纯预算未轮到」而豁免频道成功。
+        self.assertEqual('candidate', second['state'])
+        self.assertEqual(throttle.NOTICES[throttle.YOUTUBE], second['reason'])
+        self.assertIn(second['video_id'], result['unfinished_ids'])
+        self.assertNotIn(second['video_id'], result['not_reached_ids'])
         self.assertEqual(0, second['attempts'])
         self.assertEqual(0, second['retry_at'])
 
@@ -191,7 +196,8 @@ class IncrementalMetadata(IncrementalFixture):
         self.exclude(entry)
         result, asked = self.refresh()
         asked.assert_not_called()
-        self.assertEqual([], result['rows'])
+        self.assertEqual([], ranking.score(result['rows'], of(self.settings_value), self.scope))
+        self.assertEqual(0, storage.rows()[0]['score_rank'])
         self.assertEqual(0, result['stats']['pending'])
 
     def test_removal_during_probe_cannot_refresh_or_rank_the_video(self):
@@ -201,7 +207,8 @@ class IncrementalMetadata(IncrementalFixture):
             return self.metadata(row['entry'])
         result, asked = self.refresh(removed)
         self.assertEqual(1, asked.call_count)
-        self.assertEqual([], result['rows'])
+        self.assertEqual([], ranking.score(result['rows'], of(self.settings_value), self.scope))
+        self.assertEqual(0, storage.rows()[0]['score_rank'])
         self.assertEqual(0, result['stats']['pending'])
         self.assertTrue(storage.rows()[0]['entry']['approximate'])
 
