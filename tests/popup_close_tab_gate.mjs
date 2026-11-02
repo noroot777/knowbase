@@ -16,7 +16,7 @@
  * 硬约束见 docs/decisions/browser-capture.md 与 link-grab.md。
  */
 import assert from 'node:assert/strict';
-import {popupHost, GRABBED, PAGE} from './popup_host.mjs';
+import {popupHost, hereAnswer, GRABBED, PAGE} from './popup_host.mjs';
 
 //: 服务端那一答。每个用例改这一份,扩展只负责把它摆成界面。
 let here = {ok: true, situation: 'absent', detail: '这一页还不在知识库里。',
@@ -30,8 +30,8 @@ let adoptId = 'i9';
 const tab = {id: 7, url: PAGE};
 const OTHER = 'https://example.org/posts/world';
 
-const {element, calls, removed, context, markup} = await popupHost({tab, answer: path => {
-  if (path === '/api/browser-capture/here') return hereReply || {status: 200, data: here};
+const {element, calls, removed, context, markup} = await popupHost({tab, answer: (path, sent) => {
+  if (path === '/api/browser-capture/here') return hereReply || hereAnswer(here, sent);
   if (path === '/api/browser-capture/here/adopt') return {status: 200, data: {ok: true, id: adoptId}};
   if (path === '/api/grab/from-page') return fromPageReply;
   if (path === '/api/grab') return grabReply;
@@ -417,7 +417,8 @@ hereReply = null;
 // (g3) **反过来钉一边:刷新那一问失败不是「新操作」。** 他没换目标、一个候选都没点,
 //      只是这一问连不上 —— 那一次有效的成功不许被丢掉,否则采完之后网络一抖出口就
 //      没了,而那一页正是采集抽屉刚为它开出来的。只按「服务端此刻说做完了」授权的
-//      写法在这里变红。
+//      写法在这里变红。**它同时是 (g6) 那一道的反向钉**:按下去那一刻那一问也失败,
+//      照旧按凭据关得掉 —— 「问不着」和「问着了、答的是还欠着事」是两件事。
 const MINE = 'https://example.org/posts/still-mine';
 tab.id = 23; tab.url = MINE;
 here = {ok: true, situation: 'absent', page_url: MINE, item: null, intent: null,
@@ -491,6 +492,49 @@ assert.equal(element('close-tab').hidden, false, '真再采一次,出口照旧�
 removed.length = 0;
 await element('close-tab').click();
 assert.deepEqual(removed, [24], '按下去关的就是它');
+
+// (g6) **按下去那一刻也要现问一次 —— 他可能压根没点过「重新确认」。** 实测形态:采完
+//      之后他去采集抽屉里点了一次「重新采集正文」,再回弹窗直接按这颗还摆着、还接着
+//      焦点的按钮。屏幕上那一份答复停在采成那一刻,只在「重新确认」那一下更新的话,
+//      这一下关掉的就是一页**正等着被重采的原文**。服务端那一侧另有自己的一道(旧回执
+//      不为新欠账背书,`browser_capture.here` 那一答改成 `undecided`,回归在
+//      `tests/test_browser_capture_here.py`);这里这一道管的是「他压根没再问过」那一段
+//      窗口 —— 元规则「两份实现各有自己的回归」。
+const AGAIN_WAITING = 'https://example.org/posts/asked-again';
+tab.id = 25; tab.url = AGAIN_WAITING;
+here = {ok: true, situation: 'absent', page_url: AGAIN_WAITING, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+await element('refresh').click();
+here = {ok: true, situation: 'complete', page_url: AGAIN_WAITING, intent: null, elsewhere: [],
+        item: {key: 'kG', kind: 'inbox', title: '刚收下那一篇', url: AGAIN_WAITING},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('act').click();
+assert.equal(element('close-tab').hidden, false, '先回到露面那一档');
+// 他在采集抽屉里点了「重新采集正文」—— 弹窗一个字都不知道,**一次「重新确认」都没点**。
+// 真实服务端这一答就是这一档(旧回执照旧写在那句话里,那个新待办只作为候选摆着)。
+const waitingAgain = {id: 'iG2', key: 'kG', title: '刚收下那一篇', page_url: AGAIN_WAITING};
+here = {ok: true, situation: 'undecided', page_url: AGAIN_WAITING, intent: null,
+        detail: '这一次采集已经写进这一条了，但这一篇又有一次采集在等着。'
+                + '下面点一下它再采一遍，或者回采集抽屉里取消那一次。',
+        item: {key: 'kG', kind: 'inbox', title: '刚收下那一篇', url: AGAIN_WAITING},
+        elsewhere: [waitingAgain]};
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [], '一次「重新确认」都没点:按下去那一刻现问一次,一个都不许关');
+assert.match(element('status').textContent, /还有一件没采完/,
+  '两句分得清:不是「换页了」,是「这一页还有事没做完」');
+assert.equal(element('close-tab').hidden, true, '顺手那次重画把这颗按钮收回去');
+// 反过来钉一边:**多出来的那一问不许挡住正常那一下**。真再采一次,按下去照旧关得掉。
+here = {ok: true, situation: 'absent', page_url: AGAIN_WAITING, item: null, intent: null,
+        detail: '这一页还不在知识库里。', elsewhere: []};
+await element('refresh').click();
+here = {ok: true, situation: 'complete', page_url: AGAIN_WAITING, intent: null, elsewhere: [],
+        item: {key: 'kG', kind: 'inbox', title: '刚收下那一篇', url: AGAIN_WAITING},
+        detail: '这一条已经在知识库里，正文也齐了。'};
+await element('act').click();
+removed.length = 0;
+await element('close-tab').click();
+assert.deepEqual(removed, [25], '真再采一次,按下去关的就是它');
 
 tab.id = 7; tab.url = PAGE;
 

@@ -314,6 +314,65 @@ class CaptureHereTests(CaptureCase):
         self.assertEqual('saved', self.here(payload={'url': page,
                                                      'intent_id': adopted['id']}).json()['situation'],
                          '回执在审计表里,重启丢掉内存里那几个也照旧认得')
+        # **这张回执只为它那一页说话。** 换一页问,答的是那一页自己的情形 —— 扩展那一侧
+        # 读到 `saved` 就会按这一页再授权一次「关掉这一页」(`grant(here, here.url, true)`),
+        # 所以这一道漏了,许可就发给了人此刻在读的那一页。扩展那边的桩照这一条摆
+        # (`tests/popup_host.mjs` 的 `hereAnswer`)。
+        elsewhere = self.here(payload={'url': 'https://e.org/some-other-page',
+                                       'intent_id': adopted['id']}).json()
+        self.assertEqual('undecided', elsewhere['situation'], '回执不许替另一页签字')
+        self.assertNotIn('写进这一条', elsewhere['detail'], '更不许对着另一页说那句话')
+
+    def test_an_old_receipt_stops_speaking_once_the_item_waits_again(self):
+        """上一条的另一头:**那张回执证明不了「这一篇此刻没有更晚的欠账」。**
+
+        走到这一档的是:他点过「这一页就是这一篇,改用它」、采完了,随后同一条目上
+        又发起一次采集(采集抽屉里那颗「重新采集正文」)。`saved()` 读的是审计表,
+        带着同一个身份再问照旧认得那张旧回执 —— 继续答 `saved` 就等于替这一页签下
+        「没事了」,而扩展那颗「关掉这一页」认的正是这一答(`SETTLED` 白名单)。
+        **实测后果**:上一次那次成功把一页正等着被重采的原文关掉,而新请求仍
+        `pending`、回执为空。
+
+        **先断后果**:判据落在「这一答在不在白名单里」上 —— `undecided` 不在,所以
+        扩展那一侧当场撤销许可;那个新待办照旧只作为候选摆着(**不代选、不自动
+        执行**),回执仍作为历史成功留在那句话里。
+
+        **反过来钉两边**,缺一条这个判据就成了「有待办就不答 saved」或者「永远答
+        saved」:①别的条目在等这一页照旧答 `saved`(上一条用例钉着,那是他没做过的
+        事);②那一次重采被取消之后,同一个身份再问又回到 `saved`。
+        """
+        page = 'https://e.org/shared'
+        later = self.put(url='https://e.org/post-two')
+        adopted = self.here(path='/here/adopt',
+                            payload={'key': later, 'page_url': page}).json()
+        self.assertEqual(200, self.precheck(adopted, body=BODY, page_url=page).status_code)
+        self.assertEqual(200, self.upload(adopted, page_url=page).status_code)
+        ask = {'url': page, 'intent_id': adopted['id']}
+        self.assertEqual('saved', self.here(payload=ask).json()['situation'],
+                         '先回到「这一次写进去了」那一档')
+
+        # 同一条目上又发起一次采集
+        again = self.intent(page_url=page, key=later)
+        state = self.here(payload=ask).json()
+        self.assertEqual('undecided', state['situation'],
+                         '这一篇又有一次采集在等着,旧回执不许再说「没事了」')
+        self.assertIn('又有一次采集在等着', state['detail'], '要说清为什么,不然看着像按钮坏了')
+        self.assertIn('已经写进这一条了', state['detail'], '回执照旧作为历史成功留着')
+        self.assertEqual(later, state['item']['key'], '说的还是刚写进去那一条')
+        self.assertIsNone(state['intent'], '不代选:那个新待办只作为候选摆着')
+        self.assertEqual([again['id']], [one['id'] for one in state['elsewhere']],
+                         '新那一次要摆在人眼前 —— 它是唯一的出路')
+        # 不自动执行:这一答交不出任何写得了的待办,所以按一下什么也不会发生
+        before = self.row(later)
+        self.assertNotEqual(200, self.upload(state['intent'] or {'id': ''},
+                                             page_url=page).status_code)
+        self.assertEqual(before['content_rev'], self.row(later)['content_rev'])
+
+        # ② 那一次重采被取消之后,同一个身份再问又回到 `saved`
+        self.assertEqual(200, self.client.delete(
+            '/api/browser-capture/intents/' + again['id']).status_code)
+        self.assertEqual('saved', self.here(payload=ask).json()['situation'],
+                         '没有更晚的欠账了,回执照旧答得出「这一次写进去了」')
 
     def test_a_pick_that_went_stale_with_nothing_left_is_not_answered_by_url(self):
         """上一条的另一头:他点过的那个失效了,而这一页上**一个待办都不剩**。

@@ -18,7 +18,7 @@
  * 硬约束见 docs/decisions/link-grab.md 与 browser-capture.md。
  */
 import assert from 'node:assert/strict';
-import {popupHost, captured, GRABBED, PAGE} from './popup_host.mjs';
+import {popupHost, hereAnswer, captured, GRABBED, PAGE} from './popup_host.mjs';
 
 //: 服务端那一答。每个用例改这一份,扩展只负责把它摆成界面。
 let here = {ok: true, situation: 'absent', detail: '这一页还不在知识库里。',
@@ -28,8 +28,8 @@ let pendingReply = null;   // 非空 = 验密钥那一问当场失败
 let grabReply = GRABBED;
 const tab = {id: 7, url: PAGE};
 
-const {element, calls, extracted, source} = await popupHost({tab, answer: path => {
-  if (path === '/api/browser-capture/here') return hereReply || {status: 200, data: here};
+const {element, calls, extracted, source} = await popupHost({tab, answer: (path, sent) => {
+  if (path === '/api/browser-capture/here') return hereReply || hereAnswer(here, sent);
   //: 「改用它」那一下服务端交回的待办 id。这一份里它不变 —— 「人中途换了操作」那一维
   //: 要同一轮里换两个 id 才表达得出来,钉在 `popup_close_tab_gate.mjs`。
   if (path === '/api/browser-capture/here/adopt') return {status: 200, data: {ok: true, id: 'i9'}};

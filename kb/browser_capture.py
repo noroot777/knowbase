@@ -262,7 +262,27 @@ def here(url: str, intent_id: str = '') -> dict:
         except LookupError:
             done = None     # 条目这期间被删了,下面「兑现不了就不代选」接住
         if done and done['page_url'] == page:
-            return answered('saved', f"这一次采集已经写进这一条了。{done['receipt']['detail']}。", done)
+            # **「上一次写成功了」证明不了「这一篇此刻没有更晚的欠账」。** 回执只是历史:
+            # 同一条目上又有一个待办在等着(人在采集抽屉里点过「重新采集正文」),这一答
+            # 照旧说 `saved` 就等于替这一页签下「没事了」—— 而扩展那颗「关掉这一页」认
+            # 的正是这一答(`SETTLED` 白名单)。**实测后果**:上一次那次成功把一页正等着
+            # 被重采的原文关掉(后端查:新请求仍 `pending`、回执为空,只有旧那张回执)。
+            #
+            # **判据按条目问,不按页问。** 一个条目同时只挂一个待办(`_create` 把其余的
+            # 顶成 `superseded`),而这一次保存已经把它自己那个用掉了 —— 所以「它名下还
+            # 挂着一个 pending」就等于「那一个比这张回执晚」,不必另存一个代次。反过来
+            # 钉一边:**别的条目在等这一页照旧答 `saved`**(那是他没做过的事,不是他刚
+            # 做完的那一项又回到未完成)。
+            #
+            # **不代选、也不自动执行那个新待办**(同「兑现不等于放行」):把它作为候选交
+            # 出去、由人点一下,回执照旧作为历史成功留在这句话里。
+            again = any(one['key'] == done['key'] for one in _pending())
+            if not again:
+                return answered('saved',
+                                f"这一次采集已经写进这一条了。{done['receipt']['detail']}。", done)
+            return answered('undecided',
+                            '这一次采集已经写进这一条了，但这一篇又有一次采集在等着。'
+                            '下面点一下它再采一遍，或者回采集抽屉里取消那一次。', done)
 
         # 人点过的那一下优先,而且是**唯一**的依据。
         picked = next((one for one in bound if one['id'] == intent_id), None) if intent_id else None

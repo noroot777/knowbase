@@ -23,6 +23,27 @@ export const GRABBED = {status: 200, data: {ok: true, added: 1, duplicate: false
                                             content_ok: true, stored_body: true,
                                             detail: '已收下，正在写入知识库'}};
 
+//: **`/here` 答的是「他问的那一页」,不是摆局时那一页。** 真实服务端拿回执的
+//: `page_url` 跟问的那一页逐字比过才答 `saved`(`browser_capture.here`,服务端那一侧
+//: 自己有回归钉着),其余各档同理 —— 问另一页,答的就是另一页自己的情形。
+//: **桩里不分的话,「采完之后标签跳走了」那几条会拿到一份属于上一页的答复**,而
+//: `saved` 那一档读到之后会就地再授权一次(`grant(here, here.url, true)`):许可于是
+//: 发给了人此刻在读的那一页,按下去关掉的就是它 —— 而真机上服务端压根不会那么答。
+//: 换一页之后答哪一档也照真机分:带着一个兑现不了的身份问 → `undecided`
+//: (「你选的那个采集请求已经失效了」),没带身份问一页不在库里的 → `absent`。
+//: 两档都不在白名单里,所以许可一样当场作废 —— 分开写是为了不在桩里埋一句真机
+//: 不会说的话。
+export const hereAnswer = (staged, sent) => {
+  if (!(sent && staged && staged.page_url && sent.url !== staged.page_url))
+    return {status: 200, data: staged};
+  return {status: 200, data: sent.intent_id
+    ? {ok: true, situation: 'undecided', page_url: sent.url, item: null, intent: null,
+       detail: '你选的那个采集请求已经失效了。下面还在等的条目里点一下要补的那一篇；'
+               + '一个都没有就回采集抽屉里重新发起。', elsewhere: []}
+    : {ok: true, situation: 'absent', page_url: sent.url, item: null, intent: null,
+       detail: '这一页还不在知识库里。', elsewhere: []}};
+};
+
 export async function popupHost({tab, answer}) {
   const {element, document} = popupDom();
   const calls = [];
@@ -66,9 +87,10 @@ export async function popupHost({tab, answer}) {
     fetch: async (url, options = {}) => {
       const path = url.replace(SERVER, '');
       calls.push({path, method: options.method || 'GET', sent: options.body ? JSON.parse(options.body) : null});
-      //: 探针自己摆的那几答先问它。**它交回 undefined 才落到下面** —— 「这一问当场
-      //: 失败」是靠交回一个 4xx/5xx 表达的,所以这里只能认 undefined,不能认假值。
-      const staged = answer(path);
+      //: 探针自己摆的那几答先问它(连请求体一起交给它 —— `/here` 要按「问的是哪一页」
+      //: 答)。**它交回 undefined 才落到下面** —— 「这一问当场失败」是靠交回一个
+      //: 4xx/5xx 表达的,所以这里只能认 undefined,不能认假值。
+      const staged = answer(path, calls[calls.length - 1].sent);
       if (staged !== undefined && staged !== null) return staged;
       if (path.endsWith('/pending')) return {status: 200, data: {intents: []}};
       if (path === '/api/browser-capture/precheck') return {status: 200, data: {ok: true, characters: 1200}};
