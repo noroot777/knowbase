@@ -6,11 +6,23 @@ _COMMAND = re.compile(
     r'(?<![\w-])(?:npm\s+(?:install|run|exec|test|ci)\b|npx\s+\S+|'
     r'git\s+(?:clone|rebase|push|pull|checkout|switch|commit|diff|status|add)\b|'
     r'(?:python[\d.]*|pip[\d.]*|curl|wget|docker|node|bash|sh)\s+-\S+|'
-    r'export\s+[A-Za-z_]\w*=)[^\n]*')
+    r'export\s+[A-Za-z_]\w*=)')
+_COMMAND_END = re.compile(r'[.!?。！？](?=\s|$)|[;\r\n]')
+_COMMAND_ARG = re.compile(r'''[ \t]*("(?:\\.|[^"\\])*"|'[^']*'|[A-Za-z0-9_@%+=:/.$~*?{}\\-]+)''')
 
 
 def literal_spans(text):
-    spans = [matched.span() for pattern in (_LITERALS, _COMMAND) for matched in pattern.finditer(text)]
+    spans = [matched.span() for matched in _LITERALS.finditer(text)]
+    for matched in _COMMAND.finditer(text):
+        boundary = _COMMAND_END.search(text, matched.end())
+        end = boundary.start() if boundary else len(text)
+        cursor, operands = matched.end(), 0
+        while argument := _COMMAND_ARG.match(text, cursor, end):
+            operands += argument[1].isalpha()
+            if operands > (2 if matched[0].startswith('git ') else 1):
+                break
+            cursor = argument.end()
+        spans.append((matched.start(), cursor))
     offset = 0
     for line in text.splitlines(keepends=True):
         try:
@@ -42,10 +54,12 @@ def contexts(text, blocks):
     return result
 
 
-def valid(value, literals):
+def valid(value, literals, source):
     remainder = value
     for literal in sorted(literals, key=len, reverse=True):
         remainder = remainder.replace(literal.strip(), '')
+    if value.split() == source.split() and re.search(r'[A-Za-z]', remainder):
+        return False
     return not any(character.isalpha() for character in remainder) or bool(re.search(r'[\u4e00-\u9fff]', remainder))
 
 

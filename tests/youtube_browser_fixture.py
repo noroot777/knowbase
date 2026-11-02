@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from kb.feeds import registry as reg
-from kb.youtube import collector, discovery, login, media, notes, ranking, storage, toolchain
+from kb.youtube import collector, discovery, login, media, notes, ranking, storage, toolchain, transcripts
 from kb.collectors import FetchScope
 
 
@@ -17,14 +17,17 @@ def install():
         status_sources[label] = selected['id']
     published = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     with reg.db() as connection:
-        connection.execute("UPDATE subscriptions SET last_error='上一轮连接失败',failures=3,retry_at=1 WHERE id=?",
-                           (status_sources['部分同步测试频道'],))
+        connection.executemany("UPDATE subscriptions SET last_error='上一轮连接失败',failures=3,retry_at=1 WHERE id=?",
+                               [(status_sources['部分同步测试频道'],), (source['id'],)])
     entries = [{'video_id': f'{number:011d}', 'url': 'https://www.youtube.com/watch?v=' + f'{number:011d}',
                 'title': title, 'description': title, 'published': published, 'views': 10000 // number}
                for number, title in enumerate(('AI agent coding tutorial', 'AI model research benchmark',
                                                'AI workflow explained', 'Travel weekend'), 1)]
 
     def fetch(selected, *arguments):
+        if selected['id'] == source['id']:
+            selected['discovery_unavailable'] = [
+                {'video_id': f'{number:011d}', 'reason': '离线夹具：单片无法读取'} for number in (981, 982)]
         for count, label in enumerate(('跳过一条测试频道', '跳过两条测试频道'), 1):
             if selected['id'] == status_sources[label]:
                 selected['discovery_unavailable'] = [
@@ -38,10 +41,14 @@ def install():
     def reply(prompt, *arguments):
         if prompt.startswith('将以下字幕'):
             segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-            return '好的，以下是译文：' + json.dumps({'translations': [
-                '作者演示智能体编程，强调每次修改都要测试，不能仅凭生成结果认定正确。接口预算为六十四。'
-                if 'The AI agent' in segment or 'Verify the result' in segment else segment
-                for segment in segments]}, ensure_ascii=False) + '（以上为译文）'
+            for original, translated in (
+                    ('The AI agent generates code.', '作者演示智能体编程。'),
+                    ('Test every change.', '强调每次修改都要测试，不能仅凭生成结果认定正确。'),
+                    ('Verify the result rather than trusting model claims.', '作者要求核验结果，而不是相信模型的声称。'),
+                    ('The API budget is 64.', '接口预算为六十四。'),
+                    ('The planner checks every later step before using its result.', '规划器逐步核验后续结果。')):
+                segments = [segment.replace(original, translated) for segment in segments]
+            return '好的，以下是译文：' + json.dumps({'translations': segments}, ensure_ascii=False) + '（以上为译文）'
         if '只输出 JSON' in prompt:
             return '以下是笔记：' + json.dumps({'title': '智能体编程：先验证再采用',
                                'summary': '作者展示智能体编程方法，并强调测试与人工核验的重要性。',
@@ -68,9 +75,11 @@ def install():
     media.probe = lambda *arguments, **keywords: {'duration': 600, 'language': 'en'}
     narrative = ('The AI agent generates code. Test every change. ' * 6 +
                  'Verify the result rather than trusting model claims. The API budget is 64.')
-    commands = '\n'.join(['npm install --save-dev vitest && npx vitest run --coverage'] * 12)
-    media.obtain = lambda *arguments: {'origin': 'uploaded_captions', 'language': 'en', 'segments': [
-        {'start': 0, 'end': 600, 'text': narrative + '\n\n' + commands}]}
+    commands = '. '.join(['npm install --save-dev vitest && npx vitest run --coverage'] * 12)
+    caption_text = narrative + '\n\n' + commands + '.\n' + (
+        'The planner checks every later step before using its result. ' * 6)
+    segments = transcripts.parse(json.dumps({'segments': [{'start': 0, 'end': 600, 'text': caption_text}]}), '.json')
+    media.obtain = lambda *arguments: {'origin': 'uploaded_captions', 'language': 'en', 'segments': segments}
     notes.model = lambda stage: SimpleNamespace(provider='fixture', model_id='fixture')
     notes.call = reply
     storage.discover(source, entries)

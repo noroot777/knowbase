@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg
-from kb.youtube import collector, discovery, media, notes, ranking, storage, transcripts
+from kb.youtube import collector, discovery, media, notes, ranking, storage, transcripts, translation
 from tests.youtube_fixture import YouTubeFixture
 from tests.youtube_translation_fixture import response
 
@@ -176,6 +176,67 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertEqual(2, call.call_count)
         self.assertEqual(frozenset(), collector.YouTubeCollector('youtube').materialize())
         self.assertFalse(list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md')))
+
+    def test_cleaned_caption_command_echo_is_rejected_from_cache_and_recovers_before_export(self):
+        selected = SimpleNamespace(provider='fixture', model_id='fixture')
+        sentences = {
+            'Welcome back to the channel. Today we examine an AI agent framework.': '欢迎回来，今天介绍智能体框架。',
+            'First run npm install to get the deps.': '先运行 npm install 安装依赖。',
+            'The planner decomposes the goal into steps and each step gets its own budget.': '规划器拆分目标，为每步分配预算。',
+            'The executor runs those steps and checks the result before proceeding.': '执行器逐步运行并核验结果。',
+            'Every generated change requires independent verification before use.': '使用每次生成的修改前都要独立核验。'}
+        segments = transcripts.parse(json.dumps({'segments': [
+            {'start': position * 20, 'end': (position + 1) * 20, 'text': sentence + '\n'}
+            for position, sentence in enumerate(list(sentences) * 6)]}), '.json')
+        source, = transcripts.blocks(segments)
+        self.assertNotIn('\n', source)
+        blocks = [unit['text'] for unit in translation.units(source)]
+        incomplete = json.dumps({'translations': ['作者介绍智能体框架。', *blocks[1:]]})
+        directory = media.cache_dir(self.row['video_id'])
+        key = notes.signature(translation.STAGE, selected, source)
+        media.save_json(directory / 'notes-cache.json', {key: incomplete})
+        broken, prompts = True, []
+
+        def reply(prompt, *arguments):
+            prompts.append(prompt)
+            if prompt.startswith('将以下字幕'):
+                values = json.loads(prompt.split('\n\n', 1)[1])['segments']
+                if broken:
+                    return incomplete if len(values) > 1 else json.dumps({'translations': values})
+                for original, translated in sentences.items():
+                    values = [value.replace(original, translated) for value in values]
+                return json.dumps({'translations': values})
+            if '只输出 JSON' in prompt:
+                return json.dumps({'title': '核验智能体的逐步执行', 'summary': '说明规划与执行的验证边界。',
+                                   'body': '## 方法\n规划器分配预算，执行器核验每步结果。'})
+            return '作者说明规划器分配预算，执行器逐步核验结果。'
+
+        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
+                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
+                patch.object(media, 'probe', return_value=self.metadata), \
+                patch.object(media, 'obtain', return_value={'origin': 'uploaded_captions', 'language': 'en',
+                                                           'segments': segments}):
+            result = collector.collect(FetchScope(force=True))
+            self.assertEqual(0, result['added'])
+            self.assertEqual('failed', storage.rows()[0]['state'])
+            self.assertNotIn(key, media.read_json(directory / 'notes-cache.json'))
+            self.assertTrue(prompts)
+            self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in prompts))
+            self.assertFalse(collector.YouTubeCollector('youtube').materialize())
+            broken = False
+            result = collector.collect(FetchScope(force=True))
+        self.assertEqual((1, 1), (result['processed'], result['added']), result)
+        self.assertEqual('ready', storage.rows()[0]['state'])
+        self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
+        files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
+        self.assertEqual(1, len(files))
+        body = files[0].read_text()
+        self.assertIn('规划器拆分目标', body)
+        self.assertIn('npm install', body)
+        self.assertNotIn('The planner', body)
+        self.assertNotIn('The executor', body)
 
     def test_code_heavy_translation_reaches_ready_and_export_without_language_ratio_failure(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')

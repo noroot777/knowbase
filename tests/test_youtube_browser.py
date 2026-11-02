@@ -22,6 +22,8 @@ class YouTubeBrowser(unittest.TestCase):
                              '零返回的跳过提示不虚构其他条目或访问限制原因',
                              '代码密集译文保留原始命令且不发布格式样例',
                              '取回数据后的部分同步不再显示旧连接失败',
+                             '数量预算留尾清旧失败且显示本轮跳过说明',
+                             '单行字幕的命令后叙述确实翻译成中文',
                              '没列完的频道显示部分同步而不是成功', '内容积压不伪装成频道覆盖失败',
                              'YouTube覆盖提示说明按窗口重查而非接续位置',
                              '真实待办接口只报告覆盖失败而非内容积压'} <= {check['name'] for check in checks})
@@ -36,3 +38,5 @@ class YouTubeBrowser(unittest.TestCase):
             self.assertIn('接口预算为六十四', files[0].read_text())
             self.assertIn('npm install --save-dev vitest && npx vitest run --coverage', files[0].read_text())
             self.assertNotIn('"translations"', files[0].read_text())
+            self.assertIn('规划器逐步核验后续结果', files[0].read_text())
+            self.assertNotIn('The planner checks every later step', files[0].read_text())

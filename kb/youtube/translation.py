@@ -57,7 +57,8 @@ def render(text, output):
     translated = values(text, output)
     blocks = [unit['text'] for unit in units(text)]
     literals = translation_language.contexts(text, blocks)
-    if any(not translation_language.valid(value, context) for value, context in zip(translated, literals)):
+    if any(not translation_language.valid(value, context, block)
+           for value, context, block in zip(translated, literals, blocks)):
         raise RuntimeError(INVALID)
     return translation_language.joined(text, blocks, translated)
 
@@ -65,6 +66,6 @@ def render(text, output):
 def unit_output(text, position, output):
     blocks = [unit['text'] for unit in units(text)]
     value = values(blocks[position], output)[0]
-    if not translation_language.valid(value, translation_language.contexts(text, blocks)[position]):
+    if not translation_language.valid(value, translation_language.contexts(text, blocks)[position], blocks[position]):
         raise RuntimeError(INVALID)
     return value

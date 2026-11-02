@@ -3,7 +3,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from kb.feeds.registry import text_language
-from kb.youtube import json_output, media, notes, translation
+from kb.youtube import json_output, media, notes, transcripts, translation, translation_language
 from tests.youtube_fixture import YouTubeFixture
 
 
@@ -103,6 +103,49 @@ class TranslationOutput(YouTubeFixture):
                               ('https://example.test/install', 'https://unrelated.test/other')):
             with self.subTest(source=source), self.assertRaises(RuntimeError):
                 translation.render(source, json.dumps({'translations': [value]}))
+
+    def test_cleaned_single_line_captions_do_not_turn_command_tails_into_literals(self):
+        lines = ['Welcome back to the channel. Today we examine an AI agent framework.',
+                 'First run npm install to get the deps.',
+                 'The planner decomposes the goal into steps and each step gets its own budget.',
+                 'The executor runs those steps and checks the result before proceeding.',
+                 'Every generated change requires independent verification before use.'] * 6
+        segments = transcripts.parse(json.dumps({'segments': [
+            {'start': position * 20, 'end': (position + 1) * 20, 'text': line + '\n'}
+            for position, line in enumerate(lines)]}), '.json')
+        source, = transcripts.blocks(segments)
+        self.assertNotIn('\n', source)
+        blocks = [unit['text'] for unit in translation.units(source)]
+        self.assertGreaterEqual(len(blocks), 5)
+        for position, block in enumerate(blocks):
+            with self.subTest(position=position), self.assertRaises(RuntimeError):
+                translation.unit_output(source, position, json.dumps({'translations': [block]}))
+        incomplete = json.dumps({'translations': ['作者介绍智能体框架。', *blocks[1:]]})
+        with self.assertRaises(RuntimeError):
+            translation.render(source, incomplete)
+        with patch.object(notes, 'call', return_value=incomplete), self.assertRaises(RuntimeError):
+            notes.translate(source, self.selected, 10**10, lambda: False)
+        spans = translation_language.literal_spans(source)
+        self.assertTrue(spans)
+        self.assertTrue(all('The planner' not in source[start:end] for start, end in spans))
+
+    def test_commands_end_before_prose_even_without_caption_newlines(self):
+        for source in ('npm install to get the deps and then verify every generated change',
+                       'npm install packages verify requirements independently without running unsafe commands',
+                       'npm install. Verify every generated change before use.',
+                       'First run npm install. Review 测试 results independently.'):
+            with self.subTest(source=source), self.assertRaises(RuntimeError):
+                translation.render(source, json.dumps({'translations': [source]}))
+        command = 'npm install --save-dev vitest && npx vitest run --coverage'
+        tail = ('The planner checks every generated change before using it. ' * 12).strip()
+        source = command + '. ' + tail
+        translated = [unit['text'].replace('The planner checks every generated change before using it.',
+                                          '规划器在使用前核验每次生成的修改。')
+                      for unit in translation.units(source)]
+        rendered = translation.render(source, json.dumps({'translations': translated}))
+        self.assertIn(command, rendered)
+        self.assertIn('\n\n', rendered)
+        self.assertNotIn('The planner', rendered)
 
     def test_valid_narrative_and_literal_unit_caches_survive_another_unit_failure(self):
         first = ('Review every generated change before use. ' * 8).strip()

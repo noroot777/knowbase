@@ -1,6 +1,26 @@
 # YouTube 低成本接入验证
 
-## 当前复修：同一行包装、技术叙述与旧连接错误（Q6aANIwNFZIj）
+## 当前复修：单行字幕命令边界与预算留尾清旧错（sJYB8ObBe4Vx）
+
+- 命令字面量不再从命中位置一直吞到字幕块末尾：按句末与有限参数结构识别，普通叙述不能因为前面出现 npm install 就全被豁免。源文叙述逐段原样返回时拒绝，纯已识别代码/URL 仍可保留。
+- 测试经过真实 transcripts.parse/clean/blocks 生成无换行字幕，同时覆盖批次、逐段恢复、旧错误缓存重验、拒绝发布与恢复后实际 Markdown 导出。字面识别仍是保守语法子集，不承诺任意命令或翻译语义核验。
+- 清旧连接失败不再要求列表 incomplete：实际取回条目、无当前失败时，数量预算留尾也清 last_error/failures/retry_at；未完成状态和原成功水位保留，原空返回、当前内容错误、AUTH 提醒与停止保护未撤。
+- 浏览器夹具现在同样经过真实字幕清洗，命令后的叙述要翻译为中文；给实际有预算积压的 AI Search 种旧连接失败，核对旧错清理、本轮跳过说明和真实待办接口。
+- 本轮先命名扩展会话 `🔎 YouTube单行字幕与预算恢复复修`，请求后台标签被拒 `Capability is not available: visibility`，未创建标签。之后用项目独立无头壳、临时 profile 与 loopback 夹具，不使用用户登录态、不接管普通标签。
+- 已裁定的发现性能及带视频 ID 的 AUTH/未知错误放行政策未动；其他非阻断项未扩修，不自动改写既有生产成品。
+
+仅本轮修改的四个测试模块登记：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_translation_output tests.test_youtube_source_status tests.test_youtube_integrity tests.test_youtube_browser -v
+```
+
+cwd：`/Users/fjh/code/knowledge-base/.worktrees/MNW4en5L0iPP`。
+真实登记日志、受测树和本轮截图在
+`/Users/fjh/code/harness/data/runs/MNW4en5L0iPP/repair-review-sJYB8ObBe4Vx/`。
+其余未改模块与整套回归留给验收；未访问真实模型、YouTube 或用户 cookie，未修改生产环境。
+
+## 历史复修：同一行包装、技术叙述与旧连接错误（Q6aANIwNFZIj）
 
 - JSON 提取优先独立顶层结果，没有独立结果时兼容同一行的前后说明；格式承诺、数组内嵌对象和提示回声仍拒绝。翻译与最终笔记共用入口。
 - 译文不再因汉字占比小于固定阈值被否决，也不恢复原译文长度比。仍核对源文分段、条数、非空及中文叙述信号；已识别的纯源文字面片段可原样保留。结构与中文信号不证明语义保真。

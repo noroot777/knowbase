@@ -486,6 +486,10 @@ try {
   check('内容积压不伪装成频道覆盖失败', backlogCard.state === '已同步（有跳过）' &&
     backlogCard.notice.includes('未完成处理') && !backlogCard.text.includes('部分同步') &&
     !backlogCard.text.includes('从上次的位置'), JSON.stringify(backlogCard));
+  check('数量预算留尾清旧失败且显示本轮跳过说明', backlogCard.state === '已同步（有跳过）' &&
+    backlogCard.notice.includes('2 条视频无法读取') && backlogCard.notice.includes('未完成处理') &&
+    !backlogCard.text.includes('上一轮连接失败') && !backlogCard.text.includes('查看失败原因') &&
+    backlogCard.text.includes('尚未成功同步'), JSON.stringify(backlogCard));
   const care = await evaluate(`fetch('/api/intake-care?kind=youtube').then(response=>response.json())`);
   check('真实待办接口只报告覆盖失败而非内容积压', care.source_problems === 1 &&
     care.sources.length === 1 && care.sources[0].name === '部分同步测试频道' &&
@@ -516,6 +520,9 @@ try {
     $('source-reader-body').textContent.includes('npm install --save-dev vitest && npx vitest run --coverage') &&
     !$('source-reader-body').textContent.includes('第一段译文') &&
     !$('source-reader-body').textContent.includes('第二段译文')`));
+  check('单行字幕的命令后叙述确实翻译成中文', await evaluate(`
+    $('source-reader-body').textContent.includes('规划器逐步核验后续结果') &&
+    !$('source-reader-body').textContent.includes('The planner checks every later step')`));
   check('候选完成原因不混入翻译误报', await evaluate(`
     fetch('/api/intake/youtube/ranking').then(response=>response.json()).then(value=>
       value.items.filter(row=>row.state==='ready').length===1 &&

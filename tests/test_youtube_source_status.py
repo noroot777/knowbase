@@ -139,6 +139,41 @@ class YouTubeSourceStatus(YouTubeFixture):
                 if not content_error and not auth_error:
                     self.assertEqual(['partial'], problems)
 
+    def test_complete_listing_with_count_budget_tail_clears_old_connection_failure(self):
+        source = self.sources[0]
+        previous = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+        with reg.db() as connection:
+            connection.execute("UPDATE subscriptions SET last_success=?,last_error='上一轮连接失败：HTTP Error 429',"
+                               'failures=3,retry_at=1 WHERE id=?', (previous, source['id']))
+        self.settings(max_videos=1)
+        entries = [self.entry(number) for number in (971, 972)]
+
+        def fetch(selected, *arguments):
+            if selected['id'] != source['id']:
+                return []
+            selected['discovery_unavailable'] = [
+                {'video_id': f'{number:011d}', 'reason': '离线夹具：单片无法读取'} for number in (981, 982)]
+            return entries
+
+        with patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'firefox'}), \
+                patch.object(collector, 'DISCOVERY_SPACING', 0), patch.object(discovery, 'fetch', side_effect=fetch), \
+                patch.object(notes, 'available', return_value=(True, '')), \
+                patch.object(media, 'probe', return_value={'duration': 600}), \
+                patch.object(media, 'obtain', return_value=self.complete_transcript()), \
+                patch.object(notes, 'build', side_effect=self.note):
+            result = collector.collect(FetchScope(force=True))
+        stored = reg.subscription('youtube', source['id'])
+        self.assertEqual(['deferred', 'ready'], sorted(row['state'] for row in storage.rows([source['id']])))
+        self.assertEqual(('', 0, 0), tuple(stored[key] for key in ('last_error', 'failures', 'retry_at')))
+        self.assertEqual(previous, stored['last_success'])
+        self.assertEqual('', stored['last_note'])
+        self.assertIn('2 条视频无法读取', stored['last_notice'])
+        self.assertIn('未完成处理', stored['last_notice'])
+        self.assertFalse(result['partial'])
+        self.assertNotIn(str(source['id']), result['succeeded_ids'])
+        self.assertFalse([item for item in source_diagnostics.problems('youtube')
+                          if item['source_id'] == source['id']])
+
     def test_content_backlog_is_not_a_source_coverage_problem(self):
         source = self.sources[0]
         entries = [self.entry(number) for number in range(1, 6)]

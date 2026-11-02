@@ -553,7 +553,7 @@ def _round(scope):
             if scope.ranged:
                 completed = [row for row in completed if scope.since <= row['entry']['published'][:10] <= scope.until]
             if not commit_notes(source, completed, summary, outstanding, scope.ranged, record_success=False,
-                                clear_failure=source['id'] in returned and source['id'] in incomplete and not current_failure):
+                                clear_failure=source['id'] in returned and not current_failure):
                 summary['repointed'] += 1
                 continue
             if source['id'] in failures:
