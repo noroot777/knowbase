@@ -110,7 +110,7 @@ class TimingBookTests(unittest.TestCase):
         with mock.patch.object(tiers, "build_suite", lambda t: load(slow)), \
                 mock.patch.dict(os.environ), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
-            rc = tiers.main(["full"])
+            rc = tiers.main(["full-logic", "--selftest=run"])
         self.assertEqual(0, rc, err.getvalue())
         self.assertIn("个文件(含类级夹具)合计 15 秒", err.getvalue())
         self.assertIn("tests.fake_main.MainSlow.test_x", err.getvalue())

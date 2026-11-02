@@ -540,7 +540,7 @@ Knowbase 操作入口(Windows)—— 每条命令跑完就还你终端,不用挂
   回归(前台跑,数据目录自动换成全新临时目录,不碰真实库)
     .\kb.ps1 test                   提交前的快速层:纯逻辑全量,浏览器回归显式拦下
     .\kb.ps1 test probes            只跑浏览器回归 —— 改了 kb/static/ 或阅读页之后
-    .\kb.ps1 test full              真全量,push 前至少一次
+    .\kb.ps1 test full              真全量,逻辑/浏览器两路并行;KB_SELFTEST=always 强制跑设施自测
 
   订阅(瞬间返回)
     .\kb.ps1 accounts list|discover|add|remove|enable|disable [名字]

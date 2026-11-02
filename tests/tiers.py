@@ -15,6 +15,11 @@
   态度,但把浏览器覆盖数打出来)。**验收合并前必须跑过一次,由 ash 的验收闸门在
   点验收时自动跑**(手动跑用于排查;动了测试基建/共享夹具的那一轮当轮跑)——
   共享 `KB_DATA_DIR` 的「只在同跑时红、单跑永远绿」那类问题,只有全量同跑看得见。
+  按 kb_browser 标记切成逻辑/浏览器两路(`PARTS`),由 `tests/tier_split.py` 并行起
+  子进程跑;同一路内的同跑污染照旧看得见,两路之间的不再覆盖(仓库主人拍板)。
+
+**测试设施自测那一组**指纹没变、证没过期就不跑(`tests/tier_selftest.py`),
+`KB_SELFTEST=always` 强制照跑。
 
 每一层跑完都打一份耗时账(最慢的文件/用例,文件那栏含类级夹具,见 `timing_lines`):
 提速只能对着重尾下手,默认输出却只有一串点和一个总秒数。
@@ -31,6 +36,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -39,6 +45,7 @@ import unittest
 from collections import Counter
 from pathlib import Path
 
+from tests import tier_selftest
 from tests.headless import SKIP_ENV
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,6 +53,9 @@ from tests import clear_feature_env
 
 TESTS_DIR = ROOT / "tests"
 TIERS = ("fast", "probes", "full")
+#: full 的两路(tests/tier_split.py 起的子进程各跑一路):按 kb_browser 标记切开,
+#: 两路不重不漏,合起来就是整套。也能单独跑来排查。
+PARTS = ("full-logic", "full-browser")
 
 #: 耗时账的时钟,单独一个名字好让回归换成假钟(不去动全局的 time.monotonic)。
 _clock = time.monotonic
@@ -67,12 +77,33 @@ def probe_modules() -> list[str]:
     return out
 
 
+def filter_suite(suite, keep):
+    """按 keep(用例) 筛,**保留原来的模块/类嵌套**:setUpClass/setUpModule 靠
+    相邻用例的类与模块判边界,压平了照样能跑,但两路各自那一份的夹具边界要和
+    整套时一样。空掉的子 suite 一并丢掉。"""
+    out = unittest.TestSuite()
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            sub = filter_suite(item, keep)
+            if sub.countTestCases():
+                out.addTest(sub)
+        elif keep(item):
+            out.addTest(item)
+    return out
+
+
 def build_suite(tier: str) -> unittest.TestSuite:
     """按层取用例。fast 的闸门不在这里 —— 在 tests.headless(见模块 docstring)。"""
     loader = unittest.defaultTestLoader
     if tier == "probes":
         return loader.loadTestsFromNames(probe_modules())
-    return loader.discover(str(TESTS_DIR), top_level_dir=str(ROOT))
+    suite = loader.discover(str(TESTS_DIR), top_level_dir=str(ROOT))
+    if tier in PARTS:
+        # 导入失败的那种(_FailedTest)没有标记,落在逻辑那一路,照样报红。
+        browser = tier == "full-browser"
+        return filter_suite(
+            suite, lambda t: bool(getattr(t, "kb_browser", False)) == browser)
+    return suite
 
 
 def _apply_tier_env(tier: str) -> None:
@@ -193,18 +224,47 @@ def timing_lines(result: TierResult, n: int = SLOWEST_N) -> list[str]:
     return out
 
 
+def selftest_passed(planned: set[str], result: TierResult) -> set[str]:
+    """自测用例里**整条真跑完且绿**的那些:开始了、没被(子例)skip、没红。"""
+    bad = {getattr(t, "test_case", t).id()
+           for t, _ in result.failures + result.errors}
+    return ((result.kb_started & planned) - result.kb_whole_skips
+            - result.kb_partial_skips - bad)
+
+
 def main(argv: list[str]) -> int:
     tier = argv[0] if argv else "fast"
-    if tier not in TIERS:
+    opts = dict(a[2:].split("=", 1) for a in argv[1:] if a.startswith("--") and "=" in a)
+    if tier == "full":
+        from tests import tier_split
+        return tier_split.run_full()
+    if tier not in TIERS + PARTS:
         print(f"不认识的层 {tier!r},只有 {'|'.join(TIERS)}(缺省 fast)", file=sys.stderr)
         return 2
-    _apply_tier_env(tier)
+    if "parent" in opts:
+        from tests import tier_split
+        tier_split.watch_parent(int(opts["parent"]))
+    return run_tier(tier, selftest=opts.get("selftest"), report=opts.get("report"))
+
+
+def run_tier(tier: str, *, selftest: str | None = None, report: str | None = None) -> int:
+    """在本进程里跑一层(或 full 的一路)。selftest 给 run/skip 就照办(full 的
+    父进程替两路定好了),不给就自己读证。report 给了就把账写成 JSON 交回父进程。"""
+    _apply_tier_env("full" if tier in PARTS else tier)
     # 汇总要打的流,**现在就存一份引用**:有的用例会临时把 sys.stdout/sys.stderr
     # 换成 StringIO,泄漏(多线程、失败路径)时跑完再取就拿到它那份替身,汇总行
     # 一声不响地丢掉 —— 实测丢过。unittest 自己的结果块没丢,靠的就是 runner 在
     # 开跑前解析了一次流;这里同一个办法。
     status = sys.stderr
+    if selftest is None:
+        skip, why = tier_selftest.decide()
+        print(f"[selftest] {why}", file=status, flush=True)
+    else:
+        skip = selftest == "skip"
     suite = build_suite(tier)
+    if skip:
+        suite = filter_suite(suite, lambda t: not tier_selftest.is_selftest(t))
+    planned_selftest = {t.id() for t in _iter_tests(suite) if tier_selftest.is_selftest(t)}
     browser_ids = browser_case_ids(suite)
     t0 = time.monotonic()
     result = unittest.TextTestRunner(verbosity=1, resultclass=TierResult).run(suite)
@@ -230,6 +290,18 @@ def main(argv: list[str]) -> int:
     # 不打出来就只剩一个总秒数可看。
     for row in timing_lines(result):
         print(row, file=status, flush=True)
+    rc = _verdict(tier, result, total, ran, status)
+    if report:
+        Path(report).write_text(json.dumps({
+            "rc": rc, "executed": executed, "wall": wall,
+            "browser_total": total, "browser_ran": ran,
+            "selftest_planned": sorted(planned_selftest),
+            "selftest_passed": sorted(selftest_passed(planned_selftest, result)),
+        }), encoding="utf-8")
+    return rc
+
+
+def _verdict(tier, result, total, ran, status) -> int:
     if tier == "probes":
         # 这一层的意义就是「现在就验浏览器」,没验全不许绿:缺壳时浏览器用例全
         # skip、几百条纯逻辑邻居通过、命令报成功 —— 那正是要修的事故形态。空集
