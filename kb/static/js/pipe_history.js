@@ -267,8 +267,8 @@ function viewPipeRun(key) {
   pipeViewing = run;
   renderPipeHistory();
   renderPipeState(pipeSnapshot || { running: false });
-  // **已经在视口里就别滚。** 桌面上轮次列和这张卡并排,点一行它本来就在眼前 ——
-  // 再滚一次是无谓的跳动。窄屏单列时它在上面几百像素外,那一档照旧要带过去。
+  // **已经在视口里就别滚。** 历史那张表就在这张卡下面,视口够高时点一行它本来就在
+  // 眼前 —— 再滚一次是无谓的跳动。人往下滚到表上才点的那一档,它在上面几百像素外,照旧要带过去。
   const title = $('pipe-state-title'), box = title.getBoundingClientRect();
   title.focus({ preventScroll: box.top >= 0 && box.bottom <= window.innerHeight });
 }

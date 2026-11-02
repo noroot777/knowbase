@@ -4,14 +4,16 @@
 // 不按得下去);这一份验的是**几何** —— 点一行之后屏幕上看不看得见变化。两件事分开,
 // 因为那份探针贴着 700 行上限,而且这一份要换视口、改设备度量,和它那套状态机无关。
 //
-// 来由:轮次列原来待在页尾。点一行走的是 `viewPipeRun` → `renderPipeState`,**整屏**
-// (概况卡、失败明细、进度、阶段、日志)按那一轮重渲染 —— 它是个视图切换器。1440×900
-// 实测那一行在 y≥1047、被它改写的概况卡在 y=84,**点下去屏幕上什么都看不见**;退出
-// 入口(`#pipe-viewing`)又在页顶,一次「这轮不对,看上一轮」是两趟整页滚动。
+// 来由:点一行走的是 `viewPipeRun` → `renderPipeState`,**整屏**(概况卡、失败明细、进度、
+// 阶段、日志)按那一轮重渲染 —— 它是个视图切换器。最早轮次列待在页尾,1440×900 实测那一行
+// 在 y≥1047、被它改写的概况卡在 y=84,**点下去屏幕上什么都看不见**。现在历史是概况卡下面
+// 那张整宽的表(一行一轮、一列一类,`pipe_matrix.js`,形态见 `docs/decisions/sync-flow.md`),
+// 中间那一版「并排 + sticky」随之作废。
 //
-// **判据落在后果上,不落在「DOM 挂在哪个父节点下」** —— 搬了位置而没解决同屏,那一条
-// 照旧该红。**反过来钉一边**:窄屏单列时并排不可能,那一档改为要求 `focus()` 真把视线
-// 带到被改写的那块。
+// **判据落在后果上,不落在「DOM 挂在哪个父节点下」**:点下去之后概况卡的标题和「正在查看」
+// 那句话(退出入口就在它上面)在视口里。**两条路各钉一次**:标题本来就在眼前时页面一动
+// 不动(`preventScroll`),被滚出去时靠 `viewPipeRun` 末尾那次 `focus()` 带回来 —— 后一档
+// 要矮视口才摆得出来(1000 高时整页只比视口长几十像素,标题怎么滚都在眼前)。
 //
 // 自带只读 mock 后端(没有状态机:一份固定的两轮留档 + 静态回包),CDP 直连 playwright
 // 缓存里的 chrome-headless-shell(不装 playwright、不连网、始终无头、临时 profile)。
@@ -87,52 +89,37 @@ await send("Page.navigate", { url: `${base}/#pipe` });
 await setup("面板加载出两轮留档",
             until(`document.querySelectorAll('.pipe-history-row').length === 2`, 8000));
 
-// ── 1. 并排那一档:点一行,被点的行和「这是哪一轮」那句话同屏 ──────────────────
-await setup("点中上午那一行", clickAt(".pipe-history-row:nth-child(2)"));
-await setup("整屏换成上午那一轮", until(`$('pipe-stage-export').dataset.status === 'error'`));
-const wide = await evalJs(`(() => {
-  const row = document.querySelector('.pipe-history-row:nth-child(2)').getBoundingClientRect();
-  const say = document.querySelector('#pipe-viewing').getBoundingClientRect();
-  const vis = b => b.top >= 0 && b.bottom <= innerHeight;
-  return { row: vis(row), say: vis(say), scrolled: Math.round(scrollY),
-           sideBySide: getComputedStyle(document.querySelector('.pipe-workbench'))
-             .gridTemplateColumns.split(' ').length > 1 };
+// 点**那一行的时间格**:历史是一张一列一类的表,点在类型那几格上会顺手选中那一类
+// (`pipeMatrixPick`)。这里要的是「换一轮」本身,不挑类型。
+const ROW2 = "#pipe-history-list .pipe-history-row:nth-child(2) .pipe-history-when";
+const sight = () => evalJs(`(() => {
+  const vis = s => { const b = document.querySelector(s).getBoundingClientRect();
+                     return b.height > 0 && b.top >= 0 && b.bottom <= innerHeight; };
+  return { title: vis('#pipe-state-title'), say: vis('#pipe-viewing'), scrolled: Math.round(scrollY),
+           overflowX: document.documentElement.scrollWidth > innerWidth };
 })()`);
-check("宽屏:轮次列和步骤并排", wide.sideBySide, JSON.stringify(wide));
-check("宽屏:被点的那一行和「正在查看」那句话同屏可见", wide.row && wide.say, JSON.stringify(wide));
+
+// ── 1. 点一行:被改写的那块和退出入口落在眼前 ─────────────────────────────────
+await setup("点中上午那一行", clickAt(ROW2));
+await setup("整屏换成上午那一轮", until(`$('pipe-stage-export').dataset.status === 'error'`));
+const wide = await sight();
+check("宽屏:点下去概况卡标题和「正在查看」都在视口里", wide.title && wide.say, JSON.stringify(wide));
 // 「要不要滚」得用**不自己滚的那种点击**来量:`clickAt` 为了命中先做一次
-// `scrollIntoView({ block: 'center' })`,拿它量出来的 scrollY 是探针自己滚的
-// (实测 80),不是页面滚的。所以这一条单独用 DOM click,从 scrollY=0 起量。
+// `scrollIntoView({ block: 'center' })`,拿它量出来的 scrollY 是探针自己滚的,
+// 不是页面滚的。所以这一条单独用 DOM click,从 scrollY=0 起量。
 await evalJs(`exitPipeHistory(); scrollTo(0, 0); true`);
 await sleep(200);
-await evalJs(`document.querySelector('.pipe-history-row:nth-child(2)').click(); true`);
+await evalJs(`document.querySelector(${JSON.stringify(ROW2)}).click(); true`);
 await setup("DOM click 也翻得过去", until(`$('pipe-stage-export').dataset.status === 'error'`));
 await sleep(400);                      // focus() 的平滑滚动要是真发生了,给它时间发生
-const quiet = await evalJs(`(() => {
-  const row = document.querySelector('.pipe-history-row:nth-child(2)').getBoundingClientRect();
-  const say = document.querySelector('#pipe-viewing').getBoundingClientRect();
-  const vis = b => b.top >= 0 && b.bottom <= innerHeight;
-  return { scrolled: Math.round(scrollY), row: vis(row), say: vis(say) };
-})()`);
-check("并排那一档点下去页面一动不动(两边本来就都在眼前)",
-      quiet.scrolled === 0 && quiet.row && quiet.say, JSON.stringify(quiet));
-
-// 那一列要钉住:展开一条问题明细能把左边拉长几百像素,选择器不能跟着滚出去
-await evalJs(`document.querySelectorAll('#pipe-stages details').forEach(d => { if (!d.hidden) d.open = true; });
-  scrollTo(0, document.documentElement.scrollHeight); true`);
-await sleep(320);
-const pinned = await evalJs(`(() => {
-  const card = document.querySelector('.pipe-history-panel').getBoundingClientRect();
-  return { visible: card.top < innerHeight && card.bottom > 0, scrolled: Math.round(scrollY),
-           position: getComputedStyle(document.querySelector('.pipe-history-panel')).position };
-})()`);
-check("滚到底之后轮次列还钉在视口里",
-      pinned.position === 'sticky' && pinned.visible && pinned.scrolled > 0, JSON.stringify(pinned));
+const quiet = await sight();
+check("标题本来就在眼前时点下去页面一动不动",
+      quiet.scrolled === 0 && quiet.title && quiet.say, JSON.stringify(quiet));
 await evalJs(`scrollTo(0, 0); exitPipeHistory(); true`);
 await sleep(200);
 
 // ── 2. 失败明细只有一份:概况卡只说哪几步,不抄它们的 detail ──────────────────
-await setup("再翻到上午那一轮", clickAt(".pipe-history-row:nth-child(2)"));
+await setup("再翻到上午那一轮", clickAt(ROW2));
 await setup("整屏又换过去了", until(`$('pipe-stage-export').dataset.status === 'error'`));
 const dedup = await evalJs(`({
   summary: $('pipe-issues-list').textContent.replace(/\\s+/g, ' ').trim(),
@@ -181,7 +168,7 @@ liveRun = "run-live";
 await evalJs(`refreshPipe()`);
 await setup("摆出「有一轮在跑」", until(`$('pipe-log-panel').open === true`));
 await evalJs(`$('pipe-log-panel').open = false; true`);          // 用户自己收起来
-await setup("翻到上午那一轮", clickAt(".pipe-history-row:nth-child(2)"));
+await setup("翻到上午那一轮", clickAt(ROW2));
 await evalJs(`exitPipeHistory(); refreshPipe()`);
 await sleep(200);
 check("跑着的时候收起日志,翻一趟历史回来它还是收着的",
@@ -198,34 +185,25 @@ liveRun = "";
 await evalJs(`refreshPipe(); exitPipeHistory(); scrollTo(0, 0); true`);
 await sleep(200);
 
-// ── 5. 反过来钉一边:窄屏单列,选择器排在步骤之前,focus 把视线带过去 ─────────
+// ── 5. 反过来钉一边:标题被滚出视口时,focus 把视线带回被改写的那块 ─────────────
 //
-// **两个宽度都要量,而且 1100 这一档是有来由的**:塌列原来写在 `@media (max-width:
-// 1180px)`,而「排到上面 + 钉住关掉」写在另一个更窄的断点里 —— 两条都命中时后者赢,
-// 于是 1000~1180 这一段**列已经塌成单列、选择器却还钉着、还排在它改写的内容后面**,
-// 正是「单列下它反过来挡住内容」那一档。只量 820 的话这一段一个字都测不到:实测定点
-// 注入(把窄屏那条 grid 改回两列)时探针**全绿**,因为 820 那一档被另一条规则兜住了。
+// 先滚到页底(人是在表上点的),这时概况卡标题在视口上方。两个宽度各量一次:窄一档
+// 卡片换行更多、更高,同一句 `preventScroll` 判据要在两种卡高下都成立。
 for (const width of [1100, 820]) {
-  await evalJs(`exitPipeHistory(); scrollTo(0, 0); true`);
+  await evalJs(`exitPipeHistory(); true`);
   await send("Emulation.setDeviceMetricsOverride",
-             { width, height: 900, deviceScaleFactor: 1, mobile: false });
+             { width, height: 600, deviceScaleFactor: 1, mobile: false });
   await sleep(320);
-  await setup(`窄屏 ${width} 下再点那一行`, clickAt(".pipe-history-row:nth-child(2)"));
-  await setup(`窄屏 ${width} 也换过去了`, until(`$('pipe-stage-export').dataset.status === 'error'`));
-  const narrow = await evalJs(`(() => {
-    const t = $('pipe-state-title').getBoundingClientRect();
-    const y = s => Math.round(document.querySelector(s).getBoundingClientRect().top + scrollY);
-    return { oneColumn: getComputedStyle(document.querySelector('.pipe-workbench'))
-               .gridTemplateColumns.split(' ').length === 1,
-             selectorFirst: y('.pipe-history-panel') < y('.pipe-stage-panel'),
-             position: getComputedStyle(document.querySelector('.pipe-history-panel')).position,
-             titleInView: t.top >= 0 && t.bottom <= innerHeight };
-  })()`);
-  check(`${width}:回落单列`, narrow.oneColumn, JSON.stringify(narrow));
-  check(`${width}:选择器排在步骤之前`, narrow.selectorFirst, JSON.stringify(narrow));
-  check(`${width}:钉住关掉(单列时它会反过来挡住内容)`,
-        narrow.position === 'static', JSON.stringify(narrow));
-  check(`${width}:靠 focus 把视线带到被改写的那块`, narrow.titleInView, JSON.stringify(narrow));
+  await evalJs(`scrollTo(0, document.documentElement.scrollHeight); true`);
+  await sleep(200);
+  await setup(`${width}×600 下标题先被滚出视口`, evalJs(
+    `$('pipe-state-title').getBoundingClientRect().bottom < 0`));
+  await setup(`${width} 下再点那一行`, clickAt(ROW2));
+  await setup(`${width} 也换过去了`, until(`$('pipe-stage-export').dataset.status === 'error'`));
+  await sleep(400);
+  const narrow = await sight();
+  check(`${width}:靠 focus 把标题和「正在查看」带回视口`, narrow.title && narrow.say, JSON.stringify(narrow));
+  check(`${width}:那张表不把整页撑出横向滚动`, !narrow.overflowX, JSON.stringify(narrow));
 }
 await send("Emulation.clearDeviceMetricsOverride");
 

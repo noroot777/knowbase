@@ -381,6 +381,8 @@ python -m unittest tests.test_subs_layout tests.test_source_post_title \
   30 条时容器约 765px、内容约 1904px，可滚到最后一条的操作按钮，整页不滚。
 - 375×760 实测：3 条同样按内容收缩；30 条在约 328px 的容器内滚动，
   页尾说明保留、没有横向溢出。
+- 名单下那一行说明后来按「让布局解释界面」删掉了(`687daa3`),所以 `subs_wechat_review_checks.mjs`
+  量的是名单自己的底边:整块落在视口里、长名单内部滚动、整页不滚。量那行说明的判据随它作废。
 
 ### 回归与浏览器证据
 
