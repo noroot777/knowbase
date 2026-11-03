@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kb import browser_capture
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_article, x_channels
+from kb.feeds import x_intake_store as store
 from kb.feeds.x_article_js import SOURCE
 from kb.web import browser_capture_api, x_article_capture_api
 from tests.test_x_guest import GuestBase, status
@@ -130,6 +131,23 @@ class SaveTests(CaptureBase):
                 self.assertEqual(before, self.candidate()['entry'])
         self.collect()
         self.assertNotIn(STATUS, self.stored())
+
+    def test_a_stale_link_of_a_repointed_subscription_does_not_block_the_live_one(self):
+        """订阅 A 改指了别的账号、还没同步(它那条旧关联和旧进度都还在);同一个账号又加成了订阅 B。
+        人补的正文要经 B 写进去 —— 挑中 A 的话 `finish` 找不到它现在的进度,一个字都不写。"""
+        reg.save_subscription('social', {'url': 'https://x.com/carol'}, self.source['id'])
+        again = self.sub('alice', name='alice 又一次')
+        identity = store.identity(reg.subscription('social', again['id']))
+        with reg.db() as c:
+            row = c.execute('SELECT channel, floor FROM x_intake_sources WHERE source_id=?',
+                            (self.source['id'],)).fetchone()
+            c.execute('INSERT INTO x_intake_sources(source_id, identity, channel, floor) VALUES (?,?,?,?)',
+                      (again['id'], identity, row['channel'], row['floor']))
+            c.execute("INSERT INTO x_intake_links(source_id, identity, post_id) VALUES (?,?,'6')",
+                      (again['id'], identity))
+        r = self.save()
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertEqual('ready', self.candidate()['state'])
 
     def test_a_post_that_no_longer_waits_is_not_written_again(self):
         """已经补上并入库的,再交一份(哪怕是另一份正文)也不许改它。"""

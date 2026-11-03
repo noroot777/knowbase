@@ -120,8 +120,12 @@ def save(post_id: str, page_url: str, snapshot) -> dict:
     with store.read_db(timeout=30) as conn:
         task = conn.execute("SELECT * FROM x_intake_candidates WHERE post_id=? AND state='pending'",
                             (ident,)).fetchone()
-        links = [row['source_id'] for row in conn.execute(
-            'SELECT source_id FROM x_intake_links WHERE post_id=? ORDER BY source_id', (ident,))]
+        # 关联的口径同 `store.pending`:身份是那条订阅**现在**指着的账号、推文在它的有效下界之内。
+        # 订阅改指别的账号之后,旧关联要等它下一轮同步才清掉;只认 source_id 会挑中它,写不进去。
+        links = [(row['source_id'], row['identity']) for row in conn.execute(
+            '''SELECT l.source_id,l.identity FROM x_intake_links l JOIN x_intake_sources s
+               ON s.source_id=l.source_id AND s.identity=l.identity JOIN x_intake_candidates p USING(post_id)
+               WHERE l.post_id=? AND p.published>=s.floor ORDER BY l.source_id''', (ident,))]
     entry = json.loads(task['entry']) if task else None
     if not entry or not _owes(entry):
         raise ValueError('这一条已经不在等长文了（可能刚被自动补上或已入库）。没有写入。')
@@ -134,10 +138,10 @@ def save(post_id: str, page_url: str, snapshot) -> dict:
     #
     # **不许只把正文写回、留着 pending 等下一轮**:下一轮的时间线扫描会按时间线上那一份(空正文、
     # 带长文信号)把 pending 的候选整份重写(`store.stage`),人刚补的正文当场丢掉。
-    sources = {source['id']: source for source in reg.subscriptions('social')}
+    sources = {(source['id'], store.identity(source)): source for source in reg.subscriptions('social')}
     owner = next((sources[one] for one in links if one in sources), None)
     if owner is None:
-        raise ValueError('这条推文所属的订阅已经不在了，没有写入。')
+        raise ValueError('这条推文所属的订阅已经不在了（或改指了别的账号），没有写入。')
     try:
         store.finish(owner, dict(task), [merged], [], '')
     except (LockBusy, sqlite3.OperationalError):

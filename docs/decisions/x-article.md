@@ -102,7 +102,7 @@
   `browser_fetch` 轮询时和人工那条路都过它。回归 `tests/test_x_article_capture.py` 的 `ShippingTests`(还钉着 ZIP
   里带上了 `x_article_read.js` 和 `x_capture.js`)。
 - **人工补长文**(`kb/feeds/x_article_capture.py`、`kb/web/x_article_capture_api.py`、扩展的 `x_capture.js`、
-  「问题与待办」里的 `x_article_owed.js`):自动那条路拿不到正文的长文作为候选挂在 X 五天队列里,**不入库**;
+  「问题与待办」里 `diag_detail.js` 的 `careRenderXArticles`):自动那条路拿不到正文的长文作为候选挂在 X 五天队列里,**不入库**;
   人在自己登录着 X 的浏览器里点开那篇长文、点一下扩展,快照交回服务端。不登录那一档(`guest`)最需要它 ——
   那一档只有 FxTwitter 拿得到长文 —— 但它对四条通道的候选一视同仁。
   - **它不是「从浏览器采集」(`kb.browser_capture`)那一套**:那一套补的是**已经在 `feed_items` 里**的文章行、

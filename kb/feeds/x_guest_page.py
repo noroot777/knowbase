@@ -16,11 +16,14 @@
 内联脚本 `formatRelativePastTimestamp` / `formatFullTimestamp` 的参数里,脚本第一个参数
 就是那个时间链接的 id),所以浏览器通道的收集脚本一行都用不上。认不出来一律抛
 `PageError`:有 `<article>` 却一条都配不上时间,就是页面换了形状,不许当成「没有推文」。
+只有一部分配不上时,认得出来的照给,认不出来的条数一并交出去(`posts` 返回的第二项),由调用方
+记成「没读全」—— 不许拿剩下几条把它们证明掉。
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -98,7 +101,17 @@ def _with_card(text: str, card: str) -> str:
     return f'{text} {card}' if text else card
 
 
-def _post(article: Tag, stamps: dict[str, int]) -> Post | None:
+def _moment(value) -> datetime | None:
+    """脚本参数里的毫秒时间戳;不是数、NaN/无穷、超出能表示的范围一律 `None`(那一条按认不出来算)。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000, timezone.utc)
+    except (OverflowError, ValueError, OSError):
+        return None
+
+
+def _post(article: Tag, stamps: dict[str, datetime]) -> Post | None:
     own = _own(article)
     # **身份按「带时间的那个节点」认**:脚本第一个参数就是它的 id,它自己或它外面那层链接
     # 指向这条推文。不按「第一条 status 链接」认 —— 那可能是引用卡片或别人的回复。
@@ -122,41 +135,44 @@ def _post(article: Tag, stamps: dict[str, int]) -> Post | None:
     head = article.get_text(' ', strip=True)[:40]
     long_form = next((m.group(1) for n in own if n.name == 'a' and (m := _ARTICLE.search(n.get('href', '')))), '')
     return Post(author=author, ident=ident,
-                when=datetime.fromtimestamp(stamp / 1000, timezone.utc),
+                when=stamp,
                 name=name, text=_with_card(_text(body).strip() if body else '', card),
                 truncated=any(n.name == 'button' and n.get_text(strip=True) in _MORE for n in own),
                 quoted=article.find('article') is not None, article=long_form,
                 pinned=any(head.startswith(p) for p in _PINNED))
 
 
-def posts(html: str) -> list[Post]:
-    """页面上那几条推文,按页面顺序。有推文却一条都认不出来就抛。"""
+def posts(html: str) -> tuple[list[Post], int]:
+    """页面上那几条推文(按页面顺序),和认不出来的顶层推文条数。有推文却一条都认不出来就抛。"""
     stamps = {}
     for ident, args in _STAMP.findall(html):
         try:
-            value = json.loads(args).get('timestamp')
-        except (ValueError, AttributeError):
+            when = _moment(json.loads(args).get('timestamp'))
+        except (ValueError, AttributeError, RecursionError):
             continue
-        if isinstance(value, int) and value > 0:
-            stamps[ident] = value
-    soup = BeautifulSoup(html, 'html.parser')
-    tops = [a for a in soup.find_all('article') if a.find_parent('article') is None]
-    got = [p for p in (_post(a, stamps) for a in tops) if p]
+        if when is not None:
+            stamps[ident] = when
+    try:
+        soup = BeautifulSoup(html, 'html.parser')
+        tops = [a for a in soup.find_all('article') if a.find_parent('article') is None]
+        got = [p for p in (_post(a, stamps) for a in tops) if p]
+    except RecursionError:
+        raise PageError('X 页面嵌套深得读不下去') from None
     if not tops:
         raise PageError('X 页面上一条推文都没有(登录墙、限流或账号不可见)')
     if not got:
         raise PageError(f'X 页面换了形状,{len(tops)} 条推文一条都认不出来')
-    return got
+    return got, len(tops) - len(got)
 
 
-def timeline(handle: str, deadline: float) -> list[Post]:
-    """未登录主页上露出来的那几条(含置顶,不含转推)。"""
+def timeline(handle: str, deadline: float) -> tuple[list[Post], int]:
+    """未登录主页上露出来的那几条(含置顶,不含转推),和认不出来的条数。"""
     return posts(fetch(f'https://x.com/{handle}', deadline))
 
 
 def detail(handle: str, ident: str, deadline: float) -> Post:
     """单条详情页上的那条主推文。身份对不上、或者仍是截断的,一律抛。"""
-    for post in posts(fetch(f'https://x.com/{handle}/status/{ident}', deadline)):
+    for post in posts(fetch(f'https://x.com/{handle}/status/{ident}', deadline))[0]:
         if post.ident == ident:
             if post.truncated:
                 raise PageError('X 详情页上的正文仍是截断的')

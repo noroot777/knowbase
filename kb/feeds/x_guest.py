@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import time
@@ -58,6 +59,10 @@ RETRY_PAUSE = 2.0
 PAGE_PAUSE = 0.5
 # 剩下不到这么多秒就不再发新请求(一次请求本身就要一两秒)。
 MIN_USEFUL = 2.0
+# 账号时限里给后路(X 主页 + 截断正文的详情页)留的秒数:公开接口的**第一页**最多问到这之前。
+# 不留的话,接口慢到超时时三次重试就把整个账号的时限吃光,X 主页明明能打开也轮不上它。
+# 第一页问到之后后路就不会再走了,后面的翻页照旧用满整份时限。
+PAGE_RESERVE = float(os.environ.get('KB_X_GUEST_PAGE_RESERVE', '10'))
 # 当成没有水位(新订阅、区间补抓之外)时只读这么多天。真正的下界由调用方给。
 FIRST_DAYS = 5
 SHANGHAI = ZoneInfo('Asia/Shanghai')
@@ -94,15 +99,32 @@ def _page(handle: str, cursor: str, deadline: float) -> dict:
         if not isinstance(payload, dict) or not isinstance(payload.get('results'), list):
             why = '回包里没有推文列表'
             continue
+        if _bottom(payload) is None:
+            why = '回包里的翻页标记认不出来'
+            continue
         return payload
     raise GuestError(f'公开接口没答复({why or "时限用完"})')
 
 
-def _when(status: dict) -> datetime | None:
-    stamp = status.get('created_timestamp')
-    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or stamp <= 0:
+def _bottom(payload: dict) -> str | None:
+    """下一页的游标;没有下一页是 `''`,形状认不出来是 `None`(不许当成「翻到尽头了」)。"""
+    cursor = payload.get('cursor')
+    if cursor is None:
+        return ''
+    if not isinstance(cursor, dict) or not isinstance(cursor.get('bottom') or '', str):
         return None
-    return datetime.fromtimestamp(stamp, timezone.utc)
+    return cursor.get('bottom') or ''
+
+
+def _when(status: dict) -> datetime | None:
+    """推文时间;缺、不是数、NaN/无穷、超出能表示的范围,一律 `None`(该条按认不出来算)。"""
+    stamp = status.get('created_timestamp')
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or not math.isfinite(stamp) or stamp <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(stamp, timezone.utc)
+    except (OverflowError, ValueError, OSError):
+        return None
 
 
 def _well_formed(status) -> bool:
@@ -144,10 +166,11 @@ def _build(url: str, when: datetime, text: str, name: str, *, quoted: bool, arti
 
 
 def _entry(status: dict) -> dict | None:
+    """`None` 只有一种意思:只有引用、自己没写字(明确不收)。认不出身份抛 `PostUnavailable`。"""
     url = _url(status)
     when = _when(status)
     if not url or not when:
-        return None
+        raise PostUnavailable('推文的地址或时间认不出来')
     article = status.get('article')
     return _build(url, when, status.get('text') or '',
                   str(status['author'].get('name') or status['author']['screen_name']),
@@ -155,14 +178,25 @@ def _entry(status: dict) -> dict | None:
                   article=str(article.get('id') if isinstance(article, dict) else article) if article else '')
 
 
-def _scan_api(handle: str, floor: datetime, *, deadline: float, should_stop=None) -> dict:
+def _unreadable_note(count: int, where: str) -> str:
+    return f'{where}有 {count} 条推文认不出来(时间、作者或地址缺了或换了形状),这一轮没法证明读全了'
+
+
+def _scan_api(handle: str, floor: datetime, *, deadline: float, first_deadline: float | None = None,
+              should_stop=None) -> dict:
     """经 FxTwitter 把 `handle` 的时间线从最新一路读到 `floor`(排他)。
 
     返回 `{'entries', 'incomplete', 'error', 'skipped_quotes'}`:
     - `error` 非空 = 第一页都没问到,这个号这一轮什么也没读成;
     - `incomplete` 非空 = 读了一部分,条目照收,但没读到下界(调用方不许推进水位)。
+
+    `first_deadline` 只管第一页(给后路留的那一份,见 `PAGE_RESERVE`)。
+
+    **认不出来的条目让这一轮证明不了读全**:时间线上只有两种条目可以安静地不收 —— 明确不是他自己发的、
+    明确只有引用没写字;此外任何一条读不懂的(形状不对、时间或地址认不出来),在读到下界之前出现
+    就记进 `incomplete`,认得出来的照收。它不参与「连续几条到下界」的计数(它多新多老都说不准)。
     """
-    entries, seen, cursor, pages, streak, skipped = [], set(), '', 0, 0, 0
+    entries, seen, cursor, pages, streak, skipped, unreadable = [], set(), '', 0, 0, 0, 0
     incomplete = ''
     while True:
         if should_stop and should_stop():
@@ -177,7 +211,7 @@ def _scan_api(handle: str, floor: datetime, *, deadline: float, should_stop=None
         if pages:
             time.sleep(PAGE_PAUSE)
         try:
-            payload = _page(handle, cursor, deadline)
+            payload = _page(handle, cursor, deadline if pages or first_deadline is None else first_deadline)
         except GuestError as e:
             if not pages:
                 return {'entries': [], 'incomplete': '', 'error': f'@{handle}:{e}', 'skipped_quotes': 0}
@@ -194,7 +228,10 @@ def _scan_api(handle: str, floor: datetime, *, deadline: float, should_stop=None
             incomplete = error
             break
         done = False
-        for status in statuses:
+        for status in results:
+            if not _well_formed(status):
+                unreadable += not done                # 已经读到下界之后的,再老也无所谓
+                continue
             when = _when(status)
             if when > floor:
                 streak = 0
@@ -207,16 +244,20 @@ def _scan_api(handle: str, floor: datetime, *, deadline: float, should_stop=None
             try:
                 entry = _entry(status)
             except PostUnavailable:
-                entry = None
+                unreadable += 1
+                continue
             if entry is None:
-                skipped += bool(status.get('quote'))
+                skipped += 1
                 continue
             if entry['url'] not in seen:
                 seen.add(entry['url'])
                 entries.append(entry)
-        cursor = str((payload.get('cursor') or {}).get('bottom') or '')
+        cursor = _bottom(payload)
         if done or not results or not cursor:
             break                                     # 翻到下界或时间线尽头:读完了
+    if unreadable:
+        note = _unreadable_note(unreadable, '公开接口给的时间线里')
+        incomplete = f'{incomplete};{note}' if incomplete else note
     entries.sort(key=lambda e: e['published'])
     return {'entries': entries, 'incomplete': incomplete, 'error': '', 'skipped_quotes': skipped}
 
@@ -248,7 +289,7 @@ def _full_text(post: x_guest_page.Post, deadline: float) -> str:
 def _scan_page(handle: str, floor: datetime, *, deadline: float, api_error: str, should_stop=None) -> dict:
     """FxTwitter 问不到时的后路:读 X 未登录主页露出来的那几条。"""
     try:
-        shown = x_guest_page.timeline(handle, deadline)
+        shown, unreadable = x_guest_page.timeline(handle, deadline)
     except x_guest_page.PageError as e:
         return {'entries': [], 'incomplete': '', 'skipped_quotes': 0, 'notice': '',
                 'error': f'{api_error};改读 X 未登录主页也没读成:{e}'}
@@ -276,9 +317,10 @@ def _scan_page(handle: str, floor: datetime, *, deadline: float, api_error: str,
         try:
             entry = _build(post.url, post.when, text, post.name, quoted=post.quoted, article=post.article)
         except PostUnavailable:
-            entry = None
+            unreadable += 1
+            continue
         if entry is None:
-            skipped += post.quoted
+            skipped += 1
             continue
         entries.append(entry)
     notes = []
@@ -289,6 +331,9 @@ def _scan_page(handle: str, floor: datetime, *, deadline: float, api_error: str,
                      '公开接口五天内恢复的话,下一轮会补上')
     if held:
         notes.append(f'{len(held)} 条推文的全文没取到({held[0]}),留到下次同步再试')
+    if unreadable:
+        # 认不出来的那几条不知道是谁的、多新,不许拿剩下几条的「到下界」把它们证明掉。
+        notes.append(_unreadable_note(unreadable, 'X 未登录主页上'))
     entries.sort(key=lambda e: e['published'])
     return {'entries': entries, 'incomplete': ';'.join(notes), 'error': '', 'skipped_quotes': skipped,
             'notice': f'{api_error},这一轮改读了 X 未登录主页'}
@@ -302,7 +347,9 @@ def scan(handle: str, floor: datetime, *, deadline: float, should_stop=None) -> 
     - `incomplete` 非空 = 读了一部分,条目照收,但没读到下界(调用方不许推进水位);
     - `notice` = 纯提示(这一轮走了后路),不影响控制逻辑。
     """
-    got = _scan_api(handle, floor, deadline=deadline, should_stop=should_stop)
+    # 第一页问不到才走后路,所以只给第一页设早一点的截止:留出后路那一份,但不超过剩余时限的一半。
+    first = deadline - min(PAGE_RESERVE, max(0.0, deadline - time.monotonic()) / 2)
+    got = _scan_api(handle, floor, deadline=deadline, first_deadline=first, should_stop=should_stop)
     if not got['error']:
         return got | {'notice': ''}
     if should_stop and should_stop():
@@ -374,7 +421,7 @@ def probe(handle: str) -> tuple[bool, str]:
         except GuestError as e:
             api = str(e)
     try:
-        shown = x_guest_page.timeline(handle, time.monotonic() + TIMEOUT)
+        shown, _ = x_guest_page.timeline(handle, time.monotonic() + TIMEOUT)
         page, page_ok = '', f'X 未登录主页可用(露出 {len(shown)} 条)'
     except x_guest_page.PageError as e:
         page = str(e)

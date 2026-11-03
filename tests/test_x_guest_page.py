@@ -91,9 +91,9 @@ class PageBase(GuestBase):
 class ParseTests(unittest.TestCase):
     def test_a_post_reads_identity_time_name_and_text_with_full_links(self):
         """显示文字是缩短的地址,完整的在 `title` 上;「显示更多」只是个标记,不算正文。"""
-        got = x_guest_page.posts(html(article('alice', 7, 2, '看这个 ', more=True,
-                                              links=[('example.com/a…', 'https://example.com/a/long')])))
-        self.assertEqual(1, len(got))
+        got, unreadable = x_guest_page.posts(html(article('alice', 7, 2, '看这个 ', more=True,
+                                                          links=[('example.com/a…', 'https://example.com/a/long')])))
+        self.assertEqual((1, 0), (len(got), unreadable))
         post = got[0]
         self.assertEqual(('alice', '7', 'alice 本人'), (post.author, post.ident, post.name))
         self.assertEqual('https://x.com/alice/status/7', post.url)
@@ -104,23 +104,23 @@ class ParseTests(unittest.TestCase):
 
     def test_an_edited_post_is_still_recognised(self):
         """编辑过的推文,时间挂在 `/history` 链接里的 `<time>` 上。认不出来它就从主页上悄悄消失了。"""
-        post = x_guest_page.posts(html(article('alice', 8, 1, '改过的', edited=True), article('alice', 9, 2)))[0]
+        post = x_guest_page.posts(html(article('alice', 8, 1, '改过的', edited=True), article('alice', 9, 2)))[0][0]
         self.assertEqual(('8', '改过的'), (post.ident, post.text))
 
     def test_a_link_shown_only_as_a_card_is_put_back_into_the_text(self):
         """末尾链接被渲染成卡片时正文里就没有它了;原文里写着的那条 t.co 要接回去,而且只接一次。"""
-        got = x_guest_page.posts(html(article('alice', 7, 1, '新文章', card='https://t.co/CARD'),
-                                      article('alice', 6, 2, '已带 https://t.co/CARD', card='https://t.co/CARD')))
+        got, _ = x_guest_page.posts(html(article('alice', 7, 1, '新文章', card='https://t.co/CARD'),
+                                         article('alice', 6, 2, '已带 https://t.co/CARD', card='https://t.co/CARD')))
         self.assertEqual(['新文章 https://t.co/CARD', '已带 https://t.co/CARD'], [p.text for p in got])
 
     def test_a_quote_does_not_lend_its_identity_or_its_words(self):
         quoted = article('bob', 3, 30, '别人的话')
-        post = x_guest_page.posts(html(article('alice', 7, 1, '我的评论', quote=quoted)))[0]
+        post = x_guest_page.posts(html(article('alice', 7, 1, '我的评论', quote=quoted)))[0][0]
         self.assertEqual(('alice', '7', '我的评论'), (post.author, post.ident, post.text))
         self.assertTrue(post.quoted)
 
     def test_the_pinned_mark_is_read(self):
-        self.assertTrue(x_guest_page.posts(html(article('alice', 7, 500, pinned=True)))[0].pinned)
+        self.assertTrue(x_guest_page.posts(html(article('alice', 7, 500, pinned=True)))[0][0].pinned)
 
     def test_a_page_that_changed_shape_is_a_failure_not_an_empty_timeline(self):
         """有推文却一条都配不上时间,就是页面换了形状;一条推文都没有就是登录墙或限流。都不许返回空。"""
