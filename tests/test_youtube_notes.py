@@ -3,612 +3,238 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from kb.youtube import media, notes, transcripts, translation
+from kb.youtube import fulltext, media, model_response, notes, transcripts, translation, translation_cache
 from tests.youtube_fixture import YouTubeFixture
-from tests.youtube_translation_fixture import encoded, response
+from tests.youtube_translation_fixture import encoded
 
 
 class YouTubeNotes(YouTubeFixture):
     def setUp(self):
         super().setUp()
-        self.row = {'video_id': '12345678901', 'entry': self.entry(), 'channel': '测试频道'}
-        self.row['entry']['title'] = '智能体代码生成教程'
-        self.selected = SimpleNamespace(provider='fixture', model_id='fixture-model')
-        self.transcript = {'origin': 'automatic_captions', 'language': 'en', 'segments': [
-            {'start': 0, 'end': 59, 'text': 'The AI agent builds code with limitations. ' * 120},
-            {'start': 60, 'end': 119, 'text': 'Final conclusion: verify every generated change.'}]}
+        self.row = {'video_id': self.entry()['video_id'], 'entry': self.entry(), 'channel': '测试频道'}
+        self.row['entry']['title'] = '智能体代码核验'
+        self.selected = SimpleNamespace(provider='fixture', model_id='fixture')
+        self.transcript = self.complete_transcript()
         self.deadline = time.monotonic() + 30
-        self.prompts = []
-
-    def reply(self, prompt, *rest):
-        self.prompts.append(prompt)
-        if prompt.startswith('将以下字幕'):
-            return response(prompt, '本段中文译文，保留事实和限制。')
-        if '只输出 JSON' in prompt:
-            return json.dumps({'title': '智能体代码生成的实践', 'summary': '作者展示代码生成方法，并提示核验限制。',
-                               'body': '## 具体方法\n作者认为每次修改都应该验证。'}, ensure_ascii=False)
-        return '作者介绍智能体代码生成的方法和局限，需要核验结果。'
+        self.chinese = '作者要求使用前独立核验每次生成的修改，并保留事实、方法和局限。'
 
     def build(self, reply=None):
-        with patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call', side_effect=reply or self.reply):
+        with patch.object(notes, 'model', return_value=self.selected), \
+                patch.object(notes, 'call', side_effect=reply or (lambda *arguments: self.chinese)):
             return notes.build(self.row, self.transcript, self.deadline, lambda: False)
 
-    def test_full_translation_and_note_cached_without_frames(self):
-        result = self.build()
-        self.assertIn('中文译文（自动生成）', result['body'])
-        self.assertNotIn('完整中文转录', result['body'])
-        self.assertIn('未分析视频画面', result['body'])
-        self.assertNotIn('&t=', result['body'])
-        self.assertNotRegex('\n'.join(self.prompts), r'\[\d{2}:\d{2}:\d{2}\]')
-        chinese, original = result['body'].split('\n\n## 原文对照（未改写）\n\n')
-        self.assertNotIn('Final conclusion', chinese)
-        self.assertIn('Final conclusion', original)
-        self.assertIn('Final conclusion', '\n'.join(self.prompts))
-        count = len(self.prompts)
-        self.assertEqual(result, self.build())
-        self.assertEqual(count, len(self.prompts))
-        self.selected.model_id = 'new-fixture-model'
-        self.build()
-        self.assertGreater(len(self.prompts), count)
-
-    def test_empty_or_english_translation_not_published(self):
-        directory = media.cache_dir(self.row['video_id'])
-        for output in ('', '   ', 'Still entirely English words.'):
-            media.save_json(directory / 'notes-language-failures.json', {})
-            with self.subTest(output=output), self.assertRaises(RuntimeError):
-                self.build(lambda *args: output)
-            self.assertEqual([1], list(media.read_json(directory / 'notes-language-failures.json').values()))
-        self.assertFalse((directory / 'notes-cache.json').exists())
-
-    def test_batch_shape_failures_recover_by_translating_each_original_unit(self):
-        literal = 'https://example.test/tools/agent/install?version=latest'
-        source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
-        expected = [unit['text'] for unit in translation.units(source)]
-        translated = '使用前必须独立审查生成的修改，下面保留原始网址。'
-        for extra in (False, True):
-            requested = []
-
-            def reply(prompt, *arguments):
-                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-                requested.append(segments)
-                if len(segments) > 1:
-                    values = [translated, literal, '额外总结。'] if extra else [translated + literal]
-                else:
-                    self.assertIn(segments[0], expected)
-                    values = [literal if segments[0] == literal else translated]
-                return json.dumps({'translations': values})
-
-            with self.subTest(extra=extra), patch.object(notes, 'call', side_effect=reply):
-                self.assertEqual(translated + '\n\n' + literal,
-                                 notes.translate(source, self.selected, self.deadline, lambda: False))
-                self.assertEqual([expected, *[[unit] for unit in expected]], requested)
-
-    def test_atomic_recovery_reuses_completed_units_without_publishing_a_missing_one(self):
-        literal = 'python -m unittest tests.test_youtube_notes --verbose'
-        source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
-        expected = [unit['text'] for unit in translation.units(source)]
-        self.transcript['segments'] = [{'text': source}]
+    def test_whole_transcript_uses_one_plain_text_request_and_no_atomic_fallback(self):
+        self.transcript['segments'][0]['text'] = 'Verify every generated change independently. ' * 100
+        expected = ' '.join(segment['text'].strip() for segment in self.transcript['segments'])
         requested = []
-        broken = True
 
         def reply(prompt, *arguments):
-            if not prompt.startswith('将以下字幕'):
-                return self.reply(prompt, *arguments)
-            segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-            requested.append(segments)
-            if len(segments) > 1:
-                values = ['合并后的中文译文，不直接使用这份覆盖未知的输出。']
-            elif segments[0] == literal:
-                values = [] if broken else [literal]
-            else:
-                self.assertEqual(expected[0], segments[0])
-                values = ['使用前必须独立审查所有生成的修改，随后运行原文命令。']
-            return json.dumps({'translations': values})
+            requested.append(prompt)
+            self.assertIn(fulltext.SOURCE_START + expected + '\n</source>', prompt)
+            return self.chinese * 30
 
-        with self.assertRaisesRegex(RuntimeError, '覆盖'):
-            self.build(reply)
-        self.assertFalse(self.prompts)
-        cache = media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json')
-        unit_key = notes.signature('translate-unit-v1', self.selected, expected[0])
-        self.assertEqual({unit_key}, set(cache))
-        broken = False
-        result = self.build(reply)
-        self.assertIn(literal, result['body'])
-        self.assertNotIn('覆盖未知', result['body'])
-        self.assertEqual([expected, [expected[0]], [literal], expected, [literal]], requested)
-        calls = len(requested), len(self.prompts)
-        self.assertEqual(result, self.build(reply))
-        self.assertEqual(calls, (len(requested), len(self.prompts)))
+        with patch.object(translation, 'prompt', side_effect=AssertionError('no atomic requests')):
+            entry = self.build(reply)
+        self.assertEqual(1, len(requested))
+        self.assertIn(self.chinese * 30, entry['body'])
+        self.assertIn(expected, entry['body'])
+        self.assertIn('未进行逐句语义审校', entry['body'])
+        self.assertNotIn('已进行分段覆盖与语言校验', entry['body'])
 
-    def test_non_chinese_atomic_results_do_not_poison_recovery_cache(self):
-        literal = 'https://example.test/tools/agent/install?version=latest'
-        source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
-        self.transcript['segments'] = [{'text': source}]
-        expected = [unit['text'] for unit in translation.units(source)]
-        requested = []
-        broken = True
-
-        def reply(prompt, *arguments):
-            if not prompt.startswith('将以下字幕'):
-                return self.reply(prompt, *arguments)
-            segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-            requested.append(segments)
-            if len(segments) > 1:
-                values = []
-            elif broken or segments[0] == literal:
-                values = [segments[0]]
-            else:
-                values = ['使用前必须独立核验所有生成的修改，随后访问原文网址。']
-            return json.dumps({'translations': values})
-
-        with self.assertRaisesRegex(RuntimeError, '覆盖'):
-            self.build(reply)
-        self.assertFalse(self.prompts)
-        self.assertIsNone(media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json'))
-        broken = False
-        result = self.build(reply)
-        self.assertIn('必须独立核验', result['body'])
-        self.assertIn(literal, result['body'])
-        sequence = [expected, *[[unit] for unit in expected]]
-        self.assertEqual([expected, [expected[0]]] + sequence, requested)
-
-    def test_translation_accepts_natural_paragraphs_without_timestamp_alignment(self):
-        source = ('[00:00:00] The AI agent builds code.\n'
-                  '[00:00:02] It still needs review.\n'
-                  '[00:00:04] Verify every generated change before using it.')
-        output = '这个 AI 智能体能够编写代码，但仍需要审查；使用前必须核验每次生成的改动。'
-        with patch.object(notes, 'call', return_value=encoded(source, output)):
-            self.assertEqual(output, notes.translate(source, self.selected, self.deadline, lambda: False))
-
-    def test_every_batch_validation_failure_recovers_from_the_original_units(self):
-        source = 'Review every generated change before use. ' * 24
-        expected = [unit['text'] for unit in translation.units(source)]
-        count = len(expected)
-        invalid = ['中文散文而不是 JSON。', '{"translations":',
-                   json.dumps({'translations': '不是数组'}),
-                   json.dumps({'translations': ['中文译文。'] * (count - 1) + [' ']}),
-                   json.dumps({'translations': ['中文译文。'] * (count - 1) + [None]}),
-                   json.dumps({'translations': [{'id': 'foreign', 'text': '中文译文。'}] * count}),
-                   json.dumps({'translations': ['English only'] * count})]
-        for batch in invalid:
-            requested = []
-
-            def reply(prompt, *arguments):
-                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-                requested.append(segments)
-                if len(requested) == 1:
-                    return batch
-                return response(prompt, '每次生成的修改都要独立审查后才能使用。')
-
-            with self.subTest(batch=batch), patch.object(notes, 'call', side_effect=reply):
-                result = notes.translate(source, self.selected, self.deadline, lambda: False)
-            self.assertEqual([expected, *[[unit] for unit in expected]], requested)
-            self.assertEqual(count, result.count('独立审查'))
-
-    def test_model_json_wrappers_are_extracted_for_translation_and_final_note(self):
-        def wrapped(prompt, *arguments):
-            result = self.reply(prompt, *arguments)
-            if prompt.startswith('将以下字幕') or '只输出 JSON' in prompt:
-                return '好的，以下是结果：\n```JSON\n' + result + '\n```\n以上为结果。'
-            return result
-
-        result = self.build(wrapped)
-        self.assertIn('中文译文（自动生成）', result['body'])
-        self.assertNotIn('好的，以下', result['body'])
-        self.assertNotIn('以上为结果', result['body'])
-        batches = [prompt for prompt in self.prompts if prompt.startswith('将以下字幕')]
-        self.assertEqual(2, len(batches))
-        calls = len(self.prompts)
-        self.assertEqual(result, self.build(wrapped))
-        self.assertEqual(calls, len(self.prompts))
-
-    def test_transport_failure_does_not_fan_out_into_atomic_model_requests(self):
-        failure = media.ToolFailure('model transport unavailable', 'HTTP 429', origin='model')
-        with patch.object(notes, 'call', side_effect=failure) as call, self.assertRaises(media.ToolFailure):
-            notes.translate('Review every generated change. ' * 30,
-                            self.selected, self.deadline, lambda: False)
-        self.assertEqual(1, call.call_count)
-
-    def test_complete_but_compressed_translation_is_not_rejected_by_length(self):
-        source = ('The information provided in this presentation should not under any circumstances '
-                  'be regarded as a replacement for independent verification of generated source code. '
-                  'Please make sure that every single change is checked before the generated result is used.')
-        output = '本演示不能代替对生成代码的独立核验，使用前务必检查每次修改。'
-        self.assertLess(sum(char.isalnum() for char in output),
-                        sum(char.isalnum() for char in source) * .30)
-        self.assertEqual(output, notes.translated_output(source, encoded(source, output)))
-
-    def test_one_sentence_cannot_be_cached_or_used_to_generate_a_note(self):
-        def reply(prompt, *rest):
-            self.prompts.append(prompt)
-            return '中文摘要。'
-
-        with self.assertRaisesRegex(RuntimeError, '覆盖'):
-            self.build(reply)
-        self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-cache.json').exists())
-        jobs = min(notes.translation_pool.MAX_REQUESTS, len(set(transcripts.blocks(self.transcript['segments']))))
-        self.assertGreaterEqual(len(self.prompts), 2)
-        self.assertLessEqual(len(self.prompts), jobs * 2)
-        self.assertFalse(any('只输出 JSON' in prompt for prompt in self.prompts))
-
-    def test_natural_chinese_numbers_and_translated_acronyms_do_not_create_quality_claims(self):
-        self.transcript['segments'] = [{'start': 0, 'end': 600,
-            'text': 'Check 3 things in the UI and QA workflow. The API budget is 64.'}]
-        output = '检查界面和质量保证流程中的三件事。接口预算为六十四。'
-
-        def reply(prompt, *rest):
-            return response(prompt, output) if prompt.startswith('将以下字幕') else self.reply(prompt, *rest)
-
-        result = self.build(reply)
-        self.assertIn(output, result['body'])
-        self.assertNotIn('翻译核验提示', result['body'])
-        self.assertNotIn('translation_warnings', result)
-
-    def test_short_closing_translation_is_not_judged_as_a_long_text_block(self):
-        source = 'Thank you very much for watching this video.'
-        output = '感谢观看这个视频。'
-        self.assertLess(len(output), sum(char.isalnum() for char in source) * .30)
-        self.assertEqual(output, notes.translated_output(source, encoded(source, output)))
-
-    def test_compressed_translation_cache_is_reused_without_repeated_model_charges(self):
-        source = 'Every generated change needs independent verification. ' * 50
-        output = '每次生成的修改均须独立核验。'
-        raw = encoded(source, output)
-        cache = {'translation': raw}
-        with patch.object(notes, 'call') as call:
-            actual = notes.cached(media.cache_dir(self.row['video_id']), cache, 'translation',
-                                  lambda: notes.translate(source, self.selected, self.deadline, lambda: False),
-                                  lambda value: notes.translated_output(source, value))
-        call.assert_not_called()
-        self.assertEqual('\n\n'.join([output] * len(translation.units(source))), actual)
-        self.assertEqual(raw, cache['translation'])
-
-    def test_chinese_transcript_needs_no_translation_and_keeps_source_timing(self):
-        self.transcript['language'] = 'zh'
-        self.transcript['segments'] = [
-            {'start': 0, 'end': 60, 'text': '作者展示智能体如何编写代码。'},
-            {'start': 60, 'end': 120, 'text': '最后强调人工核验结果与限制。'}]
-        original = json.loads(json.dumps(self.transcript))
-        result = self.build()
-        self.assertIn('作者展示智能体如何编写代码。 最后强调人工核验结果与限制。', result['body'])
-        self.assertNotIn('## 原文对照', result['body'])
-        self.assertFalse(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
-        self.assertEqual(original, self.transcript)
-
-    def test_chinese_with_long_english_quotes_is_translated_and_preserves_the_original(self):
-        quote = ('the compiler will analyze your component tree and automatically insert memoization '
-                 'boundaries so that you do not have to write useMemo by hand any more')
-        for words in (9, 10, 11, 12, 30):
-            source = ('今天介绍这个框架的状态管理与渲染。官方文档原话是：' +
-                      ' '.join(quote.split()[:words]) + '。这句话说明编译器负责插入缓存边界，接下来实际核验。')
-            with self.subTest(words=words), patch.object(notes, 'call') as call:
-                self.assertEqual(words <= 10, notes.native_chinese(source))
-                if words <= 10:
-                    self.assertEqual(source, notes.translate(source, self.selected, self.deadline, lambda: False))
-                    call.assert_not_called()
-                else:
-                    call.return_value = response(translation.prompt(source), '编译器分析组件树并自动插入缓存边界。')
-                    self.assertEqual('编译器分析组件树并自动插入缓存边界。',
-                                     notes.translate(source, self.selected, self.deadline, lambda: False))
-                    call.assert_called_once()
-        self.transcript['language'] = 'zh'
-        self.transcript['segments'] = [{'start': 0, 'end': 120, 'text': source}]
-        original = json.loads(json.dumps(self.transcript))
-        directory = media.cache_dir(self.row['video_id'])
-        key = notes.signature('translate', self.selected, source)
-        media.save_json(directory / 'notes-cache.json', {key: source})
-        result = self.build()
-        chinese, comparison = result['body'].split('\n\n## 原文对照（未改写）\n\n')
-        self.assertIn('本段中文译文，保留事实和限制。', chinese)
-        self.assertNotIn(quote, chinese)
-        self.assertEqual(source, comparison)
-        self.assertTrue(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
-        self.assertEqual(original, self.transcript)
-        count = len(self.prompts)
-        self.assertEqual(result, self.build())
-        self.assertEqual(count, len(self.prompts))
-        self.assertEqual(source, media.read_json(directory / 'notes-cache.json')[key])
-
-    def test_mixed_chinese_identity_and_legacy_caches_cannot_bypass_translation(self):
-        english = ('so basically what we are going to do here is wire the agent into the editor and then '
-                   'let it rewrite the failing test until the suite goes green, which sounds great until '
-                   'you realise the cache gets invalidated on every single keystroke and the whole thing '
-                   'grinds to a halt, so please try it yourself before you trust any of these numbers. ')
-        source = ('好的，我们来看这个智能体编程的实际例子，先把环境准备好，然后一步一步演示整条流水线怎么跑起来。'
-                  '下面这段是作者的原话，我先放一遍，稍后再逐句解释其中的关键限制和容易踩的坑。' + english * 2).strip()
-        self.transcript['language'] = 'zh'
+    def test_long_transcripts_use_only_capacity_chunks_in_source_order(self):
+        source = ' '.join(f'Section {position} explains the method and its limitations.' for position in range(600))
         self.transcript['segments'] = [{'start': 0, 'end': 600, 'text': source}]
-        self.assertFalse(notes.native_chinese(source))
-        with self.assertRaises(RuntimeError):
-            notes.translated_output(source, source)
-        directory = media.cache_dir(self.row['video_id'])
-        legacy = notes.signature('translate', self.selected, source)
-        covered = notes.signature(translation.STAGE, self.selected, source)
-        units = translation.units(source)
-        cache = {legacy: source, covered: json.dumps({'translations': [unit['text'] for unit in units]})}
-        cache.update({notes.signature('translate-unit-v1', self.selected, unit['text']):
-                      json.dumps({'translations': [unit['text']]}) for unit in units})
-        media.save_json(directory / 'notes-cache.json', cache)
+        blocks = transcripts.blocks(self.transcript['segments'], limit=fulltext.MAX_SOURCE_CHARS)
+        self.assertGreater(len(blocks), 1)
+        self.assertTrue(all(len(block) <= fulltext.MAX_SOURCE_CHARS for block in blocks))
+        requested = []
 
         def reply(prompt, *arguments):
-            if prompt.startswith('将以下字幕') and len(json.loads(prompt.split('\n\n', 1)[1])['segments']) > 1:
-                self.prompts.append(prompt)
-                return cache[covered]
-            return self.reply(prompt)
+            block = prompt.split(fulltext.SOURCE_START, 1)[1].rsplit('\n</source>', 1)[0]
+            position = blocks.index(block)
+            requested.append(block)
+            return f'第{position}部分译文。' + self.chinese * 60
 
-        result = self.build(reply)
-        chinese, original = result['body'].split('\n\n## 原文对照（未改写）\n\n')
-        self.assertIn('本段中文译文，保留事实和限制。', chinese)
-        self.assertNotIn('so basically', chinese)
-        self.assertEqual('\n\n'.join(transcripts.blocks(self.transcript['segments'])), original)
-        self.assertGreater(sum(prompt.startswith('将以下字幕') for prompt in self.prompts), 1)
-        saved = media.read_json(directory / 'notes-cache.json')
-        self.assertEqual(source, saved[legacy])
-        self.assertNotEqual(cache[covered], saved[covered])
-        for unit in units:
-            key = notes.signature('translate-unit-v1', self.selected, unit['text'])
-            self.assertNotEqual(cache[key], saved[key])
-        count = len(self.prompts)
-        self.assertEqual(result, self.build(reply))
-        self.assertEqual(count, len(self.prompts))
+        entry = self.build(reply)
+        self.assertCountEqual(blocks, requested)
+        positions = [entry['body'].index(f'第{position}部分译文。') for position in range(len(blocks))]
+        self.assertEqual(sorted(positions), positions)
+        original = entry['body'].split('## 原文对照（未改写）\n\n', 1)[1]
+        self.assertEqual(source.split(), original.split())
 
-    def test_japanese_summaries_and_note_fields_are_not_chinese_products(self):
-        foreign = '今日は状態管理と描画の方法を説明します。'
-        with self.assertRaises(RuntimeError):
-            notes.summary_output(foreign)
-        with self.assertRaises(RuntimeError):
-            notes.translated_output('作者介绍状态管理。', foreign)
-        for field in ('title', 'summary', 'body'):
-            payload = {'title': '状态管理的方法', 'summary': '作者说明核验限制。', 'body': '正文说明实际方法。'}
-            payload[field] = foreign
-            with self.subTest(field=field), self.assertRaises(RuntimeError):
-                notes.note_payload(json.dumps(payload))
-
-    def test_output_names_and_bounded_source_quotes_are_accepted_and_cached(self):
-        quote = 'the server must respond with a valid JSON object containing the field name and the field value'
-        source = ('The author describes implementation constraints and independent verification. '
-                  'The team records every deployment failure and measures latency before rollout. '
-                  'The spec says: "' + quote + '". SoftBank and Samsung fund this service.')
-        value = '作者说明实现约束，核验部署失败和延迟。规范要求：“' + quote + '”。作者讨论 ソフトバンク 与 삼성전자 的投资。'
-        self.transcript['segments'] = [{'start': 0, 'end': 120, 'text': source}]
-        payload = {'title': 'ソフトバンク 的服务投资', 'summary': value, 'body': value}
-
-        def reply(prompt, *rest):
-            self.prompts.append(prompt)
-            if prompt.startswith('将以下字幕'):
-                return response(prompt, value)
-            return json.dumps(payload) if '只输出 JSON' in prompt else value
-
-        result = self.build(reply)
-        self.assertIn(value, result['body'])
-        self.assertEqual(self.row['entry']['title'], result['title'])
-        self.assertEqual(1, sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
-        count = len(self.prompts)
-        self.assertEqual(result, self.build(reply))
-        self.assertEqual(count, len(self.prompts))
-
-    def test_all_model_output_fields_reject_english_with_a_single_chinese_signal(self):
-        tail = ('Then we move on to the second part, which covers the deployment story, '
-                'and after that we look at the rollout, with the numbers from last quarter, '
-                'and finally we close with the roadmap, which the team has already published, '
-                'so you can read it yourself, if you want the full detail, and that is all for today.')
-        source = '作者说明部署流程和独立核验。'
-        report_tail = ('and then we are going to run the setup, which will install everything, '
-                       'after that you can open the dashboard, and you will see the metrics, '
-                       'the latency drops a lot, the memory stays flat, and the build is faster, '
-                       'but you still need to pin the version, otherwise the cache gets invalid, '
-                       'and that is the whole point of this demo, so please try it yourself, ') * 3
-        chinese = '本视频介绍新版打包器的性能提升，作者给出基准数据，并说明缓存共享的限制条件。' * 8
-        for value in ('欢迎回到本频道。' + tail, tail + '。好', chinese + report_tail,
-                      chinese + ' '.join(['untranslated'] * 201)):
-            with self.subTest(value=value):
-                with self.assertRaises(translation.LanguageError):
-                    notes.translated_output(source, value)
-                with self.assertRaises(translation.LanguageError):
-                    notes.summary_output(value, tail)
-                for field in ('title', 'summary', 'body'):
-                    payload = {'title': '部署核验', 'summary': source, 'body': source}
-                    payload[field] = value
-                    with self.subTest(field=field), self.assertRaises(translation.LanguageError):
-                        notes.note_payload(json.dumps(payload), source=tail)
-        literal = '```python\nresult = build_agent("demo")\nprint(result)\n```'
-        value = '作者要求独立核验。\n\n' + literal
-        source = 'Verify every generated change.\n\n' + literal
-        self.assertEqual(value, notes.summary_output(value, source))
-        payload = {'title': '独立核验', 'summary': value, 'body': value}
-        self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=source))
-        for invented in (literal, 'https://unrelated.test/' + 'english_narrative_' * 12):
-            value = '好。' + invented
-            with self.subTest(invented=invented), self.assertRaises(translation.LanguageError):
-                notes.summary_output(value, 'Verify the output.')
-
-    def test_native_source_ignores_legacy_summary_and_note_caches_without_models(self):
-        source = '作者说明部署流程并要求独立核验。'
-        self.transcript['segments'] = [{'start': 0, 'end': 120, 'text': source}]
+    def test_new_cache_is_reused_and_model_changes_invalidate_only_new_identity(self):
+        first = self.build()
         directory = media.cache_dir(self.row['video_id'])
-        cache = {'old-summary': 'English summary', 'old-note': '{bad JSON'}
+        before = media.read_json(directory / 'notes-cache.json')
+        self.assertEqual(1, len(before))
+        self.assertEqual(first, self.build(AssertionError('cached')))
+        self.selected.model_id = 'another-model'
+        self.build()
+        self.assertTrue(before.items() <= media.read_json(directory / 'notes-cache.json').items())
+
+    def test_legacy_complete_cache_is_reused_without_mutation(self):
+        source = ' '.join(f'Section {position} explains the method and its limitations.' for position in range(600))
+        self.transcript['segments'] = [{'start': 0, 'end': 600, 'text': source}]
+        new_blocks = transcripts.blocks(self.transcript['segments'], limit=fulltext.MAX_SOURCE_CHARS)
+        self.assertGreater(len(new_blocks), 1)
+        cache = {notes.signature(translation.STAGE, self.selected, block): encoded(block, self.chinese)
+                 for block in transcripts.blocks(self.transcript['segments'])}
+        cache['old-summary'] = 'not a translation'
+        directory = media.cache_dir(self.row['video_id'])
         media.save_json(directory / 'notes-cache.json', cache)
-        with patch.object(notes, 'model', side_effect=AssertionError('no model needed')), \
-                patch.object(notes, 'call') as call:
-            result = notes.build(self.row, self.transcript, self.deadline, lambda: False)
-        call.assert_not_called()
-        self.assertIn(source, result['body'])
-        self.assertNotIn('English summary', result['body'])
+        entry = self.build(AssertionError('reuse valid old blocks'))
+        self.assertIn(self.chinese, entry['body'])
         self.assertEqual(cache, media.read_json(directory / 'notes-cache.json'))
 
-    def test_summary_and_note_quotes_require_bounded_source_and_independent_chinese(self):
-        quote = 'the server must respond with a valid JSON object containing the field name and the field value'
-        source = ('Reviewers independently verify implementation constraints and record deployment failures. ' * 4 +
-                  'The spec says: "' + quote + '".')
-        value = '引用：“' + quote + '”。'
-        self.assertEqual(value, notes.summary_output(value, source))
-        with self.assertRaises(translation.LanguageError):
-            notes.summary_output(value)
-        payload = {'title': '规范核验', 'summary': value, 'body': value}
-        self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=source))
-        with self.assertRaises(translation.LanguageError):
-            notes.note_payload(json.dumps(payload), prompt=source)
-        for invalid in ('"' + quote + '".',
-                        '好。"' + quote + '" then the team starts deployment, and checks every number, before shipping.'):
-            with self.subTest(invalid=invalid), self.assertRaises(translation.LanguageError):
-                notes.summary_output(invalid, source)
-            for field in ('title', 'summary', 'body'):
-                payload = {'title': '规范核验', 'summary': '核验规范。', 'body': '独立核验部署。'}
-                payload[field] = invalid
-                with self.subTest(field=field, invalid=invalid), self.assertRaises(translation.LanguageError):
-                    notes.note_payload(json.dumps(payload), source=source)
-
-    def test_new_translation_policy_invalidates_notes_but_preserves_transcript_cache(self):
+    def test_partial_old_cache_translates_only_contiguous_gaps(self):
+        source = ' '.join(f'Section {position} explains the method and its limitations.' for position in range(800))
+        self.transcript['segments'] = [{'start': 0, 'end': 600, 'text': source}]
+        old_blocks = transcripts.blocks(self.transcript['segments'])
+        missing = set(range(2, len(old_blocks) - 2))
+        cache = {notes.signature(translation.STAGE, self.selected, block): encoded(block, self.chinese)
+                 for position, block in enumerate(old_blocks) if position not in missing}
         directory = media.cache_dir(self.row['video_id'])
-        media.save_json(directory / 'transcript.json', self.transcript)
-        with patch.object(notes, 'VERSION', 'youtube-notes-v2'):
-            self.build()
-        self.prompts.clear()
-        self.build()
-        self.assertTrue(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
-        self.assertEqual(self.transcript, media.read_json(directory / 'transcript.json'))
-
-    def test_failed_translation_retries_only_unfinished_text_blocks(self):
-        attempts = 0
-
-        def failed(prompt, *rest):
-            nonlocal attempts
-            if prompt.startswith('将以下字幕'):
-                attempts += 1
-                if attempts >= 2:
-                    return ''
-            return self.reply(prompt, *rest)
-
-        with self.assertRaisesRegex(RuntimeError, '中文译文'):
-            self.build(failed)
-        self.assertEqual(3, attempts)
-        blocks = notes.transcripts.blocks(self.transcript['segments'])
-        cache = media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json')
-        self.assertEqual({notes.signature(translation.STAGE, self.selected, blocks[0])}, set(cache))
-        self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in self.prompts))
-        self.build()
-        self.assertEqual(2, sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
-
-    def test_legacy_unstructured_cache_is_not_silently_promoted_to_coverage_evidence(self):
-        directory = media.cache_dir(self.row['video_id'])
-        media.save_json(directory / 'transcript.json', self.transcript)
-        blocks = notes.transcripts.blocks(self.transcript['segments'])
-        legacy = {notes.signature('translate', self.selected, block): '中文摘要。' for block in blocks}
-        media.save_json(directory / 'notes-cache.json', legacy)
-        result = self.build()
-        self.assertNotIn('中文摘要。', result['body'])
-        self.assertEqual(len(blocks), sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
-        saved = media.read_json(directory / 'notes-cache.json')
-        self.assertTrue(legacy.items() <= saved.items())
-        self.assertEqual(self.transcript, media.read_json(directory / 'transcript.json'))
-        self.assertEqual(result, self.build())
-
-    def test_corrupt_cached_coverage_is_rechecked_before_summary_or_publication(self):
-        self.build()
-        directory = media.cache_dir(self.row['video_id'])
-        block = notes.transcripts.blocks(self.transcript['segments'])[0]
-        key = notes.signature(translation.STAGE, self.selected, block)
-        cache = media.read_json(directory / 'notes-cache.json')
-        broken = json.loads(cache[key])
-        broken['translations'].pop()
-        cache[key] = json.dumps(broken)
         media.save_json(directory / 'notes-cache.json', cache)
-        self.prompts.clear()
-        self.build()
-        self.assertEqual(1, sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
+        requested = []
 
-    def test_segment_identity_coverage_rejects_missing_duplicate_foreign_and_empty_outputs(self):
-        source = 'Check every generated change before use. ' * 40
-        valid = json.loads(encoded(source, '每次修改都要核验。'))
-        rows = valid['translations']
-        invalid = [rows[:-1], rows + [rows[0]], [rows[0]] * len(rows),
-                   [{**row, 'id': 'foreign'} for row in rows],
-                   [{**row, 'text': ''} for row in rows],
-                   [{**row, 'text': 'English only'} for row in rows]]
-        for outputs in invalid:
-            with self.subTest(outputs=outputs), self.assertRaisesRegex(RuntimeError, '覆盖'):
-                notes.translated_output(source, json.dumps({'translations': outputs}))
-        shuffled = json.dumps({'translations': list(reversed(rows))})
-        self.assertEqual(notes.translated_output(source, json.dumps(valid)),
-                         notes.translated_output(source, shuffled))
+        def reply(prompt, *arguments):
+            block = prompt.split(fulltext.SOURCE_START, 1)[1].rsplit('\n</source>', 1)[0]
+            requested.append(block)
+            return self.chinese * 60
 
-    def test_segment_manifest_is_lossless_bounded_and_bound_to_source_content(self):
-        source = 'First fact: check all changes. ' * 30 + 'Final budget is 64.'
-        segments = translation.units(source)
-        self.assertGreater(len(segments), 1)
-        self.assertEqual(source, ' '.join(segment['text'] for segment in segments))
-        self.assertTrue(all(len(segment['text']) <= 450 for segment in segments))
-        translated = encoded(source, '核验所有修改，末尾预算为六十四。')
-        with self.assertRaisesRegex(RuntimeError, '覆盖'):
-            notes.translated_output(source.replace('64', '65'), translated)
+        entry = self.build(reply)
+        requested.sort(key=source.index)
+        self.assertEqual(' '.join(old_blocks[position] for position in sorted(missing)).split(),
+                         ' '.join(requested).split())
+        self.assertTrue(all(len(block) <= fulltext.MAX_SOURCE_CHARS for block in requested))
+        self.assertEqual(source.split(), entry['body'].split('## 原文对照（未改写）\n\n', 1)[1].split())
+        self.assertTrue(cache.items() <= media.read_json(directory / 'notes-cache.json').items())
+        self.build(AssertionError('completed gap cache must be reusable'))
 
-    def test_ordered_translation_accepts_literal_units_and_keeps_legacy_cache_compatible(self):
-        for literal in ('https://example.test/tools/agent/install?version=latest',
-                        'python -m unittest tests.test_youtube_notes --verbose'):
-            source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
-            segments = translation.units(source)
-            values = ['使用前需要独立审查所有生成的修改，随后执行原文中的命令或访问原网址。', literal]
-            with self.subTest(literal=literal):
-                self.assertEqual(2, len(segments))
-                manifest = json.loads(translation.prompt(source).split('\n\n', 1)[1])['segments']
-                self.assertEqual([segment['text'] for segment in segments], manifest)
-                rendered = notes.translated_output(source, json.dumps({'translations': values}))
-                self.assertEqual('\n\n'.join(values), rendered)
-                legacy = {'translations': [{'id': segment['id'], 'text': value}
-                                           for segment, value in zip(segments, values)]}
-                self.assertEqual(rendered, notes.translated_output(source, json.dumps(legacy)))
+    def test_overlapping_old_and_new_caches_choose_complete_nonoverlapping_coverage(self):
+        source = ' '.join(f'Section {position} explains the method and its limitations.' for position in range(600))
+        self.transcript['segments'] = [{'start': 0, 'end': 600, 'text': source}]
+        old_blocks = transcripts.blocks(self.transcript['segments'])
+        new_blocks = transcripts.blocks(self.transcript['segments'], limit=fulltext.MAX_SOURCE_CHARS)
+        cache = {notes.signature(translation.STAGE, self.selected, block): encoded(block, self.chinese)
+                 for block in old_blocks}
+        cache[notes.signature(fulltext.STAGE, self.selected, new_blocks[0])] = self.chinese * 60
+        planned = translation_cache.plan(self.transcript, new_blocks, self.selected, cache)
+        self.assertTrue(all(value is not None for block, value in planned))
+        self.assertEqual(source.split(), ' '.join(block for block, value in planned).split())
 
-    def test_ordered_translation_still_rejects_missing_extra_empty_or_non_chinese_blocks(self):
-        source = 'Review generated changes before use. ' * 40
-        values = ['每次修改都需要核验。'] * len(translation.units(source))
-        invalid = [values[:-1], values + ['额外的总结。'], ['', *values[1:]],
-                   ['English only'] * len(values), [{'text': value} for value in values],
-                   [123, *values[1:]]]
-        for output in invalid:
-            with self.subTest(output=output), self.assertRaisesRegex(RuntimeError, '覆盖'):
-                notes.translated_output(source, json.dumps({'translations': output}))
+    def test_overlapping_cache_selection_preserves_repeated_sources(self):
+        self.transcript['segments'][0]['text'] = 'Repeated source sentence. ' * 1300
+        blocks = transcripts.blocks(self.transcript['segments'], limit=fulltext.MAX_SOURCE_CHARS)
+        cache = {notes.signature(fulltext.STAGE, self.selected, block): self.chinese * 60 for block in blocks}
+        planned = translation_cache.plan(self.transcript, blocks, self.selected, cache)
+        self.assertTrue(all(value is not None for block, value in planned))
+        self.assertEqual(' '.join(blocks).split(), ' '.join(block for block, value in planned).split())
 
-    def test_ordered_translation_cache_remains_bound_to_source_and_model(self):
-        source = 'Verify every generated change before use. ' * 20
-        key = notes.signature(translation.STAGE, self.selected, source)
-        cache = {key: response(translation.prompt(source), '每次修改都需要独立核验。')}
-        with patch.object(notes, 'call') as call:
-            actual = notes.cached(media.cache_dir(self.row['video_id']), cache, key,
-                                  lambda: notes.translation_request(source, self.selected, self.deadline, lambda: False),
-                                  lambda value: notes.translated_output(source, value))
-        call.assert_not_called()
-        self.assertIn('独立核验', actual)
-        self.assertNotEqual(key, notes.signature(translation.STAGE, self.selected, source + ' Another fact.'))
-        self.selected.model_id = 'another-model'
-        self.assertNotEqual(key, notes.signature(translation.STAGE, self.selected, source))
+    def test_cache_coverage_prefers_two_complete_old_blocks_over_one_crossing_new_block(self):
+        candidates = [(0, 5, 'abcde', '旧一'), (5, 10, 'fghij', '旧二'), (0, 8, 'abcdefgh', '新一')]
+        self.assertEqual(candidates[:2], translation_cache.coverage(candidates))
 
-    def test_translation_cache_is_reused_without_adding_heuristic_text_to_notes(self):
-        self.transcript['segments'][-1]['text'] += ' The final API budget is 64.'
-        result = self.build()
-        self.assertNotIn('translation_warnings', result)
-        self.assertNotIn('翻译核验提示', result['body'])
-        self.assertNotIn('需核对', result['body'])
-        self.assertEqual(result, self.build())
+    def test_invalid_old_cache_is_retained_but_does_not_block_plain_translation(self):
+        source = self.transcript['segments'][0]['text']
+        identity = notes.signature(translation.STAGE, self.selected, source)
+        cache = {identity: encoded(source, source), 'old-atomic-unit': '保留旧缓存'}
+        directory = media.cache_dir(self.row['video_id'])
+        media.save_json(directory / 'notes-cache.json', cache)
+        self.assertIn(self.chinese, self.build()['body'])
+        self.assertTrue(cache.items() <= media.read_json(directory / 'notes-cache.json').items())
 
-    def test_short_reduce_tail_may_expand_without_rejecting_the_whole_note(self):
-        self.assertEqual('可用的中文分段要点。', notes.summary_output('可用的中文分段要点。', '短尾。'))
-        with self.assertRaisesRegex(RuntimeError, '压缩'):
-            notes.summary_output('中' * (notes.CONTEXT_LIMIT + 1), '原' * 12000)
+    def test_bad_new_cache_is_revalidated_before_replacement(self):
+        source = self.transcript['segments'][0]['text']
+        identity = notes.signature(fulltext.STAGE, self.selected, source)
+        directory = media.cache_dir(self.row['video_id'])
+        media.save_json(directory / 'notes-cache.json', {identity: 'English only'})
+        self.assertIn(self.chinese, self.build()['body'])
+        self.assertEqual(self.chinese, media.read_json(directory / 'notes-cache.json')[identity])
 
-    def test_translation_is_published_without_requesting_a_final_note(self):
-        def reply(prompt, *rest):
-            self.assertTrue(prompt.startswith('将以下字幕'), prompt)
-            return self.reply(prompt)
+    def test_technical_terms_and_long_english_quotations_are_not_language_failures(self):
+        quote = 'the server must respond with a valid JSON object containing all of the requested fields'
+        output = f'作者引用规范：“{quote}”。请使用 FastAPI、Supabase 和 PostgreSQL，并核验返回结果。'
+        entry = self.build(lambda *arguments: output)
+        self.assertIn(output, entry['body'])
 
-        result = self.build(reply)
-        self.assertEqual(self.row['entry']['title'], result['title'])
-        self.assertEqual(len(transcripts.blocks(self.transcript['segments'])), len(self.prompts))
-        count = len(self.prompts)
-        self.assertEqual(result, self.build(reply))
-        self.assertEqual(count, len(self.prompts))
+    def test_nonempty_and_chinese_presence_are_basic_checks_not_semantic_certification(self):
+        for output in ('', '   ', None, {'text': self.chinese}, 'English words without translation'):
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                fulltext.validate('Check the changes.', output)
+        self.assertEqual(self.chinese, fulltext.validate('Check the changes.', self.chinese))
 
-    def test_no_credentials_and_interruption_are_explicit(self):
-        with patch.object(notes, 'model', side_effect=RuntimeError('请配置模型')):
-            self.assertEqual((False, '请配置模型'), notes.available())
-        with self.assertRaises(media.Interrupted):
-            notes.call('资料', self.selected, time.monotonic() - 1, lambda: False)
+    def test_abnormally_short_answers_are_rejected_without_fine_grained_alignment(self):
+        source = 'The author explains the method and its limitations. ' * 100
+        with self.assertRaisesRegex(RuntimeError, '异常短'):
+            fulltext.validate(source, '作者介绍了方法。')
+        output = self.chinese * 30
+        self.assertEqual(output, fulltext.validate(source, output))
+
+    def test_unchanged_foreign_source_is_not_a_translation(self):
+        source = 'Verify all generated changes. 作者提醒保持谨慎。'
+        with self.assertRaisesRegex(RuntimeError, '未返回中文'):
+            fulltext.validate(source, source)
+
+    def test_chinese_source_preserves_original_without_model_or_cache(self):
+        self.transcript['segments'][0]['text'] = self.chinese
+        with patch.object(notes, 'model', side_effect=AssertionError('no model')):
+            entry = notes.build(self.row, self.transcript, self.deadline, lambda: False)
+        self.assertIn('中文字幕原文', entry['body'])
+        self.assertNotIn('原文对照', entry['body'])
+        self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-cache.json').exists())
+
+    def test_title_failure_does_not_repeat_body_or_downgrade_it(self):
+        self.row['entry']['title'] = 'Review all changes'
+
+        def reply(prompt, *arguments):
+            if fulltext.SOURCE_START + self.row['entry']['title'] + '\n</source>' in prompt:
+                raise model_response.OutputError('model refused title')
+            return self.chinese
+
+        entry = self.build(reply)
+        self.assertEqual(self.row['entry']['title'], entry['title'])
+        self.assertNotIn('fallback', entry['body_provenance'])
+        self.assertIn('## 视频原题', entry['body'])
+
+    def test_failure_counters_from_old_algorithm_do_not_block_or_change_new_translation(self):
+        directory = media.cache_dir(self.row['video_id'])
+        failures = {'old-language-stage': 3}
+        media.save_json(directory / 'notes-language-failures.json', failures)
+        self.assertIn(self.chinese, self.build()['body'])
+        self.assertEqual(failures, media.read_json(directory / 'notes-language-failures.json'))
+
+    def test_explicit_truncation_does_not_retry_as_small_segments(self):
+        calls = []
+
+        def reply(prompt, *arguments):
+            calls.append(prompt)
+            raise model_response.OutputError('模型回复未正常完成：chat/length')
+
+        with self.assertRaises(model_response.OutputError):
+            self.build(reply)
+        self.assertEqual(1, len(calls))
+        self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-cache.json').exists())
+
+    def test_stopped_or_expired_work_never_calls_the_model(self):
+        for deadline, stopped in ((time.monotonic() - 1, lambda: False), (self.deadline, lambda: True)):
+            with self.subTest(deadline=deadline), patch.object(notes, 'call') as call, \
+                    self.assertRaises(media.Interrupted):
+                notes.build(self.row, self.transcript, deadline, stopped)
+            call.assert_not_called()
+
+    def test_cached_json_is_not_the_new_plain_text_cache_format(self):
+        entry = self.build()
+        cache = media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json')
+        self.assertEqual([self.chinese], list(cache.values()))
+        self.assertNotIn(json.dumps({'translations': []}), entry['body'])
+
+    def test_browser_fixture_supports_plain_requests_and_retains_legacy_json_support(self):
+        from tests.youtube_browser_fixture import translation_reply
+
+        source = 'The AI agent generates code. Test every change.'
+        plain = translation_reply(fulltext.prompt(source))
+        self.assertTrue(plain.startswith('作者演示智能体编程。'))
+        self.assertNotIn('translations', plain)
+        legacy = translation_reply(translation.prompt(source))
+        self.assertIn(plain, translation.render(source, legacy))

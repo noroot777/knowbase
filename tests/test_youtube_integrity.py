@@ -6,9 +6,9 @@ from unittest.mock import patch
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg
-from kb.youtube import collector, discovery, media, notes, ranking, storage, transcripts, translation
+from kb.youtube import collector, discovery, fulltext, media, notes, ranking, storage, transcripts, translation
 from tests.youtube_fixture import YouTubeFixture
-from tests.youtube_translation_fixture import response
+from tests.youtube_translation_fixture import response, source_text
 
 
 class YouTubeIntegrity(YouTubeFixture):
@@ -46,11 +46,11 @@ class YouTubeIntegrity(YouTubeFixture):
         captions.assert_called_once()
         self.assertEqual(self.complete, result['segments'])
 
-    def test_translation_must_have_substance_for_each_text_block(self):
+    def test_fulltext_translation_must_not_be_empty_foreign_or_abnormally_short(self):
         text = 'Every change needs verification and testing. ' * 40 + 'Important final conclusion.'
         for output in ('中文摘要。结论。', 'Important final conclusion.'):
-            with self.subTest(output=output), patch.object(notes, 'call', return_value=output), self.assertRaises(RuntimeError):
-                notes.translate(text, None, time.monotonic() + 5, lambda: False)
+            with self.subTest(output=output), self.assertRaises(RuntimeError):
+                fulltext.validate(text, output)
 
     def test_timestamp_free_notes_are_published_and_exported(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
@@ -83,7 +83,7 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertIn('## 中文译文（自动生成）\n\n' + translated, files[0].read_text())
         self.assertNotIn('&t=', files[0].read_text())
 
-    def test_merged_translation_recovers_original_units_then_reaches_ready_and_export(self):
+    def test_fulltext_translation_preserves_commands_without_atomic_requests(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
         literal = 'python -m unittest tests.test_youtube_notes --verbose'
         source = 'Review generated changes before use. ' * 12 + '\n\n' + literal
@@ -92,13 +92,11 @@ class YouTubeIntegrity(YouTubeFixture):
 
         def reply(prompt, *arguments):
             if prompt.startswith('将以下字幕'):
-                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-                requested.append(segments)
-                if len(segments) > 1:
-                    self.assertEqual([source.split('\n\n')[0].strip(), literal], segments)
-                    return json.dumps({'translations': [translated + literal]})
-                self.assertIn(segments[0], [source.split('\n\n')[0].strip(), literal])
-                return json.dumps({'translations': [literal if segments[0] == literal else translated]})
+                value = source_text(prompt)
+                if value == self.entry_value['title']:
+                    return '独立核验生成结果'
+                requested.append(value)
+                return translated + '\n\n' + literal
             if '只输出 JSON' in prompt:
                 return json.dumps({'title': '独立核验生成结果', 'summary': '运行命令前先审查生成的修改。',
                                    'body': '## 核验步骤\n先审查，再运行测试。'})
@@ -113,26 +111,27 @@ class YouTubeIntegrity(YouTubeFixture):
                     'segments': [{'start': 0, 'end': 600, 'text': source}]}):
             result = collector.collect(FetchScope(force=True))
         self.assertEqual((1, 1), (result['processed'], result['added']), result)
-        self.assertEqual([[source.split('\n\n')[0].strip(), literal],
-                          [source.split('\n\n')[0].strip()], [literal]], requested)
+        self.assertEqual([source.strip()], requested)
         self.assertEqual('ready', storage.rows()[0]['state'])
         self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
         files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
         self.assertEqual(1, len(files))
         self.assertIn(translated + '\n\n' + literal, files[0].read_text())
 
-    def test_invalid_batch_format_recovers_units_before_publication_and_export(self):
+    def test_plain_paragraph_translation_needs_no_batch_json_before_export(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
         source = ' '.join(f'Fact {position} requires reviewing the generated code before using it.'
                           for position in range(30))
-        translated = '作者要求在使用代码前独立核验每个事实和每次生成的改动。'
+        translated = '作者要求在使用代码前独立核验每个事实和每次生成的改动。' * 12
         requested = []
 
         def reply(prompt, *arguments):
             if prompt.startswith('将以下字幕'):
-                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-                requested.append(segments)
-                return '以下是一段散文，不是有效的批次结果。' if len(segments) > 1 else response(prompt, translated)
+                value = source_text(prompt)
+                if value == self.entry_value['title']:
+                    return '核验代码中的每个事实'
+                requested.append(value)
+                return translated
             if '只输出 JSON' in prompt:
                 return '好的，以下是笔记：\n```json\n' + json.dumps({
                     'title': '核验代码中的每个事实', 'summary': '先核验再使用生成的代码。',
@@ -148,14 +147,13 @@ class YouTubeIntegrity(YouTubeFixture):
                     'segments': [{'start': 0, 'end': 600, 'text': source}]}):
             result = collector.collect(FetchScope(force=True))
         self.assertEqual((1, 1), (result['processed'], result['added']), result)
-        self.assertGreater(len(requested[0]), 1)
-        self.assertEqual([[unit] for unit in requested[0]], requested[1:])
+        self.assertEqual([source], requested)
         self.assertEqual('ready', storage.rows()[0]['state'])
         self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
         files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
         self.assertEqual(1, len(files))
         body = files[0].read_text()
-        self.assertEqual(len(requested[0]), body.count(translated))
+        self.assertEqual(1, body.count(translated))
         self.assertNotIn('以下是笔记', body)
         self.assertNotIn('笔记结束', body)
 
@@ -198,12 +196,12 @@ class YouTubeIntegrity(YouTubeFixture):
         def reply(prompt, *arguments):
             prompts.append(prompt)
             if prompt.startswith('将以下字幕'):
-                values = json.loads(prompt.split('\n\n', 1)[1])['segments']
+                value = source_text(prompt)
                 if broken:
-                    return json.dumps({'translations': [broken(value) for value in values]})
+                    return broken(value)
                 for original, translated in sentences.items():
-                    values = [value.replace(original, translated) for value in values]
-                return json.dumps({'translations': values})
+                    value = value.replace(original, translated)
+                return value
             if '只输出 JSON' in prompt:
                 return json.dumps({'title': '核验智能体的逐步执行', 'summary': '说明规划与执行的验证边界。',
                                    'body': '## 方法\n规划器分配预算，执行器核验每步结果。'})
@@ -215,17 +213,15 @@ class YouTubeIntegrity(YouTubeFixture):
                 patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', side_effect=reply), \
                 patch.object(media, 'probe', return_value=self.metadata), \
                 patch.object(media, 'obtain', return_value={'origin': 'uploaded_captions', 'language': 'en',
-                                                           'segments': segments}), \
-                patch.object(notes, 'MAX_LANGUAGE_TRIES', 5):
-            for broken in (lambda value: value, lambda value: '好。' + value,
-                           lambda value: value + '完', lambda value: '欢迎回来。' + value.partition('.')[2]):
-                incomplete = json.dumps({'translations': [broken(block) for block in blocks]})
+                                                           'segments': segments}):
+            for broken in (lambda value: value, lambda value: '过短摘要。'):
+                incomplete = json.dumps({'translations': blocks})
                 media.save_json(directory / 'notes-cache.json', {key: incomplete})
                 prompts.clear()
                 result = collector.collect(FetchScope(force=True))
                 self.assertEqual(0, result['added'])
                 self.assertEqual('failed', storage.rows()[0]['state'])
-                self.assertNotIn(key, media.read_json(directory / 'notes-cache.json'))
+                self.assertEqual(incomplete, media.read_json(directory / 'notes-cache.json')[key])
                 self.assertTrue(prompts)
                 self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in prompts))
                 self.assertFalse(collector.YouTubeCollector('youtube').materialize())
@@ -236,7 +232,7 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
         files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
         self.assertEqual(1, len(files))
-        body = files[0].read_text()
+        body = files[0].read_text().split('## 原文对照（未改写）', 1)[0]
         self.assertIn('规划器拆分目标', body)
         self.assertIn('npm install', body)
         self.assertNotIn('The planner', body)
@@ -244,10 +240,10 @@ class YouTubeIntegrity(YouTubeFixture):
 
     def test_native_chinese_quote_reaches_ready_and_export_without_translation(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
-        source = ('今天介绍状态管理与渲染的分离。官方文档原话是：the compiler will analyze your component '
-                  'tree and automatically insert memoization boundaries so that you do not have to write '
-                  'useMemo by hand any more in most of the cases we have measured so far。'
-                  '这意味着编译器会自己插入缓存边界，下面实际核验结果。')
+        self.entry_value['title'] = '状态管理与渲染分离'
+        source = ('今天介绍状态管理与渲染的分离。官方文档原话是：“the compiler analyzes your component '
+                  'tree and inserts memoization boundaries automatically without useMemo”。' +
+                  '这意味着编译器会自己插入缓存边界，下面实际核验结果。' * 8)
         transcript = {'origin': 'uploaded_captions', 'language': 'zh',
                       'segments': [{'start': 0, 'end': 600, 'text': source}]}
         prompts = []
@@ -291,8 +287,7 @@ class YouTubeIntegrity(YouTubeFixture):
         def reply(prompt, *arguments):
             prompts.append(prompt)
             if prompt.startswith('将以下字幕'):
-                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-                return json.dumps({'translations': segments if broken else ['作者说明状态管理与渲染的分离。']})
+                return source_text(prompt) if broken else '作者说明状态管理与渲染的分离。'
             if '只输出 JSON' in prompt:
                 return json.dumps({'title': '状态管理的方法', 'summary': '作者说明状态管理与渲染的分离。',
                                    'body': '## 方法\n先分离状态与渲染，再实际核验。'})
@@ -309,7 +304,7 @@ class YouTubeIntegrity(YouTubeFixture):
             self.assertEqual('failed', storage.rows()[0]['state'])
             self.assertTrue(prompts)
             self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in prompts))
-            self.assertNotIn(key, media.read_json(directory / 'notes-cache.json'))
+            self.assertEqual(json.dumps({'translations': [source]}), media.read_json(directory / 'notes-cache.json')[key])
             self.assertFalse(collector.YouTubeCollector('youtube').materialize())
             broken = False
             result = collector.collect(FetchScope(force=True))
@@ -319,8 +314,10 @@ class YouTubeIntegrity(YouTubeFixture):
         files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
         self.assertEqual(1, len(files))
         body = files[0].read_text()
-        self.assertIn('作者说明状态管理与渲染的分离。', body)
-        self.assertNotIn(source, body)
+        chinese, original = body.split('## 原文对照（未改写）', 1)
+        self.assertIn('作者说明状态管理与渲染的分离。', chinese)
+        self.assertNotIn(source, chinese)
+        self.assertIn(source, original)
 
     def test_code_heavy_translation_reaches_ready_and_export_without_language_ratio_failure(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
@@ -331,11 +328,11 @@ class YouTubeIntegrity(YouTubeFixture):
 
         def reply(prompt, *arguments):
             if prompt.startswith('将以下字幕'):
-                segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-                requested.append(segments)
-                values = ['作者解释每次生成的修改都需要独立核验。' if 'The author' in segment else segment
-                          for segment in segments]
-                return json.dumps({'translations': values})
+                value = source_text(prompt)
+                if value == self.entry_value['title']:
+                    return '核验命令执行结果'
+                requested.append(value)
+                return value.replace(narrative, '作者解释每次生成的修改都需要独立核验。')
             if '只输出 JSON' in prompt:
                 return json.dumps({'title': '核验命令执行结果', 'summary': '先独立核验，再采用生成结果。',
                                    'body': '## 方法\n运行原始命令并核验结果。'})
@@ -355,11 +352,11 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertEqual(1, len(collector.YouTubeCollector('youtube').materialize()))
         files = list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md'))
         self.assertEqual(1, len(files))
-        body = files[0].read_text()
+        body = files[0].read_text().split('## 原文对照（未改写）', 1)[0]
         self.assertEqual(16, body.count(command))
         self.assertNotIn('The author', body)
 
-    def test_missing_translation_coverage_leaves_no_note_and_recovers_on_retry(self):
+    def test_abnormally_short_translation_leaves_no_note_and_recovers_on_retry(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
         complete = {'origin': 'uploaded_captions', 'language': 'en', 'segments': [
             {'start': 0, 'end': 600, 'text': 'Verify every generated change before use. ' * 35}]}
@@ -369,10 +366,7 @@ class YouTubeIntegrity(YouTubeFixture):
         def reply(prompt, *arguments):
             prompts.append(prompt)
             if prompt.startswith('将以下字幕'):
-                payload = json.loads(response(prompt, '每次修改都要独立核验。'))
-                if broken:
-                    payload['translations'].pop()
-                return json.dumps(payload)
+                return '过短摘要。' if broken else '每次修改都要独立核验。' * 20
             if '只输出 JSON' in prompt:
                 return json.dumps({'title': '逐项核验生成结果', 'summary': '每次修改需要核验。',
                                    'body': '## 方法\n使用前独立核验。'})

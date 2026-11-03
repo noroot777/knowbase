@@ -3,13 +3,12 @@ import json
 import time
 
 from kb import llm, llm_stages
-from kb.youtube import json_output, media, model_response, transcripts, translation, translation_language, translation_pool
+from kb.youtube import fulltext, json_output, media, model_response, transcripts, translation, translation_cache, translation_language, translation_pool
 from kb.youtube.faults import local_fault
 
 
 VERSION = 'youtube-notes-v3'
 TITLE_STAGE = 'translate-title-v1'
-MAX_LANGUAGE_TRIES = 3
 CONTEXT_LIMIT = 14000
 ORIGINS = {'local_cache': '已有本地原文转录', 'uploaded_captions': '作者提供的字幕',
            'automatic_captions': 'YouTube 自动字幕', 'local_asr': '本地语音转录'}
@@ -156,99 +155,14 @@ def note_payload(output, prompt='', source='', quotes=(), chinese_source=False):
 def build(row, transcript, deadline, stopped):
     if stopped() or time.monotonic() >= deadline:
         raise media.Interrupted('视频处理已停止或时间预算用尽')
-    blocks = transcripts.blocks(transcript['segments'])
+    blocks = transcripts.blocks(transcript['segments'], limit=fulltext.MAX_SOURCE_CHARS)
     if not blocks:
         raise RuntimeError('没有可翻译的视频字幕正文')
     if native_chinese(row['entry']['title']) and all(native_chinese(block) for block in blocks):
         return translated_entry(row, transcript, blocks, blocks)
     directory = media.cache_dir(row['video_id'])
     translator = model('translate')
-    fingerprint = (json.dumps(transcript, ensure_ascii=False, sort_keys=True) + '\n' +
-                   translator.provider + '\n' + translator.model_id)
-    key = signature('language-failure-v2-translation', translator, fingerprint)
-    path = directory / 'notes-language-failures.json'
-    failures = media.read_json(path)
-    if not isinstance(failures, dict):
-        failures = {}
-    attempts = value if isinstance(value := failures.get(key), int) and value >= 0 else 0
-    if attempts < MAX_LANGUAGE_TRIES:
-        try:
-            result = build_translation(row, transcript, blocks, deadline, stopped, directory, translator)
-        except (RuntimeError, ValueError, TypeError) as error:
-            if (isinstance(error, media.Interrupted) or local_fault(error) or
-                    isinstance(error, media.ToolFailure)):
-                raise
-            if stopped() or time.monotonic() >= deadline:
-                raise media.Interrupted('视频处理已停止或时间预算用尽') from None
-            attempts += 1
-            failures[key] = attempts
-            media.save_json(path, failures)
-            if attempts < MAX_LANGUAGE_TRIES:
-                raise
-        else:
-            if key in failures:
-                failures.pop(key)
-                media.save_json(path, failures)
-            return result
-    if stopped() or time.monotonic() >= deadline:
-        raise media.Interrupted('视频处理已停止或时间预算用尽')
-    return fallback(row, transcript, directory, translator, deadline, stopped)
-
-
-def fallback(row, transcript, directory, translator, deadline, stopped):
-    cache = media.read_json(directory / 'notes-cache.json')
-    if not isinstance(cache, dict):
-        cache = {}
-    sections = []
-    blocks = transcripts.blocks(transcript['segments'])
-    for block in blocks:
-        if stopped() or time.monotonic() >= deadline:
-            raise media.Interrupted('视频处理已停止或时间预算用尽')
-        stage = 'translate' if native_chinese(block) else translation.STAGE
-        try:
-            value = translated_output(block, block if native_chinese(block) else
-                                      cache[signature(stage, translator, block)])
-        except (KeyError, RuntimeError, ValueError, TypeError):
-            for position, unit in enumerate(translation.units(block)):
-                try:
-                    value = translation.unit_output(block, position,
-                                                    cache[signature('translate-unit-v1', translator, unit['text'])])
-                except (KeyError, RuntimeError, ValueError, TypeError):
-                    sections.append((False, unit['text']))
-                else:
-                    sections.append((True, value))
-        else:
-            sections.append((True, value))
-    if stopped() or time.monotonic() >= deadline:
-        raise media.Interrupted('视频处理已停止或时间预算用尽')
-    original = '\n\n'.join(blocks)
-    if not original.strip():
-        raise RuntimeError('没有可保留的视频原文')
-    origin = ORIGINS.get(transcript['origin'], transcript['origin'])
-    if any(chinese for chinese, value in sections):
-        body = ('> 自动中文整理的某个阶段连续三轮未生成可用成品，已停止该阶段自动重试。'
-                '以下保留已通过校验的中文资料（原文或自动译文），不是已核验内容笔记；请结合原视频核对。\n\n')
-        body += '\n\n'.join(f'### 第 {position} 段：' + ('中文资料（待核验）' if chinese else '原文（未翻译）') +
-                            '\n\n' + value for position, (chinese, value) in enumerate(sections, 1))
-        if all(chinese for chinese, value in sections):
-            body += original_comparison(blocks)
-        provenance = 'translation-fallback' if all(chinese for chinese, value in sections) else 'mixed-fallback'
-        title = '整理待校验：'
-    else:
-        body = ('> 自动中文整理连续三轮未生成可用成品，已停止自动重试。以下仅保留完整原文，'
-                     '不是中文译文或已核验笔记；请结合原视频核对。\n\n'
-                '## 原文（未翻译）\n\n' + original)
-        title, provenance = '原文待校验：', 'original-fallback'
-    body += f'\n\n> 原文依据：{origin}；未分析视频画面。'
-    if stopped() or time.monotonic() >= deadline:
-        raise media.Interrupted('视频处理已停止或时间预算用尽')
-    original_title = row['entry']['title']
-    translated_title = cached_title(original_title, translator, cache) or original_title
-    if not native_chinese(original_title):
-        body += '\n\n## 视频原题\n\n' + original_title
-    return {'url': row['entry']['url'], 'title': title + translated_title, 'body': body,
-            'published': row['entry']['published'], 'author': row['channel'],
-            'content_kind': 'markdown', 'body_provenance': 'youtube:' + provenance}
+    return build_translation(row, transcript, blocks, deadline, stopped, directory, translator)
 
 
 def build_translation(row, transcript, blocks, deadline, stopped, directory, translator):
@@ -258,71 +172,56 @@ def build_translation(row, transcript, blocks, deadline, stopped, directory, tra
     translated = {}
     jobs = {}
     title = row['entry']['title']
-    title_key = signature(TITLE_STAGE, translator, title)
-    title_value = cached_title(title, translator, cache)
+    title_key = signature(fulltext.TITLE_STAGE, translator, title)
+    title_value = title if native_chinese(title) else cached_title(title, translator, cache)
+    if title_value is None and title_key in cache:
+        try:
+            title_value = fulltext.validate(title, cache[title_key])
+        except (RuntimeError, ValueError, TypeError):
+            cache.pop(title_key)
     if title_value is not None:
         translated[title_key] = title_value
     else:
-        jobs[title_key] = (title, {}, {})
-    for block in blocks:
+        jobs[title_key] = title
+    planned = translation_cache.plan(transcript, blocks, translator, cache)
+    blocks = [block for block, value in planned]
+    for block, value in planned:
         if stopped() or time.monotonic() >= deadline:
             raise media.Interrupted('视频处理已停止或时间预算用尽')
-        key = signature(translation.STAGE, translator, block)
-        if native_chinese(block):
-            translated[key] = block
+        key = signature(fulltext.STAGE, translator, block)
+        if value is not None:
+            translated[key] = value
             continue
-        if key in cache:
-            try:
-                translated[key] = translated_output(block, cache[key])
-                continue
-            except (RuntimeError, ValueError, TypeError):
-                cache.pop(key)
-                media.save_json(directory / 'notes-cache.json', cache)
-        seed = {identity: cache[identity] for unit in translation.units(block)
-                if (identity := signature('translate-unit-v1', translator, unit['text'])) in cache}
-        jobs[key] = (block, seed, dict(seed))
+        jobs[key] = block
 
     def create(key, halted):
-        block, _, local = jobs[key]
-        if key == title_key:
-            return translate_title(block, translator, deadline, halted, local)
-        return cached(None, local, key,
-                      lambda: translation_request(block, translator, deadline, halted, cache=local),
-                      lambda output: translated_output(block, output))
+        block = jobs[key]
+        try:
+            output = call(fulltext.prompt(block), translator, deadline, halted)
+            return fulltext.validate(block, output)
+        except model_response.OutputError:
+            if key != title_key:
+                raise
+        except RuntimeError as error:
+            if key != title_key or isinstance(error, (media.Interrupted, media.ToolFailure)) or local_fault(error):
+                raise
+        return title
 
     def receive(key, future):
         if stopped() or time.monotonic() >= deadline:
             raise media.Interrupted('视频翻译已停止或时间预算用尽')
-        try:
-            value = future.result()
-        except media.Interrupted:
-            raise
-        except Exception:
-            merge(key)
-            raise
-        merge(key)
-        return value
-
-    def merge(key):
-        _, seed, local = jobs[key]
-        changed = False
-        for identity in seed.keys() - local.keys():
-            if cache.get(identity) == seed[identity]:
-                cache.pop(identity, None)
-                changed = True
-        for identity, value in local.items():
-            if identity not in seed or value != seed[identity]:
-                cache[identity] = value
-                changed = True
-        if changed:
+        value = future.result()
+        if key != title_key or value != title:
+            cache[key] = value
             media.save_json(directory / 'notes-cache.json', cache)
+        return value
 
     results = translation_pool.run(jobs, create, receive, deadline, stopped) if jobs else {}
     translated.update(results)
     if stopped() or time.monotonic() >= deadline:
         raise media.Interrupted('视频处理已停止或时间预算用尽')
     return translated_entry(row, transcript, blocks,
-                            [translated[signature(translation.STAGE, translator, block)] for block in blocks],
+                            [translated[signature(fulltext.STAGE, translator, block)] for block in blocks],
                             translated[title_key])
 
 
@@ -332,7 +231,7 @@ def translated_entry(row, transcript, blocks, translated, title=None):
     chinese_source = all(native_chinese(block) for block in blocks)
     heading = '中文字幕原文' if chinese_source else '中文译文（自动生成）'
     caution = ('以上为字幕原文，未进行摘要或内容改写。' if chinese_source else
-               '译文已进行分段覆盖与语言校验，未做人工事实核查，请结合原视频核对。')
+               '以上为字幕全文自动直译，未进行逐句语义审校或人工事实核查，请结合原视频核对。')
     body = ('## ' + heading + '\n\n' + complete +
             f'\n\n> 内容依据：{origin}；未分析视频画面。字幕和语音识别可能有误。'
             + caution
