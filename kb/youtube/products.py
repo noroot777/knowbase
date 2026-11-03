@@ -51,9 +51,69 @@ def replace(connection, entry):
          reg.text_language(entry['title'], entry['body']), key, content_hash)).rowcount
 
 
+#: 「这几条视频的成品要重新复核」的队列,一行一个链接(`youtube_videos.entry.url` 与
+#: `feed_items.url` 是两张表共同的身份)。**由触发器填**,不由 Python 填 —— 写库的
+#: 不止这一份代码(另一条没重启的分支、脚本、测试直改),触发器住在库里,谁写都漏不掉。
+DIRTY = 'youtube_product_dirty'
+_VIDEO_COLUMNS = 'state,validation,note,entry,video_id'
+_ITEM_COLUMNS = 'url,title,body,author,published,body_provenance'
+#: 本进程已经全量复核过的库。校验口径(`valid`/`transcripts.validate`)改了只在重启后
+#: 生效,所以「每个进程首次打开某个库时全量复核一遍」就盖住了口径变化。
+_SWEPT = set()
+
+
+def _track(connection):
+    connection.execute(f'CREATE TABLE IF NOT EXISTS {DIRTY} (url TEXT PRIMARY KEY)')
+    # 触发器**不许让原本那条写语句失败**:`entry` 不是合法 JSON 时 `json_extract` 会抛,
+    # 那样一次与成品无关的写入会被它连带拒掉。
+    video = (f"INSERT OR IGNORE INTO {DIRTY} SELECT json_extract({{0}}.entry,'$.url') "
+             "WHERE json_valid({0}.entry) AND json_extract({0}.entry,'$.url') IS NOT NULL")
+    item = f'INSERT OR IGNORE INTO {DIRTY} SELECT {{0}}.url WHERE {{0}}.url IS NOT NULL'
+    for name, event, body in (
+            ('youtube_product_video_added', 'AFTER INSERT ON youtube_videos', video.format('NEW')),
+            ('youtube_product_video_changed', f'AFTER UPDATE OF {_VIDEO_COLUMNS} ON youtube_videos',
+             video.format('OLD') + '; ' + video.format('NEW')),
+            ('youtube_product_video_removed', 'AFTER DELETE ON youtube_videos', video.format('OLD')),
+            ('youtube_product_item_added', "AFTER INSERT ON feed_items WHEN NEW.kind='youtube'",
+             item.format('NEW')),
+            ('youtube_product_item_changed',
+             f"AFTER UPDATE OF {_ITEM_COLUMNS} ON feed_items WHEN NEW.kind='youtube' OR OLD.kind='youtube'",
+             item.format('OLD') + '; ' + item.format('NEW'))):
+        connection.execute(f'CREATE TRIGGER IF NOT EXISTS {name} {event} BEGIN {body}; END')
+
+
 def quarantine(connection):
+    """把没通过当前完整性校验的成品撤下来,换成明确的待校验说明。
+
+    **只复核变过的那几条。** 它跑在 `registry.db()` 的初始化事务里,也就是**每开一个
+    写连接跑一次**;上一版每次都把全部 `ready` 成品的字幕重新逐字校验一遍(实测
+    82 条成品、一次约 0.4 秒且一直攥着写锁),一个要开几十次连接的接口(「问题与
+    待办」的总览)因此要 10–20 秒,整个服务跟着卡住。结果只取决于两张表上那几列,
+    所以由触发器把改过的链接记进 `DIRTY`,这里只复核它们;每个进程首次打开某个库
+    时照旧全量复核一遍。整段在调用方的 `BEGIN IMMEDIATE` 里,自己写出去的那几行
+    触发器也会记进来,处理完一并清掉 —— 撤下来的状态本身就是不动点。
+    """
+    fresh = not connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (DIRTY,)).fetchone()
+    _track(connection)
+    where = connection.execute('PRAGMA database_list').fetchone()[2]
+    whole = fresh or not where or where not in _SWEPT
+    if not whole and not connection.execute(f'SELECT 1 FROM {DIRTY} LIMIT 1').fetchone():
+        return
+    videos = 'SELECT * FROM youtube_videos'
+    items = "SELECT * FROM feed_items WHERE kind='youtube'"
+    if not whole:
+        videos += f" WHERE json_extract(entry,'$.url') IN (SELECT url FROM {DIRTY})"
+        items += f' AND url IN (SELECT url FROM {DIRTY})'
+    _settle(connection, videos, items)
+    connection.execute(f'DELETE FROM {DIRTY}')
+    if where:
+        _SWEPT.add(where)
+
+
+def _settle(connection, videos, items):
     approved = {}
-    for candidate in connection.execute('SELECT * FROM youtube_videos').fetchall():
+    for candidate in connection.execute(videos).fetchall():
         row = dict(candidate)
         row['entry'] = json.loads(row['entry'])
         if row['state'] == 'ready':
@@ -64,7 +124,7 @@ def quarantine(connection):
                     reason=?,last_error=?,validation='',retry_at=0 WHERE video_id=?''',
                     (PENDING, PENDING, row['video_id']))
                 connection.execute('UPDATE youtube_video_sources SET committed=0 WHERE video_id=?', (row['video_id'],))
-    for item in connection.execute("SELECT * FROM feed_items WHERE kind='youtube'").fetchall():
+    for item in connection.execute(items).fetchall():
         note = approved.get(item['url'])
         if note and all(item[field] == note.get(field, '') for field in ('title', 'body', 'author', 'published')):
             continue
