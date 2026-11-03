@@ -110,6 +110,27 @@ class OverviewTests(CareApiCase):
         self.assertEqual(before['groups'], after['groups'])
         self.assertEqual(before['lane_totals'], after['lane_totals'])
 
+    def test_screen_lists_one_row_per_account_at_its_earliest_step(self):
+        """屏幕上一个账号一行(`source_rows`),留的是卡在最前面那一步的那一条。
+
+        事实清单(`sources`)照旧两条都在;页头和页签数的是账号。留下的必须是
+        「这一轮连不上」(访问来源),不是排在后面的「没读完」—— 后者正是前者的后果。
+        """
+        before = self.client.get('/api/intake-care', params={'kind': 'web'}).json()
+        with reg.db() as c:
+            c.execute('UPDATE subscriptions SET last_error=?,failures=2 WHERE id=?',
+                      ('连接失败：读取超时', self.ids['page']))
+        after = self.client.get('/api/intake-care', params={'kind': 'web'}).json()
+        mine = [p['problem'] for p in after['sources'] if p['source_id'] == self.ids['page']]
+        self.assertEqual(['connect', 'coverage'], mine)
+        shown = [p for p in after['source_rows'] if p['source_id'] == self.ids['page']]
+        self.assertEqual(['connect'], [p['problem'] for p in shown])
+        self.assertEqual(before['source_accounts'], after['source_accounts'])
+        self.assertEqual(len(after['source_rows']), after['source_accounts'])
+        # 反过来钉一边:不同账号各占一行,一个都不并掉。
+        owners = {(p['kind'], p['source_id']) for p in after['sources']}
+        self.assertEqual(len(owners), after['source_accounts'])
+
     def test_an_unknown_kind_is_refused(self):
         self.assertEqual(404, self.client.get('/api/intake-care',
                                               params={'kind': 'nope'}).status_code)

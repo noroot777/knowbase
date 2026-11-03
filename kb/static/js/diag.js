@@ -171,9 +171,9 @@ function careNoteHtml(note) {
 function careRenderHead() {
   const data = CARE.overview;
   const waiting = data.groups.attention + data.groups.queued;
-  const problems = data.source_problems || 0;
+  const problems = data.source_accounts || 0;
   // **来源问题不混进「条内容」那个数**(审查第 1 轮 B08):一条来源问题不是一篇
-  // 文章,同一条订阅还可能同时有「失败」和「没读完」两条。它单独说一句。
+  // 文章。它单独说一句,数的是有问题的账号(一个账号一行,`sources.latest`)。
   // **每一组数字连着它的量词是一个不可拆的单元**(`<span>` + nowrap),换行按组
   // 换。不这么写的话 320 / 390px 下整行按字换行,屏幕上是「条内容在/等」「待决/
   // 定」这样的碎字 —— 没有横向溢出,但读不出数(审查第 2 轮 B6,四宽截图)。
@@ -203,7 +203,7 @@ function careRenderTabs() {
     // 「待决定」那一组的页签数**含来源问题**(它们就列在那一组的最上面一节),
     // 而页头把两者分开说 —— 页签回答「点进去有几行」,页头回答「有多少条内容」。
     const n = id === 'running' ? (data.running.running ? 1 : 0)
-      : (data.groups[id] || 0) + (id === 'attention' ? (data.source_problems || 0) : 0);
+      : (data.groups[id] || 0) + (id === 'attention' ? (data.source_accounts || 0) : 0);
     const b = document.createElement('button');
     b.type = 'button';
     b.setAttribute('role', 'tab');
@@ -315,7 +315,7 @@ async function careLoadSections() {
     }
     CARE.sections = picked.filter(s => s.total > 0);
     if (group === 'attention' && (!CARE.stage || CARE.stage === careSourceStage())) {
-      const rows = careFilterSources(CARE.overview.sources || []);
+      const rows = careFilterSources(CARE.overview.source_rows || []);
       if (rows.length) CARE.sections.unshift({ lane: careSourceLane(), total: rows.length,
         items: rows, source: true });
     }

@@ -133,6 +133,9 @@ def overview(kind: str = ''):
     # `last_error` 和 `last_note`,贡献**两条**来源问题。它单独报一个数,页签上
     # 「待决定」显示两者之和但在页头分开说。
     source_problems = len(problem_rows)
+    # 屏幕上那一节一个账号一行(`sources.latest`),页头和页签的数跟着它数;
+    # `sources` 照旧是完整的事实清单。
+    source_rows = sources.latest(problem_rows)
     # 搁置那一组的总数走它自己那条取数(同一个 WHERE),不另写一条 count。
     groups[lanes.ARCHIVED] = lanes.shelved(kind, '', 0, 1)['total']
     return {
@@ -147,6 +150,8 @@ def overview(kind: str = ''):
         'source_steps': list(sources.SOURCE_STEPS),
         'sources': problem_rows,
         'source_problems': source_problems,
+        'source_rows': source_rows,
+        'source_accounts': len(source_rows),
         'running': running.snapshot(kind),
         'resolved_days': lanes.RESOLVED_DAYS,
         'min_body_chars': readable.MIN_CHARS,

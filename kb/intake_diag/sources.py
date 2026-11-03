@@ -196,6 +196,27 @@ def problems(kind: str) -> list[dict]:
     return out
 
 
+def latest(rows: list[dict]) -> list[dict]:
+    """**列表上一个账号只占一行**:这一条订阅卡在最前面那一步的那一条。
+
+    `problems` 是事实层,同一条订阅可以同时有好几条(连接失败 + 历史缺口 + 正文
+    待补 + 超窗),各自的身份、阶段和原话都要留着 —— 重试凭证按 `id` 现查、回归
+    钉着它们互不吞并。而屏幕上那几行说的是同一个账号,下游那几条多半就是上游那一
+    步没走通的后果(时间线没读到,历史当然补不齐),一并列出来像是一串旧账。
+
+    取 `step` 最小的那一条(访问来源 → 读取时间线 → 检查覆盖 → 结束检查),同一步
+    按 `problems` 给出的顺序。**按步骤取,不按列表里排在最后的那条取**:那个顺序是
+    拼装顺序不是时间顺序,按它取会让「这一轮连不上」被一条「历史待追补」盖掉。
+    重试的射程是整条订阅(`actions._source_scope`),所以留下哪一条都不缩小出口。
+    """
+    picked: dict[tuple, dict] = {}
+    for row in rows:
+        owner = (row['kind'], row['source_id'])
+        if owner not in picked or row['step'] < picked[owner]['step']:
+            picked[owner] = row
+    return list(picked.values())
+
+
 def counts(kinds=None) -> dict[str, int]:
     """每个来源有几条来源级问题。读不出来的来源记 0 并把原因交给调用方。"""
     return {kind: len(problems(kind)) for kind in (kinds or reg.KINDS)}
