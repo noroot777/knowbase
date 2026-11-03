@@ -230,7 +230,7 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         self.assertEqual(['00000000002', '00000000003'], [entry['video_id'] for entry in accepted])
         arguments = self.calls[0]['arguments']
         self.assertNotIn('--break-match-filters', arguments)
-        self.assertEqual('60', arguments[arguments.index('--playlist-end') + 1])
+        self.assertEqual('10', arguments[arguments.index('--playlist-end') + 1])
         self.assertIn('--lazy-playlist', arguments)
         self.assertIn('--no-quiet', arguments)
         self.assertIn('--flat-playlist', arguments)

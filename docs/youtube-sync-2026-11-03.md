@@ -103,7 +103,7 @@ PYTHONPATH="$PWD" /Users/fjh/code/knowledge-base/.venv/bin/python -u data/diagno
 单频道取样不代表完整 48 频道的总耗时；隔离成品验证不代表生产已经入库。
 本任务只提交任务分支，生产切换、完整验收和生产重同步未代替用户执行。
 
-## 续修：日期窗口实际控制翻页
+## 续修：日期窗口实际控制翻页（c7d1c4b，保守参数历史记录）
 
 - `--lazy-playlist --playlist-end 60` 只读取最新列表首批；尾部连续 30 条都明确早于请求下界减两天余量时停止。
   若近期条目仍在尾部，读取范围扩为 120、240……，直至确认边界或真正列尽，不把 60 当总上限。
@@ -176,3 +176,54 @@ AI Engineer 的待校准候选从前次 3 条降为 1 条，是补齐历史精�
 原始结果为任务目录下 `data/diagnostics/youtube-window-pages/final-code-result.json`，
 日志为同目录 `final-code-listing.log`，均未纳入提交。
 本轮修改文件 Ruff、Python AST、700 行上限及 `git diff --check` 通过。
+
+## 按实际订阅频率缩小探测批次
+
+用户明确指出，关注频道通常五天内连 10 条视频都不会发布，没有必要默认读取 60 条、
+再等待连续 30 条旧视频证明边界。现行参数改为：首批 10 条，尾部连续 3 条明确早于窗口即停止。
+粗日期的两天误差余量仍保留，它用于避免把边界视频错误判旧，不等于多收两天内容。
+只有尾部仍有近期条目时才按需扩为 20、40……，不把 10 当成强制丢弃更多近期视频的硬上限。
+此处选择更少的历史探测，接受相对原 30 条确认更弱的乱序缓冲；精确元数据准入、日期缺失提醒、
+错误处理和预算规则不变。前文 287.97 秒与 60/120 批次是上一版实测，不能作为本版参数的性能结果。
+
+本次只运行修改过的两个测试模块，实际 cwd 为本任务 worktree，原始命令仍为：
+
+```sh
+/Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_windowed_discovery tests.test_youtube_discovery_pages -v
+```
+
+哨兵 `ZG2oCB5xyz_s`：**44 项，27.013 秒，全部通过，退出码 0**。
+原始日志位于 ash 本任务 `regression/ZG2oCB5xyz_s.log`，未运行其他回归。
+
+### 10/3 参数的真实 48 频道结果
+
+普通哨兵 `_0oj63UD3e4k`，实际 cwd 为本任务 worktree，命令为：
+
+```sh
+KB_SMOKE_RESULT_NAME=aggressive-result.json PYTHONPATH="$PWD" /Users/fjh/code/knowledge-base/.venv/bin/python -u data/diagnostics/youtube-window-pages/live_listing.py
+```
+
+结果退出码 0，记录实际参数 `first_batch=10`、`old_run=3`，并断言导入当前 worktree。
+48 个启用频道全部检查并确认窗口边界，错误 0、部分完成 0，总耗时 **329.86 秒（5 分 29.86 秒）**。
+
+| 实际读取范围 | 频道数 |
+| --- | --- |
+| 10 条即停止 | 43 |
+| 10 → 20 条 | 4 |
+| 10 → 20 → 40 → 80 条 | 1 |
+
+四个扩至 20 的频道为 WorldofAI、AI Master、Better Stack 和 TheAIGRID；
+AI Engineer 扩至 80，耗时 29.40 秒。扩展由各频道时间下界与粗日期余量决定，
+不代表这些频道都在五天内发布超过 10 条；已有成功水位的频道仍使用原配置窗口。
+已有候选与历史检查本地去重后保留 3 个待精确校准候选，不代表 3 个成品。
+
+**此次没有测出更快**：相比上轮 287.97 秒，本次慢 41.89 秒。
+首批历史探测量确实降低，但自适应扩展仍需重启工具并重新读取前缀，
+本次共 55 次列表调用，上轮为 49 次，额外启动抵消了部分收益；网络时序也不同，
+不能凭这两次非同时采样把差值完全归因于参数。此次按用户频率假设缩小默认探测，
+不把「条数减少」包装成已证明的耗时优化，也不隐去这轮较慢的结果。
+
+日志与结果为本任务 `data/diagnostics/youtube-window-pages/aggressive-listing.log`
+和 `aggressive-result.json`，未纳入提交。沿用同一隔离方式：生产库仅只读备份，
+所有准备、诊断和缓存写入任务隔离目录，不生成笔记、不发布、不写生产，不操作浏览器。
+这是列表发现实测，不是生产完整同步。本轮 Ruff、Python AST、700 行上限与 diff 空白检查均通过。

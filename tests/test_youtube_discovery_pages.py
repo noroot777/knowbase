@@ -43,30 +43,30 @@ class YouTubeDiscoveryPages(YouTubeFixture):
                                             deadline or time.monotonic() + 30, notes)
 
     def test_large_history_stops_after_one_bounded_batch(self):
-        payloads = [self.payload(number, self.now if number <= 10 else self.floor - timedelta(days=4))
+        payloads = [self.payload(number, self.now if number <= 3 else self.floor - timedelta(days=4))
                     for number in range(1, 10001)]
         evidence = []
         entries = self.fetch(payloads, evidence)
-        self.assertEqual([60], self.limits)
-        self.assertEqual(10, len(entries))
+        self.assertEqual([10], self.limits)
+        self.assertEqual(3, len(entries))
         self.assertTrue(all(entry['approximate'] for entry in entries))
         self.assertEqual('window', self.source['discovery_stop'])
-        self.assertEqual([{'limit': 60, 'observed': 60}], self.source['discovery_pages'])
+        self.assertEqual([{'limit': 10, 'observed': 10}], self.source['discovery_pages'])
         self.assertEqual([], evidence)
 
     def test_isolated_old_item_and_old_run_do_not_hide_later_recent_entries(self):
-        payloads = [self.payload(number, self.now if number in (2, 55) else self.floor - timedelta(days=4))
+        payloads = [self.payload(number, self.now if number in (2, 9) else self.floor - timedelta(days=4))
                     for number in range(1, 1001)]
         entries = self.fetch(payloads)
-        self.assertEqual([60, 120], self.limits)
-        self.assertEqual(['00000000002', '00000000055'], [entry['video_id'] for entry in entries])
+        self.assertEqual([10, 20], self.limits)
+        self.assertEqual(['00000000002', '00000000009'], [entry['video_id'] for entry in entries])
         self.assertEqual('window', self.source['discovery_stop'])
 
-    def test_five_day_window_is_not_truncated_to_sixty_items(self):
+    def test_five_day_window_is_not_truncated_to_ten_items(self):
         payloads = [self.payload(number, self.now if number <= 160 else self.floor - timedelta(days=4))
                     for number in range(1, 5001)]
         entries = self.fetch(payloads)
-        self.assertEqual([60, 120, 240], self.limits)
+        self.assertEqual([10, 20, 40, 80, 160, 320], self.limits)
         self.assertEqual(160, len(entries))
         self.assertEqual(160, len({entry['video_id'] for entry in entries}))
         self.assertEqual('window', self.source['discovery_stop'])
@@ -75,40 +75,40 @@ class YouTubeDiscoveryPages(YouTubeFixture):
         payloads = [self.payload(number, self.floor - timedelta(days=4)) for number in range(1, 1001)]
         self.source['known_video_ids'] = tuple(payload['id'] for payload in payloads)
         self.assertEqual([], self.fetch(payloads))
-        self.assertEqual([60], self.limits)
+        self.assertEqual([10], self.limits)
         self.assertEqual('window', self.source['discovery_stop'])
 
     def test_no_dates_does_not_expand_into_all_history_or_confirm_success(self):
         evidence = []
         entries = self.fetch([self.payload(number, None) for number in range(1, 1001)], evidence)
-        self.assertEqual([60], self.limits)
-        self.assertEqual(60, len(entries))
+        self.assertEqual([10], self.limits)
+        self.assertEqual(10, len(entries))
         self.assertEqual('partial', self.source['discovery_stop'])
         self.assertIn('缺少可靠的粗日期', evidence[0])
 
     def test_previously_checked_old_ids_are_filtered_without_hiding_boundary_evidence(self):
-        payloads = [self.payload(number, self.floor - timedelta(days=1)) for number in range(1, 11)]
-        payloads.extend(self.payload(number, self.floor - timedelta(days=4)) for number in range(11, 1001))
+        payloads = [self.payload(number, self.floor - timedelta(days=1)) for number in range(1, 4)]
+        payloads.extend(self.payload(number, self.floor - timedelta(days=4)) for number in range(4, 1001))
         self.source['checked_old_ids'] = tuple(payload['id'] for payload in payloads)
         self.assertEqual([], self.fetch(payloads))
-        self.assertEqual([60], self.limits)
+        self.assertEqual([10], self.limits)
         self.assertEqual('window', self.source['discovery_stop'])
 
     def test_unknown_tail_prevents_false_old_page_confirmation(self):
-        payloads = [self.payload(number, None if number == 60 else self.floor - timedelta(days=4))
+        payloads = [self.payload(number, None if number == 10 else self.floor - timedelta(days=4))
                     for number in range(1, 1001)]
         evidence = []
         self.fetch(payloads, evidence)
-        self.assertEqual([60], self.limits)
+        self.assertEqual([10], self.limits)
         self.assertEqual('partial', self.source['discovery_stop'])
         self.assertTrue(evidence)
 
     def test_two_day_boundary_margin_is_retained_and_does_not_end_paging(self):
-        payloads = [self.payload(number, self.floor - timedelta(days=1 if number <= 60 else 4))
+        payloads = [self.payload(number, self.floor - timedelta(days=1 if number <= 10 else 4))
                     for number in range(1, 1001)]
         entries = self.fetch(payloads)
-        self.assertEqual([60, 120], self.limits)
-        self.assertEqual(60, len(entries))
+        self.assertEqual([10, 20], self.limits)
+        self.assertEqual(10, len(entries))
 
     def test_small_channel_exhaustion_is_success_even_without_dates(self):
         evidence = []
@@ -134,8 +134,8 @@ class YouTubeDiscoveryPages(YouTubeFixture):
         evidence = []
         payloads = [self.payload(number, self.now) for number in range(1, 1001)]
         entries = self.fetch(payloads, evidence, failure=RuntimeError('upstream timeout'))
-        self.assertEqual([60, 120], self.limits)
-        self.assertEqual(60, len(entries))
+        self.assertEqual([10, 20], self.limits)
+        self.assertEqual(10, len(entries))
         self.assertEqual('partial', self.source['discovery_stop'])
         self.assertIn('upstream timeout', evidence[0])
 
@@ -144,15 +144,15 @@ class YouTubeDiscoveryPages(YouTubeFixture):
         payloads = [self.payload(number, self.now) for number in range(1, 1001)]
         with patch.object(windowed_discovery.time, 'monotonic', side_effect=[0, 2]):
             entries = self.fetch(payloads, evidence, deadline=1)
-        self.assertEqual([60], self.limits)
-        self.assertEqual(60, len(entries))
+        self.assertEqual([10], self.limits)
+        self.assertEqual(10, len(entries))
         self.assertEqual('partial', self.source['discovery_stop'])
         self.assertIn('时间预算', evidence[0])
 
     def test_playlist_positions_prevent_false_exhaustion_when_entries_are_missing(self):
-        payloads = [self.payload(number, self.now) for number in range(1, 60)]
-        payloads[-1]['playlist_index'] = 60
+        payloads = [self.payload(number, self.now) for number in range(1, 10)]
+        payloads[-1]['playlist_index'] = 10
         observation = discovery_pages.inspect('\n'.join(json.dumps(item) for item in payloads) +
-            '\n[download] Finished downloading playlist: fixture', self.floor, 60)
-        self.assertEqual(60, observation['observed'])
+            '\n[download] Finished downloading playlist: fixture', self.floor, 10)
+        self.assertEqual(10, observation['observed'])
         self.assertFalse(observation['exhausted'])

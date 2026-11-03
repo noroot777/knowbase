@@ -3,8 +3,8 @@ import re
 from datetime import datetime, timedelta, timezone
 
 
-FIRST_BATCH = 60
-OLD_PAGE = 30
+FIRST_BATCH = 10
+OLD_PAGE = 3
 DATE_MARGIN = timedelta(days=2)
 
 
