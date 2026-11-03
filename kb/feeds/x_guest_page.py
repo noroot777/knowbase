@@ -27,6 +27,7 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from bs4 import BeautifulSoup, NavigableString, Tag
 
@@ -42,6 +43,7 @@ _STATUS = re.compile(r'^/([A-Za-z0-9_]{1,20})/status/(\d+)(?:/history)?$')
 _ARTICLE = re.compile(r'/(?:i|[A-Za-z0-9_]{1,20})/article/(\d+)')
 _MORE = ('显示更多', 'Show more')
 _PINNED = ('已置顶', 'Pinned')
+SHANGHAI = ZoneInfo('Asia/Shanghai')
 
 
 class PageError(RuntimeError):
@@ -101,16 +103,24 @@ def _with_card(text: str, card: str) -> str:
     return f'{text} {card}' if text else card
 
 
-def _moment(value) -> datetime | None:
-    """脚本参数里的毫秒时间戳;不是数、NaN/无穷、超出能表示的范围一律 `None`(那一条按认不出来算)。"""
+def instant(value, per_second: int = 1) -> datetime | None:
+    """远端给的时间戳 → UTC 时间;**两件工具共用这一份**(FxTwitter 给秒、X 页面给毫秒)。
+
+    认得出来的标准是**整条日期表示链都走得通**:是数(不是布尔)、有限、为正、能构造 UTC 时间,
+    而且能换成项目时区写成入库的那个字符串(`x_guest._build` 的 `published`)。任何一步不行都是
+    `None`,那一条按认不出来算。有限性判断、单位换算也都在保护里 —— 几百位的整数是合法 JSON,
+    转浮点那一步就抛;UTC 落在 9999-12-31 下午的,换到上海时区才越界。
+    """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    try:                                  # 有限性判断也在里面:几百位的整数转浮点那一步就抛
+    try:
         if not math.isfinite(value) or value <= 0:
             return None
-        return datetime.fromtimestamp(value / 1000, timezone.utc)
+        when = datetime.fromtimestamp(value / per_second, timezone.utc)
+        when.astimezone(SHANGHAI).strftime('%Y-%m-%d %H:%M')
     except (OverflowError, ValueError, OSError):
         return None
+    return when
 
 
 def _post(article: Tag, stamps: dict[str, datetime]) -> Post | None:
@@ -149,7 +159,7 @@ def posts(html: str) -> tuple[list[Post], int]:
     stamps = {}
     for ident, args in _STAMP.findall(html):
         try:
-            when = _moment(json.loads(args).get('timestamp'))
+            when = instant(json.loads(args).get('timestamp'), 1000)
         except (ValueError, AttributeError, RecursionError):
             continue
         if when is not None:

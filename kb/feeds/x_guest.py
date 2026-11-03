@@ -34,13 +34,11 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import re
 import time
 from datetime import datetime, timezone
 from urllib.parse import quote
-from zoneinfo import ZoneInfo
 
 from kb.feeds import x_article, x_body, x_guest_page, x_post_meta
 from kb.feeds.fetching import FeedError, request
@@ -65,7 +63,7 @@ MIN_USEFUL = 2.0
 PAGE_RESERVE = float(os.environ.get('KB_X_GUEST_PAGE_RESERVE', '10'))
 # 当成没有水位(新订阅、区间补抓之外)时只读这么多天。真正的下界由调用方给。
 FIRST_DAYS = 5
-SHANGHAI = ZoneInfo('Asia/Shanghai')
+SHANGHAI = x_guest_page.SHANGHAI
 _OLD_STREAK = 3
 _STATUS_URL = re.compile(r'^https://(?:x|twitter)\.com/([A-Za-z0-9_]{1,20})/status/(\d+)$')
 _HANDLE = re.compile(r'^[A-Za-z0-9_]{1,20}$')
@@ -124,19 +122,8 @@ def _bottom(payload: dict) -> str | None:
 
 
 def _when(status: dict) -> datetime | None:
-    """推文时间;缺、不是数、NaN/无穷、超出能表示的范围,一律 `None`(该条按认不出来算)。
-
-    有限性判断本身也在保护里:几百位的整数是合法 JSON,`math.isfinite` 转浮点那一步就抛 `OverflowError`。
-    """
-    stamp = status.get('created_timestamp')
-    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
-        return None
-    try:
-        if not math.isfinite(stamp) or stamp <= 0:
-            return None
-        return datetime.fromtimestamp(stamp, timezone.utc)
-    except (OverflowError, ValueError, OSError):
-        return None
+    """推文时间;认不出来是 `None`(该条按认不出来算)。口径在 `x_guest_page.instant`,两件工具一份。"""
+    return x_guest_page.instant(status.get('created_timestamp'))
 
 
 def _account(value) -> bool:
@@ -178,9 +165,13 @@ def _build(url: str, when: datetime, text: str, name: str, *, quoted: bool, arti
     text = text.strip()
     if not text and quoted and not article:
         return None                                  # 只有引用:不拿别人的话当他的正文
+    try:
+        # 正常走到这里的时间都过了 `x_guest_page.instant`;这一层仍收住,日期换算的异常只让这一条认不出来。
+        published = when.astimezone(SHANGHAI).strftime('%Y-%m-%d %H:%M')
+    except (OverflowError, ValueError, OSError):
+        raise PostUnavailable('推文时间换不成项目时区') from None
     out = {'url': url, 'title': (text or x_body.placeholder(name))[:500], 'body': text,
-           'author': name, 'published': when.astimezone(SHANGHAI).strftime('%Y-%m-%d %H:%M'),
-           'content_kind': 'post'}
+           'author': name, 'published': published, 'content_kind': 'post'}
     if article:
         # 时间线上那份 article 没有正文(FxTwitter 给空块,X 主页只有一张卡片),只当信号用。
         out[x_article.HINT] = article

@@ -149,6 +149,18 @@ class SaveTests(CaptureBase):
         self.assertEqual(200, r.status_code, r.text)
         self.assertEqual('ready', self.candidate()['state'])
 
+    def test_an_edited_subscription_stops_offering_the_page_until_it_syncs_again(self):
+        """列表、「这一页能不能补」和交回过同一份判据:订阅编辑过(身份带着 rev)、还没同步时,扩展不该
+        说「可以补」、交回时才拒。反过来钉一边:下一轮同步之后它照旧列得出来、交得回去。"""
+        reg.save_subscription('social', {'name': 'alice 改了名'}, self.source['id'])
+        self.assertEqual([], self.web.get('/api/x-article-capture/owed').json()['items'])
+        self.assertNotEqual('fill', self.here(ARTICLE).json()['situation'])
+        self.assertEqual(409, self.save().status_code)
+        self.collect()
+        self.assertEqual(['6'], [i['post_id'] for i in self.web.get('/api/x-article-capture/owed').json()['items']])
+        self.assertEqual('fill', self.here(ARTICLE).json()['situation'])
+        self.assertEqual(200, self.save().status_code)
+
     def test_a_post_that_no_longer_waits_is_not_written_again(self):
         """已经补上并入库的,再交一份(哪怕是另一份正文)也不许改它。"""
         self.assertEqual(200, self.save().status_code)

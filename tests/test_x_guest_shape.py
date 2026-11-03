@@ -16,6 +16,7 @@
 """
 import json
 import re
+from datetime import datetime, timezone
 import sys
 import time
 import unittest
@@ -27,10 +28,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_channels, x_guest, x_guest_page
 from kb.feeds.fetching import FeedError, Response
+from kb.feeds.x_errors import PostUnavailable
 from tests.test_x_guest import GuestBase, status
 from tests.test_x_guest_page import PAGE, PageBase, article, html
 
 UNREADABLE = '推文认不出来'
+# UTC 9999-12-31 16:00:00 —— 有限、UTC 构造得出来,换到上海时区(+8)就过了 9999 年。
+END_OF_TIME = 253402272000
 
 
 def old(handle, *idents):
@@ -92,13 +96,22 @@ class ApiShapeTests(ShapeBase):
         self.assertEqual(0, got['skipped_quotes'])
 
     def test_odd_numbers_in_timestamps_are_unreadable_not_a_crash(self):
-        """NaN、无穷、超出能表示的范围、布尔:都是这一条认不出来,不许把异常抛出这个号。"""
+        """NaN、无穷、超出能表示的范围、布尔:都是这一条认不出来,不许把异常抛出这个号。
+        最后一个是 UTC 9999-12-31 16:00:换到项目时区才越界 —— 只验到 UTC 那一步就会放它进去。"""
         odd = [status('alice', 20 + n, 1) | {'created_timestamp': value}
-               for n, value in enumerate([float('nan'), float('inf'), 1e300, 10 ** 30, True, 10 ** 400])]
+               for n, value in enumerate([float('nan'), float('inf'), 1e300, 10 ** 30, True, 10 ** 400, END_OF_TIME])]
         self.api(alice=[[status('alice', 9, 1, '好的'), *odd, *old('alice', 3, 2, 1)]])
         got = self.scan('alice')
         self.assertEqual(['好的'], [e['body'] for e in got['entries']])
-        self.assertIn(f'6 条{UNREADABLE}', got['incomplete'])
+        self.assertIn(f'7 条{UNREADABLE}', got['incomplete'])
+
+    def test_a_time_that_cannot_be_written_in_project_time_is_unreadable_at_the_shared_builder(self):
+        """两件工具共用的那一步(`_build`)自己也收住日期换算:就算有一条没经过时间戳那道口径,
+        也只是这一条认不出来(`PostUnavailable`,两处调用都把它记成认不出来),不是异常。"""
+        self.assertIsNone(x_guest_page.instant(END_OF_TIME))          # 口径那一道本身就不放它进来
+        edge = datetime(9999, 12, 31, 16, 0, tzinfo=timezone.utc)
+        with self.assertRaises(PostUnavailable):
+            x_guest._build('https://x.com/alice/status/9', edge, '正文', 'alice', quoted=False, article='')
 
     def test_an_author_that_names_no_valid_account_is_unreadable_not_someone_else(self):
         """作者账号名是空串、不合法,或者转推者形状不对:说不清是谁,就不许凭它判「不是他本人、不收」。"""
@@ -180,12 +193,14 @@ class ShapeCollectTests(ShapeBase):
         self.assertEqual('complete', rows[bob['id']]['discovery'])
 
     def test_one_account_with_a_malformed_reply_does_not_stop_the_others(self):
-        """排在前面的号一个游标怪、一个时间戳是几百位的整数,后面的号照样读、照样入库。"""
+        """排在前面的号一个游标怪、一个时间戳是几百位的整数、一个换到项目时区就越界,后面的号照样读、照样入库。"""
         alice, carol, bob = self.sub('alice'), self.sub('carol'), self.sub('bob')
         self.settings(x_channels.GUEST)
         giant = status('carol', 28, 1) | {'created_timestamp': 10 ** 400}
+        edge = status('carol', 27, 1) | {'created_timestamp': END_OF_TIME}
         self.raw(alice={'code': 200, 'results': [status('alice', 9, 1)], 'cursor': ['p1']},
-                 carol={'code': 200, 'results': [status('carol', 29, 1, '丙'), giant], 'cursor': {'bottom': None}},
+                 carol={'code': 200, 'results': [status('carol', 29, 1, '丙'), giant, edge],
+                        'cursor': {'bottom': None}},
                  bob={'code': 200, 'results': [status('bob', 19, 1, '乙')], 'cursor': {'bottom': None}})
         self.collect()
         self.assertEqual(['https://x.com/bob/status/19', 'https://x.com/carol/status/29'], self.stored())
@@ -215,11 +230,20 @@ class PageShapeTests(PageBase):
         def stamped(ident, value):
             return re.sub(r'"timestamp":\d+', f'"timestamp":{value}', article('alice', ident, 1))
         page = html(article('alice', 9, 1), stamped(8, '1e300'), stamped(7, 10 ** 30), stamped(6, 'NaN'),
-                    stamped(5, 10 ** 400))
+                    stamped(5, 10 ** 400), stamped(4, END_OF_TIME * 1000))
         shown, unreadable = x_guest_page.posts(page)
-        self.assertEqual((['9'], 4), ([p.ident for p in shown], unreadable))
+        self.assertEqual((['9'], 5), ([p.ident for p in shown], unreadable))
         with self.assertRaisesRegex(x_guest_page.PageError, '换了形状'):
             x_guest_page.posts(html(stamped(8, '1e300')))
+
+    def test_a_page_time_past_project_time_does_not_stop_the_scan(self):
+        """主页那条路走到同一个 `_build`:换到项目时区就越界的那条只是认不出来,别的照收、如实记没读全。"""
+        self.fx()
+        edge = re.sub(r'"timestamp":\d+', f'"timestamp":{END_OF_TIME * 1000}', article('alice', 10, 1))
+        self.page('alice', article('alice', 11, 1, '新的'), edge, *[article('alice', n, 130 + n) for n in (3, 2, 1)])
+        got = self.scan('alice')
+        self.assertEqual(['新的'], [e['body'] for e in got['entries']])
+        self.assertIn(f'X 未登录主页上有 1 条{UNREADABLE}', got['incomplete'])
 
 
 class BudgetTests(GuestBase):

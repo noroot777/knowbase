@@ -36,11 +36,19 @@ from kb.maintenance import LockBusy
 _PAGE = re.compile(r'^https://(?:www\.|mobile\.)?(?:x|twitter)\.com/[A-Za-z0-9_]{1,20}/(article|status)/(\d+)(?:[/?#]|$)')
 
 # 还在等长文的候选:状态 pending、还在它那条订阅的五天窗口里(口径同 `x_intake_store.pending`,
-# 只是**不看退避** —— 人手动补的这一下不该等自动重试的冷却)。
-_WAITING = '''SELECT p.post_id,p.entry,p.published,p.failures,p.reason,l.source_id
+# 只是**不看退避** —— 人手动补的这一下不该等自动重试的冷却)。这一句只看上一轮同步留下的进度,
+# 「那条订阅现在还是不是这个身份」由 `_current` 再筛一道(SQL 看不到当前订阅)。
+_WAITING = '''SELECT p.post_id,p.entry,p.published,p.failures,p.reason,l.source_id,l.identity
     FROM x_intake_candidates p JOIN x_intake_links l USING(post_id)
     JOIN x_intake_sources s ON s.source_id=l.source_id AND s.identity=l.identity
     WHERE p.state='pending' AND p.published>=s.floor'''
+
+
+def _current() -> dict:
+    """现存订阅按 (id, 身份) 索引。**列表、这一页能不能补、交回时挑谁写,都过这一份**:
+    订阅改过(改指别的账号、或只是编辑过一次,身份带着 rev)之后、下一轮同步之前,旧关联和旧进度都还在,
+    只看 SQL 会让扩展一直说「可以补」,交回时才被拒。"""
+    return {(source['id'], store.identity(source)): source for source in reg.subscriptions('social')}
 
 
 def spot(url: str) -> tuple[str, str]:
@@ -69,8 +77,10 @@ def owed(source_id: int | None = None) -> list[dict]:
         sql, args = sql + ' AND l.source_id=?', (source_id,)
     with store.read_db(timeout=30) as conn:
         rows = conn.execute(sql + ' ORDER BY p.published DESC', args).fetchall()
-    seen, out = set(), []
+    current, seen, out = _current(), set(), []
     for row in rows:
+        if (row['source_id'], row['identity']) not in current:
+            continue
         if row['post_id'] not in seen and _owes(json.loads(row['entry'])):
             seen.add(row['post_id'])
             out.append(_view(row))
@@ -120,12 +130,10 @@ def save(post_id: str, page_url: str, snapshot) -> dict:
     with store.read_db(timeout=30) as conn:
         task = conn.execute("SELECT * FROM x_intake_candidates WHERE post_id=? AND state='pending'",
                             (ident,)).fetchone()
-        # 关联的口径同 `store.pending`:身份是那条订阅**现在**指着的账号、推文在它的有效下界之内。
-        # 订阅改指别的账号之后,旧关联要等它下一轮同步才清掉;只认 source_id 会挑中它,写不进去。
+        # 关联的口径同列表(`_WAITING` + `_current`):身份是那条订阅**现在**指着的账号、推文在它的有效
+        # 下界之内。订阅改指别的账号之后,旧关联要等它下一轮同步才清掉;只认 source_id 会挑中它,写不进去。
         links = [(row['source_id'], row['identity']) for row in conn.execute(
-            '''SELECT l.source_id,l.identity FROM x_intake_links l JOIN x_intake_sources s
-               ON s.source_id=l.source_id AND s.identity=l.identity JOIN x_intake_candidates p USING(post_id)
-               WHERE l.post_id=? AND p.published>=s.floor ORDER BY l.source_id''', (ident,))]
+            _WAITING + ' AND p.post_id=? ORDER BY l.source_id', (ident,))]
     entry = json.loads(task['entry']) if task else None
     if not entry or not _owes(entry):
         raise ValueError('这一条已经不在等长文了（可能刚被自动补上或已入库）。没有写入。')
@@ -138,7 +146,7 @@ def save(post_id: str, page_url: str, snapshot) -> dict:
     #
     # **不许只把正文写回、留着 pending 等下一轮**:下一轮的时间线扫描会按时间线上那一份(空正文、
     # 带长文信号)把 pending 的候选整份重写(`store.stage`),人刚补的正文当场丢掉。
-    sources = {(source['id'], store.identity(source)): source for source in reg.subscriptions('social')}
+    sources = _current()
     owner = next((sources[one] for one in links if one in sources), None)
     if owner is None:
         raise ValueError('这条推文所属的订阅已经不在了（或改指了别的账号），没有写入。')
