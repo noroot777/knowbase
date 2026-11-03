@@ -55,6 +55,8 @@ $PY scripts/youtube_backlog_process_20261103.py reconcile
 ```
 
 dates 可重复调用直到覆盖冻结清单；未知日期保留，不记作删除或入库。
+核实失败原因后可用 `dates --retry-unknown` 重试未知项，每次先前记录保存在
+`previous_attempts`；剩余总预算不足一次完整单条核验时先退出，不额外制造超时未知项。
 process 每次只调度已核实窗口内的 ID，内存中的局部调度不改全局榜单或设置。
 沿用完整字幕/音频、中文翻译笔记、认证、正式发布和原导出链；不伪造日期或认证。
 每批仍受原 max_videos、max_minutes、max_video_minutes、run_seconds 限制。
@@ -62,3 +64,22 @@ process 每次只调度已核实窗口内的 ID，内存中的局部调度不改
 不放宽门槛，不报告全部入库。索引只 upsert 目标文章、补目标 chunk 的向量，不全库重建/清理。
 
 最终执行结果将由本任务后续收尾记录；当前文档不表示批处理已经完成。
+
+## 批次检查点
+
+任务分支已更新至生产 `main` 基线 `e62cf6d`，包含 `87cc380` 的完整字幕直接翻译、
+`ad37c63` 的并行字幕/标题翻译及 `75b539b` 的标题失败隔离。
+已核实实际 imports 来自任务 worktree，`notes.build` 走 `build_translation`，
+不再要求或调用 `youtube_summary` 完成内容成稿。后续内容处理按此实现，不恢复旧摘要管线。
+
+2026-11-03 18:18（上海时间）收到普通哨兵 `tS1ipQEvNMtM` 的真实执行结果：
+退出码 0，共持久化 457/699 条日期，old 392、recent 64、unknown 1。
+唯一 unknown `b5B5I8vAZS0` 是批次总时限用尽，将在下一批显式重试；
+这不是已经证实的上游不可用。此时尚未执行内容入库，生产正式 YouTube 仍为原有 7 篇。
+
+本检查点已真实删除核实五天外的 **392 条**，不是隐藏：逐 ID 验证
+`youtube_videos`、`youtube_video_sources`、`youtube_candidates` 均无对应行，
+原归属的发现历史保留可靠日期。清理前 `feeds.pre-clean.sqlite3` 已生成。
+原 7 篇正式文章的标题、正文、哈希及路径未改，清理前后各来源正式资产键/哈希/路径一致。
+阶段对账为 **699 = 392 已删除 + 0 已入库 + 307 尚未完成**；
+其中 242 条尚未核验、1 条超时待重试、64 条已核实窗口内待完整处理。

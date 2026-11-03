@@ -102,18 +102,23 @@ def cached_metadata(row):
     return None, ''
 
 
-def dates(budget):
+def dates(budget, retry_unknown=False):
     manifest, results = load('manifest.json'), load('dates.json')
     settings = reg.get_settings('youtube')
     deadline = time.monotonic() + budget
     with throttle.opened():
         for row in manifest['targets']:
             video_id = row['video_id']
-            if video_id in results:
+            previous = results.get(video_id)
+            if previous and (not retry_unknown or previous['classification'] != 'unknown'):
                 continue
-            if time.monotonic() >= deadline or throttle.notice():
+            if deadline - time.monotonic() < candidate_metadata.VIDEO_SECONDS or throttle.notice():
                 break
             record = {'checked_at': datetime.now(timezone.utc).isoformat()}
+            if previous:
+                record['previous_attempts'] = [*previous.get('previous_attempts', []),
+                                               {key: value for key, value in previous.items()
+                                                if key != 'previous_attempts'}]
             try:
                 metadata, evidence = cached_metadata(row)
                 if metadata is None and not row['entry'].get('approximate'):
@@ -194,11 +199,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('phase', choices=('freeze', 'dates', 'clean'))
     parser.add_argument('--budget', type=float, default=3300)
+    parser.add_argument('--retry-unknown', action='store_true')
     arguments = parser.parse_args()
     if not reg.DB_PATH.samefile(Path('/Users/fjh/code/knowledge-base/data/feeds.db')):
         raise RuntimeError('Explicit production KB_DATA_DIR is required')
     if arguments.phase == 'dates':
-        dates(arguments.budget)
+        dates(arguments.budget, retry_unknown=arguments.retry_unknown)
     else:
         globals()[arguments.phase]()
 
