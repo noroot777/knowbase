@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
  history_floor TEXT NOT NULL DEFAULT '', last_note TEXT NOT NULL DEFAULT '',
  fulltext INTEGER NOT NULL DEFAULT 0, extract INTEGER NOT NULL DEFAULT 0,
  last_notice TEXT NOT NULL DEFAULT '', rev INTEGER NOT NULL DEFAULT 0,
+ error_at TEXT NOT NULL DEFAULT '', note_at TEXT NOT NULL DEFAULT '',
  UNIQUE(kind, url)
 );
 CREATE TABLE IF NOT EXISTS feed_items (
@@ -128,6 +129,14 @@ _ADDED_COLUMNS = {
         # 实测)。**不拿 `url`/`updated_at` 充当这件事**:前者 A→B→A 之后完全
         # 复原,后者只记到秒 —— 口径同 `life` 那一段「本地可重复的状态不是身份」。
         ('rev', 'INTEGER NOT NULL DEFAULT 0'),
+        # **`last_error` / `last_note` 各自是哪一刻写下的。** `last_attempt` 顶不了:
+        # 「只写提示」的那几处会改它而不碰 `last_error`,失败那一处也不碰
+        # `last_note` —— 于是同一条订阅上两句话的新旧从 `last_attempt` 里读不出来。
+        # 「问题与待办」一个账号只列最新那一条(`kb.intake_diag.sources.latest`)
+        # 就按这两列比。和那句话**同一条 UPDATE** 写下;存量库补空串 = 没有时间
+        # 证据,那一条不参与比新旧。
+        ('error_at', "TEXT NOT NULL DEFAULT ''"),
+        ('note_at', "TEXT NOT NULL DEFAULT ''"),
     ),
     'feed_items': (
         ('lang', "TEXT NOT NULL DEFAULT ''"),              # '' 未判 / zh 无需翻译 / en 待翻译

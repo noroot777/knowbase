@@ -65,22 +65,30 @@ PROBLEMS = {
 
 
 def issues(state):
+    """`at` = 这条事实最近一次被观测到的时刻(epoch 秒,没有证据为 None)。
+
+    阻断带它自己的 `observed_at`;其余几条是这份进度的投影,取这个账号最近一次
+    发现/历史扫描写下进度的那一刻(`scan_at` / `history_at`),正文待补另认正文阶段
+    阻断的观测时刻。"""
     result = []
     observed = state.get('blocks', {'discovery': state.get('block') or {}})
+    seen = max(state.get('scan_at') or 0, state.get('history_at') or 0) or None
     for phase, block in observed.items():
         if block and phase != 'body':
             result.append(dict(kind=f"x_intake_{block['kind']}", evidence=block['reason'], retryable=True,
-                               phase=phase, step=0 if phase == 'discovery' else 1))
+                               phase=phase, step=0 if phase == 'discovery' else 1,
+                               at=block.get('observed_at') or None))
     for field, kind, label in [('unconfirmed', 'x_intake_unconfirmed', '候选待确认'),
                                ('pending', 'x_intake_body', '正文待补'),
                                ('expired', 'x_intake_expired', '最近24小时超窗')]:
         if count := state.get(field, 0):
             reason = observed.get('body', {}).get('reason', '') if field == 'pending' else ''
             evidence = f'{label} {count} 条' + (f'；正文补全：{reason}' if reason else '')
+            body_seen = observed.get('body', {}).get('observed_at') if field == 'pending' else None
             result.append(dict(kind=kind, count=count, evidence=evidence,
-                               retryable=field != 'expired'))
+                               retryable=field != 'expired', at=max(seen or 0, body_seen or 0) or None))
     attempted = state.get('discovery') != 'unattempted' or state.get('history_at', 0) > 0
     if attempted and (state.get('gap') or state.get('capacity_limited') is True):
         evidence = '；'.join(filter(None, [state.get('gap'), state.get('coverage_warning')]))
-        result.append(dict(kind='x_intake_history', evidence=evidence, retryable=True))
+        result.append(dict(kind='x_intake_history', evidence=evidence, retryable=True, at=seen))
     return result

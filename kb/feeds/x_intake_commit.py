@@ -39,8 +39,8 @@ def partial(conn, source, entries, validators):
             conn.execute('UPDATE x_intake_runs SET metrics=? WHERE id=?',
                          (json.dumps(metrics, ensure_ascii=False), row['id']))
     if validators.get('x_pending') or validators.get('x_failure'):
-        conn.execute('UPDATE subscriptions SET last_attempt=?,last_note=?,last_notice=? WHERE id=?',
-                     (reg.now(), validators.get('note', ''), validators.get('notice', ''), source['id']))
+        conn.execute('UPDATE subscriptions SET last_attempt=?,last_note=?,last_notice=?,note_at=? WHERE id=?',
+                     (reg.now(), validators.get('note', ''), validators.get('notice', ''), reg.now(), source['id']))
         return True
     return False
 

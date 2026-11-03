@@ -170,14 +170,17 @@ def _save_result(source, result, scope):
                 source_failure.write(c, source, failure, now=time.time())
             if partial:
                 return added
+            stamp = reg.now()
             c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
-                failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=?,last_notice=? WHERE id=?''',
-                (reg.now(),reg.now(),validators['etag'],validators['modified'],
+                failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=?,last_notice=?,
+                note_at=? WHERE id=?''',
+                (stamp,stamp,validators['etag'],validators['modified'],
                  validators['resolved_url'],
                  # 区间补抓不改日常增量的任何状态,这条提示也算 —— 清掉它等于替
                  # 日常同步宣布"读完了",而那一边的进度一点没动。
                  source.get('last_note','') if scope.ranged else validators.get('note',''),
                  source.get('last_notice','') if scope.ranged else validators.get('notice',''),
+                 source.get('note_at','') if scope.ranged else stamp,
                  source['id']))
     return added
 

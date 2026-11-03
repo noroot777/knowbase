@@ -42,6 +42,8 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from kb.feeds import registry as reg, x_page_state as xstate
 from kb.intake_diag import warrant
 from kb.feeds.x_intake_diagnostics import PROBLEMS as X_PROBLEMS
@@ -176,7 +178,8 @@ def problems(kind: str) -> list[dict]:
         if (reason := (source['last_error'] or '')) and reason != source.get('x_intake', {}).get('block', {}).get('reason'):
             name = _kind_of_failure(reason)
             out.append({**shared, 'id': f"source:{source['id']}:{name}",
-                        'problem': name, 'evidence': reason, **PROBLEMS[name]})
+                        'problem': name, 'evidence': reason, **PROBLEMS[name],
+                        'at': _stamp(source.get('error_at', ''))})
         automatic_x = kind == 'social' and x_channels._handle(source) and not source.get('feed_url') and \
             x_channels.channel_of(settings) in ('browser', 'attach', 'feedgrab')
         if automatic_x:
@@ -187,34 +190,55 @@ def problems(kind: str) -> list[dict]:
                 suffix = f":{issue['phase']}" if issue.get('phase') else ''
                 out.append({**shared, 'id': f"source:{source['id']}:{name}{suffix}", 'problem': name,
                             'evidence': issue['evidence'], **metadata, 'actionable': actionable,
-                            'step': issue.get('step', metadata['step']),
+                            'step': issue.get('step', metadata['step']), 'at': issue.get('at'),
                             'blocked': shared['blocked'] or ('' if issue['retryable'] else metadata['advice'])})
         elif note := (source['last_note'] or ''):
             name = _kind_of_note(note)
             out.append({**shared, 'id': f"source:{source['id']}:{name}",
-                        'problem': name, 'evidence': note, **PROBLEMS[name]})
+                        'problem': name, 'evidence': note, **PROBLEMS[name],
+                        'at': _stamp(source.get('note_at', ''))})
     return out
 
 
+def _stamp(value: str):
+    """订阅表上那两列(`error_at` / `note_at`)是 ISO 串;空串 = 没有时间证据。"""
+    if not value:
+        return None
+    moment = datetime.fromisoformat(value)
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
+
+
 def latest(rows: list[dict]) -> list[dict]:
-    """**列表上一个账号只占一行**:这一条订阅卡在最前面那一步的那一条。
+    """**列表上一个账号只列最后发生的那一条。**
 
-    `problems` 是事实层,同一条订阅可以同时有好几条(连接失败 + 历史缺口 + 正文
-    待补 + 超窗),各自的身份、阶段和原话都要留着 —— 重试凭证按 `id` 现查、回归
-    钉着它们互不吞并。而屏幕上那几行说的是同一个账号,下游那几条多半就是上游那一
-    步没走通的后果(时间线没读到,历史当然补不齐),一并列出来像是一串旧账。
+    `problems` 是事实层,同一条订阅可以同时有好几条(连接失败、历史缺口、正文待补、
+    超窗),各自的身份、阶段和原话都要留着 —— 重试凭证按 `id` 现查、回归钉着它们互不
+    吞并。屏幕上那几行说的是同一个账号,只留最新那一条。
 
-    取 `step` 最小的那一条(访问来源 → 读取时间线 → 检查覆盖 → 结束检查),同一步
-    按 `problems` 给出的顺序。**按步骤取,不按列表里排在最后的那条取**:那个顺序是
-    拼装顺序不是时间顺序,按它取会让「这一轮连不上」被一条「历史待追补」盖掉。
-    重试的射程是整条订阅(`actions._source_scope`),所以留下哪一条都不缩小出口。
+    **新旧只按每条事实自己的时间比**(`at`:失败原话的 `error_at`、没读完那句的
+    `note_at`、X 阻断的 `observed_at`、X 进度的扫描时刻),不按步骤、不按 `problems`
+    的拼装顺序 —— 那两样跟发生先后没有关系(先撞安全验证、后撞限流,按步骤取会留下
+    早的那条)。订阅共用的 `last_attempt` 也不算:只写提示的那几处会改它而不碰
+    `last_error`。
+
+    **时间相同**(同一轮里同一笔写下的几句话)才按 `problems` 的顺序取第一条。
+    **没有时间证据的那几条不参与比较,照旧列出来**:拿不出时间就说不出它比别的新还是
+    旧,并掉哪一边都是猜。存量库那两列是空串,这种行在那条订阅下一次失败/写提示之后
+    自己消失。
     """
-    picked: dict[tuple, dict] = {}
+    timed: dict[tuple, dict] = {}
+    order: list = []
     for row in rows:
         owner = (row['kind'], row['source_id'])
-        if owner not in picked or row['step'] < picked[owner]['step']:
-            picked[owner] = row
-    return list(picked.values())
+        if row.get('at') is None:
+            order.append(row)
+            continue
+        if owner not in timed:
+            order.append(owner)
+            timed[owner] = row
+        elif row['at'] > timed[owner]['at']:
+            timed[owner] = row
+    return [timed[one] if isinstance(one, tuple) else one for one in order]
 
 
 def counts(kinds=None) -> dict[str, int]:

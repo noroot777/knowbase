@@ -401,7 +401,7 @@ def save_subscription(kind: str, data: dict, source_id: int | None = None) -> di
                     # 被清掉的都是采集进度 —— 指向新的源之后它们本来就不作数。
                     c.execute("""UPDATE subscriptions SET etag='',modified='',resolved_url='',
                         last_error='',last_success='',last_attempt='',failures=0,retry_at=0,config='{}',
-                        last_note='',last_notice='',history_floor=? WHERE id=?""", (history_floor(), source_id))
+                        last_note='',last_notice='',error_at='',note_at='',history_floor=? WHERE id=?""", (history_floor(), source_id))
                     c.execute('DELETE FROM subscription_items WHERE subscription_id=?', (source_id,))
             else:
                 source_id = c.execute('''INSERT INTO subscriptions
