@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 
 from kb import pipeline_state as ps
@@ -26,6 +27,9 @@ from kb import pipeline_state as ps
 # 各自直接写 _state["stages"][name] 的话,后一个来源的结论会把前一个整个盖掉——
 # 面板上只剩最后那个来源的成败,前面几个是成功、失败还是跳过都看不见了。
 _segments: dict[str, list[dict]] = {}
+# 每条线程**自己开着的那一段**({阶段: 那一段})。几个来源同时跑时「最后追加的那一段」
+# 不再是「我这一段」:RSS 那条线程报的结论会写进后开张的公众号那一段(`pipeline_lanes`)。
+_mine = threading.local()
 
 # 合并后的状态取"最要紧"的那一档:有一个红就是红,还有没跑完的就是执行中,
 # 剩下全跳过才算跳过。
@@ -55,11 +59,15 @@ def _merge_segments(segments: list[dict]) -> dict:
 def stage_segment(name: str, label: str):
     """把这一段时间里对 name 阶段的汇报记成"label 这个来源的那一段"。"""
     segments = _segments.setdefault(name, [])
-    segments.append({"label": label, "status": "running", "detail": ""})
+    current = {"label": label, "status": "running", "detail": ""}
+    segments.append(current)
+    own = _open()
+    outer = own.get(name)
+    own[name] = current
     try:
         yield
     finally:
-        current = segments[-1]
+        own[name] = outer
         if current["status"] == "running":
             # 采集器连一次最终状态都没报(异常穿出去了):不替它编一个成功
             current.update({"status": "error", "detail": current["detail"] or "没有返回结果"})
@@ -68,6 +76,26 @@ def stage_segment(name: str, label: str):
 
 def clear_segments() -> None:
     _segments.clear()
+
+
+def _open() -> dict:
+    own = getattr(_mine, "segs", None)
+    if own is None:
+        own = _mine.segs = {}
+    return own
+
+
+def _current(name: str, segments: list[dict]) -> dict:
+    """`_stage` 这一句该并进哪一段:**这条线程自己开着的那一段**。
+
+    没开过的线程(采集器自己的工作线程)只在**只有一段还开着**时算它的;几段同时开着
+    就退回最后那一段(只一路在跑时的老口径)—— 眼下没有这种调用方,见 `pipeline_lanes`。
+    """
+    own = _open().get(name)
+    if own is not None and any(seg is own for seg in segments):
+        return own
+    running = [seg for seg in segments if seg["status"] == "running"]
+    return running[0] if len(running) == 1 else segments[-1]
 
 
 # ── 「重试失败项」要重试谁 ─────────────────────────────────────────────────────
@@ -125,6 +153,7 @@ def fold(name: str, entry: dict, detail: str) -> tuple[dict, str] | None:
     segments = _segments.get(name)
     if not segments:
         return None
-    segments[-1].update(entry)
+    seg = _current(name, segments)
+    seg.update(entry)
     return (_merge_segments(segments),
-            f"{segments[-1]['label']}：{detail}" if detail else detail)
+            f"{seg['label']}：{detail}" if detail else detail)

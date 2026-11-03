@@ -1,4 +1,4 @@
-"""日报那一轮的两段式编排:抓取按来源分,入库全库跑一次。
+"""日报那一轮的两段式编排:各来源同时抓取,入库全库跑一次 —— 同一轮管道。
 
 从 `test_daily_report.py` 拆出来 —— 那份加上这一组会超过单文件 700 行上限。
 窗口/素材口径、落盘产物、定时与停止语义仍在那一份里;结果的发布与保全
@@ -14,12 +14,13 @@ from unittest.mock import Mock, patch
 from kb import daily, daily_library, daily_run, daily_sync
 from kb import daily_state
 from kb import pipeline_batch as pb
+from kb import pipeline_results as live_results
 from kb import pipeline_state as ps
 from tests.pipeline_round_fixture import finish_round, no_extract_backlog
 
 
 class DailyTwoStageSyncTests(unittest.TestCase):
-    """同步分两段:**抓取按通道一轮一个,入库是全库的一次**。
+    """同步分两段:**抓取按通道各跑各的(同一轮里同时跑),入库是全库的一次**。
 
     只有 crawl / export 认 crawl_filter;`_run_index` 全量扫 vault、`_run_extract`
     扫全库待提取队列,两个函数都不收通道参数。挨个通道各跑一遍四段,等于把同一件
@@ -31,7 +32,7 @@ class DailyTwoStageSyncTests(unittest.TestCase):
     不重复钉那道闸。
 
     出报之后还跟着**第三段**:整理图鉴与 Wiki(`daily_library.LIBRARY_STAGES`),
-    跑在同一个批次里。所以这里的"几轮"是 N+2,成绩单的最后一项也不再是入库那一项
+    跑在同一个批次里。所以这里的"几轮"是 2,成绩单的最后一项也不再是入库那一项
     —— **按 label 取**(`scored`),不按位置。本文件里的 digest 一律指入库那一段。
     """
 
@@ -63,10 +64,12 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         self.addCleanup(restore)
 
     def sync_run(self, channels=('wechat_local', 'social', 'rss'), rounds=None,
-                 gen=None, **flags):
+                 gen=None, cells=None, **flags):
         """跑一轮带同步的 `_run`。返回每一轮管道的 (阶段清单, crawl_filter)。
 
         `rounds` 按轮次号(从 1 起)覆盖那一轮的阶段结果,用来注入某一轮的红。
+        `cells` 覆盖某个来源某一步自己那一格结果账({通道: {阶段: 那一格}}):各来源
+        同时跑之后成绩单按来源读的是这一份,不读几路合在一起的那张卡片。
 
         打桩只打到 `start_pipeline` 这一层:**收尾(`_end_run`)和落盘都是真的**。
         批次账本由 `_end_run` 喂,打掉它的话这一轮压根不会落盘,「有没有真的
@@ -83,6 +86,15 @@ class DailyTwoStageSyncTests(unittest.TestCase):
             self.batches.append(batch)
             calls.append((list(wanted), deepcopy(crawl_filter)))
             run = f'run-{len(calls)}'
+            # 各来源那一路自己那一格(真管道里由 `results.channel_run` 建、`_end_run` 收进记录)
+            for scope in (crawl_filter or {}).get('channels') or []:
+                ch = scope['channel']
+                over = (cells or {}).get(ch) or {}
+                for st in ('crawl', 'export'):
+                    if st in wanted and not (st in over and over[st] is None):
+                        live_results._cells.setdefault(st, {})[ch] = {
+                            'planned': [], 'covered': [], 'whole': True, 'reported': False,
+                            'status': 'ok', 'detail': f'{st} 好了', **(over.get(st) or {})}
             # 照 `start_pipeline` 的样子摆一轮(含它那个"没指定来源就盖默认采集器"
             # 的兜底),把阶段结果摆成终态,再走真的收尾。
             return finish_round(wanted, crawl_filter, batch,
@@ -117,31 +129,42 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         **反过来钉一边**:`trigger='schedule'` 那一轮一个 force 都不许带 ——
         退避本来就是给自动轮次用的,定时轮绕开它等于每 30 秒重试一次失败源。
         """
-        self.assertEqual([True, True],
-                         [f.get('force') for _, f in self.sync_run(channels=('rss', 'social'))[:2]])
-        self.assertEqual([None, None],
-                         [f.get('force') for _, f
-                          in self.sync_run(channels=('rss', 'social'), trigger='schedule')[:2]])
+        self.assertTrue(self.sync_run(channels=('rss', 'social'))[0][1].get('force'))
+        self.assertIsNone(
+            self.sync_run(channels=('rss', 'social'), trigger='schedule')[0][1].get('force'))
 
-    def test_fetch_is_per_channel_and_the_digest_stages_run_once(self):
+    def test_one_round_fetches_every_channel_and_ingests_once(self):
         calls = self.sync_run()
-        self.assertEqual([daily_run.FETCH_STAGES] * 3 + [daily_run.DIGEST_STAGES,
-                                                         daily_library.LIBRARY_STAGES],
+        self.assertEqual([daily_run.FETCH_STAGES + daily_run.DIGEST_STAGES,
+                          daily_library.LIBRARY_STAGES],
                          [stages for stages, _ in calls])
-        self.assertEqual([{'channel': 'wechat_local', 'force': True},
-                          {'channel': 'social', 'force': True},
-                          {'channel': 'rss', 'force': True}, None, None],
-                         [f for _, f in calls])
-        # 反过来钉一边:抓取那几轮一次都没要过 index/extract(那正是原来被重做
-        # N 遍的两段),后面那两轮全库的活也一次都没要过 crawl/export(不会顺手重抓)。
-        self.assertEqual([], [c for c in calls[:3] if {'index', 'extract'} & set(c[0])])
-        self.assertEqual([], [c for c in calls[3:] if {'crawl', 'export'} & set(c[0])])
+        self.assertEqual({'channels': [{'channel': c, 'accounts': []}
+                                       for c in ('wechat_local', 'social', 'rss')],
+                          'force': True}, calls[0][1])
+        # 反过来钉一边:整理那一轮全库的活一次都没要过 crawl/export(不会顺手重抓)
+        self.assertIsNone(calls[1][1])
+        self.assertEqual([], [c for c in calls[1:] if {'crawl', 'export'} & set(c[0])])
+        self.assertEqual(['ok'] * 3, [c['status'] for c in daily_run._state['channels'][:3]])
         self.assertEqual('done', daily_run._state['phase'])
+
+    def test_each_channel_is_graded_by_its_own_cell(self):
+        """几路合在一张卡片上:成绩单按**它自己那一格**念,别人的红不记到它头上。"""
+        self.sync_run(rounds={1: {'crawl': {'status': 'error', 'detail': 'RSS：失败 3 个'}}},
+                      cells={'rss': {'crawl': {'status': 'error', 'detail': '失败 3 个'}}})
+        got = {c['channel']: c['status'] for c in daily_run._state['channels'][:3]}
+        self.assertEqual({'wechat_local': 'ok', 'social': 'ok', 'rss': 'error'}, got)
+        self.assertIn('crawl 失败 3 个', self.scored('RSS')['detail'])
+
+    def test_a_channel_without_its_own_cell_is_not_called_ok(self):
+        """进了这一轮却没留下自己那一格:不知道,不许借别的来源的绿说它成了。"""
+        self.sync_run(cells={'social': {'crawl': None}})
+        self.assertEqual('unknown', self.scored('大V观点')['status'])
+        self.assertEqual('ok', self.scored('RSS')['status'])
 
     def test_a_digest_failure_is_not_blamed_on_any_channel(self):
         # 两段式之前 index/extract 跟着每个通道跑,它们的红只能记到"当时那个
         # 通道"头上 —— 磁盘满跟公众号没有半点关系,而面板和日报都照着念。
-        calls = self.sync_run(rounds={4: {'index': {'status': 'error', 'detail': '磁盘满'}}})
+        calls = self.sync_run(rounds={1: {'index': {'status': 'error', 'detail': '磁盘满'}}})
         digest = self.scored(daily_run.DIGEST_LABEL)
         self.assertEqual(('', 'error'), (digest['channel'], digest['status']))
         self.assertIn('index 磁盘满', digest['detail'])
@@ -162,7 +185,7 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         """
         from kb import pipeline_batch as pb
         self.sync_run()
-        self.assertEqual(5, len(self.batches), '抓取 3 轮 + 入库 1 轮 + 整理 1 轮')
+        self.assertEqual(2, len(self.batches), '同步 1 轮(各来源同时抓 + 入库) + 整理 1 轮')
         self.assertEqual(1, len(set(self.batches)), self.batches)
         self.assertTrue(self.batches[0], '一轮都没带上批次身份')
         self.assertEqual('', pb._batch_id, '走完没关批次')
@@ -171,7 +194,7 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         # 半路抛出来时 `close_batch` 那一句走不到,只有 finally 那次关得掉。开着的
         # 批次会把下一轮独立运行算进一个早就结束的批次。
         from kb import pipeline_batch as pb
-        with patch.object(daily_run, '_sync_round',
+        with patch.object(daily_run, '_sync_sources',
                           Mock(side_effect=RuntimeError('摆盘:同步那一步炸了'))):
             self.sync_run()
         self.assertEqual('failed', daily_run._state['phase'])
@@ -213,21 +236,6 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         with patch.object(pl, 'close_batch', Mock(return_value='盘上那份是更新的一轮')):
             self.sync_run()
         self.assertIn('盘上那份是更新的一轮', daily_run._state['detail'])
-
-    def test_running_out_of_fetch_budget_still_runs_the_digest_stages(self):
-        # 超预算的本意是"别再抓了,拿已经抓到的内容出报"。入库那一段要是跟着跳过,
-        # 这一轮导出的文件就进不了索引,而 `daily.generate` 取材自 kb.db 的
-        # documents —— 抓回来的东西会整个落到这份日报外面,正好把它要保的丢了。
-        calls = self.sync_run(over_budget=True)
-        # 整理那一段也不认超预算(它压根不抓),所以它照样在
-        self.assertEqual([daily_run.DIGEST_STAGES, daily_library.LIBRARY_STAGES],
-                         [stages for stages, _ in calls])
-        self.assertEqual(['超出时间预算,未同步'] * 3,
-                         [c['detail'] for c in daily_run._state['channels'][:3]])
-        self.assertEqual('ok', self.scored(daily_run.DIGEST_LABEL)['status'])
-        # 入库那一轮的"要不要收手"判据**不认超预算**,否则它一起跑就被自己停掉
-        self.stopped.assert_not_called()
-        self.gen.assert_called_once()
 
     def test_a_user_stop_skips_the_digest_stages_too(self):
         # 用户按的停止是"这一轮到此为止、也不出报",跟超预算是两件事。
@@ -277,7 +285,8 @@ class DailyTwoStageSyncTests(unittest.TestCase):
         """
         from kb import pipeline
         self.sync_run(channels=['wechat_local', 'rss'], rounds={
-            2: {'crawl': {'status': 'error', 'detail': '失败 10 个'}}})
+            1: {'crawl': {'status': 'error', 'detail': '失败 10 个'}}},
+            cells={'rss': {'crawl': {'status': 'error', 'detail': '失败 10 个'}}})
         last = pipeline.load_last_run()
         self.assertEqual('error', last['stages']['crawl']['status'])
         self.assertEqual(['crawl', 'export', 'index', 'extract', 'projects', 'wiki'],

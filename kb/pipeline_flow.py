@@ -86,10 +86,30 @@ def group_nodes(stages) -> list[dict]:
 
 
 def _new(owner: str, kind: str, nodes: list[dict]) -> dict:
+    # `running` / `step` 只给全库那几组(它们一次只跑一组);来源那几类是同时跑的,
+    # 各自走到哪一步记在 `lanes` 里({节点: 那一步})。`gate` 是全库那几步前面那道门:
+    # "" 还没到 / "wait" 在等没跑完的来源 / "go" 用户点了不等 / "open" 已经过去了;
+    # `late` 是门打开那一刻还没跑完、这一轮不等的那几类;`gate_at` 是门开始等的时刻
+    # (面板上念「已等 N 分钟」)。
     return {"owner": owner, "kind": kind, "nodes": nodes,
             "skips": [], "cuts": {}, "cut": "",
-            "running": "", "step": "", "done": [],
+            "running": "", "step": "", "lanes": {}, "done": [],
+            "gate": "", "gate_at": "", "late": [],
             "times": {}, "results": {}}
+
+
+def _lanes(plan: dict) -> dict:
+    """来源那几类各自走到哪一步。老留档里没有这一格(那时来源也记在 `running` 上)。"""
+    return plan.setdefault("lanes", {})
+
+
+def _active(plan: dict, key: str) -> bool:
+    """`key` 这一类此刻正在跑(来源那几类看 `lanes`,全库那几组看 `running`)。"""
+    return plan["running"] == key or key in _lanes(plan)
+
+
+def _step_of(plan: dict, key: str) -> str:
+    return _lanes(plan).get(key, "") if key in _lanes(plan) else plan["step"]
 
 
 def begin(run_id: str, batch: str, planned, crawl_filter) -> str:
@@ -144,7 +164,10 @@ def enter(owner: str, key: str) -> bool:
                 plan["done"].append(key)
             plan["results"].setdefault(key, {"status": "skipped", "detail": "本次跳过"})
             return False
-        if plan["running"] != key:
+        if node["kind"] == "src":
+            # 来源那几类同时跑:各占一格 `lanes`,不碰全库那一格 `running`
+            _lanes(plan).setdefault(key, "")
+        elif plan["running"] != key:
             plan["running"], plan["step"] = key, ""
         plan["times"].setdefault(key, {"started_at": ps._now(), "finished_at": "",
                                        "steps": {}})
@@ -163,22 +186,25 @@ def advance(owner: str, key: str, stage: str) -> bool:
     """
     with _lock:
         plan, node = _node(owner, key)
-        if node is None or plan["running"] != key:
+        if node is None or not _active(plan, key):
             return True
         if key in plan["cuts"]:
             return False
         now, steps = ps._now(), plan["times"][key]["steps"]
-        prev = plan["step"]
+        prev = _step_of(plan, key)
         if prev and prev != stage and prev in steps and not steps[prev][1]:
             steps[prev][1] = now
         steps.setdefault(stage, [now, ""])
-        plan["step"] = stage
+        if key in _lanes(plan):
+            _lanes(plan)[key] = stage
+        else:
+            plan["step"] = stage
         return True
 
 
-def _close_step(plan: dict, now: str) -> None:
-    prev = plan["step"]
-    steps = (plan["times"].get(plan["running"]) or {}).get("steps") or {}
+def _close_step(plan: dict, key: str, now: str) -> None:
+    prev = _step_of(plan, key)
+    steps = (plan["times"].get(key) or {}).get("steps") or {}
     if prev and prev in steps and not steps[prev][1]:
         steps[prev][1] = now
 
@@ -193,8 +219,11 @@ def leave(owner: str, key: str, result: dict | None = None) -> None:
         if times is None and key not in plan["skips"]:
             return
         now = ps._now()
-        if plan["running"] == key:
-            _close_step(plan, now)
+        if key in _lanes(plan):
+            _close_step(plan, key, now)
+            del _lanes(plan)[key]
+        elif plan["running"] == key:
+            _close_step(plan, key, now)
             plan["running"], plan["step"] = "", ""
         if key not in plan["done"]:
             plan["done"].append(key)
@@ -207,12 +236,12 @@ def leave(owner: str, key: str, result: dict | None = None) -> None:
 
 
 def leave_running(owner: str) -> None:
-    """收尾兜底:还挂在「正在跑」上的那一类,一律按走完记。"""
+    """收尾兜底:还挂在「正在跑」上的那几类(全库那一组、还没走完的来源),一律按走完记。"""
     with _lock:
         plan = _plans.get(owner) if owner else None
-        running = plan["running"] if plan else ""
-    if running:
-        leave(owner, running)
+        running = ([plan["running"]] if plan["running"] else []) + list(_lanes(plan)) if plan else []
+    for key in running:
+        leave(owner, key)
 
 
 def cutting() -> bool:
@@ -229,9 +258,19 @@ def cutting() -> bool:
     state = ps._state
     if not state.get("running"):
         return False
+    from kb.pipeline_lanes import current
+    lane = current()
     for owner in (state.get("run_id"), state.get("batch")):
         plan = _plans.get(owner) if owner else None
-        if plan and plan["cut"] and plan["cut"] == plan["running"]:
+        if not plan:
+            continue
+        # 来源那几类同时跑:问的是**这条线程跑的那一类**被结束了没有(别的来源被结束
+        # 不许让这一路停下)。没绑来源的线程只在此刻只有一类来源在跑时算它的。
+        lanes = _lanes(plan)
+        key = source_key(lane) if lane else (next(iter(lanes)) if len(lanes) == 1 else "")
+        if key and key in lanes and key in plan["cuts"]:
+            return True
+        if not lane and plan["cut"] and plan["cut"] == plan["running"]:
             return True
     return False
 
@@ -264,7 +303,7 @@ def _cut_step(plan: dict, node: dict) -> tuple[str, str]:
     if node["kind"] == "daily":
         return "", "日报已经开始生成，没法中途结束，整轮也停不下来（模型已经在出稿）；做完会接着往下走"
     steps = node["steps"]
-    current = plan["step"] or (steps[0] if steps else "")
+    current = _step_of(plan, node["key"]) or (steps[0] if steps else "")
     if node["kind"] == "src" and current != "crawl":
         return "", "这已经是这一类的最后一步，做完就接着下一类"
     if current not in steps or steps.index(current) == len(steps) - 1:
@@ -289,7 +328,7 @@ def request(owner: str, key: str, action: str) -> tuple[bool, str]:
         if node is None:
             return False, "这一轮没有这一类"
         kind, label = plan["kind"], node["label"]
-        if action not in ("skip", "unskip", "cut"):
+        if action not in ("skip", "unskip", "cut", "go"):
             return False, f"不认识的操作:{action}"
     # 停止那一道读的是别处的状态,放到锁外问(问完再进锁核一遍其余条件)。
     if stopping(owner, kind):
@@ -300,8 +339,19 @@ def request(owner: str, key: str, action: str) -> tuple[bool, str]:
         if plan is None:
             return False, STALE
         started = key in plan["times"] or key in plan["done"]
-        running = plan["running"] == key
-        if action == "skip":
+        running = _active(plan, key)
+        if action == "go":
+            # 「不等了，继续」:门开着等没跑完的来源时才受理。没跑完的那几类照常跑完、
+            # 照常记账,只是这一轮入库和日报不等它(`pipeline_sources`)。
+            if node["kind"] == "src":
+                return False, "只有排在来源后面的那几步能不等"
+            if plan.get("gate") == "go":
+                return True, ""
+            if plan.get("gate") != "wait":
+                return False, "现在没有在等谁"
+            plan["gate"] = "go"
+            note = f"已请求不等没跑完的来源，接着{label}"
+        elif action == "skip":
             if key in plan["skips"]:
                 return True, ""
             if running:
@@ -330,6 +380,58 @@ def request(owner: str, key: str, action: str) -> tuple[bool, str]:
             note = f"已请求提前结束「{label}」，手上这一步停下后接着下一类"
     ps._log(note)
     return True, ""
+
+
+def label_of(owner: str, key: str) -> str:
+    """`key` 那一类给人看的名字。计划里没有它就按通道名去问一次,再不行就是 key 本身。"""
+    with _lock:
+        _, node = _node(owner, key)
+    if node is not None:
+        return node["label"]
+    channel = key.split(":", 1)[-1]
+    return _labels().get(channel) or channel
+
+
+def gate(owner: str, value: str, late=()) -> None:
+    """全库那几步前面那道门走到哪了(`_new` 里那几档)。`late` 只在开门时交:还没跑完的那几类。"""
+    with _lock:
+        plan = _plans.get(owner) if owner else None
+        if plan is None:
+            return
+        if value == "wait" and plan.get("gate") != "wait":
+            plan["gate_at"] = ps._now()
+        plan["gate"] = value
+        for key in late:
+            if key not in plan["late"]:
+                plan["late"].append(key)
+
+
+def park(owner: str, key: str) -> None:
+    """来源那一类手上这一步做完了、下一步要排到全库那几步之后(没等它的那一路):
+    收掉手上那一步的时刻,`lanes` 里记成空 —— 不然面板上它一直像是还在抓。"""
+    with _lock:
+        plan, node = _node(owner, key)
+        if node is None or key not in _lanes(plan):
+            return
+        _close_step(plan, key, ps._now())
+        _lanes(plan)[key] = ""
+
+
+def release(owner: str) -> bool:
+    """不经人手开门(日报超出时间预算)。门没在等就什么都不做;返回这一下开没开。"""
+    with _lock:
+        plan = _plans.get(owner) if owner else None
+        if not plan or plan.get("gate") != "wait":
+            return False
+        plan["gate"] = "go"
+        return True
+
+
+def released(owner: str) -> bool:
+    """用户点了「不等了，继续」。"""
+    with _lock:
+        plan = _plans.get(owner) if owner else None
+        return bool(plan) and plan.get("gate") == "go"
 
 
 def live(state: dict) -> dict | None:

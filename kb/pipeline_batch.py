@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""业务批次:一轮日报 = N+1 次管道运行,而「最近一次运行」只有一个位子。
+"""业务批次:一轮日报 = 几次管道运行(同步一轮 + 出报之后整理一轮),而「最近一次运行」只有一个位子。
 
 从 `pipeline_state` 里分出来的:那边是**一轮运行自己的状态、收尾和两份落盘**,
 这边是**把几轮归成一个业务结果**(内存权威、批次账本、发布资格)。分家的直接原因
@@ -111,13 +111,14 @@ def _with_persist_issue(payload: dict, issue: str) -> dict:
     「同步完成」—— 看不出这一轮是降级完成的(重启就退回旧那份)。`persist_issue`
     这一格供面板直接显示(`pipe_view.js`),日志那行留着时序。
     """
+    from kb.pipeline_lanes import trim
     payload = {**payload, "persist_issue": issue,
-               "log": [*(payload.get("log") or []), ps._stamp(issue)][-80:]}
+               "log": trim([*(payload.get("log") or []), ps._stamp(issue)])}
     ps._log(issue)
     return payload
 
 
-# ── 业务批次:一轮日报 = N+1 次管道运行,而「最近一次运行」只有一个位子 ────────
+# ── 业务批次:一轮日报 = 几次管道运行,而「最近一次运行」只有一个位子 ──────────
 # **子轮一收尾就把整批的汇总写进去**,不是先写它自己、再等日报那边稍后补回。
 # 先写自己的后果:这一刻盘上那份只有刚收尾的这一轮(入库段那一轮 crawl 是
 # 「本次不执行」),前几轮的抓取失败只活在进程内 —— 进程在这中间退出(重启、

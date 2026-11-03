@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -13,6 +14,19 @@ from kb.feeds import x_intake_blocks as blocks
 from kb.feeds import x_intake_capacity as capacity
 from kb.feeds import x_intake_retention as retention
 from kb.maintenance import maintenance_lock
+
+# 存条目 / 水位那几笔等维护锁的上限(秒)。原来是 0(拿不到当场报「本机待续」),那时来源
+# 串着跑,大V观点抓取期间没有别人持锁;各来源同时跑之后,订阅源导出、YouTube 入库都会
+# 短暂攥着它,零等待就是让这一路平白交一轮「待续」。这几笔都在联网截止之外(只是本地
+# 事务),等的时间不吃 X 那份整轮预算。**观测那一笔(`set_block`)照旧零等待**:它的契约
+# 是「拿不到只警告、原话先随结果交上去」,见 docs/x-incremental-intake.md。
+LOCK_WAIT = float(os.environ.get('KB_X_LOCK_WAIT') or 300)
+
+
+def _lock():
+    from kb.pipeline_state import _log
+    return maintenance_lock(wait=LOCK_WAIT, on_wait=lambda waited: _log(
+        f'大V观点:等维护锁(另一路正在写库),已等 {int(waited)} 秒'))
 
 
 _PHASE_FIELDS = {'discovery': ('scan_at',), 'history': ('history_at',),
@@ -104,7 +118,7 @@ def observed(entries):
 
 
 def prepare(sources, channel, now):
-    with maintenance_lock(wait=0), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         retention.prune(conn, now)
         for source in sources:
@@ -162,7 +176,7 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
     fields = _phase_fields(phase)
     reused = 0
     now = time.time() if now is None else now
-    with maintenance_lock(wait=0), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return None
@@ -208,7 +222,7 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
 def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end='', coverage_complete=False,
             batch_id=''):
     fields = _phase_fields(phase)
-    with maintenance_lock(wait=0), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return False
@@ -260,7 +274,7 @@ def set_block(source, block):
 
 
 def screen_wait(source, phase, run_started):
-    with maintenance_lock(wait=0), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return 0
@@ -311,7 +325,7 @@ def pending(sources, now=None):
 
 
 def finish(source, task, entries, unavailable, reason, *, block_tokens=None):
-    with maintenance_lock(wait=0), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return
