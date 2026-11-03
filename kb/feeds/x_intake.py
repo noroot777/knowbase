@@ -12,6 +12,7 @@ from kb.feeds import x_account, x_browser, x_cooldown, x_page_state, x_post
 from kb.feeds import x_intake_store as store
 from kb.feeds import x_intake_blocks as blocks
 from kb.feeds import x_intake_capacity as capacity
+from kb.feeds import x_intake_supersede as supersede
 from kb.feeds.x_cdp import CdpError, XBudgetExceeded
 from kb.feeds.x_intake_metrics import Metrics, seconds
 from kb.youtube.faults import local_fault
@@ -369,6 +370,13 @@ class Intake:
                     if not local_fault(error):
                         raise
                     self.local_error(source, error, '确认进度')
+        try:
+            # 只比库里多了链接的那几条 `repair`:覆盖库里那一条、放行候选,下面的交付照常带走它。
+            self.metrics.count('superseded', supersede.run(self.sources))
+        except Exception as error:
+            if not local_fault(error):
+                raise
+            logging.getLogger(__name__).warning('覆盖存量推文失败，留到下一轮：%s', error)
         for source in self.sources:
             handle = x_channels._handle(source)
             outcomes = self.outcomes.get(source['id'], {})

@@ -491,6 +491,19 @@ def delivery(source):
     return entries, pending_count, unavailable, expired
 
 
+def release_repair(post_id, entry_json):
+    """`repair` 那一条的新版已经写进库里 → 候选回到 ready,照常交付确认。
+
+    **判据待在这一笔自己的事务里**:候选还是取样时那一份(`entry` 的 CAS),而且库里
+    那一条此刻确实就是它(`existing`)。中间别人改过库里那条,这一下就是 0 行 ——
+    它照旧留在 `repair`,下一轮再判,不拿一份没写进去的版本去确认交付。"""
+    with _lock(), db() as conn:
+        if not existing(conn, json.loads(entry_json)):
+            return 0
+        return conn.execute("""UPDATE x_intake_candidates SET state='ready',reason=''
+            WHERE post_id=? AND state='repair' AND entry=?""", (post_id, entry_json)).rowcount
+
+
 def acknowledge(conn, source, entries):
     if not current(conn, source):
         return False

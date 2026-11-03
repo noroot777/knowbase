@@ -18,19 +18,22 @@ from tests.test_x_intake import IntakeBase
 TEXT = 'The AI compute situation\n\n- build out delays will continue\n- power is the bottleneck'
 
 
-class TitleDriftTests(IntakeBase):
+class DriftBase(IntakeBase):
+    """摆盘:同一条推文先经详情页展开入库,再从时间线全文看到一次。**这里一条用例都没有**
+    (`tests/test_x_intake_supersede.py` 继承它,带用例的话会被一起收走)。"""
+
     def raw(self, text, *, truncated=False):
         raw = tweet('100', when=(self.now - timedelta(hours=1)).isoformat(), text=text)
         raw['truncated'] = truncated
         return dict(x_browser._entry(raw), x_observed_at=raw['datetime'])
 
-    def saved_by_detail_page(self):
+    def saved_by_detail_page(self, text=TEXT):
         """浏览器那条路:预览 → 详情页展开 → 入库。返回库里那一条。"""
         self.prepare()
-        preview = self.raw(TEXT.splitlines()[0], truncated=True)
+        preview = self.raw(text.splitlines()[0], truncated=True)
         self.stage([preview])
         source, task = store.pending([self.source])[0]
-        full = x_post.merge(preview, TEXT)
+        full = x_post.merge(preview, text)
         store.finish(source, task, [full], [], '')
         reg.put_items(self.source, [full])
         # 这一轮那条通道看到它时**没有**现成的 ready 候选(实页那 40 条都是 attempted=0 的新
@@ -48,6 +51,8 @@ class TitleDriftTests(IntakeBase):
         with reg.db() as conn:
             return dict(conn.execute('SELECT * FROM feed_items').fetchone())
 
+
+class TitleDriftTests(DriftBase):
     def test_same_body_with_other_title_is_not_parked_in_repair(self):
         stored = self.saved_by_detail_page()
         self.assertEqual(stored['title'], TEXT.splitlines()[0])
@@ -80,7 +85,7 @@ class TitleDriftTests(IntakeBase):
 
     def test_different_body_still_waits_for_versioned_backfill(self):
         stored = self.saved_by_detail_page()
-        changed = TEXT + '\nhttps://www.example.com/more'
+        changed = TEXT.replace('bottleneck', 'constraint')   # 改了字,不是只多了链接
         self.stage([self.timeline_full_text(changed)])
 
         self.assertEqual(self.candidate()['state'], 'repair')
