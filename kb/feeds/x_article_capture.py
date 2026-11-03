@@ -31,6 +31,10 @@ from kb.feeds import registry as reg, x_article, x_post
 from kb.feeds import x_intake_store as store
 from kb.maintenance import LockBusy
 
+# 人点了「采集这篇长文」在等的这一下,维护锁最多等这么久(口径同收藏那一侧的 `_DOC_LOCK_WAIT`):
+# 等不到就如实说一句让人过会儿再点,不让整条 HTTP 连接陪着一轮大编码挂上几分钟。
+_LOCK_WAIT = 10.0
+
 # 人此刻站着的那一页:`/<handle>/article/<推文 id>`(长文页)或 `/<handle>/status/<推文 id>`(推文页)。
 # 只认推文 id —— handle 大小写不敏感、改名后旧地址照样跳得到(口径同 `x_article._spot`)。
 _PAGE = re.compile(r'^https://(?:www\.|mobile\.)?(?:x|twitter)\.com/[A-Za-z0-9_]{1,20}/(article|status)/(\d+)(?:[/?#]|$)')
@@ -151,7 +155,7 @@ def save(post_id: str, page_url: str, snapshot) -> dict:
     if owner is None:
         raise ValueError('这条推文所属的订阅已经不在了（或改指了别的账号），没有写入。')
     try:
-        store.finish(owner, dict(task), [merged], [], '')
+        store.finish(owner, dict(task), [merged], [], '', lock_wait=_LOCK_WAIT)
     except (LockBusy, sqlite3.OperationalError):
         raise ValueError('同步正在写库，稍后再点一次。没有写入。') from None
     with store.read_db(timeout=30) as conn:

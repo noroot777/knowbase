@@ -13,6 +13,7 @@
 import io
 import json
 import sys
+import time
 import unittest
 import zipfile
 from pathlib import Path
@@ -26,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from kb import browser_capture
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_article, x_channels
-from kb.feeds import x_intake_store as store
+from kb.feeds import x_article_capture, x_intake_store as store
 from kb.feeds.x_article_js import SOURCE
 from kb.web import browser_capture_api, x_article_capture_api
 from tests.test_x_guest import GuestBase, status
@@ -169,6 +170,34 @@ class SaveTests(CaptureBase):
         self.assertEqual(409, r.status_code)
         self.assertIn('已经不在等长文', r.json()['detail'])
         self.assertEqual(('长文标题', '第一段\n\n第二段'), self.stored()[STATUS])
+
+
+class LockWaitTests(CaptureBase):
+    """人点了按钮在等:维护锁只等一小会儿(`x_article_capture._LOCK_WAIT`),短暂攥着的照常写进去,
+    等不到就 409、如实说一句、候选原样。两边各钉一次。"""
+
+    def hold(self, seconds):
+        from tests.test_x_intake_lock_wait import hold_maintenance_lock
+        worker = hold_maintenance_lock(seconds)
+        self.addCleanup(worker.join, 5)
+
+    def test_a_briefly_held_lock_is_waited_for(self):
+        self.hold(0.3)
+        with patch.object(x_article_capture, '_LOCK_WAIT', 3.0):
+            r = self.save()
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertEqual('ready', self.candidate()['state'])
+
+    def test_a_lock_held_past_the_short_wait_is_refused_and_writes_nothing(self):
+        before = self.candidate()['entry']
+        self.hold(2.0)
+        started = time.monotonic()
+        with patch.object(x_article_capture, '_LOCK_WAIT', 0.3):
+            r = self.save()
+        self.assertEqual(409, r.status_code)
+        self.assertIn('同步正在写库', r.json()['detail'])
+        self.assertLess(time.monotonic() - started, 1.5)          # 不陪着那一轮维护挂下去
+        self.assertEqual(('pending', before), (self.candidate()['state'], self.candidate()['entry']))
 
 
 class ShippingTests(unittest.TestCase):

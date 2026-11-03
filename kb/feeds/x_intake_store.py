@@ -52,11 +52,15 @@ def _confirmed_progress(progress, phase, incomplete, observed, boundary, end, pr
     return covered, coverage_end, gap, discovery, latest
 
 
+# **遇到锁就等,跟别的来源一个口径**(`reg.db()` 默认等 30 秒、`maintenance_lock()` 按 `KB_MAINT_LOCK_WAIT`):
+# 页面上任何一个请求开库都会在写锁里核一遍表结构,一秒都不等的话这么短的一下也能让一个号白跑一轮
+# (实测:切完通道立刻点同步,排在最前面的 7 个号全报 `database is locked`,第 8 个起全部正常)。
+# 等不到照旧抛,调用方照旧记成本机失败、待办保留。
 def db():
-    return reg.db(timeout=0)
+    return reg.db()
 
 
-def read_db(timeout=0):
+def read_db(timeout=30):
     return reg.read_db(timeout=timeout)
 
 
@@ -104,7 +108,7 @@ def observed(entries):
 
 
 def prepare(sources, channel, now):
-    with maintenance_lock(wait=0), db() as conn:
+    with maintenance_lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         retention.prune(conn, now)
         for source in sources:
@@ -162,7 +166,7 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
     fields = _phase_fields(phase)
     reused = 0
     now = time.time() if now is None else now
-    with maintenance_lock(wait=0), db() as conn:
+    with maintenance_lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return None
@@ -208,7 +212,7 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
 def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end='', coverage_complete=False,
             batch_id=''):
     fields = _phase_fields(phase)
-    with maintenance_lock(wait=0), db() as conn:
+    with maintenance_lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return False
@@ -247,7 +251,7 @@ def progress(source):
 
 
 def set_block(source, block):
-    with maintenance_lock(wait=0), db() as conn:
+    with maintenance_lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if current(conn, source):
             row = conn.execute('SELECT block FROM x_intake_sources WHERE source_id=? AND identity=?',
@@ -260,7 +264,7 @@ def set_block(source, block):
 
 
 def screen_wait(source, phase, run_started):
-    with maintenance_lock(wait=0), db() as conn:
+    with maintenance_lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return 0
@@ -310,8 +314,10 @@ def pending(sources, now=None):
     return result
 
 
-def finish(source, task, entries, unavailable, reason, *, block_tokens=None):
-    with maintenance_lock(wait=0), db() as conn:
+def finish(source, task, entries, unavailable, reason, *, block_tokens=None, lock_wait=None):
+    """`lock_wait`:维护锁最多等几秒,缺省同 `maintenance_lock()`。人点了按钮在等的那一下传短的
+    (`x_article_capture.save`)—— 一轮大编码能攥锁几分钟,那是整条 HTTP 连接挂死。"""
+    with maintenance_lock(wait=lock_wait), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return
