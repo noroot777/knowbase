@@ -68,7 +68,7 @@
     </div>
     <div id="cap-saved" class="cap-block" hidden>
       <h2>正文已补入，入库还没结束</h2><p id="cap-receipt" class="mono"></p>
-      <p class="warning">「继续」跑导出与索引两段：同类来源其他待办会一起导出，可能联网补抓并调用翻译模型，索引检查全库。条目化提取不在这一步。</p>
+      <p class="warning">「继续」跑导出与索引两段：同类来源其他待办会一起导出，可能联网补抓并调用翻译模型，索引检查全库。条目化提取不在这一步。同类文章采完一批点一次就够；不点的话，下一轮带上这类来源的同步也会处理。</p>
       <div class="actions">
         <button id="cap-continue" type="button">继续导出与索引</button>
         <button id="cap-restart" class="secondary" type="button">重新采集正文</button>
