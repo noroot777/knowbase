@@ -22,6 +22,16 @@ function careWhyOf(row, lane) {
   return row.fulltext_error || '';
 }
 
+/** **只有真有出口的那一档才给复选框**(审查第 1 轮 B03):「已完成」那一组的
+    `exits` 是空的,给了复选框就会在批量栏上冒出「立即执行已选 / 仅重新排队」——
+    后端确实会拒,可按钮本身就是一句谎话。来源级问题照旧不进批量(见文件头)。
+    行上那一格、节头的全选、批量栏的全选三处共用这一份口径。 */
+function carePickable(row, lane) { return !row.id && (lane.exits || []).length > 0; }
+
+function carePickableRows(section) {
+  return section.items.filter(row => carePickable(row, section.lane));
+}
+
 function careRenderList() {
   const host = $('care-list');
   host.innerHTML = '';
@@ -57,6 +67,19 @@ function careSectionNode(section) {
   const n = document.createElement('span');
   n.className = 'care-section-n';
   n.textContent = `${section.total} 条`;
+  const rows = carePickableRows(section);
+  if (rows.length) {
+    // 节头那一格:勾的是**这一节已经列出来的**那几条。没展开的不算 —— 批量栏承诺的
+    // 是「当前可见并明确勾选的记录」,展开更多之后新来的那几行是空的,这一格随即
+    // 变成半选,而不是悄悄替人把没看过的也勾上。
+    const all = document.createElement('input');
+    all.type = 'checkbox';
+    all.dataset.pickLane = lane.id;
+    all.setAttribute('aria-label', `全选「${title.textContent}」列出的 ${rows.length} 条`);
+    all.onchange = () => careToggleSection(lane.id, all.checked);
+    head.classList.add('pickable');
+    head.appendChild(all);
+  }
   head.append(title, n);
   if (lane.summary) {
     const hint = document.createElement('p');
@@ -81,12 +104,10 @@ function careRowNode(row, lane) {
   const node = document.createElement('div');
   node.className = 'care-row' + (CARE.selected === id ? ' on' : '');
   const pickCell = document.createElement('div');
-  // **只有真有出口的那一档才给复选框**(审查第 1 轮 B03):「已完成」那一组的
-  // `exits` 是空的,给了复选框就会在批量栏上冒出「立即执行已选 / 仅重新排队」——
-  // 后端确实会拒,可按钮本身就是一句谎话。来源级问题照旧不进批量(见文件头)。
-  if (!row.id && (lane.exits || []).length) {
+  if (carePickable(row, lane)) {
     const box = document.createElement('input');
     box.type = 'checkbox';
+    box.dataset.pickKey = row.key;
     box.checked = CARE.picked.has(row.key);
     box.setAttribute('aria-label', '选择「' + careTitleOf(row) + '」');
     box.onclick = e => {
@@ -167,6 +188,12 @@ function careTriesText(row, lane) {
 }
 
 function carePick(row, lane, on) {
+  careSetPicked(row, lane, on);
+  careRenderBatch();
+}
+
+/** 只改 `CARE.picked`,不重画。全选一次改几十条,画一次就够。 */
+function careSetPicked(row, lane, on) {
   // `exits` 决定批量栏上给哪几颗按钮;`decision` 是「已搁置」那一组恢复时要取消
   // 的**那一次决定**(没有它后端会拒,理由见 `shelf.release`)。
   // `life` 是**勾这一下时它在第几世**:随请求发回去,由服务端 AND 进写语句 ——
@@ -177,7 +204,40 @@ function carePick(row, lane, on) {
       exits: [...(lane.exits || [])], decision: row.shelf_decision_id || '',
       life: row.life || '' });
   } else CARE.picked.delete(row.key);
+}
+
+function careToggleSection(laneId, on) {
+  const section = CARE.sections.find(one => one.lane.id === laneId);
+  if (!section) return;
+  for (const row of carePickableRows(section)) careSetPicked(row, section.lane, on);
   careRenderBatch();
+}
+
+/** 批量栏那一格:这一屏所有列出来、能勾的行。半选时点一下是补齐,不是清空。 */
+function careToggleAll(on) {
+  for (const section of CARE.sections) {
+    for (const row of carePickableRows(section)) careSetPicked(row, section.lane, on);
+  }
+  careRenderBatch();
+}
+
+/** 行上的复选框和节头那一格**按 `CARE.picked` 就地对齐**,不整张列表重画 ——
+    重画会把列表高度清零再长回来,人勾到一半滚动位置跟着跳。 */
+function careSyncPickBoxes() {
+  const host = $('care-list');
+  for (const box of host.querySelectorAll('input[data-pick-key]')) {
+    box.checked = CARE.picked.has(box.dataset.pickKey);
+  }
+  for (const box of host.querySelectorAll('input[data-pick-lane]')) {
+    const section = CARE.sections.find(one => one.lane.id === box.dataset.pickLane);
+    careMarkTri(box, section ? carePickableRows(section) : []);
+  }
+}
+
+function careMarkTri(box, rows) {
+  const n = rows.filter(row => CARE.picked.has(row.key)).length;
+  box.checked = rows.length > 0 && n === rows.length;
+  box.indeterminate = n > 0 && n < rows.length;
 }
 
 function careSelect(id) {
@@ -195,11 +255,23 @@ function careRenderBatch() {
   // 是「当前可见并明确勾选的记录」。
   for (const key of CARE.picked.keys()) if (!visible.has(key)) CARE.picked.delete(key);
   careRenderVisibleCount();
+  careSyncPickBoxes();
   if (!CARE.picked.size) { host.hidden = true; host.innerHTML = ''; return; }
   host.hidden = false;
   host.innerHTML = '';
-  const label = document.createElement('strong');
-  label.textContent = `已选 ${CARE.picked.size} 条`;
+  // 「已选 N 条」前面那一格就是整屏的全选:一组里分好几节(正文 / 翻译 / 写入)时,
+  // 节头那几格只管各自那一节。
+  const label = document.createElement('label');
+  label.className = 'care-batch-all';
+  const all = document.createElement('input');
+  all.type = 'checkbox';
+  const everyRow = CARE.sections.flatMap(carePickableRows);
+  careMarkTri(all, everyRow);
+  all.setAttribute('aria-label', `全选这一屏列出的 ${everyRow.length} 条`);
+  all.onchange = () => careToggleAll(all.checked);
+  const count = document.createElement('strong');
+  count.textContent = `已选 ${CARE.picked.size} 条`;
+  label.append(all, count);
   const kinds = new Set(picked.map(one => one.kind));
   const acts = document.createElement('div');
   acts.className = 'care-batch-acts';
@@ -234,7 +306,7 @@ function careRenderBatch() {
   clear.type = 'button';
   clear.className = 'ghost';
   clear.textContent = '清除选择';
-  clear.onclick = () => { CARE.picked.clear(); careRenderList(); };
+  clear.onclick = () => { CARE.picked.clear(); careRenderBatch(); };
   acts.appendChild(clear);
   host.append(label, acts);
 }

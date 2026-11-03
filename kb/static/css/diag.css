@@ -53,6 +53,10 @@
   border: 1px solid var(--brand); background: var(--brand-soft); border-radius: 9px;
   margin-bottom: 10px; font-size: 13px; }
 .care-batch strong { color: var(--brand-deep); font-family: var(--font-mono); }
+.care-batch-all { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; }
+/* 三处复选框一个尺寸。节头那一格加上右边距占满行上那 22px 一列,标题跟行标题对齐。 */
+.care-batch-all input, .care-section-head > input[type="checkbox"] { min-height: 0; margin: 0;
+  width: 16px; height: 16px; flex: 0 0 16px; }
 .care-batch .care-batch-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
 .care-batch button { min-height: 32px; padding: 5px 11px; }
 
@@ -65,6 +69,9 @@
 .care-section-head .care-section-n { font-family: var(--font-mono); font-size: 12px;
   color: var(--muted); }
 .care-section-head p { flex: 1 1 100%; margin: 0; color: var(--muted); font-size: 12px; }
+.care-section-head.pickable { align-items: center; }
+.care-section-head.pickable > input[type="checkbox"] { margin-right: 6px; }
+.care-section-head.pickable p { padding-left: 32px; }
 
 .care-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; gap: 10px;
   align-items: start; width: 100%; padding: 11px 15px; border: 0; border-top: 1px solid var(--line-soft);
@@ -72,7 +79,7 @@
 .care-section-head + .care-row { border-top: 0; }
 .care-row:hover { background: var(--brand-tint); }
 .care-row.on { background: var(--brand-tint); box-shadow: inset 3px 0 0 var(--brand); }
-.care-row input[type="checkbox"] { min-height: 0; margin: 3px 0 0; }
+.care-row input[type="checkbox"] { min-height: 0; margin: 3px 0 0; width: 16px; height: 16px; }
 /* 行里那块可点区域是 `<button>`,**通用 button 样式要整个重置掉**:base.css 给
    button 的是深松绿底、居中、圆角(主操作的样子),于是列表标题和那半句红色报错
    都压在深绿底上 —— 实测计算样式背景 rgb(23,96,79)、标题 rgb(20,32,43)、报错

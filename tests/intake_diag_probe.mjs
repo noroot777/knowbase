@@ -375,6 +375,64 @@ await until(`CARE.group === 'attention' && CARE.sections.length > 0
 check("待决定那一组照旧勾得上",
       await evalJs(`!!document.querySelector('#care-list input[type=checkbox]')`));
 
+// ── 10c-2. 全选:节头那一格管这一节,批量栏那一格管整屏 ─────────────────────────
+// 先断言后果:勾中的是**哪几条**(`CARE.picked` 的 key 集合),不是「打没打勾」。
+// 反过来钉一边:来源问题那一节没有全选、整屏全选也勾不进来源问题 —— 它的出口是
+// 点名一条订阅同步一次,批量勾三条就是第一条占住管道、后两条当场 409。
+const pickedKeys = `JSON.stringify([...CARE.picked.keys()].sort())`;
+const laneKeys = lane => `JSON.stringify(CARE.sections.find(s => s.lane.id === '${lane}')
+  .items.filter(r => !r.id).map(r => r.key).sort())`;
+check("来源问题那一节没有全选那一格",
+      await evalJs(`!document.querySelector('#care-list input[data-pick-lane="source_problems"]')`));
+check("能勾的每一节都有全选那一格",
+      await evalJs(`CARE.sections.filter(s => s.items.some(r => !r.id) && (s.lane.exits || []).length)
+        .every(s => !!document.querySelector('#care-list input[data-pick-lane="' + s.lane.id + '"]'))`),
+      await evalJs(`JSON.stringify([...document.querySelectorAll('#care-list input[data-pick-lane]')].map(b => b.dataset.pickLane))`));
+const firstLane = await evalJs(`document.querySelector('#care-list input[data-pick-lane]')?.dataset.pickLane || ''`);
+await evalJs(`document.querySelector('#care-list input[data-pick-lane]').click()`);
+check("节头那一格勾中的正好是这一节列出的那几条",
+      firstLane && (await evalJs(pickedKeys)) === (await evalJs(laneKeys(firstLane))),
+      `${firstLane}: ${await evalJs(pickedKeys)}`);
+check("这一节的行复选框跟着勾上,批量栏露出来",
+      await evalJs(`[...document.querySelectorAll('#care-list input[data-pick-key]')]
+        .filter(b => CARE.picked.has(b.dataset.pickKey)).every(b => b.checked) && !$('care-batch').hidden`));
+await evalJs(`document.querySelector('.care-batch-all input').click()`);
+check("整屏全选勾满所有能勾的行,来源问题一条不进",
+      await evalJs(`(() => {
+        const want = CARE.sections.filter(s => !s.source && (s.lane.exits || []).length)
+          .flatMap(s => s.items.map(r => r.key)).sort();
+        const got = [...CARE.picked.keys()].sort();
+        const src = new Set((CARE.sections.find(s => s.source)?.items || []).map(r => r.key || r.id));
+        return want.length > 1 && JSON.stringify(want) === JSON.stringify(got)
+          && got.every(k => !src.has(k));
+      })()`), await evalJs(pickedKeys));
+await evalJs(`document.querySelector('.care-batch-all input').click()`);
+check("整屏全选再点一下全部放掉,批量栏收起",
+      await evalJs(`CARE.picked.size === 0 && $('care-batch').hidden
+        && [...document.querySelectorAll('#care-list input[type=checkbox]')].every(b => !b.checked && !b.indeterminate)`));
+// 半选:已搁置那一组夹具里有两条,勾满之后放掉一条,两处全选都该变成半选,
+// 而半选时点一下是**补齐**(浏览器把 indeterminate 的点击翻成 checked)。
+await evalJs(`careSetGroup('archived')`);
+await until(`CARE.group === 'archived' && CARE.sections.some(s => s.lane.id === 'archived' && s.items.length >= 2)`);
+await evalJs(`document.querySelector('#care-list input[data-pick-lane="archived"]').click()`);
+check("已搁置那一组也能全选(批量栏给的是「恢复」)",
+      (await evalJs(pickedKeys)) === (await evalJs(laneKeys('archived')))
+        && await evalJs(`$('care-batch').textContent.includes('恢复')`), await evalJs(pickedKeys));
+await evalJs(`document.querySelector('#care-list input[data-pick-key]').click()`);
+check("放掉一条之后节头和批量栏那两格都是半选",
+      await evalJs(`(() => {
+        const head = document.querySelector('#care-list input[data-pick-lane="archived"]');
+        const all = document.querySelector('.care-batch-all input');
+        return head.indeterminate && !head.checked && all.indeterminate && !all.checked;
+      })()`));
+await evalJs(`document.querySelector('#care-list input[data-pick-lane="archived"]').click()`);
+check("半选时点节头那一格是补齐,不是清空",
+      (await evalJs(pickedKeys)) === (await evalJs(laneKeys('archived'))), await evalJs(pickedKeys));
+await evalJs(`careSetGroup('attention')`);
+await until(`CARE.group === 'attention' && CARE.sections.every(s => s.lane.group === 'attention')`);
+check("切分组之后勾选照旧清空(全选不把上一组的带过来)",
+      await evalJs(`CARE.picked.size === 0`));
+
 // ── 10d. 「从浏览器采集」:正文那几档的主入口,「手动补正文」退成兜底 ─────────
 // 会落到这几档的多半是「页面上没有识别出正文,可能需要登录或由脚本渲染」「这一页
 // 要求先完成验证或登录」「HTTP 403」—— 那些页人**已经在浏览器里开着、登录态也在**,
