@@ -43,6 +43,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
  history_floor TEXT NOT NULL DEFAULT '', last_note TEXT NOT NULL DEFAULT '',
  fulltext INTEGER NOT NULL DEFAULT 0, extract INTEGER NOT NULL DEFAULT 0,
  last_notice TEXT NOT NULL DEFAULT '', rev INTEGER NOT NULL DEFAULT 0,
+ error_at TEXT NOT NULL DEFAULT '', note_at TEXT NOT NULL DEFAULT '',
  UNIQUE(kind, url)
 );
 CREATE TABLE IF NOT EXISTS feed_items (
@@ -84,13 +85,24 @@ CREATE TABLE IF NOT EXISTS feed_runs (
 # 的 IF NOT EXISTS 对它们不生效,只能逐列 ALTER 补——补不上就不是"少个字段",
 # 而是整个翻译流程在老库上永远报 no such column。
 _ADDED_COLUMNS = {
+    # 下面三列(`staged_at` / `gap_at` / `linked_at`)是「问题与待办」比新旧用的
+    # **事实自己的时刻**:正文候选进入待补、历史缺口出现、候选被记进某一轮扫描。
+    # 只在那件事真的发生时写(缺口换个说法、待补在两种待补之间换档不算)——
+    # 扫描开始、失败记账都会刷新 `scan_at`,借它
+    # 会让没动过的旧待办比刚发生的限流还新(`kb.intake_diag.sources.latest`)。
+    # 存量补 0 = 没有时间证据。
     'x_intake_candidates': (
         ('unavailable', "TEXT NOT NULL DEFAULT ''"),
+        ('staged_at', 'REAL NOT NULL DEFAULT 0'),
     ),
     'x_intake_sources': (
         ('window_end', "TEXT NOT NULL DEFAULT ''"),
         ('block', "TEXT NOT NULL DEFAULT ''"),
         ('screen_waits', "TEXT NOT NULL DEFAULT '{}'"),
+        ('gap_at', 'REAL NOT NULL DEFAULT 0'),
+    ),
+    'x_intake_links': (
+        ('linked_at', 'REAL NOT NULL DEFAULT 0'),
     ),
     'x_intake_batches': (
         ('block_token', "TEXT NOT NULL DEFAULT ''"),
@@ -128,6 +140,14 @@ _ADDED_COLUMNS = {
         # 实测)。**不拿 `url`/`updated_at` 充当这件事**:前者 A→B→A 之后完全
         # 复原,后者只记到秒 —— 口径同 `life` 那一段「本地可重复的状态不是身份」。
         ('rev', 'INTEGER NOT NULL DEFAULT 0'),
+        # **`last_error` / `last_note` 各自是哪一刻写下的。** `last_attempt` 顶不了:
+        # 「只写提示」的那几处会改它而不碰 `last_error`,失败那一处也不碰
+        # `last_note` —— 于是同一条订阅上两句话的新旧从 `last_attempt` 里读不出来。
+        # 「问题与待办」一个账号只列最新那一条(`kb.intake_diag.sources.latest`)
+        # 就按这两列比。和那句话**同一条 UPDATE** 写下;存量库补空串 = 没有时间
+        # 证据,那一条不参与比新旧。
+        ('error_at', "TEXT NOT NULL DEFAULT ''"),
+        ('note_at', "TEXT NOT NULL DEFAULT ''"),
     ),
     'feed_items': (
         ('lang', "TEXT NOT NULL DEFAULT ''"),              # '' 未判 / zh 无需翻译 / en 待翻译

@@ -45,8 +45,15 @@ def expire(conn, source_id, identity, floor):
                  (source_id, identity, floor, floor))
 
 
-def count(conn, source_id, identity, floor):
-    return conn.execute('''SELECT count(*) FROM x_intake_links l JOIN x_intake_candidates p USING(post_id)
+_UNCONFIRMED = '''FROM x_intake_links l JOIN x_intake_candidates p USING(post_id)
         WHERE l.source_id=? AND l.identity=? AND l.confirmed=0 AND l.delivered=0
-        AND p.state IN ('ready','pending','repair') AND p.published>=?''',
-                        (source_id, identity, floor)).fetchone()[0]
+        AND p.state IN ('ready','pending','repair') AND p.published>=?'''
+
+
+def count(conn, source_id, identity, floor):
+    return conn.execute('SELECT count(*) ' + _UNCONFIRMED, (source_id, identity, floor)).fetchone()[0]
+
+
+def latest(conn, source_id, identity, floor):
+    """同一批「候选待确认」里最后一条被记进扫描的时刻(`linked_at`);没有就是 0。"""
+    return conn.execute('SELECT max(l.linked_at) ' + _UNCONFIRMED, (source_id, identity, floor)).fetchone()[0] or 0

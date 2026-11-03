@@ -173,12 +173,14 @@ def prepare(sources, channel, now, deadline=None):
                 conn.execute('DELETE FROM x_intake_links WHERE source_id=?', (source['id'],))
                 conn.execute('DELETE FROM x_intake_sources WHERE source_id=?', (source['id'],))
                 previous = None
-            conn.execute('''INSERT INTO x_intake_sources(source_id,identity,channel,floor,window_end,gap)
-                VALUES(?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
-                floor=excluded.floor,window_end=excluded.window_end,gap=excluded.gap,discovery='unattempted',error='' ''',
+            conn.execute('''INSERT INTO x_intake_sources(source_id,identity,channel,floor,window_end,gap,gap_at)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
+                floor=excluded.floor,window_end=excluded.window_end,gap=excluded.gap,
+                gap_at=CASE WHEN x_intake_sources.gap='' AND excluded.gap<>'' THEN excluded.gap_at
+                    ELSE x_intake_sources.gap_at END,discovery='unattempted',error='' ''',
                 (source['id'], identity(source), channel, floor, now.isoformat(),
                  _coverage_gap(previous['covered'], previous['coverage_end'], floor, now.isoformat())
-                 if previous else '最近五天尚未确认完整覆盖'))
+                 if previous else '最近五天尚未确认完整覆盖', now.timestamp()))
             retention.expire(conn, source['id'], identity(source), floor, now)
             batches.expire(conn, source['id'], identity(source), floor)
             expired = retention.recent(conn, source['id'], identity(source), now)
@@ -243,12 +245,15 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
             elif cached and cached['state'] == 'ready' and complete(json.loads(cached['entry'])) and not blocked:
                 reused += not bool(saved)
             else:
-                conn.execute('''INSERT INTO x_intake_candidates(post_id,entry,published,state)
-                    VALUES(?,?,?,?) ON CONFLICT(post_id) DO UPDATE SET
-                    entry=excluded.entry,published=excluded.published,state=excluded.state''',
-                    (identifier, json.dumps(entry, ensure_ascii=False), published.isoformat(), state))
-            conn.execute('INSERT OR IGNORE INTO x_intake_links(source_id,identity,post_id) VALUES(?,?,?)',
-                         (source['id'], identity(source), identifier))
+                conn.execute('''INSERT INTO x_intake_candidates(post_id,entry,published,state,staged_at)
+                    VALUES(?,?,?,?,?) ON CONFLICT(post_id) DO UPDATE SET
+                    entry=excluded.entry,published=excluded.published,state=excluded.state,
+                    staged_at=CASE WHEN x_intake_candidates.state NOT IN ('pending','repair')
+                        AND excluded.state IN ('pending','repair') THEN excluded.staged_at
+                        ELSE x_intake_candidates.staged_at END''',
+                    (identifier, json.dumps(entry, ensure_ascii=False), published.isoformat(), state, now))
+            conn.execute('INSERT OR IGNORE INTO x_intake_links(source_id,identity,post_id,linked_at) VALUES(?,?,?,?)',
+                         (source['id'], identity(source), identifier, now))
             batches.add(conn, batch_id, identifier)
         columns = ','.join(f'{field}=?' for field in fields)
         discovery = 'partial' if 'scan_at' in fields else progress['discovery']
@@ -277,8 +282,9 @@ def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end=
         state = _confirmed_progress(progress, phase, incomplete, observed, boundary, end, proven)
         if proven and 'history_at' in fields:
             batches.recover(conn, source['id'], identity(source), boundary, end)
-        conn.execute("UPDATE x_intake_sources SET covered=?,coverage_end=?,gap=?,discovery=?,latest=?,error='' WHERE source_id=?",
-                     (*state, source['id']))
+        conn.execute('''UPDATE x_intake_sources SET covered=?,coverage_end=?,gap=?,discovery=?,latest=?,error='',
+            gap_at=CASE WHEN gap='' AND ?<>'' THEN ? ELSE gap_at END WHERE source_id=?''',
+                     (*state, state[2], time.time(), source['id']))
         blocks.resolve(conn, progress, batch_id, proven or bool(observed), phase)
         waits = json.loads(progress['screen_waits'])
         for name in blocks.phases(phase):
@@ -431,22 +437,35 @@ def statuses(sources, channel='browser'):
     now = datetime.now(timezone.utc)
     with read_db(timeout=30) as conn:
         rows = {row['source_id']: dict(row) for row in conn.execute('SELECT * FROM x_intake_sources')}
-        counts = {(row['source_id'], row['identity']): row['pending'] for row in conn.execute('''
-            SELECT l.source_id,l.identity,count(*) AS pending FROM x_intake_links l
+        pending_rows = conn.execute('''
+            SELECT l.source_id,l.identity,count(*) AS pending,
+                max(max(p.attempted),max(p.staged_at),max(l.linked_at)) AS attempted FROM x_intake_links l
             JOIN x_intake_candidates p USING(post_id) WHERE p.state IN ('pending','repair')
-            GROUP BY l.source_id,l.identity''')}
+            GROUP BY l.source_id,l.identity''').fetchall()
+        counts = {(row['source_id'], row['identity']): row['pending'] for row in pending_rows}
+        # 正文待补那一条自己的时刻:那几条最后一次补正文、最后一条进入待补、或最后一条
+        # **进入这个账号**的时刻。候选按 `post_id` 全局只有一行,别的账号先收过的转推在
+        # 这个账号这里是新事,`staged_at` 却还是那边的旧时间 —— 所以账号这一维认
+        # `linked_at`;反过来不能为它去刷新共享的 `staged_at`,那会把先收的账号也变新。
+        pending_at = {(row['source_id'], row['identity']): row['attempted'] or 0 for row in pending_rows}
         unconfirmed = {source_id: batches.count(conn, source_id, row['identity'], row['floor'])
                        for source_id, row in rows.items()}
+        unconfirmed_at = {source_id: batches.latest(conn, source_id, row['identity'], row['floor'])
+                          for source_id, row in rows.items()}
         for source_id, row in rows.items():
             row['expired'] = retention.recent(conn, source_id, row['identity'], datetime.now(timezone.utc))
+            row['expired_at'] = retention.recent_at(conn, source_id, row['identity'], datetime.now(timezone.utc))
             row['outside'] = retention.notice(utc(row['floor']), row['expired'])
     for source in sources:
         row = rows.get(source['id'])
         if row and row['identity'] == identity(source) and row['channel'] == ('browser' if channel == 'attach' else channel):
             source['x_intake'] = {key: row[key] for key in
-                                  ('discovery', 'gap', 'expired', 'error', 'floor', 'scan_at', 'history_at', 'outside')}
+                                  ('discovery', 'gap', 'gap_at', 'expired', 'expired_at', 'error', 'floor',
+                                   'scan_at', 'history_at', 'outside')}
             source['x_intake']['pending'] = counts.get((source['id'], identity(source)), 0)
+            source['x_intake']['pending_at'] = pending_at.get((source['id'], identity(source)), 0)
             source['x_intake']['unconfirmed'] = unconfirmed[source['id']]
+            source['x_intake']['unconfirmed_at'] = unconfirmed_at[source['id']]
             with read_db(timeout=30) as conn:
                 events = blocks.replay(conn, source['id'], identity(source), row['channel'], row['block'])
             blocks.project(source['x_intake'], events)

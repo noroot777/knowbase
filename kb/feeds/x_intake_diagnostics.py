@@ -1,4 +1,6 @@
 """Structured automatic-X queue facts; free-form notes are never evidence of coverage."""
+from datetime import datetime, timezone
+
 from kb.feeds.x_intake_capacity import RESCAN_NOTICE
 
 PROBLEMS = {
@@ -64,23 +66,46 @@ PROBLEMS = {
 }
 
 
+def _epoch(value):
+    if not value:
+        return None
+    moment = datetime.fromisoformat(value)
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
+
+
 def issues(state):
+    """`at` = 这条事实自己最近一次发生/变化的时刻(epoch 秒,没有证据为 None)。
+
+    阻断认它自己的 `observed_at`;超窗认 `x_intake_expirations.expired_at`;正文待补认
+    那几条最后一次补正文、最后一条进入待补、最后一条进入这个账号的时刻(`attempted` /
+    `staged_at` / `linked_at`)和正文阶段阻断;候选待确认认最后一条被记进扫描的时刻(`linked_at`);历史缺口认缺口出现的时刻
+    (`gap_at`)。**不认 `scan_at` / `history_at`**:扫描开始、失败记账都会刷新它们,
+    借它会让没动过的旧待办比刚发生的限流还新。只因容量不够才报的那条没有发生时刻。"""
     result = []
     observed = state.get('blocks', {'discovery': state.get('block') or {}})
     for phase, block in observed.items():
         if block and phase != 'body':
             result.append(dict(kind=f"x_intake_{block['kind']}", evidence=block['reason'], retryable=True,
-                               phase=phase, step=0 if phase == 'discovery' else 1))
+                               phase=phase, step=0 if phase == 'discovery' else 1,
+                               at=block.get('observed_at') or None))
     for field, kind, label in [('unconfirmed', 'x_intake_unconfirmed', '候选待确认'),
                                ('pending', 'x_intake_body', '正文待补'),
                                ('expired', 'x_intake_expired', '最近24小时超窗')]:
         if count := state.get(field, 0):
             reason = observed.get('body', {}).get('reason', '') if field == 'pending' else ''
             evidence = f'{label} {count} 条' + (f'；正文补全：{reason}' if reason else '')
+            if field == 'expired':
+                at = _epoch(state.get('expired_at', ''))
+            elif field == 'pending':
+                at = max(state.get('pending_at') or 0,
+                         observed.get('body', {}).get('observed_at') or 0) or None
+            else:
+                at = state.get('unconfirmed_at') or None
             result.append(dict(kind=kind, count=count, evidence=evidence,
-                               retryable=field != 'expired'))
+                               retryable=field != 'expired', at=at))
     attempted = state.get('discovery') != 'unattempted' or state.get('history_at', 0) > 0
     if attempted and (state.get('gap') or state.get('capacity_limited') is True):
         evidence = '；'.join(filter(None, [state.get('gap'), state.get('coverage_warning')]))
-        result.append(dict(kind='x_intake_history', evidence=evidence, retryable=True))
+        result.append(dict(kind='x_intake_history', evidence=evidence, retryable=True,
+                           at=(state.get('gap_at') or None) if state.get('gap') else None))
     return result

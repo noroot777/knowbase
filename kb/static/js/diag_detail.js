@@ -207,6 +207,15 @@ function careRenderSourceDetail(host, row) {
     quote.textContent = row.evidence;
     steps.appendChild(quote);
   }
+  // 一个账号只列一行(`sources.latest`):记不出时间的那几条比不出新旧,所以如实
+  // 说一句它们还在,而不是悄悄并掉、也不另占一行。
+  const undated = row.undated || [];
+  if (undated.length) {
+    const rest = document.createElement('p');
+    rest.textContent = `另有 ${undated.length} 条记不出发生时间、比不出新旧：`
+      + undated.map(one => one.label).join('；');
+    steps.appendChild(rest);
+  }
   careBlock(host, '', [row.explanation, row.advice]);
   // X 账号的正文待办里有长文时,把那几篇列出来给人手动补(`careRenderXArticles`,在本文件末尾)。
   if (row.problem === 'x_intake_body') careRenderXArticles(host, row);
