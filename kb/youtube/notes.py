@@ -3,11 +3,12 @@ import json
 import time
 
 from kb import llm, llm_stages
-from kb.youtube import json_output, media, transcripts, translation, translation_language, translation_pool
+from kb.youtube import json_output, media, model_response, transcripts, translation, translation_language, translation_pool
 from kb.youtube.faults import local_fault
 
 
 VERSION = 'youtube-notes-v3'
+TITLE_STAGE = 'translate-title-v1'
 MAX_LANGUAGE_TRIES = 3
 CONTEXT_LIMIT = 14000
 ORIGINS = {'local_cache': '已有本地原文转录', 'uploaded_captions': '作者提供的字幕',
@@ -100,6 +101,30 @@ def translated_output(text, output):
     if not output.strip() or not translation_language.chinese_output(output, text):
         raise translation.LanguageError('模型未返回中文译文，保留原始字幕等待重试')
     return output.strip()
+
+
+def cached_title(title, selected, cache):
+    if native_chinese(title):
+        return title
+    for stage in (TITLE_STAGE, translation.STAGE):
+        try:
+            return translated_output(title, cache[signature(stage, selected, title)])
+        except (KeyError, RuntimeError, ValueError, TypeError):
+            continue
+    return None
+
+
+def translate_title(title, selected, deadline, stopped, cache):
+    try:
+        output = call(translation.prompt(title), selected, deadline, stopped)
+    except model_response.OutputError:
+        return title
+    try:
+        value = translated_output(title, output)
+    except (RuntimeError, ValueError, TypeError):
+        return title
+    cache[signature(TITLE_STAGE, selected, title)] = output
+    return value
 
 
 def summary_output(output, source=None, quotes=(), chinese_source=False):
@@ -218,11 +243,7 @@ def fallback(row, transcript, directory, translator, deadline, stopped):
     if stopped() or time.monotonic() >= deadline:
         raise media.Interrupted('视频处理已停止或时间预算用尽')
     original_title = row['entry']['title']
-    try:
-        translated_title = (original_title if native_chinese(original_title) else translated_output(
-            original_title, cache[signature(translation.STAGE, translator, original_title)]))
-    except (KeyError, RuntimeError, ValueError, TypeError):
-        translated_title = original_title
+    translated_title = cached_title(original_title, translator, cache) or original_title
     if not native_chinese(original_title):
         body += '\n\n## 视频原题\n\n' + original_title
     return {'url': row['entry']['url'], 'title': title + translated_title, 'body': body,
@@ -234,19 +255,25 @@ def build_translation(row, transcript, blocks, deadline, stopped, directory, tra
     cache = media.read_json(directory / 'notes-cache.json')
     if not isinstance(cache, dict):
         cache = {}
-    texts = [row['entry']['title'], *blocks]
     translated = {}
     jobs = {}
-    for block in texts:
+    title = row['entry']['title']
+    title_key = signature(TITLE_STAGE, translator, title)
+    title_value = cached_title(title, translator, cache)
+    if title_value is not None:
+        translated[title_key] = title_value
+    else:
+        jobs[title_key] = (title, {}, {})
+    for block in blocks:
         if stopped() or time.monotonic() >= deadline:
             raise media.Interrupted('视频处理已停止或时间预算用尽')
-        if native_chinese(block):
-            translated[block] = block
-            continue
         key = signature(translation.STAGE, translator, block)
+        if native_chinese(block):
+            translated[key] = block
+            continue
         if key in cache:
             try:
-                translated[block] = translated_output(block, cache[key])
+                translated[key] = translated_output(block, cache[key])
                 continue
             except (RuntimeError, ValueError, TypeError):
                 cache.pop(key)
@@ -257,6 +284,8 @@ def build_translation(row, transcript, blocks, deadline, stopped, directory, tra
 
     def create(key, halted):
         block, _, local = jobs[key]
+        if key == title_key:
+            return translate_title(block, translator, deadline, halted, local)
         return cached(None, local, key,
                       lambda: translation_request(block, translator, deadline, halted, cache=local),
                       lambda output: translated_output(block, output))
@@ -289,11 +318,12 @@ def build_translation(row, transcript, blocks, deadline, stopped, directory, tra
             media.save_json(directory / 'notes-cache.json', cache)
 
     results = translation_pool.run(jobs, create, receive, deadline, stopped) if jobs else {}
-    translated.update({jobs[key][0]: value for key, value in results.items()})
+    translated.update(results)
     if stopped() or time.monotonic() >= deadline:
         raise media.Interrupted('视频处理已停止或时间预算用尽')
-    return translated_entry(row, transcript, blocks, [translated[block] for block in blocks],
-                            translated[row['entry']['title']])
+    return translated_entry(row, transcript, blocks,
+                            [translated[signature(translation.STAGE, translator, block)] for block in blocks],
+                            translated[title_key])
 
 
 def translated_entry(row, transcript, blocks, translated, title=None):

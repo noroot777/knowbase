@@ -155,10 +155,14 @@ class TranslationOnly(YouTubeFixture):
         self.assertEqual('智能体核验生成的修改', entry['title'])
         self.assertIn('智能体生成代码，运行测试并核验限制。', entry['body'])
 
-    def test_failed_title_cannot_be_hidden_by_a_successful_chinese_body(self):
+    def test_failed_title_does_not_downgrade_a_successful_chinese_body(self):
         self.row['entry']['title'] = 'Verify changes before deployment'
         self.transcript['segments'][0]['text'] = '部署前核验修改并记录限制。'
         with patch.object(notes, 'model', return_value=self.selected), \
-                patch.object(notes, 'call', return_value='English title without translation'), \
-                self.assertRaises(RuntimeError):
-            notes.build(self.row, self.transcript, self.deadline, lambda: False)
+                patch.object(notes, 'call', return_value='English title without translation') as call:
+            entry = notes.build(self.row, self.transcript, self.deadline, lambda: False)
+        self.assertEqual(self.row['entry']['title'], entry['title'])
+        self.assertEqual('youtube:uploaded_captions', entry['body_provenance'])
+        self.assertIn(self.transcript['segments'][0]['text'], entry['body'])
+        self.assertEqual(1, call.call_count)
+        self.assertFalse(media.read_json(media.cache_dir(self.row['video_id']) / 'notes-language-failures.json'))

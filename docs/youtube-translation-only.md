@@ -7,8 +7,9 @@
 - 发现、真实日期核实、候选排序、视频数量/时长预算和字幕完整性认证不变。
 - 外语字幕使用现有 `translate` 模型逐段完整翻译，校验覆盖与输出语言；不再分段摘要、归并、生成概述或改写正文。
 - 中文字幕原文直接保存；标题和字幕都为中文时不调用模型，混合语言正文仍按现有语言判据决定是否翻译。
-- 外语标题作为独立段完整翻译并缓存，成品用中文标题，外语原题保留在正文；不生成概述或改写成稿。
-- 标题和字幕翻译使用全进程共享、最多 3 席的线程池，同一段重复出现只调一次，按字幕原序组装结果。
+- 外语标题独立尝试翻译并缓存合格译名，输出无效时保留原题，不拖累合格正文；不生成概述或改写成稿。
+- 标题和字幕翻译使用全进程共享、最多 3 席的线程池；重复字幕只调一次，按字幕原序组装结果。
+  标题与同文字幕仍是不同作业，标题回退不放宽字幕覆盖或语言校验，外语原题保留在正文。
 - 作业只写私有内存，协调线程合并增量缓存，保留已接收成功段与失败段内已校验的单位译文。
 - 取消、超时或服务失败会停止派发并取消剩余作业，迟到回复不得写缓存或成为成品；模型 429 沿用共享熔断。
 - YouTube 读取和普通同步逐视频调度仍串行，不改变数量/时长预留和正式发布事务；本轮不引入跨视频流水线。
@@ -58,7 +59,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" /Users/fjh/code/knowledge-base/.venv
 生产数据库仅以 `mode=ro` 打开，未写生产数据或调用上游模型。
 无界面改动，不操作浏览器，无浏览器通道降级。
 
-## 审查修复与有限并发（2026-11-03）
+## 首轮审查修复与有限并发（ad37c63 历史记录）
 
 已完整读取第 1 轮报告 `free-review/lQKnG-fTEKdC/round-1/report.md`。
 标题不翻译的问题成立：此前保留英文原题会因正文已经是中文而永久绕开通用翻译队列。
@@ -109,3 +110,53 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" /Users/fjh/code/knowledge-base/.venv
 沙箱 `data/diagnostics/youtube-translation-only/parallel-title-6c6ls8xv`。
 已断言工作树导入和所有数据/vault 路径隔离，生产数据库以 `mode=ro` 和 `query_only` 打开。
 没有界面改动、浏览器操作或通道降级。
+
+## 第二轮审查：标题输出与字幕失败隔离（2026-11-03）
+
+完整读取第 2 轮报告 `free-review/lQKnG-fTEKdC/round-2/report.md`，接受唯一阻断意见。
+根因是把可能只含产品名的标题当作必须出现中文的字幕段，并把标题输出失败计入整条视频预算。
+本轮在标题层统一修复，不添加品牌白名单，也不放宽字幕段的覆盖、语言或成品认证：
+
+- 标题只请求一次；输出原名、非中文、格式不完整或模型明确的 `OutputError` 时仅回退原题，
+  正文照常成品入库，不增加字幕失败次数，不把坏标题输出缓存成合格字幕。
+- 新标题使用独立 `translate-title-v1` 作业/缓存身份，标题与同文字幕也不会共用可选回退路径。
+  仍兼容读取旧签名下已通过严格校验的标题译文；普通出口和正文降级出口共用标题缓存读取规则。
+- 完整正文成功时按原契约清掉当前失败计数；真实字幕失败仍保留原有三次预算与明确降级。
+  不整体清空历史计数或译文缓存，不重写已发布笔记。
+- 服务未交付、本地存储故障、429 熔断、用户停止和超时不伪装成标题输出失败，仍按原分类中断。
+  全局 3 席额度、普通逐视频调度、列表发现、排名和视频处理预算保持不变。
+
+### 本轮验证
+
+仅修改/新增 `test_youtube_translation_only` 与 `test_youtube_title_fallback` 两个模块；
+其余回归留给验收，不复用历史 80 项通过记录作为本轮验证。
+首轮哨兵 `eYE9HmS5XyXh` 实跑 24 项、0.174 秒、退出码 1，4 个中文字幕子用例报错。
+错误均发生在测试的缓存断言：未创建缓存文件时返回 `None`，不能做字典成员判断。
+改为明确断言中文字幕路径不创建空缓存文件，外语字幕路径不缓存坏标题；生产代码未改。
+修正后哨兵 `cfTMMATdrr_V`：24 项，0.164 秒，全部通过，退出码 0。
+实际工作目录 `/Users/fjh/code/knowledge-base/.worktrees/BnEuTjdfU3Be`；原始完整日志
+`/Users/fjh/code/harness/data/runs/BnEuTjdfU3Be/regression/cfTMMATdrr_V.log`。
+两次登记均执行以下未过滤的命令，前四行记录实现、共享池及两个测试模块的 SHA256：
+
+```sh
+shasum -a 256 kb/youtube/notes.py kb/youtube/translation_pool.py tests/test_youtube_translation_only.py tests/test_youtube_title_fallback.py && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" /Users/fjh/code/knowledge-base/.venv/bin/python -m unittest tests.test_youtube_translation_only tests.test_youtube_title_fallback -v
+```
+
+测试通过后只补本文记录；四个 Python 文件的哈希与原始日志逐项一致。
+本轮三个修改/新增 Python 文件的 Ruff、AST/700 行检查与 `git diff --check` 均通过。
+未运行其它回归；collector 全流程与通用翻译/导出的回归覆盖仍留给验收前置命令。
+
+另执行真实数据层隔离冒烟，输入及模型均为明确的本地夹具：四种产品名标题各配英文、中文完整字幕，
+调用实际 `notes.build` → `products.certify/valid/publish` → `translate.display` → `sync.export`。
+8 篇均首轮成品发布并在开启 `hold_untranslated` 时成功导出，原题保留，字幕失败计数为 0，
+导出哈希与正式内容一致。12 次本地夹具请求，上游模型调用 0 次；未打开或写入生产数据库。
+这证明标题回退不会阻断正式交付，不证明上游模型翻译质量或性能。
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD" /Users/fjh/code/knowledge-base/.venv/bin/python data/diagnostics/youtube-translation-only/title_fallback_smoke.py
+```
+
+冒烟退出码 0，日志及结果分别为 `data/diagnostics/youtube-translation-only/title-fallback-smoke.log`、
+`data/diagnostics/youtube-translation-only/title-fallback-smoke-result.json`，
+沙箱 `data/diagnostics/youtube-translation-only/title-fallback-kotjdkud`。
+未改前端或其它来源；没有浏览器操作、通道降级、真实网络请求或生产写入。
