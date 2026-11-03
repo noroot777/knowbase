@@ -12,6 +12,7 @@ class YouTubeStageCache(YouTubeFixture):
     def setUp(self):
         super().setUp()
         self.row = {'video_id': self.entry()['video_id'], 'entry': self.entry(), 'channel': '测试频道'}
+        self.row['entry']['title'] = '智能体代码生成教程'
         self.selected = SimpleNamespace(provider='fixture', model_id='fixture')
         self.payload = {'title': '具体中文标题', 'summary': '保留事实与限制的中文概述。', 'body': '具体中文内容。'}
         self.blocks = [f'中文原文内容{position}。' for position in range(16)]
@@ -24,38 +25,22 @@ class YouTubeStageCache(YouTubeFixture):
             product = notes.build(self.row, self.transcript, time.monotonic() + 30, lambda: False)
         return product, call
 
-    def test_failed_reduction_retries_with_validated_maps_and_translations(self):
-        calls = []
-
-        def failed(prompt, *arguments):
-            calls.append(prompt)
-            block = prompt.split('\n\n', 1)[1]
-            return block if len(block) > 10000 else '中文要点。' * 200
-
-        with self.assertRaisesRegex(RuntimeError, '未能压缩'):
-            self.build(failed)
-        self.assertEqual(17, len(calls))
-        path = media.cache_dir(self.row['video_id']) / 'notes-cache.json'
-        cache = media.read_json(path)
-        self.assertEqual(32, len(cache))
-        failed_block = calls[-1].split('\n\n', 1)[1]
-        key = notes.signature('reduce', self.selected, failed_block)
-        self.assertNotIn(key, cache)
-        cache[key] = failed_block
-        media.save_json(path, cache)
-
-        def recovered(prompt, *arguments):
-            return json.dumps(self.payload) if '只输出 JSON' in prompt else '已压缩的中文事实与限制。'
-
-        product, call = self.build(recovered)
-        self.assertEqual(3, call.call_count)
-        self.assertIn('中文译文（自动生成）', product['body'])
-        self.assertNotEqual(failed_block, media.read_json(path)[key])
+    def test_long_chinese_source_needs_no_reduction_or_final_note(self):
+        directory = media.cache_dir(self.row['video_id'])
+        cache = {'old-reduce': 'bad summary', 'old-note': '{bad json'}
+        media.save_json(directory / 'notes-cache.json', cache)
+        product, call = self.build(AssertionError('no model calls for Chinese'))
+        call.assert_not_called()
+        for block in self.blocks:
+            self.assertIn(block, product['body'])
+        self.assertIn('中文字幕原文', product['body'])
+        self.assertEqual(self.row['entry']['title'], product['title'])
+        self.assertEqual(cache, media.read_json(directory / 'notes-cache.json'))
 
     def test_invalid_stage_outputs_are_not_cached_and_good_stages_survive(self):
         directory = media.cache_dir(self.row['video_id'])
         cache = {'valid-transcript': '已校验原文'}
-        for output in ('', 'English summary without Chinese', '中文' * 600):
+        for output in ('', 'English summary without Chinese', '中' * (notes.CONTEXT_LIMIT + 1)):
             with self.subTest(output=output[:20]), self.assertRaises(RuntimeError):
                 notes.cached(directory, cache, 'bad-summary', lambda: output, notes.summary_output)
             self.assertNotIn('bad-summary', cache)
