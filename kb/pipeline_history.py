@@ -69,8 +69,13 @@ def _run_record() -> dict:
     return run_record(_batch_aggregate() or ps._state)
 
 
-def _save_history() -> None:
-    """把这一轮的终态记进历史。
+def _save_history(record: dict | None = None) -> None:
+    """把这一轮的终态记进历史。`record` 缺省 = 这一轮(批次里是整批那份汇总)。
+
+    **显式给 `record` 的那一档只顶掉同身份那一条**,不读 `_aggregate_covers()`:那一格
+    答的是「内存里那份权威合并了谁」,跟别人交进来的这条记录无关 —— 日报交卷时那份
+    临时记录(`pipeline_batch._archive_provisional`)写进来的时候,权威位上躺着的可能
+    还是上一批的汇总,拿它的覆盖集去删就把上一批那条历史删了。
 
     **按 run id 幂等**(身份非空时):同一轮重复落盘时替换那一条、不追加 —— 否则一次
     重复调用就在历史里留下两条一模一样的记录,而它们的区别只有写入顺序。
@@ -83,7 +88,8 @@ def _save_history() -> None:
     # 延迟 import,同上。读的是**同一本账**(都在 `_lock` 里):`_run_record()` 决定
     # "存哪一份",`_aggregate_covers()` 回答"这一份实际合并了谁"。
     from kb.pipeline_batch import _aggregate_covers
-    record = _run_record()
+    explicit = record is not None
+    record = record if explicit else _run_record()
     rid = record["run_id"]
     # **空身份一律追加,不去重。** 空串不是身份 —— 拿它当键会把两轮各自跑过的运行
     # 合成一条(没经过 `start_pipeline` 的那条路身份就是空的)。历史里少一轮是静默
@@ -112,7 +118,8 @@ def _save_history() -> None:
     # 发布被拒那一档同理:写下的是子轮自己那份局部结果。**反过来钉住:真的汇总即使
     # 状态写失败,存进历史的也还是完整汇总**,不许退回局部结果。
     superseded = {rid} if rid else set()
-    superseded |= _aggregate_covers()
+    if not explicit:
+        superseded |= _aggregate_covers()
     runs = [r for r in _history_rounds_strict()
             if not (r.get("run_id") and r["run_id"] in superseded)]
     runs.insert(0, record)

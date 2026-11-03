@@ -148,6 +148,21 @@ _batch_rev = 0
 # 收尾时找不到自己的批次,按一次普通同步落盘,日报的结论、身份和类型计划一起丢了。
 # 所以只记下「关了」,**由那一轮自己在收尾时关**(`_publish_in_batch`)。
 _batch_closing = False
+# 等最后一轮收尾的那几批,**按批次身份各存一本账**。日报交卷之后下一份日报随时可以
+# 开新的一批,而上面那几格只有一个位子:新的一批一开,旧那一批的结论、身份、待关闭
+# 标记一起被清掉,旧那一轮收尾时只能按一次普通同步落盘。所以开新批时把它挪到这里,
+# 由那一轮收尾时取出来发布(`_publish_in_batch`)。
+_parked: dict[str, dict] = {}
+_BOOK = ("_batch_id", "_batch_runs", "_batch_issue", "_batch_notes", "_batch_kind",
+         "_batch_rev", "_batch_closing")
+
+
+def _book() -> dict:
+    return {name: globals()[name] for name in _BOOK}
+
+
+def _load(book: dict) -> None:
+    globals().update(book)
 
 
 def _remember_batch_note(note: str) -> None:
@@ -224,6 +239,8 @@ def open_batch(kind: str = "") -> str:
     global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_seq
     global _batch_kind, _batch_rev, _batch_closing
     with ps._lock:
+        if _batch_id and _batch_closing:
+            _parked[_batch_id] = _book()       # 还在等它最后那一轮收尾,别清
         _batch_seq += 1
         _batch_id, _batch_runs = f"batch-{ps._RUN_EPOCH}-{_batch_seq}", []
         _batch_issue, _batch_notes, _batch_kind, _batch_rev = "", [], kind, 0
@@ -240,15 +257,17 @@ def close_batch() -> str:
     **这一批还有一轮在跑时不当场关**(`_batch_closing`):那一轮收尾时把整批连同日报
     的结论合并着发布一次,再由它关。「在跑」和「收尾」在同一把锁里判、做(`_end_run`
     持着 `ps._lock` 调 `_publish_in_batch`、最后才放下 `running`),所以不会两头都
-    以为对方会关。
+    以为对方会关。推迟关的那一刻**先把交卷时的样子写进历史**(`_archive_provisional`):
+    结论不许只活在内存里等那一轮收尾。
     """
     global _batch_closing
     with ps._lock:
-        issue = _batch_issue
         if _batch_id and ps._state.get("running") and ps._state.get("batch") == _batch_id:
             _batch_closing = True
-        else:
-            _close_locked()
+            _archive_provisional()
+            return _batch_issue
+        issue = _batch_issue
+        _close_locked()
         return issue
 
 
@@ -263,7 +282,46 @@ def _close_locked() -> None:
 def batch_live(batch: str) -> bool:
     """`batch` 还开着(含「日报关过了、还有一轮在跑」那一档)。它的类型计划要活到这时候。"""
     with ps._lock:
-        return bool(batch) and batch == _batch_id
+        return bool(batch) and (batch == _batch_id or batch in _parked)
+
+
+#: 交卷那一刻还没落定的那几步,临时记录上写的话。
+PROVISIONAL = "日报交卷时这一步还在后台跑；这一条是交卷那一刻的记录，跑完会换成最终结论"
+
+
+def _archive_provisional() -> None:
+    """日报交卷、这一批还有一轮在跑:**当场**把这一批连同日报的结论写进历史。已持 `ps._lock`。
+
+    那一轮收尾时整批会合并着再发布一次,身份相同(合并沿用最后那一轮的 run id),
+    原位顶掉这一条。不先写这一份的话,从交卷到那一轮收尾之间进程一退(重启、OOM),
+    日报的结论只活在内存里,同步历史里连这一次日报都没有。
+
+    **只写历史,不写状态文件**:状态那一份喂「重试失败项」的派生,一份没跑完的记录
+    不许当成「最近一次运行」。还没落定的那几步记成 `stopped`(当日账本按「没执行过」
+    读,零覆盖),结果账里还没落定的那几格不带,**不带完成序号**(恢复不拿它当顺序凭据)。
+    **永不抛**:写不上的原因并进 `_batch_issue`,由 `close_batch` 的调用方说出来。
+    """
+    global _batch_issue
+    try:
+        from kb.pipeline_persist import run_record   # 延迟:同 `_archive_refused`
+        snap = deepcopy(ps.run_payload())
+        snap.update(run_seq=0, seq_gen=None, finished_at="")
+        for stage in snap["stages"].values():
+            if stage.get("status") in ("running", "pending"):
+                stage.update(status="stopped", detail="；".join(
+                    x for x in (PROVISIONAL, stage.get("detail")) if x))
+        snap["results"] = {step: {ch: cell for ch, cell in cells.items()
+                                  if cell.get("status") not in ("running", "pending")}
+                           for step, cells in (snap.get("results") or {}).items()}
+        merged = _merge_runs([*_batch_runs, snap], _batch_notes, _batch_kind)
+        told = flow.record(_batch_id)
+        if told:
+            merged["flow"] = {"run": merged.get("run_id", ""), **told}
+        ps._save_history(run_record(merged))
+    except Exception as e:                         # noqa: BLE001 - 见 docstring
+        why = (f'日报交卷时这一批还有一轮在跑，交卷那一刻的结论没能写进同步历史({e})；'
+               '那一轮收尾之前重启的话，历史里看不到这一次日报')
+        _batch_issue = f'{_batch_issue};{why}' if _batch_issue else why
 
 
 def round_key() -> tuple[str, str]:
@@ -338,7 +396,18 @@ def _publish_in_batch() -> None:
     要不要清开工标记)。抛之前要做的那两件事在 `_publish_merged` 里(把原因记进批次
     账本、**整批那份照旧当权威**),**不许退回去写当前子轮那一份局部结果**。
     """
-    if not _batch_id or ps._state.get("batch") != _batch_id:
+    batch = ps._state.get("batch")
+    if batch and batch in _parked:
+        # 日报交卷之后又开了新的一批:这一轮属于挪到一边的那一批,用它自己那本账发布,
+        # 发完它就关了(不再放回);当前那一批原样换回来
+        current = _book()
+        _load(_parked.pop(batch))
+        try:
+            _publish_round()
+        finally:
+            _load(current)
+        return
+    if not _batch_id or batch != _batch_id:
         _save_own()
         return
     try:
