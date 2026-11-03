@@ -90,11 +90,11 @@ def _new(owner: str, kind: str, nodes: list[dict]) -> dict:
     # 各自走到哪一步记在 `lanes` 里({节点: 那一步})。`gate` 是全库那几步前面那道门:
     # "" 还没到 / "wait" 在等没跑完的来源 / "go" 用户点了不等 / "open" 已经过去了;
     # `late` 是门打开那一刻还没跑完、这一轮不等的那几类;`gate_at` 是门开始等的时刻
-    # (面板上念「已等 N 分钟」)。
+    # (面板上念「已等 N 分钟」);`release` 是还没走到门口就收到的「不等了」(`release`)。
     return {"owner": owner, "kind": kind, "nodes": nodes,
             "skips": [], "cuts": {}, "cut": "",
             "running": "", "step": "", "lanes": {}, "done": [],
-            "gate": "", "gate_at": "", "late": [],
+            "gate": "", "gate_at": "", "late": [], "release": False,
             "times": {}, "results": {}}
 
 
@@ -418,20 +418,28 @@ def park(owner: str, key: str) -> None:
 
 
 def release(owner: str) -> bool:
-    """不经人手开门(日报超出时间预算)。门没在等就什么都不做;返回这一下开没开。"""
+    """不经人手开门(日报超出时间预算)。返回这个意思落下了没有(门已经过去了 = 没有)。
+
+    **还没走到门口也要落下,不许只认「此刻在等」**:来源那几路起跑前要在主线程上逐个
+    取采集器,预算偏偏在这段时间里用完的话,只试一次的放行落空,之后门开始等、却再也
+    没人替它开 —— 日志写着「接着入库处理」,实际一直在等。所以记成一个待消费的意思,
+    门一开始等就放行(`released`)。
+    """
     with _lock:
         plan = _plans.get(owner) if owner else None
-        if not plan or plan.get("gate") != "wait":
+        if not plan or plan.get("gate") == "open":
             return False
-        plan["gate"] = "go"
+        if plan.get("gate") == "wait":
+            plan["gate"] = "go"
+        plan["release"] = True
         return True
 
 
 def released(owner: str) -> bool:
-    """用户点了「不等了，继续」。"""
+    """用户点了「不等了，继续」,或者日报那边超出预算替他点过了(哪怕那时还没走到门口)。"""
     with _lock:
         plan = _plans.get(owner) if owner else None
-        return bool(plan) and plan.get("gate") == "go"
+        return bool(plan) and (plan.get("gate") == "go" or bool(plan.get("release")))
 
 
 def live(state: dict) -> dict | None:

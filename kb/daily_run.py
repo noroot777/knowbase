@@ -484,7 +484,11 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                          _state['detail'] or '日报这一轮没有留下结论')
         finally:
             # 批次在 `library_tail` 里已经关过、发布过(带着这份计划);到这儿才作废它。
-            flow.end(batch)
+            # 这一批还有一轮在跑(没等的那几路)时批次是由那一轮收尾时关的,计划也归它收
+            # (`pipeline_batch.close_batch`)—— 这里作废的话它落盘时就没有计划了
+            from kb.pipeline import batch_live     # 延迟:同上(不出报时 `pl` 没 import)
+            if not batch_live(batch):
+                flow.end(batch)
             _release_round(sched_day, retry)
 
 

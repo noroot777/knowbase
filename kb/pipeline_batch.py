@@ -143,6 +143,11 @@ _batch_kind = ""
 # 结论却变了,前端要靠它知道「同一轮、该重取了」(`pipeline_payload.own_revision`)。
 # 跟 `_batch_kind` 一样只在 `open_batch` / `close_batch` 里清。
 _batch_rev = 0
+# 日报那边已经关过这一批,**可这一批还有一轮在跑**(入库处理一走完日报就交卷,没等的
+# 那几路还在后台跑完,见 `daily_sync._sync_sources`)。这时不能当场关:账本一清,那一轮
+# 收尾时找不到自己的批次,按一次普通同步落盘,日报的结论、身份和类型计划一起丢了。
+# 所以只记下「关了」,**由那一轮自己在收尾时关**(`_publish_in_batch`)。
+_batch_closing = False
 
 
 def _remember_batch_note(note: str) -> None:
@@ -217,11 +222,12 @@ def open_batch(kind: str = "") -> str:
     于是今天第二次抓取被并进第一次,面板上永远写着「第 1 次」。
     """
     global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_seq
-    global _batch_kind, _batch_rev
+    global _batch_kind, _batch_rev, _batch_closing
     with ps._lock:
         _batch_seq += 1
         _batch_id, _batch_runs = f"batch-{ps._RUN_EPOCH}-{_batch_seq}", []
         _batch_issue, _batch_notes, _batch_kind, _batch_rev = "", [], kind, 0
+        _batch_closing = False
         return _batch_id
 
 
@@ -230,12 +236,34 @@ def close_batch() -> str:
 
     盘上那份已经在最后一个子轮收尾时写全了,这里不再写 —— 所以**提早返回、
     甚至中途崩掉都不会少东西**。
+
+    **这一批还有一轮在跑时不当场关**(`_batch_closing`):那一轮收尾时把整批连同日报
+    的结论合并着发布一次,再由它关。「在跑」和「收尾」在同一把锁里判、做(`_end_run`
+    持着 `ps._lock` 调 `_publish_in_batch`、最后才放下 `running`),所以不会两头都
+    以为对方会关。
     """
-    global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_kind, _batch_rev
+    global _batch_closing
     with ps._lock:
-        issue, _batch_id, _batch_runs = _batch_issue, "", []
-        _batch_issue, _batch_notes, _batch_kind, _batch_rev = "", [], "", 0
+        issue = _batch_issue
+        if _batch_id and ps._state.get("running") and ps._state.get("batch") == _batch_id:
+            _batch_closing = True
+        else:
+            _close_locked()
         return issue
+
+
+def _close_locked() -> None:
+    global _batch_id, _batch_runs, _batch_issue, _batch_notes, _batch_kind, _batch_rev
+    global _batch_closing
+    _batch_id, _batch_runs = "", []
+    _batch_issue, _batch_notes, _batch_kind, _batch_rev = "", [], "", 0
+    _batch_closing = False
+
+
+def batch_live(batch: str) -> bool:
+    """`batch` 还开着(含「日报关过了、还有一轮在跑」那一档)。它的类型计划要活到这时候。"""
+    with ps._lock:
+        return bool(batch) and batch == _batch_id
 
 
 def round_key() -> tuple[str, str]:
@@ -313,8 +341,20 @@ def _publish_in_batch() -> None:
     if not _batch_id or ps._state.get("batch") != _batch_id:
         _save_own()
         return
+    try:
+        _publish_round()
+    finally:
+        if _batch_closing:
+            # 日报那边已经关过这一批了(见 `close_batch`):这一轮是它最后一个写入者
+            _close_locked()
+
+
+def _publish_round() -> None:
     _batch_runs.append(ps.run_payload())
-    if len(_batch_runs) < 2:
+    # 头一轮自己就是整批 —— 除非日报已经交卷:那一刻这一批的结论(`batch_note`)只在
+    # 账本里,这一轮又是最后一轮,只写自己那份就把它连同「日报」这个身份一起丢了
+    first = len(_batch_runs) < 2
+    if first and not _batch_closing:
         _save_own()
         return
     # **资格冲突和 I/O 故障是两件完全不同的事,分开判。** 混成一种异常的后果是
@@ -323,7 +363,7 @@ def _publish_in_batch() -> None:
     # 失败于是内存里和磁盘上一起没了(第 5 轮实测:一次临时写失败就够)。
     # `archive=False`:历史那一份紧接着由 `_end_run` 自己那一笔写(它两份分别尝试、
     # 分别诊断,见那边的注释)。这里再写一次只是多一次全量重写历史文件。
-    err = _publish_merged(archive=False)
+    err = _publish_merged(archive=False, first=first)
     if isinstance(err, PublishRefused):
         # 没资格:期间有更新的一轮独立运行收尾(用户自己点了同步)。退回只写自己
         # 那一份 —— **我们这一轮确实是此刻最新的**,而把前几轮一起合进去等于拿一批
@@ -334,7 +374,7 @@ def _publish_in_batch() -> None:
         raise err                                  # 写盘炸了:原样抛给 `_end_run`
 
 
-def _publish_merged(*, archive: bool) -> Exception | None:
+def _publish_merged(*, archive: bool, first: bool = False) -> Exception | None:
     """把**整批**(已收尾的子轮 + 批次事件)合并着发布一次。已持 `ps._lock`。
 
     返回 None = 发布成功;返回异常 = 这一次没发布出去(`PublishRefused` = 没资格,
@@ -346,6 +386,10 @@ def _publish_merged(*, archive: bool) -> Exception | None:
     必须自己答一次。子轮收尾传 False(紧接着 `_end_run` 自己那一笔会写);批次事件传
     True,它后面没有子轮了,不自己补一次就只有「最近一次运行」收到这一版(审查 R3)。
 
+    `first`:正在收尾的就是这一批的头一轮。资格判据问的是「此刻的最新是不是我们
+    这一批的」,而头一轮收尾之前最新的那一轮必然是别人 —— 它本来就是此刻最新的那一轮
+    (同 `_save_own`),不问资格。
+
     **口径只有这一份**:哪一批有资格发布、合成什么、谁当权威、覆盖了哪几轮。两个
     调用方(子轮收尾、批次事件)在这几件事上分裂一次就等于一边把整批的失败写丢了。
     """
@@ -354,7 +398,8 @@ def _publish_merged(*, archive: bool) -> Exception | None:
     # 改内存里那份汇总,版本不动的话前端那份缓存就认不出它变过。
     _batch_rev += 1
     try:
-        _publish_right(_batch_round_ids())
+        if not first:
+            _publish_right(_batch_round_ids())
     except PublishRefused as e:
         _batch_issue = e.reason
         # **没资格当「最近一次运行」,不等于没资格补全自己那条历史。** 两件事是两种

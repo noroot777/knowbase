@@ -223,15 +223,17 @@ def _stage(name: str, status: str, detail: str = "",
     # `fold` 返回 None,照原样写 —— 只更新当前那一段、再合成一条对外结论的判据
     # 全在那边,这里不许再判一次。
     from kb.pipeline_results import note
-    from kb.pipeline_segments import fold
+    from kb.pipeline_segments import fold, publish_lock
     # **两份账,各答一个问题。** 分段那一份答「面板上这张卡片怎么写」(各段扁平合并,
     # 不带来源归属);结果账答「哪个来源这一步什么结论、实际覆盖了什么」—— 当日欠账
     # 按它算。**记的是合并之前这一条**,合并之后就分不出是谁的了(第 3 轮审查 R2)。
     note(name, entry)
-    folded = fold(name, entry, detail)
-    if folded:
-        entry, detail = folded
-    _state["stages"][name] = entry
+    # 并进自己那一段和发布合并卡片在同一把锁里(理由在 `publish_lock` 上)
+    with publish_lock:
+        folded = fold(name, entry, detail)
+        if folded:
+            entry, detail = folded
+        _state["stages"][name] = entry
     # 来源那几路是并行的:全库那几步开跑之后(没等它的那一路还在后台跑),它的进度
     # 不许把「当前阶段」抢回抓取 / 导出 —— 日报那边按它念进度
     if status == "running" and not (_lanes.current() and _state.get("current_stage")

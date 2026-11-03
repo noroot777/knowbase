@@ -63,9 +63,9 @@ class _Base(unittest.TestCase):
 class _Rig:
     """桩掉执行层(`_guarded` / `_settle` / 开轮 / 「交完了」),`Lanes` 与计划是真的。"""
 
-    def __init__(self, on_crawl=None):
+    def __init__(self, on_crawl=None, on_export=None):
         self.calls, self.settled, self.ended = [], [], []
-        self.on_crawl = on_crawl
+        self.on_crawl, self.on_export = on_crawl, on_export
         self._patches = [
             patch.object(srcs, "crawl_channels", return_value=SCOPES),
             patch.object(srcs, "_collector", side_effect=lambda s: (object(), None)),
@@ -81,6 +81,8 @@ class _Rig:
         self.calls.append((stage, scope["channel"]))
         if self.on_crawl and stage == "crawl":
             self.on_crawl(scope["channel"])
+        if self.on_export and stage == "export":
+            self.on_export(scope["channel"])
 
     def __enter__(self):
         for p in self._patches:
@@ -170,6 +172,55 @@ class GateTest(_Base):
         self.assertNotIn(("export", "b"), self.rig.calls)
         self.assertIn(("export", "b", "stopped"), self.rig.settled)
 
+    def test_a_source_already_exporting_still_counts_as_late(self):
+        """b 已经进了导出、还没导完:门开时它照样算没等。
+
+        「进了导出」证明不了「这一轮的入库看得到它的文件」(订阅那几类先补正文、翻译,
+        最后才拿维护锁写 vault),漏记就是那几篇静默缺席。它的导出照常做完,不挪后。
+        """
+        _plan()
+        release_b = threading.Event()
+        self.addCleanup(release_b.set)
+        with _Rig(on_export=lambda ch: ch == "b" and release_b.wait(5)) as rig:
+            run = srcs.run_sources(["crawl", "export"], None, OWNER)
+            self.assertTrue(_until(lambda: ("export", "b") in rig.calls))
+            gate = threading.Thread(target=run.wait_gate)
+            gate.start()
+            self.assertTrue(_until(lambda: flow._plans[OWNER]["gate"] == "wait"))
+            self.assertEqual((True, ""), flow.request(OWNER, "ingest", "go"))
+            gate.join(5)
+            self.assertEqual(["src:b"], flow._plans[OWNER]["late"])
+            release_b.set()
+            run.join()
+        self.assertEqual(1, rig.calls.count(("export", "b")), "已经开始的导出照常做完、只做一次")
+        self.assertFalse(run.broken)
+
+    def test_an_early_release_is_kept_until_the_gate_waits(self):
+        """日报超预算时各路还没走到门口(还在主线程上逐个取采集器):放行要留到门开始等。"""
+        _plan()
+        self.assertTrue(flow.release(OWNER))
+        self.assertEqual("", flow._plans[OWNER]["gate"])
+        release_b = threading.Event()
+        self.addCleanup(release_b.set)
+        with _Rig(on_crawl=lambda ch: ch == "b" and release_b.wait(5)):
+            run = srcs.run_sources(["crawl", "export"], None, OWNER)
+            gate = threading.Thread(target=run.wait_gate)
+            gate.start()
+            gate.join(3)
+            self.assertFalse(gate.is_alive(), "放行落空了:门一直在等")
+            plan = flow._plans[OWNER]
+            self.assertEqual("go", plan["gate"])
+            self.assertIn("src:b", plan["late"])
+            release_b.set()
+            run.join()
+
+    def test_a_release_after_the_gate_has_opened_does_nothing(self):
+        """反过来钉一边:门已经过去了,放行不再落下(下一轮同一份计划也不会被它带着走)。"""
+        _plan()
+        flow.gate(OWNER, "open")
+        self.assertFalse(flow.release(OWNER))
+        self.assertFalse(flow.released(OWNER))
+
     def test_go_is_refused_unless_the_gate_is_waiting(self):
         _plan()
         self.assertEqual((False, "现在没有在等谁"), flow.request(OWNER, "ingest", "go"))
@@ -177,6 +228,42 @@ class GateTest(_Base):
         self.assertFalse(flow.request(OWNER, "src:a", "go")[0], "来源那一类不能「不等」")
         self.assertEqual((True, ""), flow.request(OWNER, "ingest", "go"))
         self.assertTrue(flow.released(OWNER))
+
+
+class PartialStartTest(_Base):
+    def test_a_failed_thread_start_waits_for_the_lanes_already_running(self):
+        """第二路的线程开不出来:第一路已经在抓,它跑完之前不许往外抛(抛出去就宣布空闲了)。"""
+        _plan()
+        real = threading.Thread
+        made, out = [], {}
+
+        def thread(*a, **k):
+            if made:
+                raise RuntimeError("can't start new thread")
+            made.append(real(*a, **k))
+            return made[-1]
+        release_a = threading.Event()
+        self.addCleanup(release_a.set)
+
+        def start():
+            try:
+                srcs.run_sources(["crawl", "export"], None, OWNER)
+            except RuntimeError as e:
+                out["err"] = e
+        with _Rig(on_crawl=lambda ch: release_a.wait(5)) as rig, \
+                patch.object(srcs.threading, "Thread", side_effect=thread):
+            caller = real(target=start)
+            caller.start()
+            self.assertTrue(_until(lambda: ("crawl", "a") in rig.calls))
+            time.sleep(0.2)
+            self.assertTrue(caller.is_alive(), "a 还在抓,起跑那一步就先抛出去了")
+            release_a.set()
+            caller.join(5)
+        self.assertIn("err", out)
+        self.assertIn(("export", "a"), rig.calls, "a 没跑完就抛出去了")
+        self.assertEqual([], rig.ended, "有一路没起跑的那一轮不许记「交完了」")
+        self.assertEqual("error", results.snapshot()["crawl"]["b"]["status"])
+        self.assertNotIn("src:b", flow._plans[OWNER]["lanes"], "没起跑的那一路还挂在面板上")
 
 
 class CuttingPerLaneTest(_Base):
@@ -254,6 +341,47 @@ class AttributionTest(_Base):
             t.join(5)
         cells = results.snapshot()["crawl"]
         self.assertEqual({"a 好了", "b 好了"}, {cells["a"]["detail"], cells["b"]["detail"]})
+
+    def test_a_stale_merge_cannot_be_published_over_a_newer_one(self):
+        """A 合并出「B 还在跑」之后被抢占,B 跑完发布了「全都好了」:A 那份旧的不许再盖回去。
+
+        抢占点用替身 `_merge_segments` 摆死:A 收尾那次合并算完后停下等 B(最多 1 秒)。
+        锁住了的话 B 根本进不来,等满超时 A 先发布、B 后发布;没锁的话 B 先发布、A 后盖。
+        """
+        real = pipeline_segments._merge_segments
+        armed, a_merged, b_go, b_done = threading.Event(), threading.Event(), \
+            threading.Event(), threading.Event()
+
+        def merge(segments):
+            got = real(segments)
+            if armed.is_set():
+                armed.clear()
+                a_merged.set()
+                b_done.wait(1.0)
+            return got
+
+        def lane_a():
+            with lanes.bind("a"), pipeline_segments.stage_segment("crawl", "A"):
+                ps._stage("crawl", "ok", "A 好了")
+                armed.set()
+
+        def lane_b():
+            with lanes.bind("b"), pipeline_segments.stage_segment("crawl", "B"):
+                b_go.wait(5)
+                ps._stage("crawl", "ok", "B 好了")
+            b_done.set()
+        with patch.object(pipeline_segments, "_merge_segments", side_effect=merge):
+            tb = threading.Thread(target=lane_b)
+            tb.start()
+            self.assertTrue(_until(lambda: len(pipeline_segments._segments.get("crawl", [])) == 1))
+            ta = threading.Thread(target=lane_a)
+            ta.start()
+            self.assertTrue(a_merged.wait(5))
+            b_go.set()
+            ta.join(5)
+            tb.join(5)
+        self.assertEqual("ok", ps._state["stages"]["crawl"]["status"],
+                         "两段都好了,合并卡片却停在旧的那一份上")
 
     def test_a_lane_does_not_pull_the_current_stage_back_from_the_library_steps(self):
         ps._state["current_stage"] = "index"

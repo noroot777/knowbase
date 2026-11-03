@@ -213,6 +213,10 @@ def _source_entry(channel: str, label: str, fetch: list[str], results: dict,
         # 进过这一轮却没留下自己那一格:不知道,不许借别的来源的绿说它成了
         return {**entry, 'status': 'error' if bad else 'unknown',
                 'detail': '；'.join(bad + ['这一轮没留下这个来源自己的结果'])[:400]}
+    if unsettled := [name for name, c in own if c.get('status') not in _SETTLED]:
+        # 还在跑(或者压根没报过结论)的那一格:不知道它最后成没成,更不许算「同步完成」
+        return {**entry, 'status': 'error' if bad else 'unknown',
+                'detail': '；'.join(bad + [f'{"、".join(unsettled)} 还没跑完'])[:400]}
     return {**entry, 'status': 'error' if bad else 'skipped' if idle else 'ok',
             'detail': '；'.join(bad + idle)[:400] if bad or idle else '同步完成'}
 

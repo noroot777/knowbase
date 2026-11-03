@@ -144,3 +144,16 @@ class SyncSourcesTest(unittest.TestCase):
         self.steps = [stuck, lambda: None, lambda: self.snap.update(running=False)]
         self.go(deadline=time.monotonic() - 1, budget=-10)
         self.stop.assert_called_once_with(RUN)
+
+
+class SourceEntryTest(unittest.TestCase):
+    def test_a_cell_still_running_is_not_graded_as_synced(self):
+        """那一格还没落定(导出还在补正文、翻译):不知道它最后成没成,不许念「同步完成」。"""
+        results = {'crawl': {'a': _cell()}, 'export': {'a': _cell('running', '')}}
+        entry = daily_sync._source_entry('a', '甲', FETCH, results, late=False)
+        self.assertEqual('unknown', entry['status'])
+        self.assertIn('export 还没跑完', entry['detail'])
+        # 反过来钉一边:两格都落定了就是同步完成
+        results['export']['a'] = _cell()
+        entry = daily_sync._source_entry('a', '甲', FETCH, results, late=False)
+        self.assertEqual(('ok', '同步完成'), (entry['status'], entry['detail']))

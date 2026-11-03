@@ -177,7 +177,6 @@ class Lanes:
         self.broken = False
         self.threads: list[tuple[str, threading.Thread]] = []
         self.late: set[str] = set()
-        self.exporting: set[str] = set()
         self.tail = threading.Event()
         self._lock = threading.Lock()
 
@@ -222,12 +221,31 @@ class Lanes:
                 flow.leave(self.owner, node)
             raise
         self.opened = True
-        for scope, node in entered:
-            collector, broken = _collector(scope)
-            thread = threading.Thread(target=self._lane, args=(scope, node, collector, broken),
-                                      name=f"src-{scope['channel']}", daemon=True)
+        for i, (scope, node) in enumerate(entered):
+            try:
+                collector, broken = _collector(scope)
+                thread = threading.Thread(target=self._lane,
+                                          args=(scope, node, collector, broken),
+                                          name=f"src-{scope['channel']}", daemon=True)
+                thread.start()
+            except BaseException as exc:
+                self._abort(entered[i:], exc)
+                raise
             self.threads.append((node, thread))
-            thread.start()
+
+    def _abort(self, rest: list, exc: BaseException) -> None:
+        """起到一半起不动了(线程开不出来):**已经起跑的那几路要等它们跑完才许往外抛**。
+
+        句柄还没交给编排层,它的 `finally` 里没有 `join` 可调 —— 直接抛出去的话这一轮
+        当场宣布空闲,而已经起跑的那几路还在写库、写进度,跟下一轮搅在一起。没起来的
+        那几路各留一格「没起跑」(不替它编结论),这一轮不记「交完了」。
+        """
+        self.broken = True
+        for scope, node in rest:
+            results.failed(self.steps[0], scope["channel"], scope.get("accounts"),
+                           f"这一路没有起跑:{type(exc).__name__}: {exc}")
+            flow.leave(self.owner, node)
+        self.join()
 
     def _lane(self, scope: dict, node: str, collector, broken: str | None) -> None:
         with lanes.bind(scope["channel"]):
@@ -258,8 +276,11 @@ class Lanes:
                 break
             time.sleep(0.5)
         with self._lock:
-            late = [] if _state.get("stop_requested") else \
-                [n for n in self.running() if n not in self.exporting]
+            # **还没跑完的一律算没等,已经在导出的也一样。** 「进了导出这一步」证明不了
+            # 「这一轮的入库看得到它的文件」:订阅那几类的导出先补正文、翻译(网络和模型,
+            # 可能好几分钟),最后才拿维护锁写 vault —— 索引可以先拿到锁扫完。拿不准就往
+            # 「没等它」那边记:误记顶多日报里多一句「没等它」,漏记是那几篇静默缺席
+            late = [] if _state.get("stop_requested") else self.running()
             self.late.update(late)
         if late:
             # 门打开那一刻还在跑的几路:照常跑完、照常记账,导出挪到全库那几步之后
@@ -270,12 +291,11 @@ class Lanes:
     def hold(self, node: str) -> bool:
         """这一路要开始导出了。没等它的那一路要等全库那几步走完;返回 False = 等的期间整轮被停了。
 
-        「这一路算不算被不等」和「开始导出」在同一把锁里定:门正好在这一刻打开时,要么它
-        已经在导出(那就照常导完,索引会排队等它那把维护锁),要么它被记成不等、导出挪后。
+        「这一路算不算被不等」在 `_lock` 里读:门正好在这一刻打开时,要么它已经开始导出
+        (照常导完 —— 它照样被记成没等,理由在 `wait_gate`),要么导出挪到全库那几步之后。
         """
         with self._lock:
             if node not in self.late:
-                self.exporting.add(node)
                 return True
         if not self.tail.is_set():
             flow.park(self.owner, node)
