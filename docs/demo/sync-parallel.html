@@ -20,8 +20,9 @@ body{font:15px/1.7 var(--font-body);background:var(--paper);color:var(--ink);pad
 .wrap{max-width:1240px;margin:0 auto}
 button{font:13px/1 var(--font-body);cursor:pointer}
 button.go{background:var(--brand);color:var(--card);border:0;border-radius:9px;padding:0 16px;min-height:36px}
-button.ghost{background:var(--card);color:var(--ink-2);border:1px solid var(--line);border-radius:9px;padding:0 12px;min-height:30px}
+button.ghost{background:var(--card);color:var(--ink-2);border:1px solid var(--line);border-radius:8px;padding:0 10px;min-height:28px;font-size:12px}
 button.ghost:hover{background:var(--brand-tint);border-color:var(--brand-soft)}
+button.text{background:none;border:0;color:var(--brand);padding:0;font-size:12.5px}
 .mono{font-family:var(--font-mono)}
 
 /* demo 自己的工具条，不属于页面 */
@@ -38,76 +39,71 @@ h1{font-family:var(--font-display);font-weight:900;font-size:26px;letter-spacing
 .facts{display:flex;gap:7px;align-items:baseline;font-size:13px;color:var(--muted)}
 .facts b{font:600 15px var(--font-mono);color:var(--ink-2)}
 
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;margin-bottom:16px}
+.panel-h{display:flex;align-items:baseline;gap:14px;padding:16px 22px 12px}
+.panel-h h2{font-size:16px}
+.panel-h .meta{font-size:12.5px;color:var(--muted)}
+
 /* ── 本轮那张卡 ── */
-.flow{background:var(--card);border:1px solid var(--line);border-top:3px solid var(--brand);border-radius:12px;padding:20px 24px 20px}
+.flow{border-top:3px solid var(--brand);padding:20px 24px 16px}
 .flow.has-error{border-top-color:var(--danger)}
-.flow-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:18px}
+.flow-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:14px}
 .flow-head h2{font-size:20px;line-height:1.4;margin-bottom:2px}
 .flow-head p{font-size:13px;color:var(--muted)}
 .metrics{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0}
 .metrics b{font:600 20px/1.4 var(--font-display)}
 .metrics span{font-size:12px;color:var(--muted)}
 
-/* 时间轴：每一行一个来源 / 一个全库步骤，横向是同一根时间轴 */
-.gantt{--name:184px;--dur:92px;--act:104px}
-.g-row{display:grid;grid-template-columns:var(--name) 1fr var(--dur) var(--act);align-items:center;column-gap:14px;min-height:44px;border-radius:9px}
-.g-row.lane{cursor:pointer}
-.g-row.lane:hover{background:var(--brand-tint)}
-.g-row.open{background:var(--brand-tint)}
-.g-name{display:flex;align-items:center;gap:8px;padding-left:8px;font-size:13.5px;font-weight:600;white-space:nowrap}
-.g-dur{font:12px var(--font-mono);color:var(--muted);text-align:right}
-.g-act{text-align:right;padding-right:6px}
-.g-act button{min-height:28px;font-size:12px}
-.dot{width:10px;height:10px;border-radius:50%;flex-shrink:0;background:var(--line)}
-[data-s=done] .dot{background:var(--brand)}
-[data-s=run] .dot{background:var(--brand);animation:pulse 1.4s ease-in-out infinite}
-[data-s=issue] .dot{background:var(--danger)}
-[data-s=wait] .dot{background:var(--warn)}
-@keyframes pulse{50%{opacity:.25}}
+/* 每行：名字 | 一根细条（全轮共用一个比例尺）| 此刻那句 | 耗时 | 动作 */
+.r{display:grid;grid-template-columns:110px minmax(0,1fr) 300px 64px 104px;align-items:center;column-gap:16px;min-height:40px;padding:0 8px;border-radius:8px}
+.r.click{cursor:pointer}
+.r.click:hover,.r.open{background:var(--brand-tint)}
+.r .nm{font-size:13.5px;font-weight:600;white-space:nowrap}
+.r .say{font-size:12.5px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .t{font:12px var(--font-mono);color:var(--muted);text-align:right}
+.r .act{text-align:right}
+.bar{position:relative;height:4px;background:var(--line-soft);border-radius:2px}
+.bar i{position:absolute;top:0;bottom:0;border-radius:2px;background:var(--brand)}
+.r[data-s=run] .bar i::after{content:"";position:absolute;right:-3px;top:-3px;width:10px;height:10px;border-radius:50%;background:var(--brand);animation:pulse 1.4s ease-in-out infinite}
+.r[data-s=issue] .bar i{background:var(--danger)}
+.r[data-s=issue] .say{color:var(--danger)}
+.r[data-s=wait] .say{color:var(--warn)}
+.r[data-s=todo] .nm,.r[data-s=todo] .say{color:var(--muted)}
+.r .late{color:var(--muted)}
+@keyframes pulse{50%{opacity:.3}}
+.sep{height:1px;background:var(--line-soft);margin:6px 8px}
 
-.track{position:relative;height:44px}
-.axis .track{height:26px}
-.tick{position:absolute;top:4px;transform:translateX(-50%);font:11px var(--font-mono);color:var(--muted)}
-.grid-line{position:absolute;top:0;bottom:0;width:1px;background:var(--line-soft)}
-.seg{position:absolute;top:13px;height:18px;border-radius:5px;min-width:3px}
-.seg.crawl{background:var(--brand)}
-.seg.export{background:var(--brand-soft);box-shadow:inset 0 0 0 1px var(--brand)}
-.seg.step{background:var(--brand)}
-.seg.issue{background:var(--warn-soft);box-shadow:inset 0 0 0 1.5px var(--danger)}
-.seg.waiting{background:repeating-linear-gradient(135deg,var(--warn-soft) 0 6px,transparent 6px 12px);box-shadow:inset 0 0 0 1px var(--warn)}
-.seg.live{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.28) 0 6px,transparent 6px 12px);background-size:17px 17px;animation:slide 1s linear infinite}
-.seg.export.live{background-color:var(--brand-soft)}
-@keyframes slide{to{background-position:17px 0}}
-.seg-say{position:absolute;top:32px;font:11px var(--font-mono);color:var(--muted);white-space:nowrap}
-.g-row[data-s=run] .seg-say{color:var(--brand)}
-.g-row[data-s=issue] .seg-say{color:var(--danger)}
-.tag{font:500 11px/1 var(--font-body);color:var(--warn);background:var(--warn-soft);border-radius:999px;padding:4px 8px;margin-left:4px}
+.detail{margin:2px 8px 8px 126px;border-left:2px solid var(--brand-soft);padding:2px 0 2px 16px}
+.step{display:grid;grid-template-columns:70px 1fr auto;gap:12px;padding:5px 0;font-size:13px}
+.step b{font-weight:600}
+.step span{color:var(--ink-2)}
+.step em{font-style:normal;color:var(--muted);font-size:12.5px}
+.step[data-s=issue] span,.step[data-s=issue] em{color:var(--danger)}
+.step[data-s=run] em{color:var(--brand)}
 
-/* 贯穿所有行的两根竖线：此刻 / 入库那道门 */
-.overlay{position:absolute;inset:0 calc(var(--dur) + var(--act) + 28px) 0 calc(var(--name) + 14px);pointer-events:none}
-.now{position:absolute;top:22px;bottom:0;width:0;border-left:1.5px solid var(--brand)}
-.now::before{content:"此刻";position:absolute;bottom:-18px;left:-13px;font:600 11px var(--font-body);color:var(--brand);background:var(--card);padding:0 3px;white-space:nowrap}
-.gate{position:absolute;top:22px;bottom:0;width:0;border-left:1.5px dashed var(--ink-2)}
-.g-body{position:relative;padding-bottom:14px}
-.split{height:1px;background:var(--line);margin:8px 0}
+/* ── 历史运行（列不变，点一行就把上面那张卡换成那一轮） ── */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font-weight:500;font-size:12px;color:var(--muted);text-align:center;padding:8px 6px;border-bottom:1px solid var(--line-soft)}
+th:first-child,td:first-child{text-align:left;padding-left:22px}
+td{text-align:center;padding:9px 6px;border-bottom:1px solid var(--line-soft)}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--brand-tint)}
+tbody tr.on{background:var(--brand-tint);box-shadow:inset 3px 0 var(--brand)}
+td.l{text-align:left}
+.c{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--brand)}
+.c.issue{background:var(--danger)}
+.c.run{animation:pulse 1.4s ease-in-out infinite}
+.c.none{width:4px;height:4px;background:var(--line)}
+.res-issue{color:var(--danger)}
 
-/* 门口那一条 */
-.gatebar{position:relative;z-index:2;display:flex;align-items:center;gap:14px;margin:6px 0 6px;padding:10px 14px;border:1px solid var(--warn);background:var(--warn-soft);border-radius:10px;font-size:13.5px;color:var(--warn)}
-.gatebar b{color:var(--ink)}
-.gatebar .mono{font-size:12.5px}
-.gatebar button{margin-left:auto}
-
-/* 点开一个来源：两步的明细（沿用现在的样式） */
-.detail{position:relative;z-index:2;margin:4px 0 10px calc(var(--name) + 14px);border:1px solid var(--line);border-radius:10px;background:var(--card);padding:6px 16px}
-.step{display:grid;grid-template-columns:26px 1fr auto;gap:10px;padding:10px 0;border-bottom:1px solid var(--line-soft)}
-.step:last-child{border-bottom:0}
-.step .n{width:22px;height:22px;border-radius:50%;display:grid;place-items:center;font:600 11px var(--font-mono);background:var(--brand-soft);color:var(--brand-deep);margin-top:2px}
-.step b{font-size:14px}
-.step p{font-size:13px;color:var(--ink-2)}
-.step .st{font-size:12.5px;text-align:right;color:var(--muted)}
-.step[data-s=issue] .n{background:var(--warn-soft);color:var(--danger)}
-.step[data-s=issue] p,.step[data-s=issue] .st{color:var(--danger)}
-.step[data-s=run] .st{color:var(--brand)}
+/* ── 运行日志：按来源筛 ── */
+.filters{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.filters button{font-size:12px;color:var(--ink-2);background:none;border:1px solid var(--line);border-radius:999px;padding:5px 10px}
+.filters button[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--card)}
+.log{font:12px/1.9 var(--font-mono);padding:4px 22px 16px;max-height:360px;overflow:auto}
+.log div{display:grid;grid-template-columns:62px 76px 1fr;gap:10px;color:var(--ink-2)}
+.log .who{color:var(--muted);font-family:var(--font-body)}
+.log .bad{color:var(--danger)}
 </style>
 </head>
 <body>
@@ -115,10 +111,10 @@ h1{font-family:var(--font-display);font-weight:900;font-size:26px;letter-spacing
 
 <div class="demo-bar" role="group" aria-label="demo 场景">
   <b>场景</b>
-  <button class="chip" data-k="run">① 几路同时在跑</button>
-  <button class="chip" data-k="gate">② 入库前在等 YouTube</button>
+  <button class="chip" data-k="live">① 几路同时在跑</button>
+  <button class="chip" data-k="gate">② 入库处理在等 YouTube</button>
   <button class="chip" data-k="skip">③ 点了「不等了」之后</button>
-  <button class="chip" data-k="end">④ 整轮结束</button>
+  <button class="chip" data-k="r1103">④ 整轮结束</button>
   <span class="say" id="say"></span>
 </div>
 
@@ -127,170 +123,203 @@ h1{font-family:var(--font-display);font-weight:900;font-size:26px;letter-spacing
   <button class="go">新建同步</button>
 </div>
 
-<section class="flow" id="flow" aria-label="本轮同步">
+<section class="panel flow" id="flow" aria-label="本轮同步">
   <div class="flow-head">
     <div><h2 id="title"></h2><p id="sub"></p></div>
     <div class="metrics"><b id="m1"></b><span id="m2"></span></div>
   </div>
-  <div class="gantt" id="gantt"></div>
+  <div id="rows"></div>
+</section>
+
+<section class="panel" aria-label="历史运行">
+  <div class="panel-h"><h2>历史运行</h2><span class="meta">保留最近 3 天 · 7 轮</span></div>
+  <table>
+    <thead><tr><th>时间</th><th>类型</th>
+      <th>公众号</th><th>大V观点</th><th>RSS</th><th>YouTube</th><th>简报</th><th>网页专栏</th>
+      <th>入库处理</th><th>生成日报</th><th>整理工具与 Wiki</th><th>耗时</th><th class="l">结果</th></tr></thead>
+    <tbody id="hist"></tbody>
+  </table>
+</section>
+
+<section class="panel" aria-label="运行日志">
+  <div class="panel-h"><h2>运行日志</h2><span class="meta" id="log-meta"></span><div class="filters" id="filters"></div></div>
+  <div class="log" id="log"></div>
 </section>
 
 </div>
 <script>
-// 时间一律是「距 09:00 的分钟数」。数字取自 11-02 / 11-03 两轮日报的真实各段耗时。
-const LANES = [
-  {k:'wx',  name:'公众号'},
-  {k:'x',   name:'大V观点'},
-  {k:'rss', name:'RSS'},
-  {k:'yt',  name:'YouTube'},
-  {k:'dg',  name:'简报'},
-  {k:'web', name:'网页专栏'},
+const SRC = [['wx','公众号'],['x','大V观点'],['rss','RSS'],['yt','YouTube'],['dg','简报'],['web','网页专栏']];
+const TAIL = [['ingest','入库处理'],['daily','生成日报'],['tidy','整理工具与 Wiki']];
+const NAME = Object.fromEntries([...SRC, ...TAIL, ['all','全库']]);
+
+// 时间是「距这一轮开跑的分钟数」。11-02 / 11-01 是真实留档(那时还是逐个跑);11-03 那几档是按真实各段耗时排成同时跑。
+const DONE_SRC = {
+  wx:[0,16.1,'done','新增 34 篇 · 导出 34 篇'],
+  x:[0,21,'issue','1 步有问题 · 新增 131 条'],
+  rss:[0,7.2,'done','新增 62 条 · 已保存 31 条'],
+  dg:[0,.5,'done','新增 0 条'], web:[0,.3,'done','新增 0 条'],
+};
+const RUNS = {
+  live:{ live:true, now:12, title:'日报进行中', m1:'3 / 6 来源跑完', m2:'已用 12 分钟',
+    say:'六个来源同时开跑，每行一根细条，所有行共用同一个比例尺：条越长跑得越久，末端在闪的还在跑。点一行展开它的两步。',
+    rows:{ wx:[0,12,'run','导出 · 配图 160/391'], x:[0,12,'run','抓取 · 读取 31/51 个账号'], rss:DONE_SRC.rss,
+           yt:[0,12,'run','抓取 · 元数据更新 6/698'], dg:DONE_SRC.dg, web:DONE_SRC.web } },
+  gate:{ live:true, now:26, title:'日报进行中', m1:'5 / 6 来源跑完', m2:'已用 26 分钟',
+    say:'只剩 YouTube 没跑完。入库处理那一行直接写在等谁、等了多久，按钮就在同一行上。',
+    rows:{ ...DONE_SRC, yt:[0,26,'run','抓取 · 视频深加工 2/3'],
+           ingest:[null,null,'wait','等 YouTube 跑完 · 已等 5 分钟','skip'] } },
+  skip:{ live:true, now:29.2, title:'日报进行中', m1:'生成日报', m2:'已用 29 分钟',
+    say:'点了「不等了」：入库处理、生成日报接着走；YouTube 照常跑完、照常记账，它那一行写明「本轮不等」，结果进下一轮入库。',
+    rows:{ ...DONE_SRC, yt:[0,29.2,'run','视频深加工 3/3','late'],
+           ingest:[26.5,28.6,'done','新增/更新 183 · 提取 22'], daily:[28.6,29.2,'run','生成中'] } },
+  r1103:{ title:'日报结束，2 个步骤有问题', m1:'8 / 9 完成', m2:'耗时 38 分钟', error:true, when:'11-03 09:38',
+    say:'跑完之后就是这一轮的留档。下面历史里点任何一行，这张卡就换成那一轮；更早逐个跑的那几轮，细条自然排成阶梯。',
+    rows:{ ...DONE_SRC, yt:[0,31.2,'issue','1 步有问题 · 入库 1 条','late'],
+           ingest:[26.5,28.6,'done','新增/更新 183 · 提取 22'], daily:[28.6,29.8,'done','78 条素材'], tidy:[29.8,38,'done','入库 62 条目 · 图谱 ok'] } },
+  r1102:{ title:'日报结束，2 个步骤有问题', m1:'7 / 9 完成', m2:'耗时 63 分钟', error:true, when:'11-02 10:03',
+    rows:{ wx:[0,2.1,'done','新增 22 篇 · 导出 22 篇'], x:[2.1,26.2,'issue','1 步有问题 · 新增 131 条'],
+           rss:[26.3,34,'done','新增 110 条 · 已保存 29 条'], yt:[34.1,51,'issue','1 步有问题 · 入库 1 条'],
+           dg:[51.1,51.2,'done','新增 0 条'], web:[51.2,51.4,'done','新增 0 条'],
+           ingest:[51.4,54,'done','新增/更新 183 · 提取 22'], daily:[55.1,56.2,'done','78 条素材'], tidy:[55.1,63.5,'done','入库 62 条目 · 图谱 ok'] } },
+  r1101:{ title:'日报结束，2 个步骤有问题', m1:'7 / 9 完成', m2:'耗时 79 分钟', error:true, when:'11-01 10:19',
+    rows:{ wx:[0,21.9,'done','新增 23 篇 · 导出 23 篇'], x:[21.9,33.9,'issue','1 步有问题'],
+           rss:[34,37.9,'issue','2 步有问题'], yt:[38,68.2,'issue','1 步有问题'],
+           dg:[68.2,68.4,'done','新增 0 条'], web:[68.4,68.6,'done','新增 0 条'],
+           ingest:[68.6,71,'done','新增/更新 140'], daily:[71,72.3,'done','61 条素材'], tidy:[72.3,79.3,'done','入库 48 条目'] } },
+};
+const SCENE_RUN = {live:'live', gate:'gate', skip:'skip', r1103:'r1103'};
+
+const STEPS = {
+  wx:['新增 34 篇，补齐正文 34 篇','导出 34 篇，配图 391 张'],
+  x:['检查 38/51 个来源，新增 131 条，失败 5 个：X 限制了访问频率，下一轮同步会重抓','已保存 131 条到知识库'],
+  rss:['检查 9/9 个来源，新增 62 条','补抓原文 20 条，翻译 31 条，已保存 31 条'],
+  yt:['检查 47/48 个频道，处理 3 条，入库 1 条；2 个频道处理失败','已保存 1 条到知识库'],
+  dg:['检查 1/1 个来源，新增 0 条','已保存 0 条'], web:['检查 1/1 个来源，新增 0 条','已保存 0 条'],
+};
+
+// 日志：每行带「谁打的」，几路同时跑时交错在一起，靠上面的筛选分开看
+const LOG = [
+  ['09:00:02','all','日报开跑：6 个来源同时开始'],
+  ['09:00:03','x','准备 X 浏览器会话，读取 51 个账号'],
+  ['09:00:04','rss','正在读取 4 个来源（已检查 0/9）'],
+  ['09:00:05','yt','频道列表 1/48'],
+  ['09:00:06','dg','TLDR AI · 新增 0 条'],
+  ['09:00:20','web','Anthropic 官方 · 新增 0 条'],
+  ['09:00:44','rss','检查 9/9 个来源，新增 62 条'],
+  ['09:02:15','wx','下载正文 25/34 篇'],
+  ['09:02:54','wx','新增 34 篇，补齐正文 34 篇'],
+  ['09:02:54','wx','导出到 obs'],
+  ['09:03:40','yt','频道列表完成 47/48，增量更新元数据'],
+  ['09:05:12','x','大V观点 12/51 · 宝玉'],
+  ['09:05:13','x','宝玉：X 限制了访问频率，下一轮同步会重抓','bad'],
+  ['09:07:11','rss','已翻译 31 条，已保存 31 条到知识库'],
+  ['09:09:30','yt','元数据更新 4/698'],
+  ['09:11:40','x','大V观点 31/51 · Simon Willison'],
+  ['09:12:00','wx','导出 · 配图 160/391'],
+  ['09:16:06','wx','完成：导出 34，待补正文 1'],
+  ['09:21:00','x','检查 38/51 个来源，新增 131 条，失败 5 个','bad'],
+  ['09:21:00','all','入库处理在等 YouTube'],
+  ['09:24:10','yt','处理 2/3 · ChatGPT Just Changed A LOT AGAIN'],
+  ['09:26:30','all','不等 YouTube，开始入库处理'],
+  ['09:28:36','ingest','新增/更新 183，新向量 319；提取成功 22'],
+  ['09:29:48','daily','日报已生成：78 条素材'],
+  ['09:31:12','yt','检查 47/48 个频道，入库 1 条；2 个频道处理失败（本轮不等，下一轮入库）','bad'],
+  ['09:38:00','tidy','双链化 22 篇 · 图谱 ok'],
 ];
-const TAIL = [{k:'ingest',name:'入库处理'},{k:'daily',name:'生成日报'},{k:'tidy',name:'整理工具与 Wiki'}];
 
-// 每个场景:此刻、门在哪、各行的段([起,止,类,状态])、各行此刻那句、明细
-const SCENES = {
-  run: {
-    now: 12, title:'日报进行中', sub:'公众号 + 大V观点 + RSS + YouTube + 简报 + 网页专栏 · 全部订阅',
-    m1:'3 / 6 来源跑完', m2:'已用 12 分钟',
-    say:'六个来源同时开跑，每行一条时间条：深色是抓取，浅色是导出。竖线是「此刻」。哪一行最长，整轮就卡在哪一行。点一行看这个来源的两步明细。',
-    lanes:{
-      wx:{s:'run', segs:[[0,2.9,'crawl'],[2.9,12,'export','live']], say:'导出 · 配图 160/391'},
-      x:{s:'run', segs:[[0,12,'crawl','live']], say:'抓取 · 读取 31/51 个账号'},
-      rss:{s:'done', segs:[[0,.7,'crawl'],[.7,7.2,'export']], say:'新增 62 条 · 已保存 31 条'},
-      yt:{s:'run', segs:[[0,12,'crawl','live']], say:'抓取 · 元数据更新 6/698'},
-      dg:{s:'done', segs:[[0,.1,'crawl'],[.1,.5,'export']], say:'新增 0 条'},
-      web:{s:'done', segs:[[0,.3,'crawl']], say:'新增 0 条'},
-    },
-    tail:{}, axisEnd: 40,
-  },
-  gate: {
-    now: 26, gate: 21, title:'日报进行中', sub:'公众号 + 大V观点 + RSS + YouTube + 简报 + 网页专栏 · 全部订阅',
-    m1:'5 / 6 来源跑完', m2:'已用 26 分钟',
-    say:'其余五个来源 09:21 都跑完了，只剩 YouTube。入库处理那一行开始等（斜纹那段）。上面那条黄色的横条说清在等谁、等了多久，点「不等了，继续」就开始入库。',
-    lanes:{
-      wx:{s:'done', segs:[[0,2.9,'crawl'],[2.9,16.1,'export']], say:'新增 34 篇 · 导出 34 篇'},
-      x:{s:'issue', segs:[[0,20,'crawl','issue'],[20,21,'export']], say:'1 步有问题 · 新增 131 条'},
-      rss:{s:'done', segs:[[0,.7,'crawl'],[.7,7.2,'export']], say:'新增 62 条 · 已保存 31 条'},
-      yt:{s:'run', segs:[[0,26,'crawl','live']], say:'抓取 · 视频深加工 2/3'},
-      dg:{s:'done', segs:[[0,.1,'crawl'],[.1,.5,'export']], say:'新增 0 条'},
-      web:{s:'done', segs:[[0,.3,'crawl']], say:'新增 0 条'},
-    },
-    tail:{ingest:{s:'wait', segs:[[21,26,'waiting']], say:'等 YouTube'}},
-    waiting:{who:'YouTube', since:'09:21', mins:5}, axisEnd: 40,
-  },
-  skip: {
-    now: 29.2, gate: 26.5, title:'日报进行中', sub:'公众号 + 大V观点 + RSS + YouTube + 简报 + 网页专栏 · 全部订阅',
-    m1:'生成日报', m2:'已用 29 分钟',
-    say:'点了「不等了」：虚线竖线就是放行那一刻。入库处理、生成日报照常往下走；YouTube 越过虚线继续跑，行尾标着「本轮不等」，它的结果照常记账，下一轮入库。「结束本类型」才是真把它停掉。',
-    lanes:{
-      wx:{s:'done', segs:[[0,2.9,'crawl'],[2.9,16.1,'export']], say:'新增 34 篇 · 导出 34 篇'},
-      x:{s:'issue', segs:[[0,20,'crawl','issue'],[20,21,'export']], say:'1 步有问题 · 新增 131 条'},
-      rss:{s:'done', segs:[[0,.7,'crawl'],[.7,7.2,'export']], say:'新增 62 条 · 已保存 31 条'},
-      yt:{s:'run', late:true, segs:[[0,29.2,'crawl','live']], say:'抓取 · 视频深加工 3/3'},
-      dg:{s:'done', segs:[[0,.1,'crawl'],[.1,.5,'export']], say:'新增 0 条'},
-      web:{s:'done', segs:[[0,.3,'crawl']], say:'新增 0 条'},
-    },
-    tail:{
-      ingest:{s:'done', segs:[[21,26.5,'waiting'],[26.5,28.6,'step']], say:'新增/更新 183 · 提取 22'},
-      daily:{s:'run', segs:[[28.6,29.2,'step','live']], say:'生成中'},
-    }, axisEnd: 40,
-  },
-  end: {
-    now: null, gate: 26.5, title:'日报结束，2 个步骤有问题', sub:'公众号 + 大V观点 + RSS + YouTube + 简报 + 网页专栏 · 全部订阅 · 2026-11-03 09:38 结束',
-    m1:'8 / 9 完成', m2:'耗时 38 分钟（逐个跑约 1 小时）', error:true,
-    say:'跑完之后这张图就是这一轮的留档：哪一路最长、门口等了多久、谁越过了门，一眼看得到。YouTube 在门之后才跑完，它那 1 条新视频记在这一轮，进下一轮的入库。',
-    lanes:{
-      wx:{s:'done', segs:[[0,2.9,'crawl'],[2.9,16.1,'export']], say:'新增 34 篇 · 导出 34 篇'},
-      x:{s:'issue', segs:[[0,20,'crawl','issue'],[20,21,'export']], say:'1 步有问题 · 新增 131 条'},
-      rss:{s:'done', segs:[[0,.7,'crawl'],[.7,7.2,'export']], say:'新增 62 条 · 已保存 31 条'},
-      yt:{s:'issue', late:true, segs:[[0,31,'crawl','issue'],[31,31.2,'export']], say:'1 步有问题 · 入库 1 条'},
-      dg:{s:'done', segs:[[0,.1,'crawl'],[.1,.5,'export']], say:'新增 0 条'},
-      web:{s:'done', segs:[[0,.3,'crawl']], say:'新增 0 条'},
-    },
-    tail:{
-      ingest:{s:'done', segs:[[21,26.5,'waiting'],[26.5,28.6,'step']], say:'新增/更新 183 · 提取 22'},
-      daily:{s:'done', segs:[[28.6,29.8,'step']], say:'78 条素材'},
-      tidy:{s:'done', segs:[[29.8,38,'step']], say:'入库 62 条目 · 图谱 ok'},
-    }, axisEnd: 40,
-  },
-};
+// 逐个跑那几轮的留档日志(取自 11-02 那一轮):来源一段一段排开,筛选照样能用
+const OLD_LOG = [
+  ['09:00:18','wx','下载正文 1/22 篇'], ['09:01:35','wx','新增 22 篇，补齐正文 22 篇'], ['09:02:25','wx','完成：导出 22，待补正文 1'],
+  ['09:02:26','x','准备读取 51 个账号'], ['09:22:27','x','检查 38/51 个来源，新增 131 条，失败 5 个','bad'],
+  ['09:27:08','rss','检查 9/9 个来源，新增 110 条'], ['09:34:21','rss','已保存 29 条到知识库'],
+  ['09:37:48','yt','频道列表完成 47/48，增量更新元数据'], ['09:51:20','yt','检查 47/48 个频道，入库 1 条；2 个频道处理失败','bad'],
+  ['09:51:26','dg','新增 0 条'], ['09:51:38','web','新增 0 条'],
+  ['09:53:41','ingest','新增/更新 183，新向量 319'], ['09:55:25','daily','日报已生成：78 条素材'], ['10:03:49','tidy','双链化 22 篇 · 图谱 ok'],
+];
 
-const DETAIL = {
-  wx:[['抓取内容','新增 34 篇，补齐正文 34 篇','done'],['导出文章','导出 34 篇，配图 391 张','done']],
-  x:[['抓取内容','检查 38/51 个来源，新增 131 条，失败 5 个；X 限制了访问频率，下一轮同步会重抓','issue'],['导出文章','已保存 131 条到知识库','done']],
-  rss:[['抓取内容','检查 9/9 个来源，新增 62 条','done'],['导出文章','补抓原文 20 条，翻译 31 条，已保存 31 条','done']],
-  yt:[['抓取内容','检查 47/48 个频道，处理 3 条，入库 1 条；2 个频道处理失败','issue'],['导出文章','已保存 1 条到知识库','done']],
-  dg:[['抓取内容','检查 1/1 个来源，新增 0 条','done'],['导出文章','已保存 0 条','done']],
-  web:[['抓取内容','检查 1/1 个来源，新增 0 条','done'],['导出文章','已保存 0 条','done']],
-};
-
-let scene = 'run', open = null;
+let scene = 'live', view = 'live', open = null, who = 'all-lines';
 const $ = id => document.getElementById(id);
-const clock = m => { const t = 9*60 + m; return String(Math.floor(t/60)).padStart(2,'0') + ':' + String(Math.round(t%60)).padStart(2,'0'); };
-const dur = m => m < 1 ? Math.round(m*60) + ' 秒' : (m >= 60 ? Math.floor(m/60) + ' 小时 ' : '') + Math.round(m%60) + ' 分';
+const dur = m => m < 1 ? Math.round(m*60) + ' 秒' : Math.round(m) + ' 分';
+const nowClock = {live:'09:12:00', gate:'09:26:00', skip:'09:29:20'};
 
-function segsHtml(segs, end) {
-  return segs.map(([a,b,kind,flag]) => {
-    const cls = ['seg', kind, flag === 'live' ? 'live' : '', flag === 'issue' ? 'issue' : ''].join(' ');
-    return `<span class="${cls}" style="left:${a/end*100}%;width:${(b-a)/end*100}%"></span>`;
+function rowHtml(k, v, end, isSrc) {
+  if (!v) return `<div class="r" data-s="todo"><span class="nm">${NAME[k]}</span><div class="bar"></div><span class="say"></span><span class="t"></span><span class="act"></span></div>`;
+  const [a, b, s, say, flag] = v;
+  const bar = a == null ? '' : `<i style="left:${a/end*100}%;width:${Math.max((b-a)/end*100, .4)}%"></i>`;
+  const late = flag === 'late' ? '<span class="late">本轮不等 · </span>' : '';
+  const act = flag === 'skip' ? `<button class="ghost" onclick="event.stopPropagation();pick('skip')">不等了，继续</button>`
+    : (isSrc && s === 'run' && RUNS[view].live ? '<button class="ghost" onclick="event.stopPropagation()">结束本类型</button>' : '');
+  const t = a == null ? '' : dur(b - a);
+  const html = `<div class="r${isSrc ? ' click' : ''}${open === k ? ' open' : ''}" data-s="${s}" data-k="${k}">
+    <span class="nm">${NAME[k]}</span><div class="bar">${bar}</div><span class="say">${late}${say}</span><span class="t">${t}</span><span class="act">${act}</span></div>`;
+  if (!(isSrc && open === k)) return html;
+  const [p1, p2] = STEPS[k];
+  const running = s === 'run', onExport = /导出/.test(say);
+  const st1 = s === 'issue' ? 'issue' : (running && !onExport ? 'run' : 'done');
+  const st2 = running ? (onExport ? 'run' : 'todo') : 'done';
+  const lab = {run:'进行中', done:'已完成', issue:'需处理', todo:'未开始'};
+  return html + `<div class="detail">
+    <div class="step" data-s="${st1}"><b>抓取内容</b><span>${st1 === 'run' ? say : p1}</span><em>${lab[st1]}</em></div>
+    <div class="step" data-s="${st2}"><b>导出文章</b><span>${st2 === 'run' ? say : st2 === 'todo' ? '—' : p2}</span><em>${lab[st2]}</em></div>
+    <div class="step"><b></b><span><button class="text" onclick="filterLog('${k}')">只看这一类的日志</button></span><em></em></div></div>`;
+}
+
+function renderCard() {
+  const R = RUNS[view];
+  $('title').textContent = R.title; $('m1').textContent = R.m1; $('m2').textContent = R.m2;
+  $('sub').textContent = '公众号 + 大V观点 + RSS + YouTube + 简报 + 网页专栏 · 全部订阅' + (R.when ? ' · ' + R.when + ' 结束' : '');
+  $('flow').classList.toggle('has-error', !!R.error);
+  const ends = Object.values(R.rows).map(v => v[1] || 0);
+  const end = R.live ? Math.max(40, R.now * 1.25) : Math.max(...ends);
+  $('rows').innerHTML = SRC.map(([k]) => rowHtml(k, R.rows[k], end, true)).join('')
+    + '<div class="sep"></div>' + TAIL.map(([k]) => rowHtml(k, R.rows[k], end, false)).join('');
+  document.querySelectorAll('.r.click').forEach(r => r.onclick = () => { open = open === r.dataset.k ? null : r.dataset.k; renderCard(); });
+}
+
+function cell(v) {
+  if (!v) return '<span class="c none"></span>';
+  return `<span class="c ${v[2] === 'issue' ? 'issue' : ''} ${v[2] === 'run' || v[2] === 'wait' ? 'run' : ''}"></span>`;
+}
+function renderHist() {
+  const cur = RUNS[SCENE_RUN[scene]];
+  const lines = [
+    [SCENE_RUN[scene], cur.live ? '11-03 09:00' : '11-03 09:38', '日报', cur.live ? cur.m2.replace('已用 ','') : '38 分钟', cur.live ? '进行中' : '2 个步骤需处理'],
+    ['r1102', '11-02 10:03', '日报', '1 小时 3 分', '2 个步骤需处理'],
+    ['r1101', '11-01 10:19', '日报', '1 小时 19 分', '4 个步骤需处理'],
+  ];
+  $('hist').innerHTML = lines.map(([id, t, kind, d, res]) => {
+    const R = RUNS[id];
+    const cells = [...SRC, ...TAIL].map(([k]) => `<td>${cell(R.rows[k])}</td>`).join('');
+    return `<tr data-id="${id}" class="${view === id ? 'on' : ''}"><td class="mono">${t}</td><td>${kind}</td>${cells}
+      <td class="mono">${d}</td><td class="l ${R.live ? '' : 'res-issue'}">${res}</td></tr>`;
   }).join('');
+  document.querySelectorAll('#hist tr').forEach(tr => tr.onclick = () => { view = tr.dataset.id; open = null; renderCard(); renderHist(); });
 }
 
-function row(item, d, end, {lane, now}) {
-  if (!d) return `<div class="g-row" data-s="todo"><div class="g-name"><span class="dot"></span>${item.name}</div>
-    <div class="track"></div><div class="g-dur"></div><div class="g-act"></div></div>`;
-  const segs = d.segs, a = segs[0][0], b = segs[segs.length-1][1];
-  const busy = d.s === 'run';
-  const act = lane && busy ? `<button class="ghost" onclick="event.stopPropagation()">结束本类型</button>` : '';
-  const late = d.late ? `<span class="tag">本轮不等</span>` : '';
-  const say = `<span class="seg-say" style="left:${a/end*100}%">${d.say}</span>`;
-  const time = d.s === 'wait' ? '已等 ' + dur(b-a) : dur(segs.filter(s => s[2] !== 'waiting').reduce((t,s) => t + s[1]-s[0], 0));
-  return `<div class="g-row${lane ? ' lane' : ''}${open === item.k ? ' open' : ''}" data-s="${d.s}" ${lane ? `data-k="${item.k}"` : ''}>
-    <div class="g-name"><span class="dot"></span>${item.name}${late}</div>
-    <div class="track">${segsHtml(segs, end)}${say}</div>
-    <div class="g-dur">${time}</div><div class="g-act">${act}</div></div>`
-    + (lane && open === item.k ? detailHtml(item.k, d) : '');
+function renderLog() {
+  const R = RUNS[view];
+  const upto = R.live ? nowClock[view] : '99';
+  const all = view === 'r1103' || R.live ? LOG.filter(l => l[0] <= upto) : OLD_LOG;
+  const kinds = ['all-lines', ...SRC.map(s => s[0]), 'tail'];
+  $('filters').innerHTML = kinds.map(k => `<button aria-pressed="${who === k}" onclick="filterLog('${k}')">${k === 'all-lines' ? '全部' : k === 'tail' ? '全库' : NAME[k]}</button>`).join('');
+  const keep = l => who === 'all-lines' || l[1] === who || (who === 'tail' && ['all','ingest','daily','tidy'].includes(l[1]));
+  const shown = all.filter(keep);
+  $('log-meta').textContent = '每类保留最近 40 条';
+  $('log').innerHTML = shown.slice().reverse().map(([t, k, msg, bad]) =>
+    `<div><span>${t}</span><span class="who">${k === 'all' ? '' : NAME[k]}</span><span class="${bad ? 'bad' : ''}">${msg}</span></div>`).join('');
 }
+function filterLog(k) { who = k; renderLog(); document.getElementById('log').scrollIntoView({block:'nearest'}); }
 
-function detailHtml(k, d) {
-  const steps = DETAIL[k].map(([t,p,s], i) => {
-    const running = d.s === 'run' && (i === d.segs.length - 1);
-    const st = running ? 'run' : (d.segs.length > i ? s : 'todo');
-    const txt = running ? d.say : (d.segs.length > i ? p : '等抓取跑完');
-    const lab = {run:'进行中', done:'已完成', issue:'需处理', todo:'未开始'}[st];
-    return `<div class="step" data-s="${st}"><span class="n">${i+1}</span><div><b>${t}</b><p>${txt}</p></div><span class="st">${lab}</span></div>`;
-  }).join('');
-  return `<div class="detail">${steps}</div>`;
-}
-
-function render() {
-  const S = SCENES[scene], end = S.axisEnd;
+function pick(k) {
+  scene = k; view = SCENE_RUN[k]; open = null;
   document.querySelectorAll('.chip').forEach(c => c.setAttribute('aria-pressed', c.dataset.k === scene));
-  $('say').textContent = S.say;
-  $('title').textContent = S.title; $('sub').textContent = S.sub;
-  $('m1').textContent = S.m1; $('m2').textContent = S.m2;
-  $('flow').classList.toggle('has-error', !!S.error);
-
-  let ticks = '';
-  for (let m = 0; m <= end; m += 5)
-    ticks += `<span class="grid-line" style="left:${m/end*100}%"></span><span class="tick" style="left:${m/end*100}%">${clock(m)}</span>`;
-  const axis = `<div class="g-row axis"><div></div><div class="track">${ticks}</div><div></div><div></div></div>`;
-
-  const lanes = LANES.map(l => row(l, S.lanes[l.k], end, {lane:true})).join('');
-  const gatebar = S.waiting ? `<div class="gatebar"><span>入库处理在等 <b>${S.waiting.who}</b> 跑完 · <span class="mono">${S.waiting.since} 起，已等 ${S.waiting.mins} 分钟</span></span>
-    <button class="ghost" onclick="pick('skip')">不等了，继续</button></div>` : '<div class="split"></div>';
-  const tail = TAIL.map(t => row(t, S.tail[t.k], end, {})).join('');
-
-  const lines = (S.now != null ? `<span class="now" style="left:${S.now/end*100}%"></span>` : '')
-    + (S.gate != null && S.gate !== S.now ? `<span class="gate" style="left:${S.gate/end*100}%"></span>` : '');
-  $('gantt').innerHTML = `<div class="g-body">${axis}${lanes}${gatebar}${tail}<div class="overlay">${lines}</div></div>`;
-
-  document.querySelectorAll('.g-row.lane').forEach(r => r.onclick = () => { open = open === r.dataset.k ? null : r.dataset.k; render(); });
+  $('say').textContent = RUNS[view].say;
+  renderCard(); renderHist(); renderLog();
 }
-function pick(k) { scene = k; render(); }
+const _renderCard = renderCard;
+renderCard = () => { _renderCard(); renderLog(); };
 document.querySelectorAll('.chip').forEach(c => c.onclick = () => pick(c.dataset.k));
-render();
+pick('live');
 </script>
 </body>
 </html>
