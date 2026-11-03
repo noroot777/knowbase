@@ -147,9 +147,9 @@ def _save_result(source, result, scope):
         # 是用户点名的那段日期,拿它当增量进度就是宣布中间那段已经收过。
         validators = {k: source[k] for k in ('etag', 'modified', 'resolved_url')}
     x_intake_commit.check_budget(validators)
-    # 大V观点那一路也排队等锁(上限 `x_intake_store.LOCK_WAIT`,理由在那边):各来源同时
+    # 大V观点那一路也排队等锁,但受停止和整轮截止约束(`x_intake_store.save_lock`):各来源同时
     # 跑时订阅源的导出正攥着它是常态,零等待就是让这一轮的成品平白挪到下一轮。
-    with (maintenance_lock(wait=x_intake_store.LOCK_WAIT) if validators.get('x_intake')
+    with (x_intake_store.save_lock(validators, halted) if validators.get('x_intake')
           else maintenance_lock()):
         if not scope.ranged and not validators.get('x_intake'):
             entries = _within_history(source, entries)

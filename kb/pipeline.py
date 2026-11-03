@@ -192,6 +192,7 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None,
     空串 = 没有计划,一律照常跑(既有调用方和回归都不传它)。"""
     pre_thread = None
     sources, gated, group = None, False, None
+    failed: BaseException | None = None
     try:
         # 抓取被反爬间隔限速(页间/号间随机 sleep),期间 CPU 和网络全闲着:
         # 先并行开跑一轮"存量"提取,消化上一轮已索引但没提取的积压。
@@ -260,11 +261,16 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None,
                     _run_extract()
             else:
                 _RUNNERS[s]()
+    except BaseException as exc:
+        failed = exc
+        raise
     finally:
         # 各来源那几路和存量提取都还可能在写库:**全都跑完才许宣布空闲**,停止和意外
         # 异常也一样。没等的那几路的导出在这一刻才开始(`Lanes.join` 先宣布全库那几步
         # 走完了)。全库最后那一组**先收尾**:日报等的是「入库处理走完了」,不是没等的
         # 那几路也跑完。
+        if failed is not None:
+            _settle_broken(failed)
         if group is not None:
             flow.leave(owner, group[0])
         if sources is not None:
@@ -281,6 +287,20 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None,
         _end_run()
         if mine or (batch and not batch_live(owner)):
             flow.end(owner)
+
+
+def _settle_broken(exc: BaseException) -> None:
+    """全库那几步半路抛了:**离开那一组之前**把还没落定的几步记成中断。
+
+    离开那一组 = 计划里记「走完了」,日报据此交卷 —— 可后面还要等慢来源跑完(`join`),
+    `_end_run` 把 pending / running 补成 error 是在那之后。不先落下的话,日报读到的是
+    「提取 pending」,评成了「同步完成」。来源那几步不碰:它们还在各自的线程上跑。
+    """
+    why = f"流程中断，未完成 · {type(exc).__name__}: {exc}"
+    for name in STAGES:
+        stage = _state["stages"].get(name) or {}
+        if name not in flow.SOURCE_STEPS and stage.get("status") in ("pending", "running"):
+            _stage(name, "error", why[:300])
 
 
 def _pre_worked(stats: dict) -> bool:

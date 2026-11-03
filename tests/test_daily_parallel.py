@@ -17,6 +17,7 @@ from kb import pipeline as pl
 from kb import pipeline_flow as flow
 from kb import pipeline_results as live_results
 from kb import pipeline_state as ps
+from tests.pipeline_case import HistoryCase
 
 BATCH = 'b-1'
 RUN = 'run-1'
@@ -136,6 +137,22 @@ class SyncSourcesTest(unittest.TestCase):
         self.assertIn('crawl 登录过期', first['detail'])
         self.assertIn(daily_sync.LATE, first['detail'])
 
+    def test_a_digest_step_left_unsettled_is_not_graded_as_synced(self):
+        """入库处理那一组走完了、可提取那一格没落定(半路抛了):不许念「同步完成」。"""
+        def crashed():
+            self.ingest(late=())
+            self.ingest_done()
+            live_results._cells['export']['a'] = _cell()
+            self.snap['stages']['extract'] = {'status': 'pending', 'detail': ''}
+        self.steps = [crashed]
+        entries = self.go(deadline=time.monotonic() + 3600)
+        digest = entries[-1]
+        self.assertEqual('入库处理', digest['label'])
+        self.assertEqual('unknown', digest['status'])
+        self.assertIn('extract 没有落定的结论', digest['detail'])
+        # 反过来钉一边:同一组都落定了,那一项就是同步完成(见上面那两条)
+        self.assertEqual(['ok', 'ok'], [e['status'] for e in entries[:2]])
+
     def test_the_digest_budget_stops_the_round(self):
         """入库处理自己那份保底预算超了:停这一轮(没有它的话日报一直等下去)。"""
         def stuck():
@@ -152,8 +169,41 @@ class SourceEntryTest(unittest.TestCase):
         results = {'crawl': {'a': _cell()}, 'export': {'a': _cell('running', '')}}
         entry = daily_sync._source_entry('a', '甲', FETCH, results, late=False)
         self.assertEqual('unknown', entry['status'])
-        self.assertIn('export 还没跑完', entry['detail'])
+        self.assertIn('export 没有落定的结论', entry['detail'])
         # 反过来钉一边:两格都落定了就是同步完成
         results['export']['a'] = _cell()
         entry = daily_sync._source_entry('a', '甲', FETCH, results, late=False)
         self.assertEqual(('ok', '同步完成'), (entry['status'], entry['detail']))
+
+
+class IngestCrashTest(HistoryCase):
+    """全库那几步半路抛了:离开那一组(日报据此交卷)之前,那一步就得是红的。"""
+
+    def run_round(self, extract):
+        """跑一轮只有提取的管道;每次离开一组时,记下那一刻提取那一格是什么。"""
+        self.seen = []
+        real = flow.leave
+
+        def leave(owner, key, result=None):
+            self.seen.append((key, dict(ps._state['stages']['extract'])))
+            return real(owner, key, result)
+        with patch.object(pl, '_run_extract', side_effect=extract), \
+                patch.object(flow, 'leave', side_effect=leave):
+            pl._run_pipeline(['extract'])
+
+    def test_the_error_is_on_the_card_before_the_group_is_left(self):
+        def boom():
+            ps._stage('extract', 'running', '提取 3/10')
+            raise RuntimeError('Claude 503')
+        with self.assertRaises(RuntimeError):
+            self.run_round(boom)
+        self.assertEqual(['ingest'], [key for key, _ in self.seen])
+        cell = self.seen[0][1]
+        self.assertEqual('error', cell['status'], '离开入库那一组时那一步还没落成红')
+        self.assertIn('Claude 503', cell['detail'])
+
+    def test_a_clean_round_is_left_as_it_finished(self):
+        """反过来钉一边:没抛的那一轮,离开时那一格原样是它自己报的结论。"""
+        self.run_round(lambda: ps._stage('extract', 'ok', '提取 10 篇'))
+        self.assertEqual([('ingest', {'status': 'ok', 'detail': '提取 10 篇'})], self.seen)
+
