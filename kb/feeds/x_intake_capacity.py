@@ -7,6 +7,8 @@ from kb.feeds.x_intake_metrics import seconds
 WINDOW = timedelta(days=5)
 RESCAN_NOTICE = '每轮从顶部尽力重扫，不是断点续页；不保证五天内补齐，超窗后需指定历史区间补抓。'
 PHASE_SECONDS = {'discovery': 240, 'history': 120, 'body': 120}
+# Channels whose one timeline pass covers discovery and history together (no separate history phase).
+COMBINED = ('feedgrab', 'guest')
 
 
 def phase_seconds(phase, reader=None, *, default=None):
@@ -17,6 +19,8 @@ def account_seconds(channel, phase, reader=None):
     read = reader or seconds
     if channel == 'feedgrab':
         return read('KB_X_FEEDGRAB_ACCOUNT_SECONDS', 25)
+    if channel == 'guest':
+        return read('KB_X_GUEST_ACCOUNT_SECONDS', 25)
     return read('KB_X_ACCOUNT_SECONDS', 8 if phase == 'discovery' else 20)
 
 
@@ -28,12 +32,12 @@ def plan(count, channel, *, budget=480, window=WINDOW, remaining=None, reader=No
     body = phase_seconds('body', reader)
     item_seconds = (reader or seconds)('KB_X_BODY_ITEM_SECONDS', 25)
     body_demand = body if body_pending is None else min(body, max(0, body_pending) * item_seconds)
-    quota = account_seconds(channel, 'combined' if channel == 'feedgrab' else 'discovery', reader)
+    quota = account_seconds(channel, 'combined' if channel in COMBINED else 'discovery', reader)
     discovery = 0 if discovery_done else phase_seconds('discovery', reader,
-                  default=max(240, per_round * quota) if channel == 'feedgrab' else 240)
+                  default=max(240, per_round * quota) if channel in COMBINED else 240)
     discovery_reserve = min(discovery, per_round * quota, available)
     body_reserve = min(body_demand, available - discovery_reserve)
-    if channel == 'feedgrab':
+    if channel in COMBINED:
         discovery = min(discovery, max(0, available - body_reserve))
         limits = dict(discovery=discovery, history=0, body=body_reserve)
     else:
@@ -42,7 +46,7 @@ def plan(count, channel, *, budget=480, window=WINDOW, remaining=None, reader=No
         discovery = min(discovery, max(0, available - history - body_reserve))
         limits = dict(discovery=discovery, history=history, body=body_reserve)
     stages = {}
-    for phase in (['combined'] if channel == 'feedgrab' else ['discovery', 'history']):
+    for phase in (['combined'] if channel in COMBINED else ['discovery', 'history']):
         limit = limits['discovery' if phase == 'combined' else phase]
         quota = account_seconds(channel, phase, reader)
         slots = floor(limit / quota)

@@ -278,6 +278,67 @@ def _spot(path: str) -> tuple[str, str]:
     return (m.group(1), m.group(2)) if m else ('', '')
 
 
+#: `read_snapshot` 的第三种答复:这一页还没渲染出正文,调用方自己决定再等还是认输。
+NOT_YET = object()
+
+
+def read_snapshot(snap, want: str):
+    """读页脚本(`_READ_JS`)交回的一份快照 → 这一篇的长文。**两个消费方共用这一份判据**:
+    登录通道的后路(`browser_fetch`,轮询到渲染出来为止)和人工补长文
+    (`kb.feeds.x_article_capture.save`,人在自己的浏览器里点一下扩展,只有这一份快照)。
+
+    返回 `{'title','body'}` = 读到了;`None` = **确定这条推文没有长文**(X 把这一页
+    弹回了推文页);`NOT_YET` = 还没渲染出来。身份对不上、回包读不懂一律抛
+    `ArticleUnavailable`。`want` 是那条推文的 id。
+    """
+    if not isinstance(snap, dict):
+        raise ArticleUnavailable('长文页面的回包读不懂')
+    seen = _spot(str(snap.get('path') or ''))
+    # **承重那一道:这一页到底是不是我们要的那一篇。** 导航没生效时页面停在
+    # **上一篇文章**上,而那一页的正文是非空的 —— 不核对身份就会把上一篇的
+    # 标题和正文写进这一条,`fill` 报成功、水位照常推进,而 `put_items` 是
+    # `ON CONFLICT DO NOTHING`:**再同步也纠不回来**(2026-10-09 第 1 轮审查
+    # 实测:第二篇 `/Review/article/200` 真回 HTTP 204,库里第二条存成了第一
+    # 篇的标题和正文,拿正确正文重新入库返回新增 0 条)。
+    #
+    # 只比那个数字 id(见 `_spot`)。认不出 id 的路径(首页、登录墙、
+    # `about:blank`)不在这里拦 —— 那是「没打开」,交给下面两道:正文只在
+    # 身份对得上时才收,收不到就答 `NOT_YET`(轮询的那一方按超时抛)。
+    if seen[1] and seen[1] != want:
+        raise ArticleUnavailable(
+            f'浏览器没跳到这一篇,还停在 /{seen[0]}/{seen[1]} 上')
+    if snap.get('back') and seen[1] == want:
+        return None               # X 自己弹回推文页:这条确实没有长文
+    # **正文只在"确实停在这一篇的文章页上"时才收。** 今天这和 JS 那边的
+    # `at` 同真同假(两者都从同一份 `path` 算),分成两处是因为它们回答的
+    # 不是一个问题:`at` 回答形状(还在文章页吗),这里回答身份(是哪一篇)。
+    if seen == ('article', want):
+        # `_rows`:非列表一律当空。同一条口径的另一侧 —— 后路恰恰是
+        # 「接口挂了」那一刻走的,它自己也漏出 `TypeError` 的话,同一场
+        # 事故只是换了个位置(整批账号一起带掉)。当空 = 这一页还没渲染
+        # 出正文,答 `NOT_YET`。
+        #
+        # **而列表里那个成员不许丢掉** —— 口径同 `_must_block`,而且这是
+        # 同一条缺陷的两个位置:丢掉它之后剩下的正常段照样拼出一段**非空**
+        # 正文,于是「正文读到了」、水位照常推进,而丢掉的那一段是这篇文章
+        # 的正文,`put_items` 是 `ON CONFLICT DO NOTHING`、再也补不回来。
+        # 空值(`''` / `None` / `0`)跳过:它们携带不了任何内容线索。
+        blocks = []
+        for row in _rows(snap.get('blocks')):
+            if isinstance(row, str):
+                if row.strip():
+                    blocks.append(row)
+            elif row:
+                raise ArticleUnavailable(
+                    f'文章页读出来的正文块不是文字:{type(row).__name__}')
+        if blocks:
+            body = '\n\n'.join(blocks)[:MAX_CHARS].strip()
+            seen_title = snap.get('title')
+            title = seen_title.strip() if isinstance(seen_title, str) else ''
+            return {'title': title, 'body': body}
+    return NOT_YET
+
+
 def browser_fetch(session, url: str, *, wait: float | None = None,
                   deadline: float | None = None) -> dict | None:
     """后路:在 `session` 那个**已经登录**的浏览器里读这篇长文。
@@ -326,51 +387,9 @@ def browser_fetch(session, url: str, *, wait: float | None = None,
             raise ArticleUnavailable(f'长文页面读不动:{e}') from None
         except (ValueError, TypeError, UnicodeError) as e:
             raise ArticleUnavailable(f'长文页面的回包读不懂:{e}') from None
-        if not isinstance(snap, dict):
-            raise ArticleUnavailable('长文页面的回包读不懂')
-        seen = _spot(str(snap.get('path') or ''))
-        # **承重那一道:这一页到底是不是我们要的那一篇。** 导航没生效时页面停在
-        # **上一篇文章**上,而那一页的正文是非空的 —— 不核对身份就会把上一篇的
-        # 标题和正文写进这一条,`fill` 报成功、水位照常推进,而 `put_items` 是
-        # `ON CONFLICT DO NOTHING`:**再同步也纠不回来**(2026-10-09 第 1 轮审查
-        # 实测:第二篇 `/Review/article/200` 真回 HTTP 204,库里第二条存成了第一
-        # 篇的标题和正文,拿正确正文重新入库返回新增 0 条)。
-        #
-        # 只比那个数字 id(见 `_spot`)。认不出 id 的路径(首页、登录墙、
-        # `about:blank`)不在这里拦 —— 那是「没打开」,交给下面两道:正文只在
-        # 身份对得上时才收,收不到就按超时抛。
-        if seen[1] and seen[1] != want:
-            raise ArticleUnavailable(
-                f'浏览器没跳到这一篇,还停在 /{seen[0]}/{seen[1]} 上')
-        if snap.get('back') and seen[1] == want:
-            return None               # X 自己弹回推文页:这条确实没有长文
-        # **正文只在"确实停在这一篇的文章页上"时才收。** 今天这和 JS 那边的
-        # `at` 同真同假(两者都从同一份 `path` 算),分成两处是因为它们回答的
-        # 不是一个问题:`at` 回答形状(还在文章页吗),这里回答身份(是哪一篇)。
-        if seen == ('article', want):
-            # `_rows`:非列表一律当空。同一条口径的另一侧 —— 后路恰恰是
-            # 「接口挂了」那一刻走的,它自己也漏出 `TypeError` 的话,同一场
-            # 事故只是换了个位置(整批账号一起带掉)。当空 = 这一页还没渲染
-            # 出正文,交给下面那道超时。
-            #
-            # **而列表里那个成员不许丢掉** —— 口径同 `_must_block`,而且这是
-            # 同一条缺陷的两个位置:丢掉它之后剩下的正常段照样拼出一段**非空**
-            # 正文,于是「正文读到了」、水位照常推进,而丢掉的那一段是这篇文章
-            # 的正文,`put_items` 是 `ON CONFLICT DO NOTHING`、再也补不回来。
-            # 空值(`''` / `None` / `0`)跳过:它们携带不了任何内容线索。
-            blocks = []
-            for row in _rows(snap.get('blocks')):
-                if isinstance(row, str):
-                    if row.strip():
-                        blocks.append(row)
-                elif row:
-                    raise ArticleUnavailable(
-                        f'文章页读出来的正文块不是文字:{type(row).__name__}')
-            if blocks:
-                body = '\n\n'.join(blocks)[:MAX_CHARS].strip()
-                seen_title = snap.get('title')
-                title = seen_title.strip() if isinstance(seen_title, str) else ''
-                return {'title': title, 'body': body}
+        got = read_snapshot(snap, want)
+        if got is not NOT_YET:
+            return got
         if time.monotonic() > limit:
             raise ArticleUnavailable(
                 '长文页面没渲染出正文' if snap.get('at')

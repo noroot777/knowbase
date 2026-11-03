@@ -1,6 +1,6 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Knowbase · 采集此页</title><link rel="stylesheet" href="popup.css"><script defer src="api.js"></script><script defer src="popup.js"></script></head>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Knowbase · 采集此页</title><link rel="stylesheet" href="popup.css"><script defer src="api.js"></script><script defer src="x_capture.js"></script><script defer src="popup.js"></script></head>
 <body>
   <header><strong>k· Knowbase</strong><span id="version"></span></header>
   <main>
@@ -22,6 +22,14 @@
         </span>
         <button id="close-tab" hidden>关掉这一页</button>
         <button id="refresh" class="quiet">重新确认</button>
+      </div>
+    </section>
+    <section id="x-article" hidden>
+      <h1 id="x-state">正在确认这一篇…</h1>
+      <p id="x-post" class="t" hidden></p><p id="x-url" class="url"></p>
+      <div class="actions">
+        <button id="x-act" hidden>采集这篇长文</button>
+        <button id="x-refresh" class="quiet">重新确认</button>
       </div>
     </section>
     <section id="elsewhere" hidden>

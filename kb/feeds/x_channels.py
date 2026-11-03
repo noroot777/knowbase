@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""X 采集通道:同一批账号,三条互斥的取法。选哪条是一个设置。
+"""X 采集通道:同一批账号,四条互斥的取法。选哪条是一个设置。
 
 **硬约束在 `docs/decisions/x-channels.md` 第一节 —— 改这块之前先读那一份。**
 
@@ -8,12 +8,17 @@
 | `feedgrab`| 一份 X cookie    | 装 feedgrab + 跑一次 login | 天 |
 | `browser` | 你自己的登录态   | 在独立 profile 里登录一次 | 分钟 |
 | `attach`  | 你自己的登录态   | 在日常浏览器里开一次调试开关 | 分钟 |
+| `guest`   | 谁的也不用       | 什么都不用准备              | 分钟 |
+
+**`guest` 是完全不登录的那一套**(`x_guest`):FxTwitter 公开接口和 X 自己的未登录页面
+搭着用,不起浏览器、不碰任何账号或 cookie。它跟前三条不共用任何登录/浏览器代码,只共用
+入库那一段(五天队列、暂存与确认、正文待办)。哪一步用哪件工具写在 `x_guest` 的模块注释里。
 
 **`bridge`(第三方 RSS 桥接)这一档已经删掉**:公共实例常年不稳,而三条登录态
 通道都已经能无人值守跑。它只以**退役别名**的形式活着(见下面 `_RETIRED`)——
 存量设置里写着 `bridge` 的,解析成现在的默认档。
 
-**后两条的差别是「谁的浏览器」**:`browser` 我们自己起一个独立 profile 的无头
+**`browser` 和 `attach` 的差别是「谁的浏览器」**:`browser` 我们自己起一个独立 profile 的无头
 Chrome(所以要在那里面单独登录一次,但不依赖用户在不在);`attach` 直连用户
 日常那个浏览器(登录态现成,但只在它开着、而且开了远程调试时能用)。对照表和
 那条开关的代价写在 `kb/feeds/cdp_attach.py` 的模块注释里。
@@ -44,13 +49,14 @@ from kb.config import DATA_DIR
 from kb.feeds.x_cdp import has_login_footprint
 from kb.source_types import feed_types
 
-FEEDGRAB, BROWSER, ATTACH = 'feedgrab', 'browser', 'attach'
+FEEDGRAB, BROWSER, ATTACH, GUEST = 'feedgrab', 'browser', 'attach', 'guest'
 DEFAULT = BROWSER
-CHANNELS = (BROWSER, ATTACH, FEEDGRAB)
+CHANNELS = (BROWSER, ATTACH, FEEDGRAB, GUEST)
 LABELS = {
     FEEDGRAB: 'feedgrab(cookie)',
     BROWSER: '独立 profile 的登录态',
     ATTACH: '我日常用的浏览器',
+    GUEST: '不登录',
 }
 HINTS = {
     FEEDGRAB: '用一份 X cookie 调 X 自己的接口。建议用小号:拿 cookie 抓取违反 X 服务条款,'
@@ -69,6 +75,10 @@ HINTS = {
             '只在它开着时能抓,而且每次连接都要你点一下「允许」。'
             '用的也是你自己那个账号:拿登录态抓取违反 X 服务条款,'
             '这个号有被限制的可能。',
+    GUEST: '不用任何 X 账号、cookie 或浏览器,没有账号可封。时间线和长文经 FxTwitter 公开接口读'
+           '(第三方公共服务,账号名和推文地址会发给它);它问不到时改读 X 未登录主页,'
+           '但那里只露最新几条,发得勤的号这一轮会读不全。'
+           '两头都不可用就下一轮自动重试,不会换去走要登录的路。',
 }
 # 退役名 → 现用名。一个都不许删(见模块注释)。
 # `bridge` = 删掉的那条第三方 RSS 桥接:存量设置里写着它的,落到现在的默认档。
@@ -153,7 +163,7 @@ def validate(settings: dict) -> None:
 # `<time datetime>`,精度和语义逐字相同 —— 分开存只会让「从独立 profile 换成日常
 # 浏览器」白白重抓一遍历史。
 _WATER_KEY = {BROWSER: 'x_watermark_browser', ATTACH: 'x_watermark_browser',
-              FEEDGRAB: 'x_watermark_feedgrab'}
+              FEEDGRAB: 'x_watermark_feedgrab', GUEST: 'x_watermark_guest'}
 
 
 def _config(source: dict) -> dict:
@@ -282,6 +292,10 @@ def prefetch(sources: list[dict], settings: dict, *, since: str = '',
         from kb.feeds import x_intake
         result = x_intake.harvest(picked, settings, budget=budget or 480,
                                   on_progress=on_progress, should_stop=should_stop)
+    elif channel == GUEST:
+        from kb.feeds import x_guest
+        result = x_guest.harvest(jobs, budget=budget, on_progress=on_progress,
+                                 should_stop=should_stop)
     elif channel in (BROWSER, ATTACH):
         from kb.feeds import x_browser
         result = x_browser.harvest(
@@ -381,6 +395,11 @@ def readiness(settings: dict) -> tuple[bool, str, str]:
     它自己那颗按钮,没有文字可给。
     """
     channel = channel_of(settings)
+    if channel == GUEST:
+        from kb.feeds import x_guest
+        if not x_guest.API:
+            return False, '不登录通道的接口地址被设成了空', '去掉环境变量 KB_X_GUEST_API 或填一个可用的地址'
+        return True, '', ''
     if channel == FEEDGRAB:
         from kb.feeds import x_feedgrab
         try:
@@ -468,6 +487,11 @@ def check(settings: dict) -> tuple[bool, str]:
     浏览器(那时他可能还要点一下授权弹窗),或者真跑一次 `feedgrab doctor`。
     """
     channel = channel_of(settings)
+    if channel == GUEST:
+        from kb.feeds import registry as reg, x_guest
+        handles = [_handle(s) for s in reg.subscriptions('social')
+                   if s['enabled'] and reg.uses_channel(s) and _handle(s)]
+        return x_guest.probe(handles[0] if handles else 'X')
     if channel == FEEDGRAB:
         from kb.feeds import x_feedgrab
         return x_feedgrab.doctor(settings.get('x_feedgrab_bin', ''),

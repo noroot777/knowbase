@@ -78,7 +78,7 @@ def extension_download():
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as bundle:
         for name in ('manifest.json', 'popup.html', 'popup.css', 'popup.js', 'api.js',
-                     'extract.js', 'present.js', 'README.md'):
+                     'extract.js', 'present.js', 'x_capture.js', 'x_article_read.js', 'README.md'):
             bundle.write(EXTENSION_DIR / name,
                          'knowbase-capture/' + name)
     return Response(archive.getvalue(), media_type='application/zip',

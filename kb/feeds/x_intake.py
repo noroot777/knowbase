@@ -439,6 +439,9 @@ class Intake:
                 if self.channel == 'feedgrab':
                     from kb.feeds.x_intake_feedgrab import run
                     run(self)
+                elif self.channel == 'guest':
+                    from kb.feeds.x_intake_guest import run
+                    run(self)
                 else:
                     self.browser()
             except Exception as error:

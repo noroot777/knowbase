@@ -95,7 +95,33 @@
   feeds.db 的 `title`/`body`/`content_hash` 并清 `exported_hash`,不写 kb.db、不写 vault。**`lang` 要一并清成空串**
   (空正文那会儿按占位标题判成了中文,而 `lang='zh'` 永远进不了翻译队列);不想花翻译钱就把 `translate_tries` 设成
   `translate.MAX_TRIES`,**别改成 `lang='zh'`**(那是谎报语言)。写回按元规则带条件。
-- 读文章页的 JS 在 `x_article_js.py`、回包结构判定和块级零件在 `x_article_shape.py`、地址识别在
+- 读文章页的 JS **住在采集扩展目录里**(`kb/static/browser-extension/knowbase-capture/x_article_read.js`),
+  `x_article_js.py` 只把那个文件原样读进来 —— 人工补长文那条路(下一条)要在人自己的浏览器里跑**同一段**脚本,
+  而扩展只拿得到它自己目录下的文件。**别再在任何一侧抄一份**:两份就是「这一页读出来是什么」的两份口径,同一篇
+  长文从两条路进来长成两个样子。快照怎么判(身份、`back`、正文块)同样只有 `x_article.read_snapshot` 一份,
+  `browser_fetch` 轮询时和人工那条路都过它。回归 `tests/test_x_article_capture.py` 的 `ShippingTests`(还钉着 ZIP
+  里带上了 `x_article_read.js` 和 `x_capture.js`)。
+- **人工补长文**(`kb/feeds/x_article_capture.py`、`kb/web/x_article_capture_api.py`、扩展的 `x_capture.js`、
+  「问题与待办」里 `diag_detail.js` 的 `careRenderXArticles`):自动那条路拿不到正文的长文作为候选挂在 X 五天队列里,**不入库**;
+  人在自己登录着 X 的浏览器里点开那篇长文、点一下扩展,快照交回服务端。不登录那一档(`guest`)最需要它 ——
+  那一档只有 FxTwitter 拿得到长文 —— 但它对四条通道的候选一视同仁。
+  - **它不是「从浏览器采集」(`kb.browser_capture`)那一套**:那一套补的是**已经在 `feed_items` 里**的文章行、
+    明确拒掉 X 观点;这里补的是还没入库的推文候选。共用的只有扩展、配对密钥和读页脚本,**待办、候选、关页许可
+    一概不共用**(`popup.js` 在 X 的推文页 / 长文页上整块交给 `x_capture.js`)。
+  - **扩展一个字都不判**:这一页是不是那一篇、读没读到正文、写不写得了,全由服务端答。身份按推文 id 认(长文页
+    `/<handle>/article/<推文 id>`,同 `article_page`),地址和快照里的 `path` 都要落在那一篇上;快照判出
+    `NOT_YET`(还没显示出正文,多半是没登录或还在加载)、`None`(X 转回了推文页)、身份不对,一律拒、什么都不写。
+  - **出口只走 `x_intake_store.finish`**,把候选从 pending 转成 ready,投递照旧交给下一轮同步。**不许只把正文写回、
+    留着 pending**:下一轮的时间线扫描会按时间线上那一份(空正文、带长文信号)把 pending 的候选整份重写
+    (`store.stage`),人刚补的正文当场丢掉(实测:写回之后再同步一次,库里没有这一条)。也**不许绕过它直接写
+    `feed_items`** —— 排除、存量修补、下界、订阅改过没有都在 `finish` 那一份里判。
+  - 列表只列**在等长文**的候选(`_owes`:带长文信号或 `needs_article`,且不是长推展开那一种),口径同
+    `store.pending` 但**不看退避** —— 人手动补的这一下不该等自动重试的冷却。时间原样摆 `published`(已经是项目
+    时区),不交给前端按浏览器时区再解析。
+  - **列表、「这一页能不能补」、交回时挑哪条订阅写,三处过同一份判据**(`_WAITING` 再加 `_current`:关联的身份
+    得是那条订阅**现在**的身份)。订阅每编辑一次身份就换一版(带着 `rev`),下一轮同步之前旧关联和旧进度都还在;
+    只看 SQL 的话扩展一直说「可以补」,交回时才被 `finish` 拒掉。
+- 回包结构判定和块级零件在 `x_article_shape.py`、地址识别在
   `x_article_links.py`(起点判据再往下拆进 `x_article_nest.py`),**只因为行数**。
   `API`/`PAGE_WAIT`/`BROWSER_FALLBACK`/`MAX_CHARS` 一个都没搬(它们被 `patch.object` 改过);搬过去的名字一律原样再
   导出。
