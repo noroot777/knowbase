@@ -387,11 +387,14 @@ def statuses(sources, channel='browser'):
         rows = {row['source_id']: dict(row) for row in conn.execute('SELECT * FROM x_intake_sources')}
         pending_rows = conn.execute('''
             SELECT l.source_id,l.identity,count(*) AS pending,
-                max(max(p.attempted),max(p.staged_at)) AS attempted FROM x_intake_links l
+                max(max(p.attempted),max(p.staged_at),max(l.linked_at)) AS attempted FROM x_intake_links l
             JOIN x_intake_candidates p USING(post_id) WHERE p.state IN ('pending','repair')
             GROUP BY l.source_id,l.identity''').fetchall()
         counts = {(row['source_id'], row['identity']): row['pending'] for row in pending_rows}
-        # 正文待补那一条自己的时刻:那几条最后一次补正文、或最后一条进入待补的时刻。
+        # 正文待补那一条自己的时刻:那几条最后一次补正文、最后一条进入待补、或最后一条
+        # **进入这个账号**的时刻。候选按 `post_id` 全局只有一行,别的账号先收过的转推在
+        # 这个账号这里是新事,`staged_at` 却还是那边的旧时间 —— 所以账号这一维认
+        # `linked_at`;反过来不能为它去刷新共享的 `staged_at`,那会把先收的账号也变新。
         pending_at = {(row['source_id'], row['identity']): row['attempted'] or 0 for row in pending_rows}
         unconfirmed = {source_id: batches.count(conn, source_id, row['identity'], row['floor'])
                        for source_id, row in rows.items()}

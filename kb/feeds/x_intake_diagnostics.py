@@ -77,8 +77,8 @@ def issues(state):
     """`at` = 这条事实自己最近一次发生/变化的时刻(epoch 秒,没有证据为 None)。
 
     阻断认它自己的 `observed_at`;超窗认 `x_intake_expirations.expired_at`;正文待补认
-    那几条最后一次补正文、最后一条进入待补的时刻(`attempted` / `staged_at`)和正文阶段
-    阻断;候选待确认认最后一条被记进扫描的时刻(`linked_at`);历史缺口认缺口出现的时刻
+    那几条最后一次补正文、最后一条进入待补、最后一条进入这个账号的时刻(`attempted` /
+    `staged_at` / `linked_at`)和正文阶段阻断;候选待确认认最后一条被记进扫描的时刻(`linked_at`);历史缺口认缺口出现的时刻
     (`gap_at`)。**不认 `scan_at` / `history_at`**:扫描开始、失败记账都会刷新它们,
     借它会让没动过的旧待办比刚发生的限流还新。只因容量不够才报的那条没有发生时刻。"""
     result = []

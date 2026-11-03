@@ -372,8 +372,9 @@
   `source_accounts`,页头和页签按它数)。`sources.problems` 是事实层,一条订阅的几条问题各自的身份
   与原话都留着,重试凭证照旧按 `id` 现查。**新旧只按每条事实自己的时间比**(行上的 `at`):失败原话
   的 `subscriptions.error_at`、没读完那句的 `note_at`(各自和那句话**同一条 UPDATE** 写下)、X 阻断
-  的 `observed_at`、超窗的 `x_intake_expirations.expired_at`、正文待补那几条最后一次补正文或最后一条
-  进入待补的时刻(`attempted` / `x_intake_candidates.staged_at`)、候选待确认最后一条被记进扫描的时刻
+  的 `observed_at`、超窗的 `x_intake_expirations.expired_at`、正文待补那几条最后一次补正文、最后一条
+  进入待补、最后一条进入这个账号的时刻(`attempted` / `x_intake_candidates.staged_at` /
+  `x_intake_links.linked_at` —— 候选按 `post_id` 全局一行,别的账号先收过的转推在这个账号是新事)、候选待确认最后一条被记进扫描的时刻
   (`x_intake_links.linked_at`)、历史缺口出现的时刻(`x_intake_sources.gap_at`)。后三列只在那件事
   真的发生时写(缺口换个说法、待补在两档之间换不算)。**不按步骤、不按拼装顺序、不按订阅共用的
   `last_attempt`、也不认 `scan_at`/`history_at`** —— 先撞安全验证、后撞限流,按步骤取留下的是早的那条;

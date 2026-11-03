@@ -72,3 +72,22 @@ class XFactTimeTests(IntakeBase):
             conn.execute("UPDATE x_intake_candidates SET attempted=? WHERE post_id='100'",
                          (time.time() + 60,))
         self.assertEqual(['x_intake_body'], self.shown(self.x_state()))
+
+    def test_a_retweet_new_to_this_account_is_not_dated_by_another_account(self):
+        """A 一小时前收过、正文还待补的那一条,B 刚从转推里第一次收到:B 的正文待补认
+        B 收到它的那一刻,压得过 B 早先的限流;A 那边的时间一个字都不动。"""
+        other = self.sub('Other')
+        store.prepare([other], 'browser', self.now)
+        throttle = blocks.describe(xstate.session_throttled(), 'history')
+        store.set_block(other, throttle)
+        mine = next(one['at'] for one in self.x_state()['issues'] if one['kind'] == 'x_intake_body')
+        self.stage([self.entry('100', truncated=True)], source=other, missing='还缺一段')
+        theirs = dict(reg.subscription('social', other['id']))
+        store.statuses([theirs], 'browser')
+        body = next(one['at'] for one in theirs['x_intake']['issues'] if one['kind'] == 'x_intake_body')
+        self.assertGreater(body, throttle['observed_at'])
+        rows = [{'kind': 'social', 'source_id': other['id'], 'problem': one['kind'], 'label': one['kind'],
+                 'evidence': one['evidence'], 'at': one.get('at')} for one in theirs['x_intake']['issues']]
+        self.assertEqual(['x_intake_body'], [row['problem'] for row in sources.latest(rows)])
+        self.assertEqual(mine, next(one['at'] for one in self.x_state()['issues']
+                                    if one['kind'] == 'x_intake_body'))
