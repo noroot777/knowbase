@@ -297,10 +297,21 @@ function careAppendPage(section, got) {
 /** 列表此刻对应的那个范围。范围没变时的重取(轮询、处理完一批之后)要保住展开深度。 */
 function careScope() { return JSON.stringify([CARE.group, CARE.kind, CARE.stage, CARE.q]); }
 
-/** 往后补页,直到这一节回到原来展开到的那么多条(或者已经没有更多)。 */
+/** 往后补页,直到这一节回到原来展开到的那么多条(或者已经没有更多)。
+
+    **补页失败不拖垮整次刷新**:第一页已经拿到了,补到哪儿算哪儿、说一句。抛出去
+    的话外层 catch 清空整张列表,而批量栏还留着上一屏的勾选和按钮。 */
 async function careDeepen(section, want, mine) {
   while (section.items.length < Math.min(want, section.total)) {
-    const got = await careFetchPage(section.lane.id, section.items.length);
+    let got;
+    try {
+      got = await careFetchPage(section.lane.id, section.items.length);
+    } catch (e) {
+      if (mine === CARE.seq) {
+        toast(`只取回了前 ${section.items.length} 条，后面的勾选已放掉`, { detail: e.message });
+      }
+      return;
+    }
     if (mine !== CARE.seq || !got || !got.items.length) return;
     const before = section.items.length;
     careAppendPage(section, got);
