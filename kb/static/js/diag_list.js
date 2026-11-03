@@ -249,6 +249,8 @@ function careSelect(id) {
     每一类来源的执行射程不一样,混在一条请求里写不出一句不说谎的确认文案。 */
 function careRenderBatch() {
   const host = $('care-batch');
+  // 批量栏每次整个重建;键盘用户刚在全选那一格上按了空格,焦点要落回新的那一格。
+  const refocus = !!document.activeElement?.closest?.('.care-batch-all');
   const picked = [...CARE.picked.values()];
   const visible = careVisibleKeys();
   // 勾过但已经不在这一屏上的(换了筛选、刷新之后它走了)一律丢掉:批量栏承诺的
@@ -283,7 +285,9 @@ function careRenderBatch() {
     if (why) { b.disabled = true; b.title = why; } else b.onclick = fn;
     acts.appendChild(b);
   };
-  const mixed = kinds.size > 1 ? '不同来源的执行范围不一样，请先在上面选一类来源' : '';
+  const mixed = kinds.size > 1 ? '不同来源的执行范围不一样，请先在上面选一类来源'
+    : CARE.picked.size > careBatchMax()
+      ? `立即执行一次最多 ${careBatchMax()} 条（同步一次只跑一轮，分不了批）` : '';
   // **按真实出口给按钮**(审查第 1 轮 B03):出口是后端按档给的
   // (`lane.exits`),这里取勾中那几档的**交集** —— 一半能放回队列、一半不能时
   // 给出一颗「仅重新排队」,点下去只会部分生效,而按钮上看不出是哪一半。
@@ -309,6 +313,7 @@ function careRenderBatch() {
   clear.onclick = () => { CARE.picked.clear(); careRenderBatch(); };
   acts.appendChild(clear);
   host.append(label, acts);
+  if (refocus) all.focus();
 }
 
 function careVisibleKeys() {

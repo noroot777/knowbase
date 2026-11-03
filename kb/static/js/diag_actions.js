@@ -369,6 +369,17 @@ async function careRelink(row) {
    **按来源分组后才发请求**:每一类来源的执行射程不一样。立即执行那一颗在混选
    时已经被禁掉(diag_list.js),放回/搁置这几颗逐类发一次就行。 */
 
+/** 一个写请求最多带几条:服务端 `MAX_KEYS`,随概览给过来。缺省值只给还没重启的
+    旧进程兜底(它的概览里没有这一项,而它的上限就是这个数)。 */
+function careBatchMax() { return CARE.overview?.batch_max || 500; }
+
+function careChunks(keys) {
+  const size = careBatchMax();
+  const out = [];
+  for (let i = 0; i < keys.length; i += size) out.push(keys.slice(i, i + size));
+  return out;
+}
+
 function carePickedByKind() {
   const groups = new Map();
   for (const one of CARE.picked.values()) {
@@ -396,10 +407,16 @@ function careRunPicked() {
   const groups = carePickedByKind();
   if (groups.size !== 1) return;
   const [[kind, keys]] = [...groups];
+  // **立即执行不分批**:管道一次只跑一轮,拆成两次起跑第二次当场 409。
+  // 超过上限时批量栏上这颗本来就是禁用的(diag_list.js)。
+  if (keys.length > careBatchMax()) return;
   careRun(kind, keys);
 }
 
-/** 逐类来源发请求,**只把成功那几类的勾选去掉**。
+/** 逐类来源、每类按上限分批**依次**发请求,**只把成功那几批的勾选去掉**。
+
+    放回 / 搁置 / 恢复都是逐条独立的写,拆批不改语义;一批失败就停下这一类后面
+    的批(多半是同一个原因),那几条照旧勾着。
 
     上一版不管成败一律 `CARE.picked.clear()`,而填原因那个弹窗的 submit 又无条件
     返回 true 关掉自己 —— 一类超时或 500 时,失败那几条的勾选和人刚写的那段原因
@@ -409,14 +426,17 @@ async function careEachKind(path, label, build) {
   let touched = 0;
   const notes = [];
   const failed = [];
-  for (const [kind, keys] of carePickedByKind()) {
-    try {
-      const done = await carePost(path, build(kind, keys));
-      touched += done.requeued ?? done.shelved ?? done.released ?? 0;
-      if (done.detail) notes.push(done.detail);
-      for (const key of keys) CARE.picked.delete(key);
-    } catch (e) {
-      failed.push(e.message);
+  for (const [kind, all] of carePickedByKind()) {
+    for (const keys of careChunks(all)) {
+      try {
+        const done = await carePost(path, build(kind, keys));
+        touched += done.requeued ?? done.shelved ?? done.released ?? 0;
+        if (done.detail) notes.push(done.detail);
+        for (const key of keys) CARE.picked.delete(key);
+      } catch (e) {
+        failed.push(e.message);
+        break;
+      }
     }
   }
   if (failed.length) {
