@@ -341,12 +341,15 @@ def configuration_error(source: dict, settings: dict) -> str:
     return '' if ready else f'待配置：{why}'
 
 
-def subscriptions(kind: str) -> list[dict]:
+def subscriptions(kind: str, conn=None) -> list[dict]:
+    """`conn`:调用方手里那条连接(比如只读的 `read_db`);不给就开一条 `db()`。"""
     check_kind(kind)
-    with db() as c:
-        rows = c.execute('''SELECT s.*, (SELECT count(*) FROM subscription_items si
-            WHERE si.subscription_id=s.id) AS item_count FROM subscriptions s
-            WHERE kind=? ORDER BY id''', (kind,)).fetchall()
+    if conn is None:
+        with db() as c:
+            return subscriptions(kind, c)
+    rows = conn.execute('''SELECT s.*, (SELECT count(*) FROM subscription_items si
+        WHERE si.subscription_id=s.id) AS item_count FROM subscriptions s
+        WHERE kind=? ORDER BY id''', (kind,)).fetchall()
     return [dict(r) for r in rows]
 
 

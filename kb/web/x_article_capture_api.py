@@ -16,7 +16,7 @@ router = APIRouter()
 
 @router.get('/api/x-article-capture/owed', dependencies=[Depends(app_access)])
 def owed(source_id: int | None = None):
-    return {'items': capture.owed(source_id)}
+    return {'items': invoke(capture.owed, source_id)}
 
 
 class HereRequest(BaseModel):
@@ -26,7 +26,7 @@ class HereRequest(BaseModel):
 
 @router.post('/api/x-article-capture/here', dependencies=[Depends(extension_access)])
 def here(body: HereRequest):
-    return capture.here(body.url)
+    return invoke(capture.here, body.url)
 
 
 class SaveRequest(BaseModel):

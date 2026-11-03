@@ -125,7 +125,8 @@ SQLITE_WAIT = 30.0
 SLICE = 0.25
 
 
-def _busy(error):
+def busy(error):
+    """这个 SQLite 错误是不是「锁被别人占着」(等一会儿再来就可能成)。"""
     text = str(error).lower()
     return 'locked' in text or 'busy' in text
 
@@ -142,7 +143,7 @@ def _write_db(deadline=None, should_stop=None):
             try:
                 return take(0.0 if halted else max(0.0, min(SLICE, end - time.monotonic())))
             except sqlite3.OperationalError as error:
-                if not _busy(error) or halted or (stop and stop()) or time.monotonic() >= end:
+                if not busy(error) or halted or (stop and stop()) or time.monotonic() >= end:
                     raise
 
     def begin(timeout):

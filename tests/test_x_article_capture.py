@@ -188,6 +188,16 @@ class LockWaitTests(CaptureBase):
         self.assertEqual(200, r.status_code, r.text)
         self.assertEqual('ready', self.candidate()['state'])
 
+    def test_a_briefly_held_feeds_db_is_waited_for(self):
+        """反过来钉一边:写锁只是短暂被占、时限还够,照常交得回去。"""
+        from tests.test_x_intake_lock_wait import hold_sqlite_writer
+        worker = hold_sqlite_writer(0.3)
+        self.addCleanup(worker.join, 5)
+        with patch.object(x_article_capture, '_LOCK_WAIT', 3.0):
+            r = self.save()
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertEqual('ready', self.candidate()['state'])
+
     def test_a_lock_held_past_the_short_wait_is_refused_and_writes_nothing(self):
         before = self.candidate()['entry']
         self.hold(2.0)
@@ -198,6 +208,41 @@ class LockWaitTests(CaptureBase):
         self.assertIn('同步正在写库', r.json()['detail'])
         self.assertLess(time.monotonic() - started, 1.5)          # 不陪着那一轮维护挂下去
         self.assertEqual(('pending', before), (self.candidate()['state'], self.candidate()['entry']))
+
+
+class FeedsDbHeldTests(CaptureBase):
+    """另一个连接一直攥着 feeds.db 的写锁(同步正在写库):三个端点都在那一份短时限里答复,不是陪它等满
+    30 秒再报 500。认身份、列候选只读,所以列表和「这一页能做什么」照常答;交回那一下写不进去就 409、候选原样。"""
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_x_intake_lock_wait import hold_sqlite_until
+        self.before = self.candidate()['entry']
+        limit = patch.object(x_article_capture, '_LOCK_WAIT', 0.5)
+        limit.start(); self.addCleanup(limit.stop)
+        hold_sqlite_until(self)
+
+    def timed(self, call):
+        started = time.monotonic()
+        r = call()
+        self.assertLess(time.monotonic() - started, 0.5 + 0.4, '没守住这一个请求的那一份时限')
+        return r
+
+    def test_the_list_and_the_page_question_still_answer(self):
+        r = self.timed(lambda: self.web.get('/api/x-article-capture/owed'))
+        self.assertEqual((200, ['6']), (r.status_code, [i['post_id'] for i in r.json()['items']]))
+        r = self.timed(lambda: self.here(ARTICLE))
+        self.assertEqual((200, 'fill'), (r.status_code, r.json()['situation']))
+        r = self.timed(lambda: self.here('https://x.com/alice/status/5'))
+        self.assertEqual((200, 'stored'), (r.status_code, r.json()['situation']))
+
+    def test_handing_in_is_refused_within_the_budget_and_writes_nothing(self):
+        r = self.timed(self.save)
+        self.assertEqual(409, r.status_code, r.text)
+        self.assertIn('同步正在写库', r.json()['detail'])
+        with reg.read_db() as c:              # 锁还被攥着:只读地看一眼
+            row = c.execute("SELECT state, entry FROM x_intake_candidates WHERE post_id='6'").fetchone()
+        self.assertEqual(('pending', self.before), tuple(row))
 
 
 class ShippingTests(unittest.TestCase):

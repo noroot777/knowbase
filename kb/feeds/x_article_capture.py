@@ -26,14 +26,40 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
+from contextlib import contextmanager
 
 from kb.feeds import registry as reg, x_article, x_post
 from kb.feeds import x_intake_store as store
 from kb.maintenance import LockBusy
 
-# 人点了「采集这篇长文」在等的这一下,维护锁最多等这么久(口径同收藏那一侧的 `_DOC_LOCK_WAIT`):
-# 等不到就如实说一句让人过会儿再点,不让整条 HTTP 连接陪着一轮大编码挂上几分钟。
+# 人点了「采集这篇长文」(或扩展问这一页、页面列待补)在等的这一下,**整个请求**最多等这么久(口径同收藏
+# 那一侧的 `_DOC_LOCK_WAIT`):等不到就如实说一句让人过会儿再点,不让整条 HTTP 连接陪着一轮大编码挂上
+# 几分钟。是**一份总额**,不是每一处各领一份:请求一进来就定下截止(`_deadline`),读库、维护锁、写库都按
+# 剩下的那点等。只为认身份、列候选的那几次读一律走只读连接(`read_db`)—— 普通 `reg.db()` 开库就要过
+# 一下写锁(建表、迁移),别人正写着时光查一下订阅就能等满 30 秒。
 _LOCK_WAIT = 10.0
+
+
+def _deadline() -> float:
+    return time.monotonic() + _LOCK_WAIT
+
+
+def _left(end: float) -> float:
+    return max(0.0, end - time.monotonic())
+
+
+@contextmanager
+def _locks_are_retryable(detail: str):
+    """这一个请求里任何一处等锁没等到,都换成一句「过会儿再点」(`ValueError`,端点给 409),不让它成 500。"""
+    try:
+        yield
+    except LockBusy:
+        raise ValueError(detail) from None
+    except sqlite3.OperationalError as error:
+        if not store.busy(error):
+            raise
+        raise ValueError(detail) from None
 
 # 人此刻站着的那一页:`/<handle>/article/<推文 id>`(长文页)或 `/<handle>/status/<推文 id>`(推文页)。
 # 只认推文 id —— handle 大小写不敏感、改名后旧地址照样跳得到(口径同 `x_article._spot`)。
@@ -48,11 +74,11 @@ _WAITING = '''SELECT p.post_id,p.entry,p.published,p.failures,p.reason,l.source_
     WHERE p.state='pending' AND p.published>=s.floor'''
 
 
-def _current() -> dict:
+def _current(conn) -> dict:
     """现存订阅按 (id, 身份) 索引。**列表、这一页能不能补、交回时挑谁写,都过这一份**:
     订阅改过(改指别的账号、或只是编辑过一次,身份带着 rev)之后、下一轮同步之前,旧关联和旧进度都还在,
     只看 SQL 会让扩展一直说「可以补」,交回时才被拒。"""
-    return {(source['id'], store.identity(source)): source for source in reg.subscriptions('social')}
+    return {(source['id'], store.identity(source)): source for source in reg.subscriptions('social', conn)}
 
 
 def spot(url: str) -> tuple[str, str]:
@@ -74,14 +100,16 @@ def _view(row) -> dict:
                 source_id=row['source_id'], failures=row['failures'], reason=row['reason'])
 
 
-def owed(source_id: int | None = None) -> list[dict]:
+def owed(source_id: int | None = None, end: float | None = None) -> list[dict]:
     """还在等长文正文的推文,新的在前。`source_id` 给了就只列那一条订阅的。"""
+    end = _deadline() if end is None else end
     sql, args = _WAITING, ()
     if source_id is not None:
         sql, args = sql + ' AND l.source_id=?', (source_id,)
-    with store.read_db(timeout=30) as conn:
+    with _locks_are_retryable('同步正在写库，稍后再试一次。'), store.read_db(timeout=_left(end)) as conn:
         rows = conn.execute(sql + ' ORDER BY p.published DESC', args).fetchall()
-    current, seen, out = _current(), set(), []
+        current = _current(conn)
+    seen, out = set(), []
     for row in rows:
         if (row['source_id'], row['identity']) not in current:
             continue
@@ -106,9 +134,10 @@ def here(url: str) -> dict:
     kind, ident = spot(url)
     if not ident:
         return dict(situation='other', detail='这一页不是 X 的推文或长文。', post=None)
-    post = next((one for one in owed() if one['post_id'] == ident), None)
+    end = _deadline()
+    post = next((one for one in owed(end=end) if one['post_id'] == ident), None)
     if post is None:
-        with reg.read_db(timeout=30) as conn:
+        with _locks_are_retryable('同步正在写库，稍后再试一次。'), reg.read_db(timeout=_left(end)) as conn:
             stored = _stored(conn, ident)
         return dict(situation='stored' if stored else 'absent', post=None,
                     detail='这一条已经在知识库里了。' if stored else '知识库没在等这一篇长文的正文。')
@@ -131,13 +160,34 @@ def save(post_id: str, page_url: str, snapshot) -> dict:
         raise ValueError('长文页还没显示出正文（多半还在加载，或者这个浏览器没登录 X）。等它显示出来再点一次。')
     if got is None:
         raise ValueError('X 把这一页转回了推文页：这条推文没有长文。没有写入。')
-    with store.read_db(timeout=30) as conn:
+    end = _deadline()
+    with _locks_are_retryable('同步正在写库，稍后再点一次。没有写入。'):
+        merged = _hand_in(ident, got, end)
+    # 写进去之后才轮到这一读:这里再等不到锁就不能说「没有写入」了
+    with _locks_are_retryable('长文正文已交回，但库正忙、没能确认结果。过会儿刷新待补列表看一眼。'), \
+            store.read_db(timeout=_left(end)) as conn:
+        after = conn.execute('SELECT state, entry FROM x_intake_candidates WHERE post_id=?', (ident,)).fetchone()
+    if not after or after['entry'] != json.dumps(merged, ensure_ascii=False):
+        raise ValueError('这一条刚被别的操作改过，没有写入。请重新确认这一页。')
+    if after['state'] == 'repair':
+        detail = '长文正文已交回；库里那一条的存量正文缺少同版证明，要走版本化回填，没有覆盖旧正文。'
+    elif after['state'] == 'excluded':
+        detail = '长文正文已交回，但这一条已被设为不再收录。'
+    else:
+        detail = '长文正文已交回，下一次同步这个账号时入库。'
+    return dict(post_id=ident, title=merged['title'], characters=len(got['body']), detail=detail)
+
+
+def _hand_in(ident: str, got: dict, end: float) -> dict:
+    """认出那条候选和它现在的主人,经 `store.finish` 写回。返回写回的那一份。"""
+    with store.read_db(timeout=_left(end)) as conn:
         task = conn.execute("SELECT * FROM x_intake_candidates WHERE post_id=? AND state='pending'",
                             (ident,)).fetchone()
         # 关联的口径同列表(`_WAITING` + `_current`):身份是那条订阅**现在**指着的账号、推文在它的有效
         # 下界之内。订阅改指别的账号之后,旧关联要等它下一轮同步才清掉;只认 source_id 会挑中它,写不进去。
         links = [(row['source_id'], row['identity']) for row in conn.execute(
             _WAITING + ' AND p.post_id=? ORDER BY l.source_id', (ident,))]
+        sources = _current(conn)
     entry = json.loads(task['entry']) if task else None
     if not entry or not _owes(entry):
         raise ValueError('这一条已经不在等长文了（可能刚被自动补上或已入库）。没有写入。')
@@ -150,22 +200,8 @@ def save(post_id: str, page_url: str, snapshot) -> dict:
     #
     # **不许只把正文写回、留着 pending 等下一轮**:下一轮的时间线扫描会按时间线上那一份(空正文、
     # 带长文信号)把 pending 的候选整份重写(`store.stage`),人刚补的正文当场丢掉。
-    sources = _current()
     owner = next((sources[one] for one in links if one in sources), None)
     if owner is None:
         raise ValueError('这条推文所属的订阅已经不在了（或改指了别的账号），没有写入。')
-    try:
-        store.finish(owner, dict(task), [merged], [], '', lock_wait=_LOCK_WAIT)
-    except (LockBusy, sqlite3.OperationalError):
-        raise ValueError('同步正在写库，稍后再点一次。没有写入。') from None
-    with store.read_db(timeout=30) as conn:
-        after = conn.execute('SELECT state, entry FROM x_intake_candidates WHERE post_id=?', (ident,)).fetchone()
-    if not after or after['entry'] != json.dumps(merged, ensure_ascii=False):
-        raise ValueError('这一条刚被别的操作改过，没有写入。请重新确认这一页。')
-    if after['state'] == 'repair':
-        detail = '长文正文已交回；库里那一条的存量正文缺少同版证明，要走版本化回填，没有覆盖旧正文。'
-    elif after['state'] == 'excluded':
-        detail = '长文正文已交回，但这一条已被设为不再收录。'
-    else:
-        detail = '长文正文已交回，下一次同步这个账号时入库。'
-    return dict(post_id=ident, title=merged['title'], characters=len(got['body']), detail=detail)
+    store.finish(owner, dict(task), [merged], [], '', lock_wait=_left(end))
+    return merged

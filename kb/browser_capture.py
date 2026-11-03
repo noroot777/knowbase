@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
+import sqlite3
 import threading
 import time
 
@@ -39,6 +40,16 @@ _OTHER_PAGE = '当前页面与指定文章网址不同。采集抽屉里已标�
 
 
 def pairing_key() -> str:
+    # 扩展的每个请求都过它鉴权:已经有了就**只读**。普通 `reg.db()` 开库要先过一下写锁(建表、迁移),
+    # 同步正写库时光验一下密钥就要等满 30 秒,人工补 X 长文那 10 秒的承诺在鉴权这一步就破了。
+    if reg.DB_PATH.exists():
+        try:
+            with reg.read_db() as conn:
+                row = conn.execute('SELECT value FROM feed_meta WHERE key=?', ('browser_capture_pairing',)).fetchone()
+        except sqlite3.OperationalError:
+            row = None                      # 老库还没这张表之类:走下面那条会建表的路
+        if row:
+            return row[0]
     with reg.db() as conn:
         conn.execute('INSERT OR IGNORE INTO feed_meta(key,value) VALUES (?,?)',
                      ('browser_capture_pairing', secrets.token_urlsafe(32)))
