@@ -9,6 +9,7 @@ from kb.youtube.faults import local_fault
 
 VERSION = 'youtube-notes-v3'
 MAX_LANGUAGE_TRIES = 3
+CONTEXT_LIMIT = 14000
 ORIGINS = {'local_cache': '已有本地原文转录', 'uploaded_captions': '作者提供的字幕',
            'automatic_captions': 'YouTube 自动字幕', 'local_asr': '本地语音转录'}
 
@@ -112,7 +113,7 @@ def summary_output(output, source=None, quotes=(), chinese_source=False):
         raise RuntimeError('视频分段要点不是有效中文，原文和译文已缓存')
     if not translation_language.chinese_output(output, source or '', quotes, chinese_source=chinese_source):
         raise translation.LanguageError('视频分段要点不是有效中文，原文和译文已缓存', 'summary')
-    if len(output) > 1000:
+    if len(output) > CONTEXT_LIMIT:
         raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
     return output
 
@@ -251,7 +252,7 @@ def build_chinese(row, transcript, deadline, stopped, directory, translator, sum
                             lambda block=block: summary(block, row['entry']['title'], summarizer, deadline, stopped),
                             lambda output, block=block: summary_output(output, block, quotes, chinese_source=True)))
     combined = '\n\n'.join(facts)
-    while len(combined) > 14000:
+    while len(combined) > CONTEXT_LIMIT:
         reduced = []
         for position in range(0, len(combined), 12000):
             block = combined[position:position + 12000]

@@ -27,6 +27,7 @@ OWNERS = '''CREATE TABLE IF NOT EXISTS youtube_video_sources (
  video_id TEXT NOT NULL REFERENCES youtube_videos(video_id) ON DELETE CASCADE,
  source_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
  source_url TEXT NOT NULL, committed INTEGER NOT NULL DEFAULT 0,
+ discovery_after TEXT NOT NULL DEFAULT '',
  PRIMARY KEY(video_id,source_id)
 )'''
 
@@ -46,6 +47,7 @@ def migrate(connection):
             SELECT video_id,entry,views,heat,heat_rank,state,reason,attempts,retry_at,duration,note,
             CASE WHEN state='failed' THEN reason ELSE '' END,updated_at FROM youtube_candidates''')
         connection.execute('''INSERT OR IGNORE INTO youtube_video_sources
+            (video_id,source_id,source_url,committed)
             SELECT video_id,source_id,source_url,committed FROM youtube_candidates''')
     connection.execute("INSERT INTO feed_meta VALUES('youtube-ownership-v2',?)", (reg.now(),))
 
@@ -57,6 +59,8 @@ def initialize(connection):
     seed(connection, reg.now(), reg.history_floor())
     connection.execute(SCHEMA)
     connection.execute(OWNERS)
+    if 'discovery_after' not in {column['name'] for column in connection.execute('PRAGMA table_info(youtube_video_sources)')}:
+        connection.execute("ALTER TABLE youtube_video_sources ADD COLUMN discovery_after TEXT NOT NULL DEFAULT ''")
     columns = {column['name'] for column in connection.execute('PRAGMA table_info(youtube_videos)')}
     for name, definition in (('validation', "TEXT NOT NULL DEFAULT ''"),
                              ('repair_pending', 'INTEGER NOT NULL DEFAULT 0'),
@@ -144,10 +148,15 @@ def discover(source, entries):
                                THEN excluded.views ELSE youtube_videos.views END,
                     updated_at=excluded.updated_at''',
                 (entry['video_id'], json.dumps(entry, ensure_ascii=False), entry.get('views', 0), reg.now()))
-            connection.execute('''INSERT INTO youtube_video_sources(video_id,source_id,source_url)
-                VALUES(?,?,?) ON CONFLICT(video_id,source_id) DO UPDATE SET source_url=excluded.source_url,
+            connection.execute('''INSERT INTO youtube_video_sources(video_id,source_id,source_url,discovery_after)
+                VALUES(?,?,?,?) ON CONFLICT(video_id,source_id) DO UPDATE SET source_url=excluded.source_url,
+                discovery_after=CASE WHEN source_url<>excluded.source_url THEN excluded.discovery_after
+                    WHEN discovery_after='' OR excluded.discovery_after='' THEN ''
+                    WHEN julianday(discovery_after)<=julianday(excluded.discovery_after) THEN discovery_after
+                    ELSE excluded.discovery_after END,
                 committed=CASE WHEN source_url=excluded.source_url THEN committed ELSE 0 END''',
-                (entry['video_id'], source['id'], source['url']))
+                (entry['video_id'], source['id'], source['url'],
+                 source.get('discovery_after', '') if entry.get('approximate') else ''))
 
 
 def rows(source_ids=None, connection=None):
@@ -166,7 +175,7 @@ def rows(source_ids=None, connection=None):
                 AND item.url=json_extract(candidate.entry,'$.url')) AS committed,
             EXISTS(SELECT 1 FROM feed_item_exclusions removed WHERE removed.kind='youtube'
                 AND removed.url=json_extract(candidate.entry,'$.url')) AS excluded,
-            source.name AS channel,source.config,source.history_floor,
+            source.name AS channel,source.config,source.history_floor,owner.discovery_after,
             source.id AS owner_id
             FROM youtube_videos candidate JOIN youtube_video_sources owner ON owner.video_id=candidate.video_id
             JOIN subscriptions source ON source.id=owner.source_id
@@ -176,7 +185,7 @@ def rows(source_ids=None, connection=None):
     for item in result:
         row = dict(item)
         owner = {key: row[key] for key in ('source_id', 'source_url', 'committed', 'channel', 'config',
-                                         'history_floor')}
+                                         'history_floor', 'discovery_after')}
         candidate = grouped.setdefault(row['video_id'], {**row, 'entry': json.loads(row['entry']), 'owners': []})
         candidate['owners'].append(owner)
     return list(grouped.values())

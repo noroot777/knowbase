@@ -602,7 +602,7 @@ class YouTubeNotes(YouTubeFixture):
     def test_short_reduce_tail_may_expand_without_rejecting_the_whole_note(self):
         self.assertEqual('可用的中文分段要点。', notes.summary_output('可用的中文分段要点。', '短尾。'))
         with self.assertRaisesRegex(RuntimeError, '压缩'):
-            notes.summary_output('中' * 1001, '原' * 12000)
+            notes.summary_output('中' * (notes.CONTEXT_LIMIT + 1), '原' * 12000)
 
     def test_failed_final_note_retries_using_completed_translations(self):
         def invalid(prompt, *rest):

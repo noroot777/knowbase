@@ -54,6 +54,9 @@ def rejection(row, settings, scope, now, floor):
     published = stamp(entry['published'])
     # 估算条目的日期和简介都是未知:日期只够决定「这条值不值得探一次元数据」,简介是空的。
     estimated = bool(entry.get('approximate'))
+    history = stamp(row['history_floor'])
+    if history is not None and len(row['history_floor']) == 10:
+        history = history.replace(tzinfo=TZ)
     if row.get('excluded'):
         return '用户已永久移除此视频，不再处理', True
     if not policy.get('ranking_enabled', True):
@@ -64,8 +67,11 @@ def rejection(row, settings, scope, now, floor):
         return '缺少可靠的发布时间', True
     if scope.ranged and not scope.since <= published.astimezone(TZ).date().isoformat() <= scope.until:
         return '不在本次指定日期范围', not estimated
+    discovered_after = stamp(row.get('discovery_after'))
+    if not scope.ranged and discovered_after is not None and published < discovered_after:
+        return '早于本次频道发现窗口', not estimated
     if not scope.ranged and not row['repair_pending'] and (published < floor or
-            (stamp(row['history_floor']) is not None and published < stamp(row['history_floor']))):
+            (history is not None and published < history)):
         return '早于本轮窗口或订阅历史下界', not estimated
     if published > now + timedelta(minutes=5):
         return '尚未发布', not estimated

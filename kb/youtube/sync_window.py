@@ -7,7 +7,7 @@ from kb.youtube.ranking import stamp
 from kb.youtube.settings import of
 
 
-INITIAL_DAYS = 3
+INITIAL_DAYS = 5
 TZ = ZoneInfo('Asia/Shanghai')
 
 
@@ -59,12 +59,12 @@ def prepare(source, scope, when=None, settings=None):
         if previous is not None and previous <= now:
             floor = min(previous - timedelta(days=1), lookback)
         else:
+            floor = datetime.combine(now.astimezone(TZ).date() - timedelta(days=INITIAL_DAYS), time.min, TZ)
             if initial is None:
-                initial = datetime.combine(now.astimezone(TZ).date() - timedelta(days=INITIAL_DAYS),
-                                           time.min, TZ)
-            floor = initial
+                initial = floor
         if initial is not None:
-            floor = max(initial, floor)
+            if previous is not None and previous <= now:
+                floor = max(initial, floor)
             source['initial_fetch_at'] = initial.isoformat()
             connection.execute('''INSERT INTO youtube_sync_origins(source_id,source_url,initial_fetch_at,window_days)
                 VALUES(?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET source_url=excluded.source_url,
