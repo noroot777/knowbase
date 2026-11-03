@@ -146,14 +146,33 @@ class OverviewTests(CareApiCase):
         owners = {(p['kind'], p['source_id']) for p in after['sources']}
         self.assertEqual(len(owners), after['source_accounts'])
 
-    def test_a_problem_without_a_time_is_not_merged_away(self):
-        """没有时间证据(存量库那两列是空串)的那一条说不出新旧,照旧列出来。"""
+    def test_an_undated_problem_never_adds_a_second_row(self):
+        """记不出时间的那一条(存量库那两列是空串)不拿来比新旧,也不另占一行。
+
+        真实的 `source_failure.write` 连着失败两次 —— 失败只更新它自己那一列,旧提示
+        的时间永远补不上 —— 屏幕上照旧一行(带时间的失败),旧提示挂在 `undated` 上。
+        一条带时间的都没有时按事实顺序列第一条,同样只一行。
+        """
+        from kb.feeds import source_failure
         with reg.db() as c:
-            c.execute("UPDATE subscriptions SET last_error=?,error_at='',note_at=? WHERE id=?",
-                      ('连接失败：读取超时', '2026-11-01T00:00:00+00:00', self.ids['page']))
-        _, shown, over = self._page_rows()
-        self.assertEqual(['connect', 'coverage'], shown)
-        self.assertEqual(len(over['source_rows']), over['source_accounts'])
+            c.execute("UPDATE subscriptions SET last_error=?,error_at='',note_at='' WHERE id=?",
+                      ('连接失败：读取超时', self.ids['page']))
+        facts, shown, over = self._page_rows()
+        self.assertEqual(['connect', 'coverage'], facts)
+        self.assertEqual(['connect'], shown)
+        row = next(p for p in over['source_rows'] if p['source_id'] == self.ids['page'])
+        self.assertEqual(['没有读到上次位置（覆盖未完成）'], [one['label'] for one in row['undated']])
+        for _ in range(2):
+            with reg.db() as c:
+                source = dict(c.execute('SELECT * FROM subscriptions WHERE id=?',
+                                        (self.ids['page'],)).fetchone())
+                source_failure.write(c, source, RuntimeError('连接失败：读取超时'), now=0)
+            facts, shown, over = self._page_rows()
+            self.assertEqual(['connect', 'coverage'], facts)
+            self.assertEqual(['connect'], shown)
+        owners = {(p['kind'], p['source_id']) for p in over['sources']}
+        self.assertEqual(len(owners), over['source_accounts'])
+        self.assertEqual(len(owners), len(over['source_rows']))
 
     def test_x_phases_compare_by_observed_time_not_by_step(self):
         """X 先在发现阶段撞安全验证、后在历史阶段撞限流:留后者(步骤更靠后)。
@@ -171,10 +190,43 @@ class OverviewTests(CareApiCase):
         self.assertEqual({'x_intake_challenge': 100.0, 'x_intake_rate': 200.0, 'x_intake_body': 150.0},
                          {one['kind']: one['at'] for one in found})
         rows = [{'kind': 'social', 'source_id': 9, 'problem': one['kind'], 'step': one.get('step', 2),
-                 'at': one['at']} for one in found]
+                 'label': one['kind'], 'evidence': '', 'at': one['at']} for one in found]
         self.assertEqual(['x_intake_rate'], [r['problem'] for r in sources.latest(rows)])
         tie = [{**rows[0], 'at': 5.0}, {**rows[1], 'at': 5.0}]
         self.assertEqual([rows[0]['problem']], [r['problem'] for r in sources.latest(tie)])
+
+    def test_x_expiry_and_body_queue_carry_their_own_time(self):
+        """超窗认 `expired_at`、正文待补认最后一次补正文的时刻,不借扫描时刻。
+
+        序列:扫描在先(100)、历史限流在 200、超窗在 300 → 留超窗;正文那几条在 400
+        又试过一次 → 留正文待补。`recent_at` 从真表里取最近 24 小时最后那一次。
+        """
+        import sqlite3
+        from datetime import datetime, timezone
+        from kb.feeds import x_intake_diagnostics as diagnostics, x_intake_retention as retention
+        from kb.feeds.x_intake_schema import SCHEMA as X_INTAKE_SCHEMA
+        from kb.intake_diag import sources
+        conn = sqlite3.connect(':memory:')
+        conn.executescript(X_INTAKE_SCHEMA)
+        now = datetime(2026, 11, 3, 4, 0, tzinfo=timezone.utc)
+        for post, at in (('a', '2026-11-03T03:00:00+00:00'), ('b', '2026-11-03T03:51:00+00:00'),
+                         ('c', '2026-11-01T00:00:00+00:00')):
+            conn.execute('INSERT INTO x_intake_expirations VALUES(9,?,?,?)', ('id', post, at))
+        self.assertEqual('2026-11-03T03:51:00+00:00', retention.recent_at(conn, 9, 'id', now))
+        self.assertEqual('', retention.recent_at(conn, 8, 'id', now))
+        expired_at = datetime.fromtimestamp(300, timezone.utc).isoformat()
+        state = {'blocks': {'history': {'kind': 'rate', 'reason': '限流', 'observed_at': 200.0}},
+                 'scan_at': 100.0, 'discovery': 'complete', 'expired': 2, 'expired_at': expired_at,
+                 'pending': 1, 'pending_at': 0}
+        pick = lambda found: [r['problem'] for r in sources.latest(
+            [{'kind': 'social', 'source_id': 9, 'problem': one['kind'], 'label': one['kind'],
+              'evidence': '', 'at': one['at']} for one in found])]
+        found = diagnostics.issues(state)
+        self.assertEqual(300.0, next(one['at'] for one in found if one['kind'] == 'x_intake_expired'))
+        self.assertEqual(['x_intake_expired'], pick(found))
+        found = diagnostics.issues({**state, 'pending_at': 400.0})
+        self.assertEqual(400.0, next(one['at'] for one in found if one['kind'] == 'x_intake_body'))
+        self.assertEqual(['x_intake_body'], pick(found))
 
     def test_an_unknown_kind_is_refused(self):
         self.assertEqual(404, self.client.get('/api/intake-care',

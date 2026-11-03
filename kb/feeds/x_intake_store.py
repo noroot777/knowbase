@@ -379,21 +379,27 @@ def statuses(sources, channel='browser'):
     now = datetime.now(timezone.utc)
     with read_db(timeout=30) as conn:
         rows = {row['source_id']: dict(row) for row in conn.execute('SELECT * FROM x_intake_sources')}
-        counts = {(row['source_id'], row['identity']): row['pending'] for row in conn.execute('''
-            SELECT l.source_id,l.identity,count(*) AS pending FROM x_intake_links l
+        pending_rows = conn.execute('''
+            SELECT l.source_id,l.identity,count(*) AS pending,max(p.attempted) AS attempted FROM x_intake_links l
             JOIN x_intake_candidates p USING(post_id) WHERE p.state IN ('pending','repair')
-            GROUP BY l.source_id,l.identity''')}
+            GROUP BY l.source_id,l.identity''').fetchall()
+        counts = {(row['source_id'], row['identity']): row['pending'] for row in pending_rows}
+        # 正文待补那一条自己的时刻:那几条最后一次补正文的时间(没试过就是 0)。
+        pending_at = {(row['source_id'], row['identity']): row['attempted'] or 0 for row in pending_rows}
         unconfirmed = {source_id: batches.count(conn, source_id, row['identity'], row['floor'])
                        for source_id, row in rows.items()}
         for source_id, row in rows.items():
             row['expired'] = retention.recent(conn, source_id, row['identity'], datetime.now(timezone.utc))
+            row['expired_at'] = retention.recent_at(conn, source_id, row['identity'], datetime.now(timezone.utc))
             row['outside'] = retention.notice(utc(row['floor']), row['expired'])
     for source in sources:
         row = rows.get(source['id'])
         if row and row['identity'] == identity(source) and row['channel'] == ('browser' if channel == 'attach' else channel):
             source['x_intake'] = {key: row[key] for key in
-                                  ('discovery', 'gap', 'expired', 'error', 'floor', 'scan_at', 'history_at', 'outside')}
+                                  ('discovery', 'gap', 'expired', 'expired_at', 'error', 'floor', 'scan_at',
+                                   'history_at', 'outside')}
             source['x_intake']['pending'] = counts.get((source['id'], identity(source)), 0)
+            source['x_intake']['pending_at'] = pending_at.get((source['id'], identity(source)), 0)
             source['x_intake']['unconfirmed'] = unconfirmed[source['id']]
             with read_db(timeout=30) as conn:
                 events = blocks.replay(conn, source['id'], identity(source), row['channel'], row['block'])

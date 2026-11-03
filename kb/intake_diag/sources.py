@@ -209,36 +209,38 @@ def _stamp(value: str):
 
 
 def latest(rows: list[dict]) -> list[dict]:
-    """**列表上一个账号只列最后发生的那一条。**
+    """**列表上一个账号只占一行,列的是最后发生的那一条。**
 
     `problems` 是事实层,同一条订阅可以同时有好几条(连接失败、历史缺口、正文待补、
     超窗),各自的身份、阶段和原话都要留着 —— 重试凭证按 `id` 现查、回归钉着它们互不
     吞并。屏幕上那几行说的是同一个账号,只留最新那一条。
 
     **新旧只按每条事实自己的时间比**(`at`:失败原话的 `error_at`、没读完那句的
-    `note_at`、X 阻断的 `observed_at`、X 进度的扫描时刻),不按步骤、不按 `problems`
+    `note_at`、X 那几条见 `x_intake_diagnostics.issues`),不按步骤、不按 `problems`
     的拼装顺序 —— 那两样跟发生先后没有关系(先撞安全验证、后撞限流,按步骤取会留下
     早的那条)。订阅共用的 `last_attempt` 也不算:只写提示的那几处会改它而不碰
-    `last_error`。
+    `last_error`。时间相同(同一笔写下的几句话)才按 `problems` 的顺序取第一条。
 
-    **时间相同**(同一轮里同一笔写下的几句话)才按 `problems` 的顺序取第一条。
-    **没有时间证据的那几条不参与比较,照旧列出来**:拿不出时间就说不出它比别的新还是
-    旧,并掉哪一边都是猜。存量库那两列是空串,这种行在那条订阅下一次失败/写提示之后
-    自己消失。
+    **一个账号一行这件事不看时间证据齐不齐。** 记不出时间的那几条(存量库那两列是
+    空串)说不出比别的新还是旧,所以**不拿来比**:有带时间的就列带时间里最新的那条,
+    一条都没有才按事实顺序列第一条。被它们挤下去的那几条挂在留下那一行的 `undated`
+    上,详情里如实说一句「另有几条记不出时间」—— 不靠等下一次同步把它们补上时间,
+    持续失败的订阅只会更新失败那一列,另一句的时间永远补不上。
     """
-    timed: dict[tuple, dict] = {}
-    order: list = []
+    groups: dict[tuple, list[dict]] = {}
     for row in rows:
-        owner = (row['kind'], row['source_id'])
-        if row.get('at') is None:
-            order.append(row)
-            continue
-        if owner not in timed:
-            order.append(owner)
-            timed[owner] = row
-        elif row['at'] > timed[owner]['at']:
-            timed[owner] = row
-    return [timed[one] if isinstance(one, tuple) else one for one in order]
+        groups.setdefault((row['kind'], row['source_id']), []).append(row)
+    out = []
+    for group in groups.values():
+        timed = [row for row in group if row.get('at') is not None]
+        pick = group[0]
+        for row in timed:
+            if pick.get('at') is None or row['at'] > pick['at']:
+                pick = row
+        undated = [{'label': row['label'], 'evidence': row['evidence']}
+                   for row in group if row is not pick and row.get('at') is None]
+        out.append({**pick, 'undated': undated})
+    return out
 
 
 def counts(kinds=None) -> dict[str, int]:

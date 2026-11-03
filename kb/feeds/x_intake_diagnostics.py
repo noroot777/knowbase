@@ -1,4 +1,6 @@
 """Structured automatic-X queue facts; free-form notes are never evidence of coverage."""
+from datetime import datetime, timezone
+
 from kb.feeds.x_intake_capacity import RESCAN_NOTICE
 
 PROBLEMS = {
@@ -64,12 +66,20 @@ PROBLEMS = {
 }
 
 
-def issues(state):
-    """`at` = 这条事实最近一次被观测到的时刻(epoch 秒,没有证据为 None)。
+def _epoch(value):
+    if not value:
+        return None
+    moment = datetime.fromisoformat(value)
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
 
-    阻断带它自己的 `observed_at`;其余几条是这份进度的投影,取这个账号最近一次
-    发现/历史扫描写下进度的那一刻(`scan_at` / `history_at`),正文待补另认正文阶段
-    阻断的观测时刻。"""
+
+def issues(state):
+    """`at` = 这条事实自己最近一次发生/被确立的时刻(epoch 秒,没有证据为 None)。
+
+    阻断认它自己的 `observed_at`;超窗认 `x_intake_expirations.expired_at`;正文待补
+    认那几条最后一次补正文的时刻和正文阶段阻断,没试过的那几条是扫描暂存它们时
+    确立的。候选待确认与历史缺口由每一次发现/历史扫描重新确立,所以认那一刻
+    (`scan_at` / `history_at`)。"""
     result = []
     observed = state.get('blocks', {'discovery': state.get('block') or {}})
     seen = max(state.get('scan_at') or 0, state.get('history_at') or 0) or None
@@ -84,9 +94,15 @@ def issues(state):
         if count := state.get(field, 0):
             reason = observed.get('body', {}).get('reason', '') if field == 'pending' else ''
             evidence = f'{label} {count} 条' + (f'；正文补全：{reason}' if reason else '')
-            body_seen = observed.get('body', {}).get('observed_at') if field == 'pending' else None
+            if field == 'expired':
+                at = _epoch(state.get('expired_at', ''))
+            elif field == 'pending':
+                at = max(seen or 0, state.get('pending_at') or 0,
+                         observed.get('body', {}).get('observed_at') or 0) or None
+            else:
+                at = seen
             result.append(dict(kind=kind, count=count, evidence=evidence,
-                               retryable=field != 'expired', at=max(seen or 0, body_seen or 0) or None))
+                               retryable=field != 'expired', at=at))
     attempted = state.get('discovery') != 'unattempted' or state.get('history_at', 0) > 0
     if attempted and (state.get('gap') or state.get('capacity_limited') is True):
         evidence = '；'.join(filter(None, [state.get('gap'), state.get('coverage_warning')]))
