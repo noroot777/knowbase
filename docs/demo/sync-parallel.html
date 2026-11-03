@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>同步中心 · 各来源同时跑 · demo</title>
+<style>
+/* 色板与字体逐值抄自 kb/static/css/base.css 的 :root —— 这是独立产物，不能 import */
+:root{
+  --paper:#F3F5F4; --paper-2:#ECF0EE; --card:#FFFFFF;
+  --ink:#14202B; --ink-2:#3A4750; --muted:#66727C;
+  --line:#DCE3E0; --line-soft:#E9EDEB;
+  --brand:#17604F; --brand-deep:#0E4A3B; --brand-soft:#DFF0E9; --brand-tint:#F0F7F4;
+  --tag-bg:#EAEEED; --ok:#2E7D57; --danger:#B3402F; --warn:#8A5A22; --warn-soft:#F6EBDC;
+  --font-display:"Songti SC","STSong","Source Han Serif SC","Noto Serif CJK SC",serif;
+  --font-mono:ui-monospace,"SF Mono","SFMono-Regular",Menlo,Consolas,monospace;
+  --font-body:-apple-system,"PingFang SC","Noto Sans SC",sans-serif;
+}
+*{box-sizing:border-box;margin:0}
+body{font:15px/1.7 var(--font-body);background:var(--paper);color:var(--ink);padding:26px 24px 70px}
+.wrap{max-width:1240px;margin:0 auto}
+button{font:13px/1 var(--font-body);cursor:pointer}
+button.go{background:var(--brand);color:var(--card);border:0;border-radius:9px;padding:0 16px;min-height:36px}
+button.ghost{background:var(--card);color:var(--ink-2);border:1px solid var(--line);border-radius:8px;padding:0 10px;min-height:28px;font-size:12px}
+button.ghost:hover{background:var(--brand-tint);border-color:var(--brand-soft)}
+button.text{background:none;border:0;color:var(--brand);padding:0;font-size:12.5px}
+.mono{font-family:var(--font-mono)}
+
+/* demo 自己的工具条，不属于页面 */
+.demo-bar{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:22px;padding-bottom:16px;border-bottom:1px dashed var(--line)}
+.demo-bar>b{font-size:12.5px;font-weight:600;color:var(--muted);margin-right:4px}
+.chip{font:13px/1 var(--font-body);color:var(--ink-2);background:var(--card);border:1px solid var(--line);border-radius:999px;padding:8px 14px}
+.chip[aria-pressed="true"]{background:var(--brand);border-color:var(--brand);color:var(--card)}
+.demo-bar .say{flex-basis:100%;font-size:12.5px;color:var(--muted);margin-top:4px}
+
+/* ── 页头（不变） ── */
+.head{display:flex;justify-content:space-between;align-items:center;gap:20px;margin-bottom:20px}
+.head .row{display:flex;align-items:baseline;gap:16px}
+h1{font-family:var(--font-display);font-weight:900;font-size:26px;letter-spacing:.5px}
+.facts{display:flex;gap:7px;align-items:baseline;font-size:13px;color:var(--muted)}
+.facts b{font:600 15px var(--font-mono);color:var(--ink-2)}
+
+.panel{background:var(--card);border:1px solid var(--line);border-radius:12px;margin-bottom:16px}
+.panel-h{display:flex;align-items:baseline;gap:14px;padding:16px 22px 12px}
+.panel-h h2{font-size:16px}
+.panel-h .meta{font-size:12.5px;color:var(--muted)}
+
+/* ── 本轮那张卡 ── */
+.flow{border-top:3px solid var(--brand);padding:20px 24px 16px}
+.flow.has-error{border-top-color:var(--danger)}
+.flow-head{display:flex;justify-content:space-between;align-items:flex-start;gap:20px;margin-bottom:14px}
+.flow-head h2{font-size:20px;line-height:1.4;margin-bottom:2px}
+.flow-head p{font-size:13px;color:var(--muted)}
+.metrics{display:flex;flex-direction:column;align-items:flex-end;gap:4px;flex-shrink:0}
+.metrics b{font:600 20px/1.4 var(--font-display)}
+.metrics span{font-size:12px;color:var(--muted)}
+
+/* 每行：名字 | 一根细条（全轮共用一个比例尺）| 此刻那句 | 耗时 | 动作 */
+.r{display:grid;grid-template-columns:110px minmax(0,1fr) 300px 64px 104px;align-items:center;column-gap:16px;min-height:40px;padding:0 8px;border-radius:8px}
+.r.click{cursor:pointer}
+.r.click:hover,.r.open{background:var(--brand-tint)}
+.r .nm{font-size:13.5px;font-weight:600;white-space:nowrap}
+.r .say{font-size:12.5px;color:var(--ink-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r .t{font:12px var(--font-mono);color:var(--muted);text-align:right}
+.r .act{text-align:right}
+.bar{position:relative;height:4px;background:var(--line-soft);border-radius:2px}
+.bar i{position:absolute;top:0;bottom:0;border-radius:2px;background:var(--brand)}
+.r[data-s=run] .bar i::after{content:"";position:absolute;right:-3px;top:-3px;width:10px;height:10px;border-radius:50%;background:var(--brand);animation:pulse 1.4s ease-in-out infinite}
+.r[data-s=issue] .bar i{background:var(--danger)}
+.r[data-s=issue] .say{color:var(--danger)}
+.r[data-s=wait] .say{color:var(--warn)}
+.r[data-s=todo] .nm,.r[data-s=todo] .say{color:var(--muted)}
+.r .late{color:var(--muted)}
+@keyframes pulse{50%{opacity:.3}}
+.sep{height:1px;background:var(--line-soft);margin:6px 8px}
+
+.detail{margin:2px 8px 8px 126px;border-left:2px solid var(--brand-soft);padding:2px 0 2px 16px}
+.step{display:grid;grid-template-columns:70px 1fr auto;gap:12px;padding:5px 0;font-size:13px}
+.step b{font-weight:600}
+.step span{color:var(--ink-2)}
+.step em{font-style:normal;color:var(--muted);font-size:12.5px}
+.step[data-s=issue] span,.step[data-s=issue] em{color:var(--danger)}
+.step[data-s=run] em{color:var(--brand)}
+
+/* ── 历史运行（列不变，点一行就把上面那张卡换成那一轮） ── */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{font-weight:500;font-size:12px;color:var(--muted);text-align:center;padding:8px 6px;border-bottom:1px solid var(--line-soft)}
+th:first-child,td:first-child{text-align:left;padding-left:22px}
+td{text-align:center;padding:9px 6px;border-bottom:1px solid var(--line-soft)}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--brand-tint)}
+tbody tr.on{background:var(--brand-tint);box-shadow:inset 3px 0 var(--brand)}
+td.l{text-align:left}
+.c{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--brand)}
+.c.issue{background:var(--danger)}
+.c.run{animation:pulse 1.4s ease-in-out infinite}
+.c.none{width:4px;height:4px;background:var(--line)}
+.res-issue{color:var(--danger)}
+
+/* ── 运行日志：按来源筛 ── */
+.filters{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.filters button{font-size:12px;color:var(--ink-2);background:none;border:1px solid var(--line);border-radius:999px;padding:5px 10px}
+.filters button[aria-pressed="true"]{background:var(--ink);border-color:var(--ink);color:var(--card)}
+.log{font:12px/1.9 var(--font-mono);padding:4px 22px 16px;max-height:360px;overflow:auto}
+.log div{display:grid;grid-template-columns:62px 76px 1fr;gap:10px;color:var(--ink-2)}
+.log .who{color:var(--muted);font-family:var(--font-body)}
+.log .bad{color:var(--danger)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div class="demo-bar" role="group" aria-label="demo 场景">
+  <b>场景</b>
+  <button class="chip" data-k="live">① 几路同时在跑</button>
+  <button class="chip" data-k="gate">② 入库处理在等 YouTube</button>
+  <button class="chip" data-k="skip">③ 点了「不等了」之后</button>
+  <button class="chip" data-k="r1103">④ 整轮结束</button>
+  <span class="say" id="say"></span>
+</div>
+
+<div class="head">
+  <div class="row"><h1>同步中心</h1><span class="facts"><b>7</b> 轮留档 · 最近 <b>11-03 09:00</b></span></div>
+  <button class="go">新建同步</button>
+</div>
+
+<section class="panel flow" id="flow" aria-label="本轮同步">
+  <div class="flow-head">
+    <div><h2 id="title"></h2><p id="sub"></p></div>
+    <div class="metrics"><b id="m1"></b><span id="m2"></span></div>
+  </div>
+  <div id="rows"></div>
+</section>
+
+<section class="panel" aria-label="历史运行">
+  <div class="panel-h"><h2>历史运行</h2><span class="meta">保留最近 3 天 · 7 轮</span></div>
+  <table>
+    <thead><tr><th>时间</th><th>类型</th>
+      <th>公众号</th><th>大V观点</th><th>RSS</th><th>YouTube</th><th>简报</th><th>网页专栏</th>
+      <th>入库处理</th><th>生成日报</th><th>整理工具与 Wiki</th><th>耗时</th><th class="l">结果</th></tr></thead>
+    <tbody id="hist"></tbody>
+  </table>
+</section>
+
+<section class="panel" aria-label="运行日志">
+  <div class="panel-h"><h2>运行日志</h2><span class="meta" id="log-meta"></span><div class="filters" id="filters"></div></div>
+  <div class="log" id="log"></div>
+</section>
+
+</div>
+<script>
+const SRC = [['wx','公众号'],['x','大V观点'],['rss','RSS'],['yt','YouTube'],['dg','简报'],['web','网页专栏']];
+const TAIL = [['ingest','入库处理'],['daily','生成日报'],['tidy','整理工具与 Wiki']];
+const NAME = Object.fromEntries([...SRC, ...TAIL, ['all','全库']]);
+
+// 时间是「距这一轮开跑的分钟数」。11-02 / 11-01 是真实留档(那时还是逐个跑);11-03 那几档是按真实各段耗时排成同时跑。
+const DONE_SRC = {
+  wx:[0,16.1,'done','新增 34 篇 · 导出 34 篇'],
+  x:[0,21,'issue','1 步有问题 · 新增 131 条'],
+  rss:[0,7.2,'done','新增 62 条 · 已保存 31 条'],
+  dg:[0,.5,'done','新增 0 条'], web:[0,.3,'done','新增 0 条'],
+};
+const RUNS = {
+  live:{ live:true, now:12, title:'日报进行中', m1:'3 / 6 来源跑完', m2:'已用 12 分钟',
+    say:'六个来源同时开跑，每行一根细条，所有行共用同一个比例尺：条越长跑得越久，末端在闪的还在跑。点一行展开它的两步。',
+    rows:{ wx:[0,12,'run','导出 · 配图 160/391'], x:[0,12,'run','抓取 · 读取 31/51 个账号'], rss:DONE_SRC.rss,
+           yt:[0,12,'run','抓取 · 元数据更新 6/698'], dg:DONE_SRC.dg, web:DONE_SRC.web } },
+  gate:{ live:true, now:26, title:'日报进行中', m1:'5 / 6 来源跑完', m2:'已用 26 分钟',
+    say:'只剩 YouTube 没跑完。入库处理那一行直接写在等谁、等了多久，按钮就在同一行上。',
+    rows:{ ...DONE_SRC, yt:[0,26,'run','抓取 · 视频深加工 2/3'],
+           ingest:[null,null,'wait','等 YouTube 跑完 · 已等 5 分钟','skip'] } },
+  skip:{ live:true, now:29.2, title:'日报进行中', m1:'生成日报', m2:'已用 29 分钟',
+    say:'点了「不等了」：入库处理、生成日报接着走；YouTube 照常跑完、照常记账，它那一行写明「本轮不等」，结果进下一轮入库。',
+    rows:{ ...DONE_SRC, yt:[0,29.2,'run','视频深加工 3/3','late'],
+           ingest:[26.5,28.6,'done','新增/更新 183 · 提取 22'], daily:[28.6,29.2,'run','生成中'] } },
+  r1103:{ title:'日报结束，2 个步骤有问题', m1:'8 / 9 完成', m2:'耗时 38 分钟', error:true, when:'11-03 09:38',
+    say:'跑完之后就是这一轮的留档。下面历史里点任何一行，这张卡就换成那一轮；更早逐个跑的那几轮，细条自然排成阶梯。',
+    rows:{ ...DONE_SRC, yt:[0,31.2,'issue','1 步有问题 · 入库 1 条','late'],
+           ingest:[26.5,28.6,'done','新增/更新 183 · 提取 22'], daily:[28.6,29.8,'done','78 条素材'], tidy:[29.8,38,'done','入库 62 条目 · 图谱 ok'] } },
+  r1102:{ title:'日报结束，2 个步骤有问题', m1:'7 / 9 完成', m2:'耗时 63 分钟', error:true, when:'11-02 10:03',
+    rows:{ wx:[0,2.1,'done','新增 22 篇 · 导出 22 篇'], x:[2.1,26.2,'issue','1 步有问题 · 新增 131 条'],
+           rss:[26.3,34,'done','新增 110 条 · 已保存 29 条'], yt:[34.1,51,'issue','1 步有问题 · 入库 1 条'],
+           dg:[51.1,51.2,'done','新增 0 条'], web:[51.2,51.4,'done','新增 0 条'],
+           ingest:[51.4,54,'done','新增/更新 183 · 提取 22'], daily:[55.1,56.2,'done','78 条素材'], tidy:[55.1,63.5,'done','入库 62 条目 · 图谱 ok'] } },
+  r1101:{ title:'日报结束，2 个步骤有问题', m1:'7 / 9 完成', m2:'耗时 79 分钟', error:true, when:'11-01 10:19',
+    rows:{ wx:[0,21.9,'done','新增 23 篇 · 导出 23 篇'], x:[21.9,33.9,'issue','1 步有问题'],
+           rss:[34,37.9,'issue','2 步有问题'], yt:[38,68.2,'issue','1 步有问题'],
+           dg:[68.2,68.4,'done','新增 0 条'], web:[68.4,68.6,'done','新增 0 条'],
+           ingest:[68.6,71,'done','新增/更新 140'], daily:[71,72.3,'done','61 条素材'], tidy:[72.3,79.3,'done','入库 48 条目'] } },
+};
+const SCENE_RUN = {live:'live', gate:'gate', skip:'skip', r1103:'r1103'};
+
+const STEPS = {
+  wx:['新增 34 篇，补齐正文 34 篇','导出 34 篇，配图 391 张'],
+  x:['检查 38/51 个来源，新增 131 条，失败 5 个：X 限制了访问频率，下一轮同步会重抓','已保存 131 条到知识库'],
+  rss:['检查 9/9 个来源，新增 62 条','补抓原文 20 条，翻译 31 条，已保存 31 条'],
+  yt:['检查 47/48 个频道，处理 3 条，入库 1 条；2 个频道处理失败','已保存 1 条到知识库'],
+  dg:['检查 1/1 个来源，新增 0 条','已保存 0 条'], web:['检查 1/1 个来源，新增 0 条','已保存 0 条'],
+};
+
+// 日志：每行带「谁打的」，几路同时跑时交错在一起，靠上面的筛选分开看
+const LOG = [
+  ['09:00:02','all','日报开跑：6 个来源同时开始'],
+  ['09:00:03','x','准备 X 浏览器会话，读取 51 个账号'],
+  ['09:00:04','rss','正在读取 4 个来源（已检查 0/9）'],
+  ['09:00:05','yt','频道列表 1/48'],
+  ['09:00:06','dg','TLDR AI · 新增 0 条'],
+  ['09:00:20','web','Anthropic 官方 · 新增 0 条'],
+  ['09:00:44','rss','检查 9/9 个来源，新增 62 条'],
+  ['09:02:15','wx','下载正文 25/34 篇'],
+  ['09:02:54','wx','新增 34 篇，补齐正文 34 篇'],
+  ['09:02:54','wx','导出到 obs'],
+  ['09:03:40','yt','频道列表完成 47/48，增量更新元数据'],
+  ['09:05:12','x','大V观点 12/51 · 宝玉'],
+  ['09:05:13','x','宝玉：X 限制了访问频率，下一轮同步会重抓','bad'],
+  ['09:07:11','rss','已翻译 31 条，已保存 31 条到知识库'],
+  ['09:09:30','yt','元数据更新 4/698'],
+  ['09:11:40','x','大V观点 31/51 · Simon Willison'],
+  ['09:12:00','wx','导出 · 配图 160/391'],
+  ['09:16:06','wx','完成：导出 34，待补正文 1'],
+  ['09:21:00','x','检查 38/51 个来源，新增 131 条，失败 5 个','bad'],
+  ['09:21:00','all','入库处理在等 YouTube'],
+  ['09:24:10','yt','处理 2/3 · ChatGPT Just Changed A LOT AGAIN'],
+  ['09:26:30','all','不等 YouTube，开始入库处理'],
+  ['09:28:36','ingest','新增/更新 183，新向量 319；提取成功 22'],
+  ['09:29:48','daily','日报已生成：78 条素材'],
+  ['09:31:12','yt','检查 47/48 个频道，入库 1 条；2 个频道处理失败（本轮不等，下一轮入库）','bad'],
+  ['09:38:00','tidy','双链化 22 篇 · 图谱 ok'],
+];
+
+// 逐个跑那几轮的留档日志(取自 11-02 那一轮):来源一段一段排开,筛选照样能用
+const OLD_LOG = [
+  ['09:00:18','wx','下载正文 1/22 篇'], ['09:01:35','wx','新增 22 篇，补齐正文 22 篇'], ['09:02:25','wx','完成：导出 22，待补正文 1'],
+  ['09:02:26','x','准备读取 51 个账号'], ['09:22:27','x','检查 38/51 个来源，新增 131 条，失败 5 个','bad'],
+  ['09:27:08','rss','检查 9/9 个来源，新增 110 条'], ['09:34:21','rss','已保存 29 条到知识库'],
+  ['09:37:48','yt','频道列表完成 47/48，增量更新元数据'], ['09:51:20','yt','检查 47/48 个频道，入库 1 条；2 个频道处理失败','bad'],
+  ['09:51:26','dg','新增 0 条'], ['09:51:38','web','新增 0 条'],
+  ['09:53:41','ingest','新增/更新 183，新向量 319'], ['09:55:25','daily','日报已生成：78 条素材'], ['10:03:49','tidy','双链化 22 篇 · 图谱 ok'],
+];
+
+let scene = 'live', view = 'live', open = null, who = 'all-lines';
+const $ = id => document.getElementById(id);
+const dur = m => m < 1 ? Math.round(m*60) + ' 秒' : Math.round(m) + ' 分';
+const nowClock = {live:'09:12:00', gate:'09:26:00', skip:'09:29:20'};
+
+function rowHtml(k, v, end, isSrc) {
+  if (!v) return `<div class="r" data-s="todo"><span class="nm">${NAME[k]}</span><div class="bar"></div><span class="say"></span><span class="t"></span><span class="act"></span></div>`;
+  const [a, b, s, say, flag] = v;
+  const bar = a == null ? '' : `<i style="left:${a/end*100}%;width:${Math.max((b-a)/end*100, .4)}%"></i>`;
+  const late = flag === 'late' ? '<span class="late">本轮不等 · </span>' : '';
+  const act = flag === 'skip' ? `<button class="ghost" onclick="event.stopPropagation();pick('skip')">不等了，继续</button>`
+    : (isSrc && s === 'run' && RUNS[view].live ? '<button class="ghost" onclick="event.stopPropagation()">结束本类型</button>' : '');
+  const t = a == null ? '' : dur(b - a);
+  const html = `<div class="r${isSrc ? ' click' : ''}${open === k ? ' open' : ''}" data-s="${s}" data-k="${k}">
+    <span class="nm">${NAME[k]}</span><div class="bar">${bar}</div><span class="say">${late}${say}</span><span class="t">${t}</span><span class="act">${act}</span></div>`;
+  if (!(isSrc && open === k)) return html;
+  const [p1, p2] = STEPS[k];
+  const running = s === 'run', onExport = /导出/.test(say);
+  const st1 = s === 'issue' ? 'issue' : (running && !onExport ? 'run' : 'done');
+  const st2 = running ? (onExport ? 'run' : 'todo') : 'done';
+  const lab = {run:'进行中', done:'已完成', issue:'需处理', todo:'未开始'};
+  return html + `<div class="detail">
+    <div class="step" data-s="${st1}"><b>抓取内容</b><span>${st1 === 'run' ? say : p1}</span><em>${lab[st1]}</em></div>
+    <div class="step" data-s="${st2}"><b>导出文章</b><span>${st2 === 'run' ? say : st2 === 'todo' ? '—' : p2}</span><em>${lab[st2]}</em></div>
+    <div class="step"><b></b><span><button class="text" onclick="filterLog('${k}')">只看这一类的日志</button></span><em></em></div></div>`;
+}
+
+function renderCard() {
+  const R = RUNS[view];
+  $('title').textContent = R.title; $('m1').textContent = R.m1; $('m2').textContent = R.m2;
+  $('sub').textContent = '公众号 + 大V观点 + RSS + YouTube + 简报 + 网页专栏 · 全部订阅' + (R.when ? ' · ' + R.when + ' 结束' : '');
+  $('flow').classList.toggle('has-error', !!R.error);
+  const ends = Object.values(R.rows).map(v => v[1] || 0);
+  const end = R.live ? Math.max(40, R.now * 1.25) : Math.max(...ends);
+  $('rows').innerHTML = SRC.map(([k]) => rowHtml(k, R.rows[k], end, true)).join('')
+    + '<div class="sep"></div>' + TAIL.map(([k]) => rowHtml(k, R.rows[k], end, false)).join('');
+  document.querySelectorAll('.r.click').forEach(r => r.onclick = () => { open = open === r.dataset.k ? null : r.dataset.k; renderCard(); });
+}
+
+function cell(v) {
+  if (!v) return '<span class="c none"></span>';
+  return `<span class="c ${v[2] === 'issue' ? 'issue' : ''} ${v[2] === 'run' || v[2] === 'wait' ? 'run' : ''}"></span>`;
+}
+function renderHist() {
+  const cur = RUNS[SCENE_RUN[scene]];
+  const lines = [
+    [SCENE_RUN[scene], cur.live ? '11-03 09:00' : '11-03 09:38', '日报', cur.live ? cur.m2.replace('已用 ','') : '38 分钟', cur.live ? '进行中' : '2 个步骤需处理'],
+    ['r1102', '11-02 10:03', '日报', '1 小时 3 分', '2 个步骤需处理'],
+    ['r1101', '11-01 10:19', '日报', '1 小时 19 分', '4 个步骤需处理'],
+  ];
+  $('hist').innerHTML = lines.map(([id, t, kind, d, res]) => {
+    const R = RUNS[id];
+    const cells = [...SRC, ...TAIL].map(([k]) => `<td>${cell(R.rows[k])}</td>`).join('');
+    return `<tr data-id="${id}" class="${view === id ? 'on' : ''}"><td class="mono">${t}</td><td>${kind}</td>${cells}
+      <td class="mono">${d}</td><td class="l ${R.live ? '' : 'res-issue'}">${res}</td></tr>`;
+  }).join('');
+  document.querySelectorAll('#hist tr').forEach(tr => tr.onclick = () => { view = tr.dataset.id; open = null; renderCard(); renderHist(); });
+}
+
+function renderLog() {
+  const R = RUNS[view];
+  const upto = R.live ? nowClock[view] : '99';
+  const all = view === 'r1103' || R.live ? LOG.filter(l => l[0] <= upto) : OLD_LOG;
+  const kinds = ['all-lines', ...SRC.map(s => s[0]), 'tail'];
+  $('filters').innerHTML = kinds.map(k => `<button aria-pressed="${who === k}" onclick="filterLog('${k}')">${k === 'all-lines' ? '全部' : k === 'tail' ? '全库' : NAME[k]}</button>`).join('');
+  const keep = l => who === 'all-lines' || l[1] === who || (who === 'tail' && ['all','ingest','daily','tidy'].includes(l[1]));
+  const shown = all.filter(keep);
+  $('log-meta').textContent = '每类保留最近 40 条';
+  $('log').innerHTML = shown.slice().reverse().map(([t, k, msg, bad]) =>
+    `<div><span>${t}</span><span class="who">${k === 'all' ? '' : NAME[k]}</span><span class="${bad ? 'bad' : ''}">${msg}</span></div>`).join('');
+}
+function filterLog(k) { who = k; renderLog(); document.getElementById('log').scrollIntoView({block:'nearest'}); }
+
+function pick(k) {
+  scene = k; view = SCENE_RUN[k]; open = null;
+  document.querySelectorAll('.chip').forEach(c => c.setAttribute('aria-pressed', c.dataset.k === scene));
+  $('say').textContent = RUNS[view].say;
+  renderCard(); renderHist(); renderLog();
+}
+const _renderCard = renderCard;
+renderCard = () => { _renderCard(); renderLog(); };
+document.querySelectorAll('.chip').forEach(c => c.onclick = () => pick(c.dataset.k));
+pick('live');
+</script>
+</body>
+</html>

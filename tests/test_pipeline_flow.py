@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""同步中心那条「按类型排的线」:跳过、提前结束、按来源串着跑(`kb/pipeline_flow.py`、
-`kb/pipeline_sources.py`、`kb/pipeline._sources`)。硬约束在 `docs/decisions/sync-flow.md`。
+"""同步中心那条「按类型排的线」:跳过、提前结束、各来源同时跑(`kb/pipeline_flow.py`、
+`kb/pipeline_sources.py`、`kb/pipeline._sources`)。硬约束在 `docs/decisions/sync-flow.md`;
+同时跑特有的那几件(门、没等的那一路、归属)在 `tests/test_parallel_sources.py`。
 
 判据落在后果上:哪个来源哪一步**真被调用了**、没跑的那几格记成了什么、账本那一轮开没开、
 「交完了」记没记 —— 不是「标志打上没有」。每一条都反过来钉一边(该放行的照旧放行)。
@@ -10,6 +11,7 @@
 """
 from __future__ import annotations
 
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -177,7 +179,10 @@ class BeginTest(_Base):
 
 
 class RunSourcesTest(_Base):
-    """多来源那一档:按来源串着跑,没跑的那几格各记一笔。"""
+    """多来源那一档:各来源同时跑、各自 抓取 → 导出,没跑的那几格各记一笔。
+
+    几路同时跑,跨来源的先后不确定:断言只钉**同一个来源内**的先后,跨来源比集合。
+    """
 
     def _run(self, on_crawl=None):
         calls, settled, opened, ended = [], [], [], []
@@ -195,13 +200,17 @@ class RunSourcesTest(_Base):
                              settled.append((st, sc["channel"], status, detail))), \
                 patch.object(srcs, "_open", side_effect=lambda *a: opened.append(a)), \
                 patch("kb.fetch_rounds.note_end", side_effect=lambda *a: ended.append(a)):
-            srcs.run_sources(["crawl", "export"], None, OWNER)
+            run = srcs.run_sources(["crawl", "export"], None, OWNER)
+            run.join()
+        self.assertFalse(run.broken, "有一路的异常穿出了它自己的隔离")
         return calls, settled, opened, ended
 
-    def test_each_source_runs_both_steps_before_the_next(self):
+    def test_each_source_runs_both_steps_in_order(self):
         _plan()
         calls, settled, opened, ended = self._run()
-        self.assertEqual([("crawl", "a"), ("export", "a"), ("crawl", "b"), ("export", "b")], calls)
+        for ch in ("a", "b"):
+            self.assertEqual([("crawl", ch), ("export", ch)], [c for c in calls if c[1] == ch])
+        self.assertEqual(4, len(calls))
         self.assertEqual([], settled)
         self.assertEqual(1, len(opened))
         self.assertEqual([("k", "seg")], ended)
@@ -226,7 +235,7 @@ class RunSourcesTest(_Base):
         self.assertEqual([], opened)
         self.assertEqual([], ended)
 
-    def test_cut_during_crawl_skips_its_export_and_moves_on(self):
+    def test_cut_during_crawl_skips_its_export_and_the_other_runs_on(self):
         _plan()
         seen = []
 
@@ -236,7 +245,7 @@ class RunSourcesTest(_Base):
                 seen.append(flow.halted())      # 采集器在这一步里问「该停了吗」
         calls, settled, _, ended = self._run(on_crawl=cut)
         self.assertEqual([True], seen)
-        self.assertEqual([("crawl", "a"), ("crawl", "b"), ("export", "b")], calls)
+        self.assertEqual(sorted([("crawl", "a"), ("crawl", "b"), ("export", "b")]), sorted(calls))
         self.assertEqual([("export", "a", "skipped", srcs.CUT)], settled)
         self.assertEqual(1, len(ended))
         self.assertFalse(flow.halted())
@@ -262,22 +271,34 @@ class RunSourcesTest(_Base):
         self.assertNotIn(("export", "a"), calls)
         self.assertEqual([("export", "a", "skipped", srcs.CUT)], settled)
         # 反过来钉一边:另一个来源照常跑完,日报那一份计划完好、没沾上这一轮的请求
-        self.assertEqual([("crawl", "a"), ("crawl", "b"), ("export", "b")], calls)
+        self.assertEqual(sorted([("crawl", "a"), ("crawl", "b"), ("export", "b")]), sorted(calls))
         self.assertEqual({}, flow._plans["batch-9"]["cuts"])
         self.assertEqual([], flow._plans["batch-9"]["done"])
 
-    def test_stop_settles_the_rest_as_stopped(self):
+    def test_stop_settles_every_unfinished_step_as_stopped(self):
+        """两路都在抓的时候整轮被停:两路的导出都不跑,各留一格「被停了」。"""
         _plan()
+        both = threading.Barrier(2, timeout=5)
 
         def stop(channel):
+            both.wait()                         # 两路都进了抓取
             ps._state["stop_requested"] = True
+            both.wait()
         calls, settled, _, ended = self._run(on_crawl=stop)
-        self.assertEqual([("crawl", "a")], calls)
-        self.assertEqual([("export", "a", "stopped", srcs.STOPPED),
-                          ("crawl", "b", "stopped", srcs.STOPPED),
-                          ("export", "b", "stopped", srcs.STOPPED)], settled)
-        # 停下来的那一轮照样走完了循环:「交完了」照记
+        self.assertEqual(sorted([("crawl", "a"), ("crawl", "b")]), sorted(calls))
+        self.assertEqual(sorted([("export", "a", "stopped", srcs.STOPPED),
+                                 ("export", "b", "stopped", srcs.STOPPED)]), sorted(settled))
+        # 停下来的那一轮照样等每一路都走完:「交完了」照记
         self.assertEqual(1, len(ended))
+
+    def test_stopped_before_start_runs_nothing_and_opens_no_round(self):
+        _plan()
+        ps._state["stop_requested"] = True
+        calls, settled, opened, ended = self._run()
+        self.assertEqual([], calls)
+        self.assertEqual(4, len(settled))
+        self.assertTrue(all(s[2] == "stopped" for s in settled))
+        self.assertEqual(([], []), (opened, ended))
 
     def test_without_a_plan_everything_runs(self):
         calls, settled, _, _ = self._run()
@@ -449,8 +470,10 @@ class SourceEvidenceTest(_Base):
     """进了门却没起得来的来源,要留下它自己那一格失败(同步中心按类型看的就是它)。"""
 
     def test_collector_failure_leaves_an_error_cell_per_step(self):
-        with patch.object(srcs, "_collector", return_value=(None, "RuntimeError: 装不上")):
-            srcs._one_source(SCOPES[0], ["crawl", "export"], {}, "k", OWNER, "src:a")
+        # 采集器取不到时那一路由 `Lanes._lane` 接住(采集器在主线程上取,见 `Lanes.start`)
+        run = srcs.Lanes(["crawl", "export"], None, OWNER)
+        run._lane(SCOPES[0], "src:a", None, "RuntimeError: 装不上")
+        self.assertFalse(run.broken, "那一格该由隔离那一层记下,不是穿出去")
         got = results.snapshot()
         for stage in ("crawl", "export"):
             cell = got[stage]["a"]

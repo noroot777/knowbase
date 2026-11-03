@@ -18,8 +18,8 @@ from kb.pipeline_results import merge as results_merge
 from kb.pipeline_state import STAGES, _cap_failures, _now, new_run_id
 
 # ── 一次业务轮里的几轮管道,合并成一份结果 ──────────────────────────────────────
-# 日报那一轮不是一次管道运行,而是 N+1 次:每个来源各一轮 crawl→export,再一轮
-# 全库的 index→extract。而「最近一次运行」只有一份,**后跑的会把先跑的盖掉** ——
+# 日报那一轮不是一次管道运行:同步那一轮(各来源同时 crawl→export,再全库的
+# index→extract)之后还有出报之后整理那一轮(老版本是每个来源各一轮、再一轮入库)。而「最近一次运行」只有一份,**后跑的会把先跑的盖掉** ——
 # 于是 RSS 抓取失败之后,同步中心显示的是最后那一轮入库的「同步已完成」,失败明细
 # 和「重试失败项」一起消失(`retry_failed_plan` 读的也是这一份)。两段式之前就已经
 # 是这样了(只有最后一个来源的结果留得下来),改成两段式之后变成每次必然发生。
@@ -188,7 +188,12 @@ def _merge_runs(records: list[dict], events: list[str] | None = None,
 
 
 def _merge_log(records: list[dict], events: list[str] | None) -> list[str]:
-    """子轮日志接起来 + 这一批自己的事件。**批次事件不许被 80 行上限挤掉。**"""
+    """子轮日志接起来 + 这一批自己的事件。**批次事件不许被各类的行数上限挤掉。**
+
+    接起来之后按类各留一份(`pipeline_lanes.trim`,口径同运行中那一份):日报那一批
+    的几轮里,刷得最快的那一路不许把别的来源仅有的那几行挤出去。
+    """
+    from kb.pipeline_lanes import trim
     kept = list(events or [])[-20:]
     lines = [line for r in records for line in (r.get("log") or [])]
-    return lines[-(80 - len(kept)):] + kept
+    return trim(lines) + kept

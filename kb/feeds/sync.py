@@ -14,7 +14,7 @@ from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
 from kb.feeds import digest as digest, x_channels as x_channels
-from kb.feeds import fulltext, source_failure, translate, x_intake_commit
+from kb.feeds import fulltext, source_failure, translate, x_intake_commit, x_intake_store
 # 选源判据(本文件越过 700 行硬上限时拆出去的,见那边的模块头)。
 from kb.feeds.sync_select import pick_sources
 # 交付层那道搁置闸门(`_export` 里那一句)。判据只有 `shelf` 那一份。
@@ -147,13 +147,16 @@ def _save_result(source, result, scope):
         # 是用户点名的那段日期,拿它当增量进度就是宣布中间那段已经收过。
         validators = {k: source[k] for k in ('etag', 'modified', 'resolved_url')}
     x_intake_commit.check_budget(validators)
-    with (maintenance_lock(wait=0) if validators.get('x_intake') else maintenance_lock()):
+    # 大V观点那一路也排队等锁,但受停止和整轮截止约束(`x_intake_store.save_lock`):各来源同时
+    # 跑时订阅源的导出正攥着它是常态,零等待就是让这一轮的成品平白挪到下一轮。
+    with (x_intake_store.save_lock(validators, halted) if validators.get('x_intake')
+          else maintenance_lock()):
         if not scope.ranged and not validators.get('x_intake'):
             entries = _within_history(source, entries)
         # **条目、水位、成功时间戳一个事务**。分成两个的话,`put_items` 失败那
         # 一轮水位已经推进了,而这批推文一条都没入库 —— 它们比旧水位新、又比
         # 新水位老,从此任何一轮增量都选不到(见 `x_channels.watermark_patch`)。
-        with (reg.db(timeout=0) if validators.get('x_intake') else reg.db()) as c:
+        with reg.db() as c:
             if not _claim_write(c, source):
                 # 这条订阅在本轮采集期间被改指到别的源了 —— 手里这份属于旧的那个。
                 # 一个字都不写(条目、水位、成功时间戳一样都不写):这一轮作废,

@@ -19,13 +19,18 @@ import hashlib
 import os
 import re
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 
 import requests
+import requests.adapters
 
 # 单张图超时 / 大小上限，与 gzh_saver 一致
 IMAGE_TIMEOUT = 15
 MAX_IMAGE_SIZE = 20 * 1024 * 1024
+# 同时在路上的图片数,和浏览器对同一主机的并发量同一个量级
+IMAGE_WORKERS = 4
+_SESSION: requests.Session | None = None
 
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -282,46 +287,71 @@ def _guess_ext(content_type: str | None, url: str) -> str:
     return ".jpg"
 
 
+def _image_session() -> requests.Session:
+    """整个导出进程共用一个会话:连接池按 `IMAGE_WORKERS` 开,同一 CDN 的 TLS 连接
+    在图与图、篇与篇之间复用,不再每张图重新握手一次。"""
+    global _SESSION
+    if _SESSION is None:
+        session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=IMAGE_WORKERS,
+                                                pool_maxsize=IMAGE_WORKERS)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _SESSION = session
+    return _SESSION
+
+
+def _download_one(url: str, assets_dir: str) -> str | None:
+    """下一张图,返回落盘的文件名;失败返回 None(调用方据此保留远程 URL)。"""
+    try:
+        ext = _guess_ext(None, url)
+        h = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
+        fname = f"{h}{ext}"
+        fpath = os.path.join(assets_dir, fname)
+        if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
+            return fname
+        resp = _image_session().get(
+            url,
+            headers={"User-Agent": _UA, "Accept": "image/*,*/*;q=0.8"},
+            timeout=IMAGE_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.content
+        if len(data) > MAX_IMAGE_SIZE:
+            print(f"  [export] skip oversize image: {url[:80]} ({len(data)} B)", flush=True)
+            return None
+        real_ext = _guess_ext(resp.headers.get("Content-Type"), url)
+        if real_ext != ext:
+            fname = f"{h}{real_ext}"
+            fpath = os.path.join(assets_dir, fname)
+        with open(fpath, "wb") as f:
+            f.write(data)
+        return fname
+    except Exception as e:
+        print(f"  [export] image fail: {url[:80]} → {e}", flush=True)
+        return None
+
+
 def download_images(image_urls: list[str], assets_dir: str) -> dict[str, str]:
     """下载图片到 assets_dir。返回 {原URL: 文件名}；失败的不在 mapping 里。
 
     文件名 = md5(url)[:12] + 扩展名，同 URL 幂等复用，按天共用 assets/ 时
     多篇文章引用同一张图只存一份。
+
+    **一篇里的图并发下**(最多 `IMAGE_WORKERS` 张同时在路上)。导出的耗时几乎全
+    在这里:一天三四百张图,逐张串行时总耗时就是每张延迟之和,网络一慢(实测单张
+    中位从 0.13 秒涨到 0.94 秒)就从不到一分钟拖成十几分钟。去重之后每个 URL 只
+    交给一个线程,各自写各自的文件名,彼此不撞。
     """
     os.makedirs(assets_dir, exist_ok=True)
-    mapping: dict[str, str] = {}
     seen: set[str] = set()
     ordered = [u for u in image_urls if u and not (u in seen or seen.add(u))]
-
-    for url in ordered:
-        try:
-            ext = _guess_ext(None, url)
-            h = hashlib.md5(url.encode("utf-8")).hexdigest()[:12]
-            fname = f"{h}{ext}"
-            fpath = os.path.join(assets_dir, fname)
-            if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
-                mapping[url] = fname
-                continue
-            resp = requests.get(
-                url,
-                headers={"User-Agent": _UA, "Accept": "image/*,*/*;q=0.8"},
-                timeout=IMAGE_TIMEOUT,
-            )
-            resp.raise_for_status()
-            data = resp.content
-            if len(data) > MAX_IMAGE_SIZE:
-                print(f"  [export] skip oversize image: {url[:80]} ({len(data)} B)", flush=True)
-                continue
-            real_ext = _guess_ext(resp.headers.get("Content-Type"), url)
-            if real_ext != ext:
-                fname = f"{h}{real_ext}"
-                fpath = os.path.join(assets_dir, fname)
-            with open(fpath, "wb") as f:
-                f.write(data)
-            mapping[url] = fname
-        except Exception as e:
-            print(f"  [export] image fail: {url[:80]} → {e}", flush=True)
-    return mapping
+    if not ordered:
+        return {}
+    _image_session()  # 先在主线程建好,免得几个工作线程同时撞上「还没有」各建一个
+    with ThreadPoolExecutor(max_workers=min(IMAGE_WORKERS, len(ordered))) as pool:
+        names = pool.map(lambda u: _download_one(u, assets_dir), ordered)
+        return {url: name for url, name in zip(ordered, names) if name}
 
 
 def replace_images_in_markdown(md: str, url_to_local: dict[str, str], assets_rel_dir: str) -> str:

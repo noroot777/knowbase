@@ -45,6 +45,7 @@
 """
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 from copy import deepcopy
 
@@ -53,9 +54,13 @@ from copy import deepcopy
 # `whole` = 整条来源这一步都跑完了(只有这一档敢清空旧账);`reported` = 后两样是
 # 采集器报的事实还是按计划推断的。几份的分工见模块头。
 _cells: dict[str, dict[str, dict]] = {}
-# {步骤: 这一刻正在跑的来源}。`_stage` 据它知道该把结论记到哪一格
+# {步骤: 这一刻正在跑这一步的那几个来源}。`_stage` 据它知道该把结论记到哪一格
 # (**唯一的归属判据**:「`_stage` 写的那一条就是当前这个来源这一步的结论」)。
-_current: dict[str, str] = {}
+# 几个来源同时跑时「当前」是**按线程**认的(`_mine`):每个来源一条线程,谁报的就记
+# 谁那一格。只按步骤记一格的话,RSS 的绿会记到同时在跑的公众号那一格上,当日账本
+# 拿它去结清公众号的旧失败(`pipeline_lanes` 模块头)。
+_current: dict[str, list[str]] = {}
+_mine = threading.local()
 #: 这几步按来源跑(口径同 `pipeline_stages.run_scopes`、前端 `PIPE_SOURCE_STAGES`)。
 SOURCE_STAGES = ('crawl', 'export')
 #: 这一步扫的是**整条来源**、不按目标收窄。判据来自执行契约本身:
@@ -169,7 +174,10 @@ def channel_run(stage: str, channel: str, collector, requested):
             # True。少了这一格,一步压根没跑的 skipped 也带着「整条覆盖」去清旧账。
             'reported': False, 'status': 'running', 'detail': ''}
     _cells.setdefault(stage, {})[channel] = cell
-    _current[stage] = channel
+    _current.setdefault(stage, []).append(channel)
+    own = _own()
+    outer = own.get(stage)
+    own[stage] = channel
     try:
         yield
     except Exception as e:                         # noqa: BLE001 - 见下,照抛
@@ -184,7 +192,31 @@ def channel_run(stage: str, channel: str, collector, requested):
     finally:
         if cell.get('status') == 'running':
             cell.update(status='error', detail=cell.get('detail') or '没有返回结果')
-        _current.pop(stage, None)
+        own[stage] = outer
+        running = _current.get(stage) or []
+        if channel in running:
+            running.remove(channel)
+
+
+def _own() -> dict:
+    own = getattr(_mine, 'stages', None)
+    if own is None:
+        own = _mine.stages = {}
+    return own
+
+
+def _owner(stage: str) -> str:
+    """`_stage` 这一句记到哪个来源头上:**这条线程自己进了门的那一个**。
+
+    没进过门的线程只在**这一步此刻只有一个来源开着**时算它的(只一路在跑时的老口径,
+    也接住采集器自己的工作线程);几路同时开着就谁也不记 —— 折账退回整步那个结论
+    (保守档),不许猜一个记上去。
+    """
+    own = _own().get(stage)
+    if own:
+        return own
+    running = _current.get(stage) or []
+    return running[0] if len(running) == 1 else '\x00'
 
 
 def failed(stage: str, channel: str, requested, detail: str) -> None:
@@ -231,7 +263,7 @@ def cover(stage: str, report) -> None:
     靠签名钉住的,不是靠这段话。
     """
     from kb.collectors import Coverage
-    cell = (_cells.get(stage) or {}).get(_current.get(stage) or '\x00')
+    cell = (_cells.get(stage) or {}).get(_owner(stage))
     if cell is None or not isinstance(report, Coverage):
         return
     cell['covered'] = [str(t) for t in report.targets]
@@ -248,7 +280,7 @@ def note(stage: str, entry: dict) -> None:
     不记的那两档都正当:全库那几步(`index`/`extract`/`projects`/`wiki`)压根没有
     来源可挂;收尾补那一笔时当前来源已经摘掉了(见 `channel_run`)。
     """
-    cell = (_cells.get(stage) or {}).get(_current.get(stage) or '\x00')
+    cell = (_cells.get(stage) or {}).get(_owner(stage))
     if cell is None:
         return
     # **记账那三样要留住**:`_stage` 交来的是阶段结论,它不知道这一格的范围 ——

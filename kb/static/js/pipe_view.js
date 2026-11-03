@@ -414,37 +414,3 @@ function renderPipeHeadFacts() {
   const html = parts.join('<i>·</i>');
   if (host.innerHTML !== html) host.innerHTML = html;
 }
-function renderPipeLog(lines, finishedAt) {
-  const log = $('pipe-log'), box = $('pipe-log-box');
-  const text = lines.length ? lines.join('\n') : finishedAt ? `上次结束于 ${finishedAt}，没有保留详细日志。` : '尚无运行记录。开始同步后，这里会实时显示进展。';
-  if (log.textContent === text) return;
-  const follow = $('pipe-log-follow').checked, top = box.scrollTop;
-  log.textContent = text;
-  if (follow) box.scrollTop = box.scrollHeight;
-  else box.scrollTop = top;
-  $('pipe-log-latest').hidden = follow;
-  $('pipe-log-note').textContent = follow ? '保留最近 80 条' : '已暂停跟随 · 有新进展';
-}
-function followPipeLog() {
-  $('pipe-log-follow').checked = true;
-  $('pipe-log-box').scrollTop = $('pipe-log-box').scrollHeight;
-  $('pipe-log-latest').hidden = true; $('pipe-log-note').textContent = '保留最近 80 条';
-}
-function togglePipeLogFollow() {
-  if ($('pipe-log-follow').checked) followPipeLog();
-  else { $('pipe-log-latest').hidden = false; $('pipe-log-note').textContent = '已暂停跟随'; }
-}
-$('pipe-log-box').addEventListener('scroll', () => {
-  const box = $('pipe-log-box');
-  if (box.scrollHeight - box.scrollTop - box.clientHeight > 32 && $('pipe-log-follow').checked) {
-    $('pipe-log-follow').checked = false; togglePipeLogFollow();
-  }
-});
-new ResizeObserver(() => {
-  if ($('pipe-log-follow').checked) $('pipe-log-box').scrollTop = $('pipe-log-box').scrollHeight;
-}).observe($('pipe-log-box'));
-function downloadPipeLog() {
-  const url = URL.createObjectURL(new Blob([$('pipe-log').textContent], { type: 'text/plain;charset=utf-8' }));
-  const a = document.createElement('a'); a.href = url; a.download = '知识库同步日志.txt'; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}

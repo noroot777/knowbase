@@ -358,7 +358,7 @@ class FlowRequest(BaseModel):
 
 @router.post("/api/pipeline/flow")
 def pipeline_flow_request(body: FlowRequest):
-    """本次跳过 / 撤回跳过 / 结束本类型。不受理就 409 带原因(面板原样 toast)。
+    """本次跳过 / 撤回跳过 / 结束本类型 / 不等了继续(`go`)。不受理就 409 带原因(面板原样 toast)。
 
     owner 对不上就不受理:页面开着的那份可能是上一轮的计划,点下去不能落到这一轮头上。
     """

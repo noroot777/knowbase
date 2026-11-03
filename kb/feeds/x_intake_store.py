@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -12,7 +15,56 @@ from kb.feeds import x_intake_batches as batches
 from kb.feeds import x_intake_blocks as blocks
 from kb.feeds import x_intake_capacity as capacity
 from kb.feeds import x_intake_retention as retention
-from kb.maintenance import maintenance_lock
+from kb.maintenance import LockBusy, maintenance_lock
+
+# 存条目 / 水位那几笔**单次**等维护锁的上限(秒)。原来是 0(拿不到当场报「本机待续」),那时
+# 来源串着跑,大V观点抓取期间没有别人持锁;各来源同时跑之后,订阅源导出、YouTube 入库都会
+# 短暂攥着它,零等待就是让这一路平白交一轮「待续」。**观测那一笔(`set_block`)照旧零等待**:
+# 它的契约是「拿不到只警告、原话先随结果交上去」,见 docs/x-incremental-intake.md。
+LOCK_WAIT = float(os.environ.get('KB_X_LOCK_WAIT') or 300)
+
+# **单次上限不是边界,整轮才是**(`bounded`)。这几笔是逐账号调的,每一笔各拿一份完整的
+# 300 秒,锁被长期占着时 51 个账号光准备就能等四个多钟头,按了停止也照等 —— 取消只在等完
+# 之后才被看见。所以一轮 X 采集里所有等锁的地方共用同一个「该停了吗」和同一个截止时刻,
+# 每一笔只等到那一刻为止,按了停止就当场放弃(抛 `LockBusy`,按本机故障记「待续」,
+# 跟原来零等待拿不到锁同一条路)。截止分两档,调用方各自给:
+# - **还没联网的准备工作**(`prepare`)只等到联网截止 —— 过了那一刻本来就不会再联网,等来
+#   的锁没有用处;
+# - **已经做完的成品**(暂存、确认、收尾、最后那次存盘)可以晚交:截止是整轮预算之后再宽限
+#   一个 `LOCK_WAIT`,整轮最多多等这么久,不是每个账号各多等这么久。
+# 等锁的时间**算在整轮预算里**,不另外补:等得久,这一轮能联网的时间就少。
+_bound = threading.local()
+
+
+@contextmanager
+def bounded(should_stop=None, deadline=None):
+    """这一段里(同一条线程)每一笔等锁都受这一轮的停止和截止(monotonic)约束。"""
+    before = getattr(_bound, 'at', None)
+    _bound.at = (should_stop, deadline)
+    try:
+        yield
+    finally:
+        _bound.at = before
+
+
+def _lock(deadline=None, should_stop=None):
+    from kb.pipeline_state import _log
+    stop, end = getattr(_bound, 'at', None) or (None, None)
+    stop = should_stop or stop
+    end = deadline if deadline is not None else end
+    wait = LOCK_WAIT if end is None else min(LOCK_WAIT, max(0.0, end - time.monotonic()))
+
+    def poll(waited):
+        if stop and stop():
+            raise LockBusy(f'已按停止请求中断：等了 {int(waited)} 秒维护锁，没再等下去')
+    return maintenance_lock(wait=wait, on_poll=poll, on_wait=lambda waited: _log(
+        f'大V观点:等维护锁(另一路正在写库),已等 {int(waited)} 秒'))
+
+
+def save_lock(validators, should_stop):
+    """最后那次存盘(`feeds.sync._save_result`)的锁:成品那一档(整轮预算之后再宽限一个 `LOCK_WAIT`)。"""
+    end = validators.get('x_deadline')
+    return _lock(None if end is None else end + LOCK_WAIT, should_stop)
 
 
 _PHASE_FIELDS = {'discovery': ('scan_at',), 'history': ('history_at',),
@@ -103,8 +155,8 @@ def observed(entries):
     return latest.isoformat() if latest else ''
 
 
-def prepare(sources, channel, now):
-    with maintenance_lock(wait=0), db() as conn:
+def prepare(sources, channel, now, deadline=None):
+    with _lock(deadline), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         retention.prune(conn, now)
         for source in sources:
@@ -162,7 +214,7 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
     fields = _phase_fields(phase)
     reused = 0
     now = time.time() if now is None else now
-    with maintenance_lock(wait=0), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return None
@@ -208,7 +260,7 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
 def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end='', coverage_complete=False,
             batch_id=''):
     fields = _phase_fields(phase)
-    with maintenance_lock(wait=0), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return False
@@ -260,7 +312,7 @@ def set_block(source, block):
 
 
 def screen_wait(source, phase, run_started):
-    with maintenance_lock(wait=0), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return 0
@@ -311,7 +363,7 @@ def pending(sources, now=None):
 
 
 def finish(source, task, entries, unavailable, reason, *, block_tokens=None):
-    with maintenance_lock(wait=0), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return

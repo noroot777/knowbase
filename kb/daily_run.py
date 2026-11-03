@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """日报的编排与定时:到点先把所有来源同步一遍,再生成当天的日报。
 
-同步这一步不自己造轮子,而是**依次**借用已有的管道(`kb.pipeline`),分两段:每个
-来源各跑一趟 抓取→导出,全部抓完再跑一趟全库的 索引→提取(只有前两段认来源)。
-依次而不是并发:管道是单例(一把运行锁,索引/提取都要单写者写 kb.db)。
+同步这一步不自己造轮子,借用已有的管道(`kb.pipeline`)跑**一轮**:各来源同时
+抓取→导出,都跑完(或者不等了)再跑全库的 索引→提取(只有前两段认来源,门在
+`kb.pipeline_sources`)。入库处理一走完就去出报,没等的来源在后台照常跑完。
 
-于是一轮日报是 N+1 次管道运行,而「最近一次运行」只有一个位子 —— 这几轮用
+出报之后还有整理那一轮,而「最近一次运行」只有一个位子 —— 这几轮用
 `pipeline.open_batch('daily')` 归成一个**业务批次**,每一轮收尾都由结果存储层把整批
 合并着落盘,否则抓取失败的明细和「重试失败项」会被最后那一轮入库的成功抹掉。那个
 `'daily'` 是这一批的身份,面板的历史清单据此写「日报」而不是「同步」。细节仍旧点进
@@ -36,15 +36,15 @@ from kb.daily_library import library_tail
 # **只带 `_sync_round` 回来,不带 `_wait_idle`**:`_run` 按模块全局名调前者,
 # `patch('kb.daily_run._sync_round')` 换的正是那一处;后者在本模块没有调用点,
 # re-import 只会让打在这儿的桩看着成立而**静默穿不过去**(见 `kb.daily_sync`)。
-from kb.daily_sync import _sync_round
+from kb.daily_sync import _sync_round, _sync_sources
 from kb.sched_ledger import Ledger
 
 SETTINGS_FILE = DATA_DIR / 'daily_report.json'
-# 同步分两段:**抓取那一段按通道分,入库那一段不分**。
+# 同步分两段:**抓取那一段按通道分(各通道同时跑),入库那一段不分**。
 # 只有 crawl / export 认 crawl_filter;`_run_index` 是全量扫 vault、`_run_extract`
 # 扫的是全库待提取队列,两个函数都不收通道参数,压根没有"只做这个通道那一份"的
-# 概念。所以挨个通道各跑一遍四段,等于把同一件全库的活重做 N 遍(5 个通道 = 5 次
-# 全量扫描、5 次抢维护锁),而被处理的文档一篇不多一篇不少。
+# 概念。所以入库那一段在各通道之后只跑一次,不按通道各跑一遍(5 个通道 = 5 次全量
+# 扫描、5 次抢维护锁,而被处理的文档一篇不多一篇不少)。
 #
 # **合并不会绕开任何一道闸**:哪些内容要买提取由**订阅级**开关回答
 # (`kb.extract.pending_docs` 是唯一口径,feeds 那几类默认不提取),拦它的不是
@@ -57,8 +57,8 @@ DIGEST_STAGES = ['index', 'extract']
 DIGEST_LABEL = '入库处理（索引与提取）'
 # 用户在同步中心那条线上点了「本次跳过」的那一项(口径同 `pipeline_flow.enter`)。
 SKIPPED = '本次跳过'
-# 抓取那一段的时间预算。超了就请求管道停下、跳过剩余通道,拿已有内容出日报
-# ——"今天的日报没出来"比"日报少了两个来源"严重得多。
+# 抓取那一段的时间预算。超了就不等没跑完的通道了(还在抓的提前结束),拿已有内容
+# 入库、出日报 ——"今天的日报没出来"比"日报少了两个来源"严重得多。
 SYNC_BUDGET = int(os.environ.get('KB_DAILY_SYNC_BUDGET', str(3 * 3600)))
 # 入库那一段的保底预算。**抓取超预算时它照样要跑**:新导出的文件没进索引,
 # `daily.generate` 就查不到(它取材自 kb.db 的 documents),这一轮抓回来的东西会
@@ -386,39 +386,27 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                 flow.open_daily(batch, channels, _library_on())
             except Exception as e:                   # noqa: BLE001 - 见上
                 _log(f'这一批没有类型计划(跳过 / 提前结束不可用):{e}')
-            for channel in channels:
-                if _halting():
-                    _state['channels'].append(
-                        {'channel': channel, 'label': labels.get(channel, channel),
-                         'status': 'skipped',
-                         'detail': '已停止,未同步' if _state['stop_requested']
-                                   else '超出时间预算,未同步'})
-                    continue
-                if not flow.enter(batch, flow.source_key(channel)):
-                    _state['channels'].append(
-                        {'channel': channel, 'label': labels.get(channel, channel),
-                         'status': 'skipped', 'detail': SKIPPED})
-                    continue
-                try:
-                    _state['channels'].append(
-                        _sync_round(FETCH_STAGES,
-                                    run_trigger.apply_force({'channel': channel}, trigger),
-                                    labels.get(channel, channel), budget_end, channel,
-                                    batch=batch))
-                finally:
-                    flow.leave(batch, flow.source_key(channel))
-            # 入库那一段:等所有通道都抓完才跑,跑一次 —— 这时待索引的文件和
-            # 待提取的队列都最全。**用户按了停止才跳过**:接下来本来就不出报了。
-            # 超预算照跑(见 DIGEST_BUDGET),所以这里不能用 `_halting()`。
             if _state['stop_requested']:
-                _state['channels'].append(
-                    {'channel': '', 'label': DIGEST_LABEL, 'status': 'skipped',
-                     'detail': '已停止,未入库'})
+                _state['channels'].extend(
+                    [{'channel': c, 'label': labels.get(c, c), 'status': 'skipped',
+                      'detail': '已停止,未同步'} for c in channels]
+                    + [{'channel': '', 'label': DIGEST_LABEL, 'status': 'skipped',
+                        'detail': '已停止,未入库'}])
+            elif channels:
+                # **各来源同时跑,一轮管道**:抓取 → 导出各路并行,入库处理排在那道门后面;
+                # 跳过某一类、「不等了」、超预算都落在那一轮里(`daily_sync._sync_sources`)。
+                _state['channels'].extend(_sync_sources(
+                    channels,
+                    run_trigger.apply_force(
+                        {'channels': [{'channel': c, 'accounts': []} for c in channels]}, trigger),
+                    labels, FETCH_STAGES, DIGEST_STAGES, DIGEST_LABEL,
+                    budget_end, DIGEST_BUDGET, batch=batch))
             elif not flow.enter(batch, 'ingest'):
                 _state['channels'].append(
                     {'channel': '', 'label': DIGEST_LABEL, 'status': 'skipped',
                      'detail': SKIPPED})
             else:
+                # 一个来源都没勾:只剩入库那一段(库里已经有、还没入库的那些)
                 try:
                     _state['channels'].append(_sync_round(
                         DIGEST_STAGES, None, DIGEST_LABEL,
@@ -496,7 +484,11 @@ def _run(since: datetime | None, until: datetime | None, sync: bool,
                          _state['detail'] or '日报这一轮没有留下结论')
         finally:
             # 批次在 `library_tail` 里已经关过、发布过(带着这份计划);到这儿才作废它。
-            flow.end(batch)
+            # 这一批还有一轮在跑(没等的那几路)时批次是由那一轮收尾时关的,计划也归它收
+            # (`pipeline_batch.close_batch`)—— 这里作废的话它落盘时就没有计划了
+            from kb.pipeline import batch_live     # 延迟:同上(不出报时 `pl` 没 import)
+            if not batch_live(batch):
+                flow.end(batch)
             _release_round(sched_day, retry)
 
 
