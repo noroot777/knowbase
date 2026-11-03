@@ -333,11 +333,11 @@ def commit_notes(source, completed, summary, pending_failure=False, ranged=False
             note, notice = source_status.fields(source, summary, pending_failure, videos)
             if pending_failure or not record_success:
                 connection.execute('UPDATE subscriptions SET last_attempt=?,last_note=?,last_notice=?,note_at=? '
-                                   'WHERE id=?', (reg.now(), note, notice, reg.now(), source['id']))
+                                   'WHERE id=?', (reg.now(), note, notice, reg.moment(), source['id']))
             else:
                 connection.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
                     failures=0,retry_at=0,last_note=?,last_notice=?,note_at=? WHERE id=?''',
-                                   (reg.now(), reg.now(), note, notice, reg.now(), source['id']))
+                                   (reg.now(), reg.now(), note, notice, reg.moment(), source['id']))
     return True
 
 
@@ -360,7 +360,7 @@ def commit_successes(sources, summary):
                 note, notice = source_status.fields(source, summary)
                 connection.execute('''UPDATE subscriptions SET last_success=?,last_error='',
                     failures=0,retry_at=0,last_note=?,last_notice=?,note_at=? WHERE id=?''',
-                                   (reg.now(), note, notice, reg.now(), source['id']))
+                                   (reg.now(), note, notice, reg.moment(), source['id']))
                 completed.append(str(source['id']))
             summary['stopped'] |= stopped()
         if summary['stopped']:

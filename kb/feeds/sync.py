@@ -180,7 +180,7 @@ def _save_result(source, result, scope):
                  # 日常同步宣布"读完了",而那一边的进度一点没动。
                  source.get('last_note','') if scope.ranged else validators.get('note',''),
                  source.get('last_notice','') if scope.ranged else validators.get('notice',''),
-                 source.get('note_at','') if scope.ranged else stamp,
+                 source.get('note_at','') if scope.ranged else reg.moment(),
                  source['id']))
     return added
 

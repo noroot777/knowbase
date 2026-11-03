@@ -51,6 +51,17 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
+def moment() -> str:
+    """一件事**发生在什么时候**(`error_at` / `note_at`),记到微秒。
+
+    「问题与待办」一个账号只列最后发生的那一条,靠这两列和 X 那几条的浮点时刻比先后。
+    `now()` 只记到秒:同一频道先连接失败、紧接着又写下「没读完」是两笔独立的写,落在
+    同一秒里比出来相等,就留下了早的那条。这里不保证跨进程/时钟回拨下的严格顺序,
+    只保证不再因为截断把先后抹平。
+    """
+    return datetime.now(timezone.utc).isoformat(timespec='microseconds')
+
+
 # 新订阅第一次抓取最多带回多少天以前的内容。一个刚添加的源常常把自己的整个
 # 存档一次交出来(实测 Hugging Face Blog 的 feed 一口气给了 500 条、最早到
 # 2024-04-10),这些旧文随后逐批翻译、逐批重新导出,每重新导出一次 `indexed_at`
