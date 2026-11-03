@@ -62,8 +62,8 @@ class UnknownIsNotUnqualified(YouTubeFixture):
                 patch.object(media, 'probe', return_value=metadata), \
                 patch.object(media, 'obtain', return_value=self.complete_transcript()) as obtain, \
                 patch.object(notes, 'build', side_effect=self.note):
-            # **`products.certify` 不打桩**:成品要真过完整性校验,否则 `quarantine` 会把
-            # 它降级回 candidate,「收进来了没有」这条断言就只剩名义上的 processed 计数。
+            # **`products.certify` 不打桩**:成品要真过完整性校验,否则 `storage.ready` 不放它
+            # 发布,「收进来了没有」这条断言就只剩名义上的 processed 计数。
             collector.process(ranked, self.settings, scope, summary, time.monotonic() + 30)
         return summary, obtain
 

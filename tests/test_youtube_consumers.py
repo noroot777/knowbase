@@ -36,48 +36,6 @@ class YouTubeConsumers(YouTubeFixture):
         build.assert_not_called()
         return result
 
-    def test_legacy_consumers_quarantine_without_crawl_or_active_owners(self):
-        for number, lifecycle in enumerate(('enabled', 'disabled', 'deleted', 'repointed', 'orphan'), 2):
-            with self.subTest(lifecycle=lifecycle):
-                source, entry = self.channel(number), self.entry(number)
-                self.publish(source, entry)
-                old = self.note({'entry': entry, 'channel': source['name']}) | {
-                    'body': '旧的片尾几句话。\n\n## 完整中文转录\n\n感谢观看。'}
-                key = reg.item_key('youtube', entry['url'])
-                with reg.db() as connection:
-                    connection.execute("UPDATE youtube_videos SET note=?,validation='' WHERE video_id=?",
-                                       (json.dumps(old), entry['video_id']))
-                    connection.execute("UPDATE feed_items SET body=?,body_zh=?,title_zh='旧译名' WHERE key=?",
-                                       (old['body'], old['body'], key))
-                    if lifecycle == 'disabled':
-                        connection.execute('UPDATE subscriptions SET enabled=0 WHERE id=?', (source['id'],))
-                    elif lifecycle == 'deleted':
-                        connection.execute('DELETE FROM subscriptions WHERE id=?', (source['id'],))
-                    elif lifecycle == 'repointed':
-                        connection.execute('UPDATE subscriptions SET url=? WHERE id=?',
-                                           ('https://www.youtube.com/@different', source['id']))
-                    elif lifecycle == 'orphan':
-                        connection.execute('DELETE FROM youtube_videos WHERE video_id=?', (entry['video_id'],))
-                with patch.object(discovery, 'fetch') as fetch, patch.object(media, 'probe') as probe:
-                    response = self.client.get('/api/intake/youtube/items')
-                    self.assertEqual(200, response.status_code)
-                    item = next(item for item in response.json()['items'] if item['url'] == entry['url'])
-                    self.assertEqual(products.PENDING, item['body'])
-                    self.assertEqual(('', ''), (item['body_zh'], item['title_zh']))
-                    sync.export('youtube')
-                    exported = (self.root / 'vault' / 'source' / 'youtube' / (key + '.md')).read_text()
-                    self.assertIn(products.PENDING, exported)
-                    self.assertNotIn('旧的片尾', exported)
-                    self.assertNotIn('完整中文转录', exported)
-                    fetch.assert_not_called()
-                    probe.assert_not_called()
-                if lifecycle != 'orphan':
-                    with reg.db() as connection:
-                        row = connection.execute('SELECT * FROM youtube_videos WHERE video_id=?',
-                                                 (entry['video_id'],)).fetchone()
-                        self.assertEqual(old, json.loads(row['note']))
-                        self.assertEqual(1, row['repair_pending'])
-
     def test_current_certified_archived_body_stays_readable(self):
         note = self.publish()
         reg.delete_subscription('youtube', self.source['id'])

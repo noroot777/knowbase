@@ -99,14 +99,9 @@ class FailureSourceTests(FullTextCase):
             with self.subTest(kind=kind):
                 source, key, entry = self.add(kind)
                 expected = self.report_ref(kind, key, entry)
-                with patch.object(translate, 'translate_item', side_effect=RuntimeError('model down')) as translate_item:
+                with patch.object(translate, 'translate_item', side_effect=RuntimeError('model down')):
                     result = translate.translate_pending(kind)
-                if kind == 'youtube':
-                    self.assertEqual([], result['errors'])
-                    translate_item.assert_not_called()
-                    self.assertEqual('youtube:pending-validation', self.row(key)['body_provenance'])
-                else:
-                    self.assertEqual(expected, result['errors'][0]['drop'])
+                self.assertEqual(expected, result['errors'][0]['drop'])
                 with patch.object(sync.os, 'replace', side_effect=PermissionError('read only')):
                     sync.export(kind)
                 reports = sync._stage.call_args.kwargs['failures']

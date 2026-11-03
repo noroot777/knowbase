@@ -54,7 +54,6 @@ def migrate(connection):
 
 def initialize(connection):
     from kb.youtube.channels import seed
-    from kb.youtube.products import quarantine
     from kb.youtube import sync_window
     seed(connection, reg.now(), reg.history_floor())
     connection.execute(SCHEMA)
@@ -93,7 +92,6 @@ def initialize(connection):
         BEGIN UPDATE youtube_video_sources SET committed=0 WHERE source_id=OLD.subscription_id
         AND video_id IN (SELECT video.video_id FROM youtube_videos video JOIN feed_items item
             ON item.url=json_extract(video.entry,'$.url') WHERE item.key=OLD.item_key AND item.kind='youtube'); END''')
-    quarantine(connection)
 
 
 @contextmanager
