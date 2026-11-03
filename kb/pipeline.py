@@ -20,7 +20,7 @@ from copy import deepcopy
 from kb.config import DATA_DIR, announce_config_issue
 from kb.fetch_rounds import NoEvidence
 from kb.collectors import active_collector
-from kb.pipeline_retry import retry_failed_plan, start_retry_failed, today_failed
+from kb.pipeline_retry import retry_failed_plan, start_retry_failed, today_failed, today_owed
 from kb import pipeline_flow as flow
 from kb.pipeline_history import history_rev
 from kb import pipeline_lanes as lanes
@@ -111,6 +111,7 @@ __all__ = [
     "request_stop",
     "retry_failed_plan",
     "today_failed",
+    "today_owed",
     "run_result",
     "run_scopes",
     "source_status",

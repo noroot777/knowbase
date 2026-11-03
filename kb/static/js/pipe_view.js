@@ -327,15 +327,23 @@ function renderPipeState(s) {
     // `.pipe-stage-detail` 里已经有一份(存量实测有 200 字的),一屏上出现两遍 ——
     // 同元规则「口径只有一份」。这里的职责收敛成「哪几步 + 去哪看」。
     const names = keys => keys.map(k => `<b>${esc(STAGE_META[k]?.name || k)}</b>`).join('、');
+    // **早些时候欠下的那几步挂上来源名**(`today_owed`,和 `today_failed` 同一次派生):
+    // 这一轮的卡片底下只写「抓取内容」,人只会当成刚跑完的那个来源欠的。说不出来源
+    // (旧服务、降级)就只念步骤名,不编一个。
+    const owedBy = (!viewing && s.today_owed) || {};
+    const earlier = keys => keys.map(k => {
+      const where = (owedBy[k] || []).filter(Boolean).map(channelLabel);
+      return `<b>${esc((where.length ? where.join('、') + ' ' : '') + (STAGE_META[k]?.name || k))}</b>`;
+    }).join('、');
     // 这一轮全绿、今天还欠着那一档:**哪几步要写出来,而且不许说「明细在下面」**
     // —— 下面那几张卡片讲的是这一轮(它们全是绿的),欠的那几步在屏幕上压根没有
     // 自己的卡片。
     $('pipe-issues-list').innerHTML = shownHere.length
       ? `${names(shownHere)} · 各自的明细在下面那一步里`
-        + (shownEarlier.length ? `；${names(shownEarlier)} 是今天早些时候没补上的` : '')
+        + (shownEarlier.length ? `；${earlier(shownEarlier)} 是今天早些时候没补上的` : '')
         + (backlog ? `；另有 ${pipePending.extract} 项内容待提取` : '')
       : shown
-      ? `${names(shownStages)} · 今天早些时候没做完，可按它们各自的范围重试`
+      ? `${earlier(shownStages)} · 今天早些时候没做完，可按它们各自的范围重试`
         + (backlog ? `；另有 ${pipePending.extract} 项内容待提取` : '')
       : '在下面的「提取知识」里重试，或新建一次同步。';
   }

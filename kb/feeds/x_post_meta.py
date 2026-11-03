@@ -80,3 +80,26 @@ def eligibility(entry: dict) -> tuple[str, str]:
             return 'invalid_provenance', ''
         return '', prefix
     return 'unclassified_legacy', ''
+
+
+def same_post(stored: dict, observed: dict) -> bool:
+    """Same body version of one post, whichever path derived its title.
+
+    A post title is derived from its text, and the paths disagree: the timeline
+    builders keep the whole text, the detail merge keeps the first line. Both are
+    stamped into the fingerprint, so a byte-for-byte check calls one unchanged post
+    two versions and parks it in `repair`, which no automatic round ever drains.
+    The body, its provenance and the boundary are the version; the title is not.
+    Both records must still prove themselves, and Articles keep the strict check.
+    """
+    if (stored.get('body') != observed.get('body')
+            or stored.get('body_provenance') != observed.get('body_provenance')):
+        return False
+    metas = []
+    for entry in (stored, observed):
+        if eligibility(entry)[0]:
+            return False
+        meta = json.loads(entry[FIELD])
+        meta.pop('fingerprint')
+        metas.append(meta)
+    return metas[0] == metas[1]

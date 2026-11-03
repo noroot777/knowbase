@@ -582,6 +582,10 @@ def _snapshot(cells: dict, day: str) -> dict:
     run_id = f'daybook-{day}'
     stages, planned = {}, []
     crawl_scopes, export_scopes, notes = [], [], {}
+    # 每一步欠在哪几个来源上(空串 = 不挂在具名来源上的那一格)。面板拿它念「哪个来源
+    # 的哪一步」—— 只念步骤名的话,在一轮大V全绿的卡片底下写「抓取内容没补上」,人
+    # 只会以为说的是刚跑完的大V,而欠着的是早上那一轮 YouTube。
+    sources: dict[str, list[str]] = {}
     for name in ps.STAGES:
         owned = cells.get(name) or {}
         if not any(targets for targets in owned.values()):
@@ -599,6 +603,8 @@ def _snapshot(cells: dict, day: str) -> dict:
             for channel, targets in owned.items()
             for target, cell in targets.items()])
         for channel, targets in owned.items():
+            if _owed(targets) is not None:
+                sources.setdefault(name, []).append(channel)
             # **空串那个通道不进来源范围**:它的含义是「不挂在任何具名来源上」,而
             # 范围里写不进这个 —— 留着空 `channel` 会被 `crawl_channels` 当成
             # 「没指定来源」,那恰好就是我们要的结果(`{}` → 照默认采集器全抓),
@@ -632,6 +638,7 @@ def _snapshot(cells: dict, day: str) -> dict:
         # 身份要和 `run_id` 对得上:`retry_notes` 拿这两样核对,对不上一律当成
         # 「这一轮没有名单」(宁可按原范围重跑,也不拿别人的失败去收窄)。
         'crawl_retry': {'run': run_id, 'channels': notes},
+        'owed_sources': sources,
     }
 
 
