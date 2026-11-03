@@ -37,6 +37,7 @@ from kb.web import (
     intake_diag_api,
     wechat_api,
     browser_capture_api,
+    x_article_capture_api,
 )
 
 app = FastAPI(title="knowbase")
@@ -45,7 +46,8 @@ for _r in (pages.router, library_api.router, chat_api.router,
            favorites_api.router, settings_api.router, pipeline_api.router,
            sources_api.router, intake_api.router, intake_diag_api.router,
            wechat_api.router,
-           daily_api.router, grab_api.router, browser_capture_api.router):
+           daily_api.router, grab_api.router, browser_capture_api.router,
+           x_article_capture_api.router):
     app.include_router(_r)
 
 pl.start_scheduler()   # 定时同步调度线程(跟随 kb-web 进程存活)

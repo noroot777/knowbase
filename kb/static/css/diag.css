@@ -114,6 +114,7 @@
   overflow-wrap: anywhere; }
 .care-detail .care-detail-link { display: inline-flex; align-items: center; gap: 4px;
   color: var(--brand-deep); font-size: 12px; overflow-wrap: anywhere; }
+.care-x-articles li + li { margin-top: 6px; }
 .care-detail-hint { color: var(--muted); font-size: 12.5px; }
 .care-block { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
 .care-block h4 { font-size: 12px; color: var(--muted); font-weight: 600; margin-bottom: 6px;

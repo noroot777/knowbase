@@ -283,7 +283,10 @@ def _scan_page(handle: str, floor: datetime, *, deadline: float, api_error: str,
         entries.append(entry)
     notes = []
     if not done:
-        notes.append(f'公开接口没答复,改读 X 未登录主页只露出最新 {len(shown)} 条,没读到这一轮的下界')
+        # 说实话:公开接口一直不回来的话,被挤下去的那几条 X 主页上再也露不出来,重读多少遍都一样;
+        # 只有它在五天窗口里恢复,下一轮从顶上翻回五天前时才补得上。水位不动正是为了留住这一种。
+        notes.append(f'公开接口没答复,X 未登录主页只露出最新 {len(shown)} 条,更早的这一轮拿不到;'
+                     '公开接口五天内恢复的话,下一轮会补上')
     if held:
         notes.append(f'{len(held)} 条推文的全文没取到({held[0]}),留到下次同步再试')
     entries.sort(key=lambda e: e['published'])

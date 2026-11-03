@@ -150,7 +150,7 @@ class FallbackScanTests(PageBase):
         self.page('alice', article('alice', 1, 900, '置顶', pinned=True),
                   article('alice', 7, 60), article('alice', 6, 61))
         got = self.scan('alice')
-        self.assertIn('没读到这一轮的下界', got['incomplete'])
+        self.assertIn('更早的这一轮拿不到', got['incomplete'])
         self.assertEqual([], got['entries'])
 
     def test_a_busy_account_keeps_what_was_shown_and_says_it_is_incomplete(self):

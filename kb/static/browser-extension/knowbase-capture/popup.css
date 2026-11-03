@@ -44,7 +44,7 @@ summary { color:var(--brand); cursor:pointer; }
 #elsewhere-list li { padding:10px 0; border-top:1px solid var(--line); }
 #elsewhere-list li:first-child { padding-top:0; border-top:0; }
 #elsewhere-list button { margin-top:8px; }
-#here-state { margin:0 0 6px; }
+#here-state, #x-state { margin:0 0 6px; }
 #status { color:var(--brand); }
 #status:empty { display:none; }
 #status.error { color:var(--danger); }

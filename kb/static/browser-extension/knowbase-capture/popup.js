@@ -181,6 +181,10 @@
     }
     renderSituation();
     element('here-url').textContent = plainUrl(here.url);
+    //: X 的推文页 / 长文页交给 `x_capture.js`(人工补长文,另一组端点)。这一块的待办、候选和
+    //: 关页许可一概不适用于它:那里补的是还没入库的推文,不是库里那一行文章。
+    if (globalThis.knowbaseXArticle?.claims(here.url)) return globalThis.knowbaseXArticle.show(here, {call, status});
+    globalThis.knowbaseXArticle?.release();
     if (chosenFor !== here.url) chosen = chosenFor = '';
     situation = await api('/here', {method: 'POST', signal,
                                     body: JSON.stringify({url: here.url, intent_id: chosen})});

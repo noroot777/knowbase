@@ -208,6 +208,8 @@ function careRenderSourceDetail(host, row) {
     steps.appendChild(quote);
   }
   careBlock(host, '', [row.explanation, row.advice]);
+  // X 账号的正文待办里有长文时,把那几篇列出来给人手动补(`x_article_owed.js`)。
+  if (row.problem === 'x_intake_body' && typeof careRenderXArticles === 'function') careRenderXArticles(host, row);
   careBlock(host, '', [
     row.since ? `同步下界 ${careTime(row.since) || row.since}` : '这条订阅还没有水位',
     row.retry_at ? '退避已经打上，下一轮自动同步会按它再试一次' : '',
