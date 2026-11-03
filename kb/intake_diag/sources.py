@@ -178,7 +178,7 @@ def problems(kind: str) -> list[dict]:
             out.append({**shared, 'id': f"source:{source['id']}:{name}",
                         'problem': name, 'evidence': reason, **PROBLEMS[name]})
         automatic_x = kind == 'social' and x_channels._handle(source) and not source.get('feed_url') and \
-            x_channels.channel_of(settings) in ('browser', 'attach', 'feedgrab')
+            x_channels.channel_of(settings) in x_channels.CHANNELS
         if automatic_x:
             for issue in source.get('x_intake', {}).get('issues', []):
                 name = issue['kind']

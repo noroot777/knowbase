@@ -373,7 +373,7 @@ def acknowledge(conn, source, entries):
 def statuses(sources, channel='browser'):
     from kb.feeds import x_channels
     from kb.feeds.prefetch import X_LOCAL_SECONDS
-    eligible = {source['id'] for source in sources if channel in ('browser', 'attach', 'feedgrab')
+    eligible = {source['id'] for source in sources if channel in x_channels.CHANNELS
                 and source.get('enabled') and reg.uses_channel(source) and x_channels._handle(source)}
     schedule = capacity.schedule_notice() if eligible else ''
     now = datetime.now(timezone.utc)
