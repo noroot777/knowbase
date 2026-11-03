@@ -9,8 +9,8 @@ def reason(error):
 
 
 def write(conn, source, error, *, now):
-    conn.execute('''UPDATE subscriptions SET last_attempt=?,last_error=?,failures=failures+1,
-        retry_at=? WHERE id=?''', (reg.now(), reason(error),
+    conn.execute('''UPDATE subscriptions SET last_attempt=?,last_error=?,error_at=?,failures=failures+1,
+        retry_at=? WHERE id=?''', (reg.now(), reason(error), reg.moment(),
         now + min(86400, 1800 * 2 ** min(source['failures'], 6)), source['id']))
 
 

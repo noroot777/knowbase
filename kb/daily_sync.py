@@ -142,17 +142,179 @@ def _sync_round(stages: list[str], crawl_filter: dict | None, label: str,
     # 只看这一轮请求了的那几个阶段:没选中的阶段一开跑就落 skipped(见
     # `pipeline.start_pipeline`),全收进来的话每一轮都要多报几句"条目化/
     # wiki 未执行"。
-    graded = [(name, mine['stages'].get(name) or {}) for name in stages]
-    bad = [f'{name} {s.get("detail") or "失败"}'
-           for name, s in graded if s.get('status') == 'error']
     # skipped / stopped = 这个阶段该做的事一件没做,**不能跟着算成功**。
     # 2026-09-30 实测:51 个大V账号全都缺 X 通道配置,crawl 因此整个落 skipped
-    # (「待配置 51 个」),而这里只数 error —— 那一轮 social 通道报的是绿色的
-    # 「同步完成」,日报里那行只剩下 extract 的结果,"一条都没抓到"这件事连同
-    # 原因一起看不见。超预算/被停止时管道落 stopped,同理。
-    idle = [f'{name} {s.get("detail") or "本轮未执行"}'
-            for name, s in graded if s.get('status') in ('skipped', 'stopped')]
-    entry.update(status='error' if bad else 'skipped' if idle else 'ok',
-                 detail='；'.join(bad + idle)[:400] if bad or idle else '同步完成')
+    # (「待配置 51 个」),而只数 error 的话那一轮 social 通道报的是绿色的
+    # 「同步完成」,"一条都没抓到"这件事连同原因一起看不见。判据在 `_grade`。
+    status, detail = _grade([(name, mine['stages'].get(name)) for name in stages])
+    entry.update(status=status, detail=detail)
     _log(f'{label}:{entry["detail"]}')
     return entry
+
+
+# ── 日报那一轮的同步:各来源同时跑,一轮管道 ────────────────────────────────────
+# 原来是「每个来源各借一次管道,再借一次跑入库」(N+1 轮,来源一个接一个)。各来源同时跑
+# 之后整段同步就是**一轮**:抓取 → 导出各路并行,入库处理排在那道门后面(`pipeline_sources`)。
+# 「生成日报」不是管道阶段,所以这一轮**入库处理一走完就交卷**:没等的那几路还在后台跑完、
+# 照常记账,日报不等它们(它们的新内容本来也赶不上这一份)。
+
+#: 这几步的结论落定了(不再是 pending / running)。
+_SETTLED = ('ok', 'error', 'skipped', 'stopped')
+LATE = '没等它跑完：它照常跑完、照常记账，新内容进下一轮入库'
+
+
+def _owner_of(run: str, batch: str):
+    """这一轮带着的那份类型计划(日报那一批有就是它,建不起来时是这一轮自己的)。"""
+    from kb import pipeline_flow as flow
+    for owner in (batch, run):
+        plan = flow.record(owner) if owner else {}
+        if plan:
+            return owner, plan
+    return '', {}
+
+
+def _digest_started(plan: dict, snapshot: dict, digest: list[str]) -> bool:
+    if plan and any(n.get('key') == 'ingest' for n in plan.get('nodes') or []):
+        return 'ingest' in (plan.get('times') or {}) or 'ingest' in (plan.get('done') or [])
+    return snapshot.get('current_stage') in digest
+
+
+def _digest_done(plan: dict, snapshot: dict, digest: list[str]) -> bool:
+    """入库处理走完了(跑完、被跳过都算)。没有计划就看那几步的卡片是不是都落定了。"""
+    if plan and any(n.get('key') == 'ingest' for n in plan.get('nodes') or []):
+        return 'ingest' in (plan.get('done') or [])
+    return all((snapshot['stages'].get(s) or {}).get('status') in _SETTLED for s in digest)
+
+
+def _bad(cells: list[tuple[str, dict | None]]) -> list[str]:
+    return [f'{name} {c.get("detail") or "失败"}' for name, c in cells
+            if isinstance(c, dict) and c.get('status') == 'error']
+
+
+def _grade(cells: list[tuple[str, dict | None]]) -> tuple[str, str]:
+    """成绩单上一项的 (status, detail)。**只有每一步都明确成了才是 ok**,口径只有这一份。
+
+    error 最要紧;**没落定的**(pending / running,或者压根没有那一格)念「结果未知」——
+    日报是在入库处理一走完就交卷的,那一刻慢来源还在跑,`_end_run` 还没把半截的那几步补成
+    error,只排除坏的和跳过的话,半成品会被评成「同步完成」;skipped / stopped 是这一步该做
+    的事一件没做,也不算成。
+    """
+    bad = _bad(cells)
+    open_ = [name for name, c in cells
+             if not isinstance(c, dict) or c.get('status') not in _SETTLED]
+    idle = [f'{name} {c.get("detail") or "本轮未执行"}' for name, c in cells
+            if isinstance(c, dict) and c.get('status') in ('skipped', 'stopped')]
+    parts = bad + ([f'{"、".join(open_)} 没有落定的结论'] if open_ else []) + idle
+    status = 'error' if bad else 'unknown' if open_ else 'skipped' if idle else 'ok'
+    return status, '；'.join(parts)[:400] if parts else '同步完成'
+
+
+
+def _source_entry(channel: str, label: str, fetch: list[str], results: dict,
+                  late: bool) -> dict:
+    """一个来源在成绩单上那一条:**读它自己那一格结果账**,不读几路合在一起的卡片。"""
+    cells = [(name, (results.get(name) or {}).get(channel)) for name in fetch]
+    entry = {'channel': channel, 'label': label}
+    bad = _bad(cells)
+    if late:
+        detail = '；'.join(bad + [LATE])
+        return {**entry, 'status': 'error' if bad else 'skipped', 'detail': detail[:400]}
+    if any(not isinstance(c, dict) for _, c in cells):
+        # 进过这一轮却没留下自己那一格:不知道,不许借别的来源的绿说它成了
+        return {**entry, 'status': 'error' if bad else 'unknown',
+                'detail': '；'.join(bad + ['这一轮没留下这个来源自己的结果'])[:400]}
+    status, detail = _grade(cells)
+    return {**entry, 'status': status, 'detail': detail}
+
+
+def _sync_sources(channels: list[str], crawl_filter: dict, labels: dict[str, str],
+                  fetch: list[str], digest: list[str], digest_label: str,
+                  deadline: float, digest_budget: float, batch: str = '') -> list[dict]:
+    """日报那一轮的整段同步(各来源同时 抓取 → 导出,再入库处理),返回成绩单那几条:
+    每个来源一条,入库那一条排最后。
+
+    **超出时间预算**(`deadline`)= 别再等没跑完的来源了:还在抓的那几路提前结束、那道门
+    打开,入库处理接着走 —— 「今天的日报没出来」比「少了一个来源」严重得多。入库处理自己
+    另有保底预算(`digest_budget`,从它开跑算起),超了才停这一轮(新导出的文件不进索引,
+    日报就取不到它们,所以它不跟着来源那份预算一起被砍)。用户按的停止随时停整轮。
+    """
+    from kb import pipeline as pl
+    from kb import pipeline_flow as flow
+    from kb import pipeline_results as live_results
+
+    def everyone(status: str, detail: str) -> list[dict]:
+        return [{'channel': c, 'label': labels.get(c, c), 'status': status, 'detail': detail}
+                for c in channels] + [{'channel': '', 'label': digest_label,
+                                       'status': status, 'detail': detail}]
+
+    _set('sync', '同步各来源:等待同步管道空闲')
+    if not _wait_idle(min(deadline, time.monotonic() + WAIT_BUSY), _halting):
+        return everyone('skipped', '同步管道一直被占用,本轮跳过')
+    why: list[str] = []
+    run = pl.start_pipeline(fetch + digest, crawl_filter=crawl_filter, batch=batch, refused=why)
+    if not run:
+        return everyone('skipped', f'本轮跳过:{why[0]}' if why else '同步管道已被其它任务占用,本轮跳过')
+    with _lock:
+        _state['pipeline_run'] = run
+    if _state['stop_requested']:
+        pl.request_stop(run)        # 理由同 `_sync_round` 那一句
+    mine = early = None
+    over = digest_over = False
+    digest_end = None
+    while True:
+        snapshot = pl.get_state()
+        if snapshot.get('run_id') != run:
+            break
+        if not snapshot['running']:
+            mine = snapshot
+            break
+        owner, plan = _owner_of(run, batch)
+        if _digest_done(plan, snapshot, digest):
+            # 入库处理走完了;没等的那几路还在后台跑。**快照要在看到「走完了」之后再取一次**:
+            # 上面那份是看计划之前拍的,入库那几步的终态(含异常时补的 error,见
+            # `pipeline._run_pipeline`)在离开那一组之前才落下,旧那份里可能还是 pending
+            again = pl.get_state()
+            early = again if again.get('run_id') == run else snapshot
+            break
+        digesting = _digest_started(plan, snapshot, digest)
+        stage = snapshot.get('current_stage') or ''
+        detail = (snapshot['stages'].get(stage) or {}).get('detail') or ''
+        label = digest_label if digesting else '同步各来源'
+        _set('sync', f'{label}:{detail}' if detail else f'{label}:同步中', quiet=True)
+        now = time.monotonic()
+        if not over and now > deadline and not digesting:
+            over = True
+            _state['over_budget'] = True
+            _log('同步各来源:超出时间预算,没跑完的来源这一轮不等了,接着入库处理')
+            for key, step in (plan.get('lanes') or {}).items():
+                if step == 'crawl':
+                    flow.request(owner, key, 'cut')
+            flow.release(owner)
+        if digesting and digest_end is None:
+            digest_end = max(deadline, now + digest_budget)
+        if digest_end is not None and not digest_over and now > digest_end \
+                and not _state['stop_requested']:
+            digest_over = True
+            _state['over_budget'] = True
+            _log(f'{digest_label}:超出时间预算,请求停止后直接生成日报')
+            pl.request_stop(run)
+        time.sleep(2)
+    with _lock:
+        if _state['pipeline_run'] == run:
+            _state['pipeline_run'] = ''
+    final = mine or early or pl.run_result(run)
+    if final is None:
+        entries = everyone('unknown', '没拿到这一轮的同步结果(管道已被下一轮运行接替),成败未知')
+        _log(f'同步各来源:{entries[0]["detail"]}')
+        return entries
+    _, plan = _owner_of(run, batch)
+    results = live_results.snapshot() if early is not None else (final.get('results') or {})
+    # 门打开那一刻没跑完的几路:哪怕轮询这两秒里它已经跑完,导出也排在入库之后,这份日报不含它
+    late = set(plan.get('late') or [])
+    entries = [_source_entry(c, labels.get(c, c), fetch, results, flow.source_key(c) in late)
+               for c in channels]
+    status, detail = _grade([(name, final['stages'].get(name)) for name in digest])
+    entries.append({'channel': '', 'label': digest_label, 'status': status, 'detail': detail})
+    for entry in entries:
+        _log(f'{entry["label"]}:{entry["detail"]}')
+    return entries

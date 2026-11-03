@@ -341,6 +341,8 @@ class OrchestrationTests(unittest.TestCase):
              patch('kb.daily_library.library_round', lambda *a: None), \
              patch('kb.daily_run._sync_round', Mock(return_value={
                  'channel': '', 'label': 'x', 'status': 'ok', 'detail': ''})), \
+             patch('kb.daily_run._sync_sources', Mock(return_value=[{
+                 'channel': 'rss', 'label': 'RSS', 'status': 'ok', 'detail': ''}])), \
              patch('kb.daily_run._channel_labels', lambda: {'rss': 'RSS'}), \
              patch('kb.daily_run._release_round', lambda *a: None):
             _state.update(**fresh_round(), sched_day='')

@@ -23,6 +23,7 @@ from kb.collectors import active_collector
 from kb.pipeline_retry import retry_failed_plan, start_retry_failed, today_failed
 from kb import pipeline_flow as flow
 from kb.pipeline_history import history_rev
+from kb import pipeline_lanes as lanes
 from kb.pipeline_sources import run_sources
 from kb.pipeline_stages import (
     _extract_pass,
@@ -69,7 +70,7 @@ from kb.pipeline_state import (
 
 # 批次层:同一个业务轮里的几轮管道合并着发布(`pipeline_batch`,从
 # `pipeline_state` 拆出来只因为行数上限)。`kb.daily_run` 照旧只认本模块这三个名字。
-from kb.pipeline_batch import PublishRefused, batch_note, close_batch, open_batch
+from kb.pipeline_batch import PublishRefused, batch_live, batch_note, close_batch, open_batch
 # 历史清单标「这一行就是此刻屏幕上那份结果」过的是它(只认可信身份、一个字的内容都
 # 不比)。**没绕 `pipeline_state` 再导出一次** —— 那份文件正贴着 700 行上限,而门面
 # 本来就是对外那一层。
@@ -96,6 +97,7 @@ __all__ = [
     "last_result",
     "load_last_run",
     "batch_note",
+    "batch_live",
     "open_batch",
     "persist_error",
     "restore_gap",
@@ -134,23 +136,31 @@ CUT_REST = "这一类提前结束，这一步没跑"
 CUT_EXPORT = "本类型提前结束，这次没导出"
 
 
-def _sources(stages: list[str], crawl_filter: dict | None, owner: str) -> None:
+def _sources(stages: list[str], crawl_filter: dict | None, owner: str):
     """抓取 + 导出,按来源那一层(类型节点)跑。
 
-    多来源按来源串着跑(`pipeline_sources`)。**只有一个来源时走老路**:
+    多来源各来源同时跑(`pipeline_sources`),返回那一组 —— 编排层在全库那几步之前
+    `wait_gate`、收尾之前 `join`。**只有一个来源时走老路**(返回 None):
     `_run_crawl(crawl_filter)` / `_run_export(crawl_filter)` 原样各调一次,既有回归
     钉着这两个入口和它们的参数;这里只在两步之间多问一句「这一类跳过/提前结束了没有」。
     """
     scopes = crawl_channels(crawl_filter)
     if len(scopes) > 1:
-        run_sources(stages, crawl_filter, owner)
-        return
+        return run_sources(stages, crawl_filter, owner)
     node = flow.source_key(scopes[0]["channel"]) if scopes else ""
     if not flow.enter(owner, node):
         for s in flow.SOURCE_STEPS:
             if s in stages:
                 _settle_skipped(s, SKIPPED)
-        return
+        return None
+    # 只有这一路,在管道主线程上跑;照样绑上它的通道(日志按来源打标,口径同多来源那一档)
+    with lanes.bind(scopes[0]["channel"] if scopes else ""):
+        _one_source_inline(stages, crawl_filter, owner, node)
+    return None
+
+
+def _one_source_inline(stages: list[str], crawl_filter: dict | None, owner: str,
+                       node: str) -> None:
     try:
         if "crawl" in stages and not flow.advance(owner, node, "crawl"):
             _settle_skipped("crawl", CUT_REST)
@@ -181,6 +191,8 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None,
     """按类型往下跑。`owner` 是这一轮带着的那份类型计划(`pipeline_flow.begin`),
     空串 = 没有计划,一律照常跑(既有调用方和回归都不传它)。"""
     pre_thread = None
+    sources, gated, group = None, False, None
+    failed: BaseException | None = None
     try:
         # 抓取被反爬间隔限速(页间/号间随机 sleep),期间 CPU 和网络全闲着:
         # 先并行开跑一轮"存量"提取,消化上一轮已索引但没提取的积压。
@@ -202,7 +214,7 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None,
             pre_thread.start()
 
         sources_ran = False
-        group = None                   # (节点 key, 跳过了没有)
+        # group:(节点 key, 跳过了没有)
         for s in STAGES:
             if _state.get("stop_requested"):
                 break
@@ -212,8 +224,14 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None,
             if s in flow.SOURCE_STEPS:
                 if not sources_ran:
                     sources_ran = True
-                    _sources(stages, crawl_filter, owner)
+                    sources = _sources(stages, crawl_filter, owner)
                 continue
+            if sources is not None and not gated:
+                # 全库那几步之前那道门:等各来源跑完(或者用户点了「不等了」)
+                gated = True
+                sources.wait_gate()
+                if _state.get("stop_requested"):
+                    break
             key = _group_of(s)
             if group is None or group[0] != key:
                 if group is not None:
@@ -243,19 +261,46 @@ def _run_pipeline(stages: list[str], crawl_filter: dict | None = None,
                     _run_extract()
             else:
                 _RUNNERS[s]()
+    except BaseException as exc:
+        failed = exc
+        raise
     finally:
-        # Parallel extraction owns database writes too. Do not advertise idle
-        # until it finishes, including stop requests and unexpected exceptions.
+        # 各来源那几路和存量提取都还可能在写库:**全都跑完才许宣布空闲**,停止和意外
+        # 异常也一样。没等的那几路的导出在这一刻才开始(`Lanes.join` 先宣布全库那几步
+        # 走完了)。全库最后那一组**先收尾**:日报等的是「入库处理走完了」,不是没等的
+        # 那几路也跑完。
+        if failed is not None:
+            _settle_broken(failed)
+        if group is not None:
+            flow.leave(owner, group[0])
+        if sources is not None:
+            sources.join()
         if pre_thread:
             pre_thread.join()
         flow.leave_running(owner)
         _keep_flow(owner)
-        # 手动同步那份计划随这一轮收尾作废;日报那一份由日报那一批自己收(owner 是批次)。
+        # 手动同步那份计划随这一轮收尾作废;日报那一份由日报那一批自己收(owner 是批次)
+        # —— 除非日报已经交卷、这一批是等这一轮收尾才关的(`close_batch`):那就由这一轮收。
         # 判据在收尾**之前**取:收尾那一刻起下一轮就可以起跑、换掉 run id。
         mine = bool(owner) and owner == _state.get("run_id")
+        batch = bool(owner) and owner == _state.get("batch")
         _end_run()
-        if mine:
+        if mine or (batch and not batch_live(owner)):
             flow.end(owner)
+
+
+def _settle_broken(exc: BaseException) -> None:
+    """全库那几步半路抛了:**离开那一组之前**把还没落定的几步记成中断。
+
+    离开那一组 = 计划里记「走完了」,日报据此交卷 —— 可后面还要等慢来源跑完(`join`),
+    `_end_run` 把 pending / running 补成 error 是在那之后。不先落下的话,日报读到的是
+    「提取 pending」,评成了「同步完成」。来源那几步不碰:它们还在各自的线程上跑。
+    """
+    why = f"流程中断，未完成 · {type(exc).__name__}: {exc}"
+    for name in STAGES:
+        stage = _state["stages"].get(name) or {}
+        if name not in flow.SOURCE_STEPS and stage.get("status") in ("pending", "running"):
+            _stage(name, "error", why[:300])
 
 
 def _pre_worked(stats: dict) -> bool:

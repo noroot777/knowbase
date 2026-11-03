@@ -1,4 +1,4 @@
-/* 同步中心:概况卡里那条「按类型排的线」+ 下面那张历史运行表。
+/* 同步中心:概况卡里「一类一行」那几行 + 下面那张历史运行表。
    色值一律走 base.css 的 token;脉冲动画在 prefers-reduced-motion 下关掉。 */
 
 /* 有了那条线,进度条就是同一件事的第二种说法:藏起来(元素留着,计数口径照旧) */
@@ -6,64 +6,45 @@
 .pipe-flow[hidden], .pipe-flow-why[hidden], .pipe-stage[hidden] { display: none; }
 .pipe-flow { margin-top: 20px; }
 
-/* ── 轨道:一条横线串一排节点 ── */
-.pipe-flow-groups, .pipe-flow-rail { display: grid; grid-template-columns: repeat(var(--n, 1), minmax(0, 1fr)); }
-.pipe-flow-groups { margin-bottom: 6px; }
-.pipe-flow-groups:empty { display: none; }
-.pipe-flow-groups span { font-size: 11.5px; color: var(--muted); text-align: center; border-bottom: 1px solid var(--line-soft); margin: 0 14px; padding-bottom: 4px; }
-.pipe-flow-groups b { font-family: var(--font-mono); font-weight: 500; }
-.pipe-flow-node { position: relative; display: flex; flex-direction: column; align-items: center; gap: 5px;
-  padding: 4px 4px 9px; min-height: 0; background: none; border: 0; border-radius: 10px; text-align: center;
-  color: var(--ink); cursor: pointer; white-space: normal; }
-.pipe-flow-node:hover:not([aria-selected="true"]) { background: var(--paper); }
-.pipe-flow-node:hover .pipe-flow-dot { box-shadow: 0 0 0 4px var(--brand-tint); }
-.pipe-flow-node:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-/* 左半截连上一个,右半截连下一个;走过去的那段转绿 */
-.pipe-flow-node::before, .pipe-flow-node::after { content: ""; position: absolute; top: 17px; height: 2px; background: var(--line); }
-.pipe-flow-node::before { left: 0; right: calc(50% + 15px); }
-.pipe-flow-node::after { left: calc(50% + 15px); right: 0; }
-.pipe-flow-node:first-child::before, .pipe-flow-node:last-child::after { display: none; }
-.pipe-flow-node.pl::before, .pipe-flow-node.pr::after { background: var(--brand); }
-.pipe-flow-dot { position: relative; z-index: 1; width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
-  background: var(--card); border: 2px solid var(--line); color: var(--muted); font: 600 12px var(--font-mono); transition: box-shadow .15s; }
-.pipe-flow-dot .icon { width: 14px; height: 14px; stroke-width: 2.4; }
-.pipe-flow-nm { font-size: 13.5px; font-weight: 600; line-height: 1.35; }
-.pipe-flow-sub { font: 11.5px/1.3 var(--font-mono); color: var(--muted); white-space: nowrap; }
-.pipe-flow-node[data-s=done] .pipe-flow-dot { background: var(--brand); border-color: var(--brand); color: var(--card); }
-.pipe-flow-node[data-s=run] .pipe-flow-dot { border-color: var(--brand); }
-.pipe-flow-node[data-s=run] .pipe-flow-dot::after { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--brand); animation: pipe-flow-pulse 1.4s ease-in-out infinite; }
-.pipe-flow-node[data-s=run] .pipe-flow-sub { color: var(--brand); }
-.pipe-flow-node[data-s=cut] .pipe-flow-dot { border-color: var(--warn); color: var(--warn); background: var(--warn-soft); }
-.pipe-flow-node[data-s=cut] .pipe-flow-sub { color: var(--warn); }
-.pipe-flow-node[data-s=unknown] .pipe-flow-dot { border-color: var(--warn); border-style: dashed; color: var(--warn); }
-.pipe-flow-node[data-s=unknown] .pipe-flow-sub { color: var(--warn); }
-.pipe-flow-node[data-s=skip] .pipe-flow-dot { border-style: dashed; }
-.pipe-flow-node[data-s=skip]:not([data-issues]) .pipe-flow-nm { color: var(--muted); text-decoration: line-through; text-decoration-color: var(--line); }
+/* ── 一类一行:名字 | 一根细条(全轮共用一个比例尺)| 此刻那句 | 耗时 | 动作 ── */
+.pipe-flow-row { display: grid; grid-template-columns: 110px minmax(0, 1fr) minmax(0, 300px) 72px 112px; align-items: center;
+  column-gap: 16px; min-height: 40px; padding: 0 8px; border-radius: 8px; cursor: pointer; }
+.pipe-flow-row:hover, .pipe-flow-row[aria-expanded="true"] { background: var(--brand-tint); }
+.pipe-flow-row:focus-visible { outline: 2px solid var(--brand); outline-offset: -2px; }
+.pipe-flow-nm { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pipe-flow-say { font-size: 12.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pipe-flow-t { font: 12px var(--font-mono); color: var(--muted); text-align: right; white-space: nowrap; }
+.pipe-flow-rowact { text-align: right; }
+.pipe-flow-rowact button { white-space: nowrap; }
+.pipe-flow-late { color: var(--muted); }
+.pipe-flow-bar { position: relative; height: 4px; background: var(--line-soft); border-radius: 2px; }
+.pipe-flow-bar i { position: absolute; top: 0; bottom: 0; border-radius: 2px; background: var(--brand); }
+.pipe-flow-row[data-s=run] .pipe-flow-bar i::after { content: ""; position: absolute; right: -3px; top: -3px; width: 10px; height: 10px;
+  border-radius: 50%; background: var(--brand); animation: pipe-flow-pulse 1.4s ease-in-out infinite; }
+.pipe-flow-row[data-s=gate] .pipe-flow-say, .pipe-flow-row[data-s=cut] .pipe-flow-say, .pipe-flow-row[data-s=unknown] .pipe-flow-say { color: var(--warn); }
+.pipe-flow-row[data-s=cut] .pipe-flow-bar i, .pipe-flow-row[data-s=unknown] .pipe-flow-bar i { background: var(--warn); }
+.pipe-flow-row[data-s=wait] .pipe-flow-nm, .pipe-flow-row[data-s=wait] .pipe-flow-say,
+.pipe-flow-row[data-s=skip] .pipe-flow-nm, .pipe-flow-row[data-s=skip] .pipe-flow-say { color: var(--muted); }
+.pipe-flow-row[data-s=skip]:not([data-issues]) .pipe-flow-nm { text-decoration: line-through; text-decoration-color: var(--line); }
 /* 红跟着 `issues` 走,不跟着「走到哪了」走(口径见 `pipe_flow.js` 的 `pipeFlowState`):
    还没轮到、跳过了余下几步、提前结束的那几类也可能已经红了。**必须排在上面那几条
-   状态规则之后**,不然 done 那条的实心绿会把它盖掉。 */
-.pipe-flow-node[data-issues] .pipe-flow-dot { border-color: var(--danger); color: var(--danger); background: var(--warn-soft); }
-.pipe-flow-node[data-issues] .pipe-flow-sub { color: var(--danger); }
-.pipe-flow-node[aria-selected="true"] { background: var(--brand-tint); }
-.pipe-flow-node[aria-selected="true"] .pipe-flow-nm { color: var(--brand-deep); }
+   状态规则之后**,不然它们会把红盖掉。 */
+.pipe-flow-row[data-issues] .pipe-flow-bar i { background: var(--danger); }
+.pipe-flow-row[data-issues] .pipe-flow-say { color: var(--danger); }
+.pipe-flow-sep { height: 1px; background: var(--line-soft); margin: 6px 8px; }
 @keyframes pipe-flow-pulse { 0%, 100% { transform: scale(.7); opacity: .55; } 50% { transform: scale(1); opacity: 1; } }
 
-/* ── 选中那一类的详情:上沿一个小尖角指回轨道上那个节点 ── */
-.pipe-flow-detail { position: relative; margin-top: 10px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px 4px; }
-.pipe-flow-notch { position: absolute; top: -8px; left: 24px; width: 14px; height: 14px; background: var(--paper);
-  border-left: 1px solid var(--line); border-top: 1px solid var(--line); transform: rotate(45deg); transition: left .18s; }
-.pipe-flow-dhead { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
-.pipe-flow-dhead h3 { font-size: 16px; font-weight: 650; display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.pipe-flow-dhead p { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
-.pipe-flow-dhead p b { font: 500 12.5px var(--font-mono); color: var(--ink-2); }
-.pipe-flow-act { display: flex; gap: 8px; flex-shrink: 0; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-.pipe-flow-tag { font-size: 12px; font-weight: 600; }
-.pipe-flow-tag.ok { color: var(--ok); } .pipe-flow-tag.run { color: var(--brand); } .pipe-flow-tag.err { color: var(--danger); }
-.pipe-flow-tag.warn { color: var(--warn); } .pipe-flow-tag.mut { color: var(--muted); }
-.pipe-flow-why { margin: 10px 0 0; padding: 9px 12px; border-left: 3px solid var(--warn); background: var(--card); font-size: 13px; color: var(--ink-2); border-radius: 0 8px 8px 0; }
+/* ── 展开的那一类:挂在那一行下面,左边一道竖线 ── */
+.pipe-flow-detail { margin: 2px 8px 10px 126px; border-left: 2px solid var(--brand-soft); padding: 4px 0 2px 16px; }
+.pipe-flow-detail[hidden] { display: none; }
+.pipe-flow-dhead { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.pipe-flow-dhead:empty { display: none; }
+.pipe-flow-dhead p { font-size: 12.5px; color: var(--muted); }
+.pipe-flow-act { display: flex; gap: 12px; flex-shrink: 0; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+.pipe-flow-why { margin: 8px 0 0; padding: 9px 12px; border-left: 3px solid var(--warn); background: var(--paper); font-size: 13px; color: var(--ink-2); border-radius: 0 8px 8px 0; }
 
 /* 这一类的那几步:阶段行挪进来之后换成紧凑的一档(行本身的结构和明细不变) */
-.pipe-flow-detail .pipe-stage { grid-template-columns: 24px minmax(0, 1fr) auto; gap: 12px; padding: 11px 0; background: none; border-bottom: 1px solid var(--line-soft); }
+.pipe-flow-detail .pipe-stage { grid-template-columns: 24px minmax(0, 1fr) auto; gap: 12px; padding: 9px 0; background: none; border-bottom: 1px solid var(--line-soft); }
 .pipe-flow-detail #pipe-stages .pipe-stage:not([hidden]):last-of-type, .pipe-flow-detail #pipe-flow-extra .pipe-stage { border-bottom: none; }
 .pipe-flow-detail .pipe-stage-number { width: 24px; height: 24px; font-size: 11.5px; margin-top: 1px; }
 .pipe-flow-detail .pipe-stage h3 { font-size: 14.5px; line-height: 1.6; display: inline; }
@@ -131,14 +112,16 @@
 .pipe-matrix-note b { color: var(--danger); }
 
 @media (prefers-reduced-motion: reduce) {
-  .pipe-flow-node[data-s=run] .pipe-flow-dot::after, .pipe-matrix-dot[data-s=run]::after { animation: none; }
-  .pipe-flow-notch { transition: none; }
+  .pipe-flow-row[data-s=run] .pipe-flow-bar i::after, .pipe-matrix-dot[data-s=run]::after { animation: none; }
 }
-/* 窄屏:轨道横向滚,表格横向滚(列是类型,挤成一行一个字没法看) */
+/* 窄屏:细条和耗时让位,名字和那句话叠成两行;表格横向滚(列是类型,挤成一行一个字没法看) */
 @media (max-width: 760px) {
-  .pipe-flow-track { overflow-x: auto; }
-  .pipe-flow-rail, .pipe-flow-groups { min-width: calc(var(--n, 1) * 92px); }
-  .pipe-flow-dhead { flex-direction: column; }
+  .pipe-flow-row { grid-template-columns: minmax(0, 1fr) auto; row-gap: 2px; padding: 6px 8px; }
+  .pipe-flow-bar, .pipe-flow-t { display: none; }
+  .pipe-flow-say { grid-column: 1; }
+  .pipe-flow-rowact { grid-row: 1 / span 2; grid-column: 2; }
+  .pipe-flow-detail { margin-left: 8px; }
+  .pipe-flow-dhead { flex-direction: column; align-items: flex-start; }
   .pipe-matrix { overflow-x: auto; }
   .pipe-matrix-g, .pipe-matrix-h, .pipe-matrix .pipe-history-row { min-width: 720px; }
 }

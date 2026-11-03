@@ -42,6 +42,8 @@
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from kb.feeds import registry as reg, x_page_state as xstate
 from kb.intake_diag import warrant
 from kb.feeds.x_intake_diagnostics import PROBLEMS as X_PROBLEMS
@@ -176,7 +178,8 @@ def problems(kind: str) -> list[dict]:
         if (reason := (source['last_error'] or '')) and reason != source.get('x_intake', {}).get('block', {}).get('reason'):
             name = _kind_of_failure(reason)
             out.append({**shared, 'id': f"source:{source['id']}:{name}",
-                        'problem': name, 'evidence': reason, **PROBLEMS[name]})
+                        'problem': name, 'evidence': reason, **PROBLEMS[name],
+                        'at': _stamp(source.get('error_at', ''))})
         automatic_x = kind == 'social' and x_channels._handle(source) and not source.get('feed_url') and \
             x_channels.channel_of(settings) in x_channels.CHANNELS
         if automatic_x:
@@ -187,12 +190,58 @@ def problems(kind: str) -> list[dict]:
                 suffix = f":{issue['phase']}" if issue.get('phase') else ''
                 out.append({**shared, 'id': f"source:{source['id']}:{name}{suffix}", 'problem': name,
                             'evidence': issue['evidence'], **metadata, 'actionable': actionable,
-                            'step': issue.get('step', metadata['step']),
+                            'step': issue.get('step', metadata['step']), 'at': issue.get('at'),
                             'blocked': shared['blocked'] or ('' if issue['retryable'] else metadata['advice'])})
         elif note := (source['last_note'] or ''):
             name = _kind_of_note(note)
             out.append({**shared, 'id': f"source:{source['id']}:{name}",
-                        'problem': name, 'evidence': note, **PROBLEMS[name]})
+                        'problem': name, 'evidence': note, **PROBLEMS[name],
+                        'at': _stamp(source.get('note_at', ''))})
+    return out
+
+
+def _stamp(value: str):
+    """订阅表上那两列(`error_at` / `note_at`)是 ISO 串;空串 = 没有时间证据。"""
+    if not value:
+        return None
+    moment = datetime.fromisoformat(value)
+    return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
+
+
+def latest(rows: list[dict]) -> list[dict]:
+    """**列表上一个账号只占一行,列的是最后发生的那一条。**
+
+    `problems` 是事实层,同一条订阅可以同时有好几条(连接失败、历史缺口、正文待补、
+    超窗),各自的身份、阶段和原话都要留着 —— 重试凭证按 `id` 现查、回归钉着它们互不
+    吞并。屏幕上那几行说的是同一个账号,只留最新那一条。
+
+    **新旧只按每条事实自己的时间比**(`at`:失败原话的 `error_at`、没读完那句的
+    `note_at`、X 那几条见 `x_intake_diagnostics.issues`),不按步骤、不按 `problems`
+    的拼装顺序 —— 那两样跟发生先后没有关系(先撞安全验证、后撞限流,按步骤取会留下
+    早的那条)。订阅共用的 `last_attempt` 也不算:只写提示的那几处会改它而不碰
+    `last_error`。那两列由 `reg.moment()` 记到微秒 —— 只记到秒时,同一秒里先失败、
+    后写下「没读完」的两笔独立写入比出来相等,留下的是早的那条。真的相等才按
+    `problems` 的顺序取第一条。
+
+    **一个账号一行这件事不看时间证据齐不齐。** 记不出时间的那几条(存量库那两列是
+    空串)说不出比别的新还是旧,所以**不拿来比**:有带时间的就列带时间里最新的那条,
+    一条都没有才按事实顺序列第一条。被它们挤下去的那几条挂在留下那一行的 `undated`
+    上,详情里如实说一句「另有几条记不出时间」—— 不靠等下一次同步把它们补上时间,
+    持续失败的订阅只会更新失败那一列,另一句的时间永远补不上。
+    """
+    groups: dict[tuple, list[dict]] = {}
+    for row in rows:
+        groups.setdefault((row['kind'], row['source_id']), []).append(row)
+    out = []
+    for group in groups.values():
+        timed = [row for row in group if row.get('at') is not None]
+        pick = group[0]
+        for row in timed:
+            if pick.get('at') is None or row['at'] > pick['at']:
+                pick = row
+        undated = [{'label': row['label'], 'evidence': row['evidence']}
+                   for row in group if row is not pick and row.get('at') is None]
+        out.append({**pick, 'undated': undated})
     return out
 
 

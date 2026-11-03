@@ -9,6 +9,9 @@ RSS、YouTube 那几条路同样碰到这一下,只是等了几毫秒照常写�
 另一边(锁一直不放、等满了)照旧记成本机失败、待办保留 —— 那一侧
 `test_x_intake_isolation`、`test_x_intake_phase_delivery` 钉着。
 
+**等也有边界**(`BoundedSqliteWaitTests`):SQLite 那一侧的等待跟维护锁(`test_x_lock_bound`)一样
+受这一轮的停止和截止约束,锁被长期占着时不许逐账号各等满 30 秒。
+
 人点了按钮在等的那一下(`x_article_capture.save`)只等一小会儿,等不到如实说一句:
 那一侧在 `test_x_article_capture` 的 `LockWaitTests`。
 
@@ -28,9 +31,11 @@ from kb import maintenance
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg, sync, x_channels, x_intake_commit
 from kb.feeds import x_intake_store as store
+from kb.feeds.x_intake import Intake
 from tests.test_x_guest import GuestBase, status
 
 HOLD = 0.6
+QUICK = 2.0          # 「当场放弃」的宽限,远小于 `store.SQLITE_WAIT`
 
 
 def hold_sqlite_writer(seconds):
@@ -51,6 +56,27 @@ def hold_sqlite_writer(seconds):
     worker.start()
     assert taken.wait(5), '写锁没拿到'
     return worker
+
+
+def hold_sqlite_until(case):
+    """另一个连接一直攥着 feeds.db 的写锁,直到用例结束。"""
+    taken, release = threading.Event(), threading.Event()
+
+    def run():
+        conn = sqlite3.connect(reg.DB_PATH, timeout=0)
+        try:
+            conn.execute('BEGIN IMMEDIATE')
+            taken.set()
+            release.wait(60)
+            conn.commit()
+        finally:
+            conn.close()
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    assert taken.wait(5), '写锁没拿到'
+    case.addCleanup(worker.join, 5)
+    case.addCleanup(release.set)
 
 
 def hold_maintenance_lock(seconds):
@@ -120,6 +146,61 @@ class LockWaitTests(GuestBase):
 
     def test_a_maintenance_task_as_posts_are_stored_is_waited_for(self):
         self.round_with(x_intake_commit, 'check_budget', hold_maintenance_lock)
+
+
+class BoundedSqliteWaitTests(GuestBase):
+    """feeds.db 的写锁被长期攥着:按了停止、过了截止,每一笔都当场放弃,不逐账号各等满 `SQLITE_WAIT`。"""
+
+    def setUp(self):
+        super().setUp()
+        self.sources = [self.sub(name) for name in ('alice', 'bob', 'carol')]
+        self.settings(x_channels.GUEST)
+        self.channel = reg.get_settings('social')      # 攥锁之前读好:开库本身就要过一下写锁
+        hold_sqlite_until(self)
+
+    def gives_up(self, take):
+        started = time.monotonic()
+        with self.assertRaises(sqlite3.OperationalError):
+            with take() as conn:
+                conn.execute('BEGIN IMMEDIATE')
+        spent = time.monotonic() - started
+        self.assertLess(spent, QUICK, f'等了 {spent:.1f} 秒才放弃')
+
+    def test_a_stopped_round_gives_up_every_account_at_once(self):
+        """后果:整轮很快收工,三个号都记成本机失败(待续),而不是 3 × 30 秒之后才看见停止。"""
+        started = time.monotonic()
+        intake = Intake(self.sources, self.channel, budget=600, should_stop=lambda: True)
+        intake.run()
+        spent = time.monotonic() - started
+        self.assertLess(spent, QUICK * 2, f'按了停止还等了 {spent:.1f} 秒')
+        self.assertEqual({s['id'] for s in self.sources},
+                         {e['source_id'] for e in intake.metrics.data['local_errors']})
+
+    def test_a_stop_or_a_spent_deadline_ends_the_wait(self):
+        with store.bounded(lambda: True, None):
+            self.gives_up(store.db)
+        with store.bounded(None, time.monotonic() - 1):
+            self.gives_up(store.db)
+        with store.bounded(None, time.monotonic() + 3600):
+            self.gives_up(lambda: store.db(time.monotonic() - 1))     # 准备那一笔只等到联网截止
+
+    def test_the_final_save_gives_up_once_its_grace_is_spent(self):
+        self.gives_up(lambda: store.save_db({'x_deadline': time.monotonic() - store.LOCK_WAIT - 1}, None))
+        self.gives_up(lambda: store.save_db({}, lambda: True))
+
+    def test_the_final_save_in_sync_listens_to_stop(self):
+        """`sync._save_result` 那一笔真走的是 `save_db`:按了停止,写锁被占着就当场放弃。"""
+        validators = {'x_intake': True, 'x_deadline': time.monotonic() + 600}
+        started = time.monotonic()
+        with patch.object(sync, 'halted', lambda: True), self.assertRaises(sqlite3.OperationalError):
+            sync._save_result(self.sources[0], ([], validators), FetchScope())
+        self.assertLess(time.monotonic() - started, QUICK)
+
+    def test_the_wait_is_still_capped_by_what_is_left(self):
+        """截止还没到但剩得不多:只等剩下那一点,不是整整 30 秒。"""
+        with store.bounded(lambda: False, time.monotonic() + 0.3):
+            self.gives_up(store.db)
+        self.gives_up(lambda: store.db(time.monotonic() + 0.3))
 
 
 if __name__ == '__main__':

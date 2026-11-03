@@ -43,9 +43,6 @@ class PhaseDeliveryTests(RuntimeFixture):
 
     @contextmanager
     def blocked_observation_write(self):
-        """写阻断凭据那一下维护锁被别人攥着、**等到超时**也没拿到。X 那几处写库遇到锁照常要等
-        (`KB_MAINT_LOCK_WAIT`,同别的来源),这里把等待上限压成 0,模拟「等满了」那一刻 —— 不压的话
-        锁是这个线程自己攥的,要陪它等满默认的 900 秒。"""
         real = store.set_block
         def locked(source, event):
             lockfile = maintenance.DATA_DIR / maintenance.LOCK_NAME
@@ -56,7 +53,7 @@ class PhaseDeliveryTests(RuntimeFixture):
                     return real(source, event)
                 finally:
                     filelock.flock(held, filelock.LOCK_UN)
-        with patch.object(store, 'set_block', side_effect=locked), patch.object(maintenance, 'WAIT_SECONDS', 0):
+        with patch.object(store, 'set_block', side_effect=locked):
             yield
 
     def test_body_throttle_does_not_veto_discovery_success_or_its_watermark(self):

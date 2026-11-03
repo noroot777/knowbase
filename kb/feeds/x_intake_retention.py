@@ -27,6 +27,13 @@ def recent(conn, source_id, identity, now):
                         (source_id, identity, (now - timedelta(hours=24)).isoformat())).fetchone()[0]
 
 
+def recent_at(conn, source_id, identity, now):
+    """最近 24 小时里最后一次超窗写下的时刻(`expired_at`,ISO);没有就是空串。"""
+    return conn.execute('''SELECT max(expired_at) FROM x_intake_expirations
+        WHERE source_id=? AND identity=? AND expired_at>=?''',
+                        (source_id, identity, (now - timedelta(hours=24)).isoformat())).fetchone()[0] or ''
+
+
 def notice(floor, count):
     date = floor.astimezone(ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d')
     return f'{date} 以前的 {count} 条待办最近24小时超出自动窗口，未计为完成' if count else ''

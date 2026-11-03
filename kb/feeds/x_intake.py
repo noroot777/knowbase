@@ -424,10 +424,16 @@ class Intake:
         return self.results
 
     def run(self):
+        # 这一轮所有等维护锁的地方共用一个停止和截止(理由在 `x_intake_store.bounded`)
+        with store.bounded(self.stop, self.metrics.deadline + store.LOCK_WAIT):
+            return self._run()
+
+    def _run(self):
         with self.metrics.phase('prepare'):
             for source in self.sources:
                 try:
-                    store.prepare([source], 'browser' if self.channel == 'attach' else self.channel, self.now)
+                    store.prepare([source], 'browser' if self.channel == 'attach' else self.channel, self.now,
+                                  deadline=self.metrics.network_deadline)
                     if (progress := self.progress(source, '准备待办')) and progress.get('unconfirmed'):
                         self.recovery.add(source['id'])
                 except Exception as error:

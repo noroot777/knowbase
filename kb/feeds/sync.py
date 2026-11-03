@@ -14,7 +14,7 @@ from kb.config import VAULT_ROOT
 from kb.feeds import registry as reg
 from kb.maintenance import maintenance_lock
 from kb.feeds import digest as digest, x_channels as x_channels
-from kb.feeds import fulltext, source_failure, translate, x_intake_commit
+from kb.feeds import fulltext, source_failure, translate, x_intake_commit, x_intake_store
 # 选源判据(本文件越过 700 行硬上限时拆出去的,见那边的模块头)。
 from kb.feeds.sync_select import pick_sources
 # 交付层那道搁置闸门(`_export` 里那一句)。判据只有 `shelf` 那一份。
@@ -147,13 +147,16 @@ def _save_result(source, result, scope):
         # 是用户点名的那段日期,拿它当增量进度就是宣布中间那段已经收过。
         validators = {k: source[k] for k in ('etag', 'modified', 'resolved_url')}
     x_intake_commit.check_budget(validators)
-    with maintenance_lock():
+    # 大V观点那一路也排队等锁,但受停止和整轮截止约束(`x_intake_store.save_lock` / `save_db`):各来源
+    # 同时跑时订阅源的导出正攥着它是常态,零等待就是让这一轮的成品平白挪到下一轮。
+    x_intake = validators.get('x_intake')
+    with (x_intake_store.save_lock(validators, halted) if x_intake else maintenance_lock()):
         if not scope.ranged and not validators.get('x_intake'):
             entries = _within_history(source, entries)
         # **条目、水位、成功时间戳一个事务**。分成两个的话,`put_items` 失败那
         # 一轮水位已经推进了,而这批推文一条都没入库 —— 它们比旧水位新、又比
         # 新水位老,从此任何一轮增量都选不到(见 `x_channels.watermark_patch`)。
-        with reg.db() as c:
+        with (x_intake_store.save_db(validators, halted) if x_intake else reg.db()) as c:
             if not _claim_write(c, source):
                 # 这条订阅在本轮采集期间被改指到别的源了 —— 手里这份属于旧的那个。
                 # 一个字都不写(条目、水位、成功时间戳一样都不写):这一轮作废,
@@ -170,14 +173,17 @@ def _save_result(source, result, scope):
                 source_failure.write(c, source, failure, now=time.time())
             if partial:
                 return added
+            stamp = reg.now()
             c.execute('''UPDATE subscriptions SET last_attempt=?,last_success=?,last_error='',
-                failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=?,last_notice=? WHERE id=?''',
-                (reg.now(),reg.now(),validators['etag'],validators['modified'],
+                failures=0,retry_at=0,etag=?,modified=?,resolved_url=?,last_note=?,last_notice=?,
+                note_at=? WHERE id=?''',
+                (stamp,stamp,validators['etag'],validators['modified'],
                  validators['resolved_url'],
                  # 区间补抓不改日常增量的任何状态,这条提示也算 —— 清掉它等于替
                  # 日常同步宣布"读完了",而那一边的进度一点没动。
                  source.get('last_note','') if scope.ranged else validators.get('note',''),
                  source.get('last_notice','') if scope.ranged else validators.get('notice',''),
+                 source.get('note_at','') if scope.ranged else reg.moment(),
                  source['id']))
     return added
 

@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 
 from kb import pipeline_state as ps
@@ -26,6 +27,16 @@ from kb import pipeline_state as ps
 # 各自直接写 _state["stages"][name] 的话,后一个来源的结论会把前一个整个盖掉——
 # 面板上只剩最后那个来源的成败,前面几个是成功、失败还是跳过都看不见了。
 _segments: dict[str, list[dict]] = {}
+# 每条线程**自己开着的那一段**({阶段: 那一段})。几个来源同时跑时「最后追加的那一段」
+# 不再是「我这一段」:RSS 那条线程报的结论会写进后开张的公众号那一段(`pipeline_lanes`)。
+_mine = threading.local()
+# **「改一段 → 合并 → 发布那张合并卡片」是一个整体**,几路同时报的时候要在这把锁里做完。
+# 线程局部的归属只答「这句是谁的」,答不了「谁的快照后发布」:A 刚合并出「B 还在跑」
+# 就被抢占,B 发布了「全都好了」,A 回来再把它那份旧的盖上去 —— 两段都是 ok,合并卡片
+# 却停在 running,收尾时被判成「流程中断，未完成」。两个发布口(`stage_segment` 收尾、
+# `fold` → `pipeline_state._stage`)共用这一把;锁住的只有内存里的几行,不碰网络和磁盘。
+# 锁序:`pipeline_state._lock` 在外(`_end_run` 持着它调 `_stage`),这把在里。
+publish_lock = threading.RLock()
 
 # 合并后的状态取"最要紧"的那一档:有一个红就是红,还有没跑完的就是执行中,
 # 剩下全跳过才算跳过。
@@ -54,20 +65,48 @@ def _merge_segments(segments: list[dict]) -> dict:
 @contextmanager
 def stage_segment(name: str, label: str):
     """把这一段时间里对 name 阶段的汇报记成"label 这个来源的那一段"。"""
-    segments = _segments.setdefault(name, [])
-    segments.append({"label": label, "status": "running", "detail": ""})
+    current = {"label": label, "status": "running", "detail": ""}
+    with publish_lock:
+        segments = _segments.setdefault(name, [])
+        segments.append(current)
+    own = _open()
+    outer = own.get(name)
+    own[name] = current
     try:
         yield
     finally:
-        current = segments[-1]
-        if current["status"] == "running":
-            # 采集器连一次最终状态都没报(异常穿出去了):不替它编一个成功
-            current.update({"status": "error", "detail": current["detail"] or "没有返回结果"})
-        ps._state["stages"][name] = _merge_segments(segments)
+        own[name] = outer
+        with publish_lock:
+            if current["status"] == "running":
+                # 采集器连一次最终状态都没报(异常穿出去了):不替它编一个成功
+                current.update({"status": "error",
+                                "detail": current["detail"] or "没有返回结果"})
+            ps._state["stages"][name] = _merge_segments(segments)
 
 
 def clear_segments() -> None:
-    _segments.clear()
+    with publish_lock:
+        _segments.clear()
+
+
+def _open() -> dict:
+    own = getattr(_mine, "segs", None)
+    if own is None:
+        own = _mine.segs = {}
+    return own
+
+
+def _current(name: str, segments: list[dict]) -> dict:
+    """`_stage` 这一句该并进哪一段:**这条线程自己开着的那一段**。
+
+    没开过的线程(采集器自己的工作线程)只在**只有一段还开着**时算它的;几段同时开着
+    就退回最后那一段(只一路在跑时的老口径)—— 眼下没有这种调用方,见 `pipeline_lanes`。
+    """
+    own = _open().get(name)
+    if own is not None and any(seg is own for seg in segments):
+        return own
+    running = [seg for seg in segments if seg["status"] == "running"]
+    return running[0] if len(running) == 1 else segments[-1]
 
 
 # ── 「重试失败项」要重试谁 ─────────────────────────────────────────────────────
@@ -107,11 +146,13 @@ def note_retry_targets(channel: str, targets, at: str) -> None:
     什么都不抓』的坏时钟"。空串原样存着 —— 那等于不设时间判定,保守多抓一次。
     """
     run = ps._state.get("run_id") or ""
-    note = ps._state.get("crawl_retry") or {}
-    if note.get("run") != run:
-        note = {"run": run, "channels": {}}
-        ps._state["crawl_retry"] = note
-    note["channels"][channel] = {"targets": [str(t) for t in targets], "at": at}
+    # 几路同时头一次记名单时,各自新建一份再整张换上去的话后写的那份盖掉先写的
+    with publish_lock:
+        note = ps._state.get("crawl_retry") or {}
+        if note.get("run") != run:
+            note = {"run": run, "channels": {}}
+            ps._state["crawl_retry"] = note
+        note["channels"][channel] = {"targets": [str(t) for t in targets], "at": at}
 
 
 def fold(name: str, entry: dict, detail: str) -> tuple[dict, str] | None:
@@ -121,10 +162,12 @@ def fold(name: str, entry: dict, detail: str) -> tuple[dict, str] | None:
     `None` —— 「没在分段」和「分段合成出来是空」是两件事,所以不用空字典表示。
     `_stage` 是唯一的调用方:判据(哪一档最要紧、总数怎么算)只有 `_merge_segments`
     一处,那边既服务这条路,也服务 `stage_segment` 收尾时那一次。
+    **调用方要持着 `publish_lock`,一直持到把结论发布出去**(理由在那把锁上)。
     """
     segments = _segments.get(name)
     if not segments:
         return None
-    segments[-1].update(entry)
+    seg = _current(name, segments)
+    seg.update(entry)
     return (_merge_segments(segments),
-            f"{segments[-1]['label']}：{detail}" if detail else detail)
+            f"{seg['label']}：{detail}" if detail else detail)

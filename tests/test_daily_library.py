@@ -173,6 +173,8 @@ class OrchestrationTests(unittest.TestCase):
                                                       generate())[1]), \
              patch('kb.daily_run._sync_round', Mock(return_value={
                  'channel': '', 'label': 'x', 'status': 'ok', 'detail': ''})), \
+             patch('kb.daily_run._sync_sources', Mock(return_value=[{
+                 'channel': 'rss', 'label': 'RSS', 'status': 'ok', 'detail': ''}])), \
              patch('kb.daily_run._channel_labels', lambda: {'rss': 'RSS'}), \
              patch('kb.pipeline.open_batch', lambda kind='': 'b-1'), \
              patch('kb.pipeline.close_batch', lambda: ''), \

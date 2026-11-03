@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -12,7 +15,60 @@ from kb.feeds import x_intake_batches as batches
 from kb.feeds import x_intake_blocks as blocks
 from kb.feeds import x_intake_capacity as capacity
 from kb.feeds import x_intake_retention as retention
-from kb.maintenance import maintenance_lock
+from kb.maintenance import LockBusy, maintenance_lock
+
+# 存条目 / 水位那几笔**单次**等维护锁的上限(秒)。原来是 0(拿不到当场报「本机待续」),那时
+# 来源串着跑,大V观点抓取期间没有别人持锁;各来源同时跑之后,订阅源导出、YouTube 入库都会
+# 短暂攥着它,零等待就是让这一路平白交一轮「待续」。**观测那一笔(`set_block`)照旧零等待**:
+# 它的契约是「拿不到只警告、原话先随结果交上去」,见 docs/x-incremental-intake.md。
+LOCK_WAIT = float(os.environ.get('KB_X_LOCK_WAIT') or 300)
+
+# **单次上限不是边界,整轮才是**(`bounded`)。这几笔是逐账号调的,每一笔各拿一份完整的
+# 300 秒,锁被长期占着时 51 个账号光准备就能等四个多钟头,按了停止也照等 —— 取消只在等完
+# 之后才被看见。所以一轮 X 采集里所有等锁的地方共用同一个「该停了吗」和同一个截止时刻,
+# 每一笔只等到那一刻为止,按了停止就当场放弃(抛 `LockBusy`,按本机故障记「待续」,
+# 跟原来零等待拿不到锁同一条路)。截止分两档,调用方各自给:
+# - **还没联网的准备工作**(`prepare`)只等到联网截止 —— 过了那一刻本来就不会再联网,等来
+#   的锁没有用处;
+# - **已经做完的成品**(暂存、确认、收尾、最后那次存盘)可以晚交:截止是整轮预算之后再宽限
+#   一个 `LOCK_WAIT`,整轮最多多等这么久,不是每个账号各多等这么久。
+# 等锁的时间**算在整轮预算里**,不另外补:等得久,这一轮能联网的时间就少。
+_bound = threading.local()
+
+
+@contextmanager
+def bounded(should_stop=None, deadline=None):
+    """这一段里(同一条线程)每一笔等锁都受这一轮的停止和截止(monotonic)约束。"""
+    before = getattr(_bound, 'at', None)
+    _bound.at = (should_stop, deadline)
+    try:
+        yield
+    finally:
+        _bound.at = before
+
+
+def _limits(deadline=None, should_stop=None):
+    """这一笔该听谁的停止、等到哪一刻:调用方给了就用它的,没给用这一轮的(`bounded`)。"""
+    stop, end = getattr(_bound, 'at', None) or (None, None)
+    return should_stop or stop, deadline if deadline is not None else end
+
+
+def _lock(deadline=None, should_stop=None):
+    from kb.pipeline_state import _log
+    stop, end = _limits(deadline, should_stop)
+    wait = LOCK_WAIT if end is None else min(LOCK_WAIT, max(0.0, end - time.monotonic()))
+
+    def poll(waited):
+        if stop and stop():
+            raise LockBusy(f'已按停止请求中断：等了 {int(waited)} 秒维护锁，没再等下去')
+    return maintenance_lock(wait=wait, on_poll=poll, on_wait=lambda waited: _log(
+        f'大V观点:等维护锁(另一路正在写库),已等 {int(waited)} 秒'))
+
+
+def save_lock(validators, should_stop):
+    """最后那次存盘(`feeds.sync._save_result`)的锁:成品那一档(整轮预算之后再宽限一个 `LOCK_WAIT`)。"""
+    end = validators.get('x_deadline')
+    return _lock(None if end is None else end + LOCK_WAIT, should_stop)
 
 
 _PHASE_FIELDS = {'discovery': ('scan_at',), 'history': ('history_at',),
@@ -52,16 +108,34 @@ def _confirmed_progress(progress, phase, incomplete, observed, boundary, end, pr
     return covered, coverage_end, gap, discovery, latest
 
 
-# **遇到锁就等,跟别的来源一个口径**(`reg.db()` 默认等 30 秒、`maintenance_lock()` 按 `KB_MAINT_LOCK_WAIT`):
-# 页面上任何一个请求开库都会在写锁里核一遍表结构,一秒都不等的话这么短的一下也能让一个号白跑一轮
-# (实测:切完通道立刻点同步,排在最前面的 7 个号全报 `database is locked`,第 8 个起全部正常)。
-# 等不到照旧抛,调用方照旧记成本机失败、待办保留。
-def db():
-    return reg.db()
+# **SQLite 写锁也等,跟别的来源一个口径**(`reg.db()` 默认等 30 秒):页面上任何一个请求开库都会在写锁
+# 里核一遍表结构,一秒都不等的话这么短的一下也能让一个号白跑一轮(实测:切完通道立刻点同步,排在最前面
+# 的 7 个号全报 `database is locked`,第 8 个起全部正常)。**但跟维护锁一样受这一轮的停止和截止约束**
+# (`bounded`):每一笔只等到截止那一刻,按了停止就不再等(SQLite 的等待中途叫不停,所以停止之后改成
+# 拿不到当场报)—— 逐账号各等满 30 秒,锁被长期占着时一样会累加成几十分钟。等不到照旧抛,调用方照旧
+# 记成本机失败、待办保留。
+SQLITE_WAIT = 30.0
 
 
-def read_db(timeout=30):
-    return reg.read_db(timeout=timeout)
+def _sqlite_wait(deadline=None, should_stop=None):
+    stop, end = _limits(deadline, should_stop)
+    if stop and stop():
+        return 0.0
+    return SQLITE_WAIT if end is None else min(SQLITE_WAIT, max(0.0, end - time.monotonic()))
+
+
+def db(deadline=None):
+    return reg.db(timeout=_sqlite_wait(deadline))
+
+
+def read_db(timeout=None):
+    return reg.read_db(timeout=_sqlite_wait() if timeout is None else timeout)
+
+
+def save_db(validators, should_stop):
+    """最后那次存盘的 SQLite 连接,跟 `save_lock` 同一档截止。"""
+    end = validators.get('x_deadline')
+    return reg.db(timeout=_sqlite_wait(None if end is None else end + LOCK_WAIT, should_stop))
 
 
 def utc(value):
@@ -107,8 +181,8 @@ def observed(entries):
     return latest.isoformat() if latest else ''
 
 
-def prepare(sources, channel, now):
-    with maintenance_lock(), db() as conn:
+def prepare(sources, channel, now, deadline=None):
+    with _lock(deadline), db(deadline) as conn:
         conn.execute('BEGIN IMMEDIATE')
         retention.prune(conn, now)
         for source in sources:
@@ -125,12 +199,14 @@ def prepare(sources, channel, now):
                 conn.execute('DELETE FROM x_intake_links WHERE source_id=?', (source['id'],))
                 conn.execute('DELETE FROM x_intake_sources WHERE source_id=?', (source['id'],))
                 previous = None
-            conn.execute('''INSERT INTO x_intake_sources(source_id,identity,channel,floor,window_end,gap)
-                VALUES(?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
-                floor=excluded.floor,window_end=excluded.window_end,gap=excluded.gap,discovery='unattempted',error='' ''',
+            conn.execute('''INSERT INTO x_intake_sources(source_id,identity,channel,floor,window_end,gap,gap_at)
+                VALUES(?,?,?,?,?,?,?) ON CONFLICT(source_id) DO UPDATE SET
+                floor=excluded.floor,window_end=excluded.window_end,gap=excluded.gap,
+                gap_at=CASE WHEN x_intake_sources.gap='' AND excluded.gap<>'' THEN excluded.gap_at
+                    ELSE x_intake_sources.gap_at END,discovery='unattempted',error='' ''',
                 (source['id'], identity(source), channel, floor, now.isoformat(),
                  _coverage_gap(previous['covered'], previous['coverage_end'], floor, now.isoformat())
-                 if previous else '最近五天尚未确认完整覆盖'))
+                 if previous else '最近五天尚未确认完整覆盖', now.timestamp()))
             retention.expire(conn, source['id'], identity(source), floor, now)
             batches.expire(conn, source['id'], identity(source), floor)
             expired = retention.recent(conn, source['id'], identity(source), now)
@@ -166,7 +242,7 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
     fields = _phase_fields(phase)
     reused = 0
     now = time.time() if now is None else now
-    with maintenance_lock(), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return None
@@ -195,12 +271,15 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
             elif cached and cached['state'] == 'ready' and complete(json.loads(cached['entry'])) and not blocked:
                 reused += not bool(saved)
             else:
-                conn.execute('''INSERT INTO x_intake_candidates(post_id,entry,published,state)
-                    VALUES(?,?,?,?) ON CONFLICT(post_id) DO UPDATE SET
-                    entry=excluded.entry,published=excluded.published,state=excluded.state''',
-                    (identifier, json.dumps(entry, ensure_ascii=False), published.isoformat(), state))
-            conn.execute('INSERT OR IGNORE INTO x_intake_links(source_id,identity,post_id) VALUES(?,?,?)',
-                         (source['id'], identity(source), identifier))
+                conn.execute('''INSERT INTO x_intake_candidates(post_id,entry,published,state,staged_at)
+                    VALUES(?,?,?,?,?) ON CONFLICT(post_id) DO UPDATE SET
+                    entry=excluded.entry,published=excluded.published,state=excluded.state,
+                    staged_at=CASE WHEN x_intake_candidates.state NOT IN ('pending','repair')
+                        AND excluded.state IN ('pending','repair') THEN excluded.staged_at
+                        ELSE x_intake_candidates.staged_at END''',
+                    (identifier, json.dumps(entry, ensure_ascii=False), published.isoformat(), state, now))
+            conn.execute('INSERT OR IGNORE INTO x_intake_links(source_id,identity,post_id,linked_at) VALUES(?,?,?,?)',
+                         (source['id'], identity(source), identifier, now))
             batches.add(conn, batch_id, identifier)
         columns = ','.join(f'{field}=?' for field in fields)
         discovery = 'partial' if 'scan_at' in fields else progress['discovery']
@@ -212,7 +291,7 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
 def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end='', coverage_complete=False,
             batch_id=''):
     fields = _phase_fields(phase)
-    with maintenance_lock(), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return False
@@ -229,8 +308,9 @@ def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end=
         state = _confirmed_progress(progress, phase, incomplete, observed, boundary, end, proven)
         if proven and 'history_at' in fields:
             batches.recover(conn, source['id'], identity(source), boundary, end)
-        conn.execute("UPDATE x_intake_sources SET covered=?,coverage_end=?,gap=?,discovery=?,latest=?,error='' WHERE source_id=?",
-                     (*state, source['id']))
+        conn.execute('''UPDATE x_intake_sources SET covered=?,coverage_end=?,gap=?,discovery=?,latest=?,error='',
+            gap_at=CASE WHEN gap='' AND ?<>'' THEN ? ELSE gap_at END WHERE source_id=?''',
+                     (*state, state[2], time.time(), source['id']))
         blocks.resolve(conn, progress, batch_id, proven or bool(observed), phase)
         waits = json.loads(progress['screen_waits'])
         for name in blocks.phases(phase):
@@ -251,7 +331,7 @@ def progress(source):
 
 
 def set_block(source, block):
-    with maintenance_lock(), db() as conn:
+    with maintenance_lock(wait=0), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if current(conn, source):
             row = conn.execute('SELECT block FROM x_intake_sources WHERE source_id=? AND identity=?',
@@ -264,7 +344,7 @@ def set_block(source, block):
 
 
 def screen_wait(source, phase, run_started):
-    with maintenance_lock(), db() as conn:
+    with _lock(), db() as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return 0
@@ -315,9 +395,11 @@ def pending(sources, now=None):
 
 
 def finish(source, task, entries, unavailable, reason, *, block_tokens=None, lock_wait=None):
-    """`lock_wait`:维护锁最多等几秒,缺省同 `maintenance_lock()`。人点了按钮在等的那一下传短的
-    (`x_article_capture.save`)—— 一轮大编码能攥锁几分钟,那是整条 HTTP 连接挂死。"""
-    with maintenance_lock(wait=lock_wait), db() as conn:
+    """`lock_wait`:这一笔连等维护锁带等 SQLite 写锁一共最多等几秒,缺省按这一轮的边界(`bounded`)。
+    人点了按钮在等的那一下传短的(`x_article_capture.save`)—— 一轮大编码能攥锁几分钟,那是整条
+    HTTP 连接挂死。"""
+    end = None if lock_wait is None else time.monotonic() + lock_wait
+    with _lock(end), db(end) as conn:
         conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return
@@ -385,22 +467,35 @@ def statuses(sources, channel='browser'):
     now = datetime.now(timezone.utc)
     with read_db(timeout=30) as conn:
         rows = {row['source_id']: dict(row) for row in conn.execute('SELECT * FROM x_intake_sources')}
-        counts = {(row['source_id'], row['identity']): row['pending'] for row in conn.execute('''
-            SELECT l.source_id,l.identity,count(*) AS pending FROM x_intake_links l
+        pending_rows = conn.execute('''
+            SELECT l.source_id,l.identity,count(*) AS pending,
+                max(max(p.attempted),max(p.staged_at),max(l.linked_at)) AS attempted FROM x_intake_links l
             JOIN x_intake_candidates p USING(post_id) WHERE p.state IN ('pending','repair')
-            GROUP BY l.source_id,l.identity''')}
+            GROUP BY l.source_id,l.identity''').fetchall()
+        counts = {(row['source_id'], row['identity']): row['pending'] for row in pending_rows}
+        # 正文待补那一条自己的时刻:那几条最后一次补正文、最后一条进入待补、或最后一条
+        # **进入这个账号**的时刻。候选按 `post_id` 全局只有一行,别的账号先收过的转推在
+        # 这个账号这里是新事,`staged_at` 却还是那边的旧时间 —— 所以账号这一维认
+        # `linked_at`;反过来不能为它去刷新共享的 `staged_at`,那会把先收的账号也变新。
+        pending_at = {(row['source_id'], row['identity']): row['attempted'] or 0 for row in pending_rows}
         unconfirmed = {source_id: batches.count(conn, source_id, row['identity'], row['floor'])
                        for source_id, row in rows.items()}
+        unconfirmed_at = {source_id: batches.latest(conn, source_id, row['identity'], row['floor'])
+                          for source_id, row in rows.items()}
         for source_id, row in rows.items():
             row['expired'] = retention.recent(conn, source_id, row['identity'], datetime.now(timezone.utc))
+            row['expired_at'] = retention.recent_at(conn, source_id, row['identity'], datetime.now(timezone.utc))
             row['outside'] = retention.notice(utc(row['floor']), row['expired'])
     for source in sources:
         row = rows.get(source['id'])
         if row and row['identity'] == identity(source) and row['channel'] == ('browser' if channel == 'attach' else channel):
             source['x_intake'] = {key: row[key] for key in
-                                  ('discovery', 'gap', 'expired', 'error', 'floor', 'scan_at', 'history_at', 'outside')}
+                                  ('discovery', 'gap', 'gap_at', 'expired', 'expired_at', 'error', 'floor',
+                                   'scan_at', 'history_at', 'outside')}
             source['x_intake']['pending'] = counts.get((source['id'], identity(source)), 0)
+            source['x_intake']['pending_at'] = pending_at.get((source['id'], identity(source)), 0)
             source['x_intake']['unconfirmed'] = unconfirmed[source['id']]
+            source['x_intake']['unconfirmed_at'] = unconfirmed_at[source['id']]
             with read_db(timeout=30) as conn:
                 events = blocks.replay(conn, source['id'], identity(source), row['channel'], row['block'])
             blocks.project(source['x_intake'], events)

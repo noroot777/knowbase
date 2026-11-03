@@ -14,6 +14,7 @@ import time
 from copy import deepcopy
 from datetime import datetime
 
+from kb import pipeline_lanes as _lanes
 from kb import pipeline_open as _open
 from kb.config import DATA_DIR
 # 留档口径(留几天、超了削什么)在它自己那个模块里;`history_keep_days` 是面板那句
@@ -178,13 +179,19 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+# 几个来源同时跑时日志是几条线程一起写的:「追加 + 按类裁剪」要整段互斥。
+_log_lock = threading.Lock()
+
+
 def _log(msg: str) -> None:
-    _state["log"].append(_stamp(msg))
-    del _state["log"][:-80]
+    """记一行进度。来源那条线程说的打上它的标记,**按类各留最近若干行**(`pipeline_lanes`)。"""
+    with _log_lock:
+        _state["log"].append(_stamp(_lanes.tag(msg)))
+        _state["log"][:] = _lanes.trim(_state["log"])
 
 
 def _stamp(msg: str) -> str:
-    # 带日期:日志保留 80 行且跨天不清,只打时分秒会看不出是哪天跑的
+    # 带日期:日志跨天不清,只打时分秒会看不出是哪天跑的
     return f"[{datetime.now().strftime('%m-%d %H:%M:%S')}] {msg}"
 
 
@@ -216,16 +223,21 @@ def _stage(name: str, status: str, detail: str = "",
     # `fold` 返回 None,照原样写 —— 只更新当前那一段、再合成一条对外结论的判据
     # 全在那边,这里不许再判一次。
     from kb.pipeline_results import note
-    from kb.pipeline_segments import fold
+    from kb.pipeline_segments import fold, publish_lock
     # **两份账,各答一个问题。** 分段那一份答「面板上这张卡片怎么写」(各段扁平合并,
     # 不带来源归属);结果账答「哪个来源这一步什么结论、实际覆盖了什么」—— 当日欠账
     # 按它算。**记的是合并之前这一条**,合并之后就分不出是谁的了(第 3 轮审查 R2)。
     note(name, entry)
-    folded = fold(name, entry, detail)
-    if folded:
-        entry, detail = folded
-    _state["stages"][name] = entry
-    if status == "running":
+    # 并进自己那一段和发布合并卡片在同一把锁里(理由在 `publish_lock` 上)
+    with publish_lock:
+        folded = fold(name, entry, detail)
+        if folded:
+            entry, detail = folded
+        _state["stages"][name] = entry
+    # 来源那几路是并行的:全库那几步开跑之后(没等它的那一路还在后台跑),它的进度
+    # 不许把「当前阶段」抢回抓取 / 导出 —— 日报那边按它念进度
+    if status == "running" and not (_lanes.current() and _state.get("current_stage")
+                                    not in ("", "crawl", "export")):
         _state["current_stage"] = name
     if detail:
         _log(f"{name}: {detail}")
