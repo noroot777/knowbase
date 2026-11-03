@@ -187,7 +187,9 @@ class OverviewTests(CareApiCase):
             'history': {'kind': 'rate', 'reason': '最新：访问限流', 'observed_at': 200.0}},
             'pending': 3, 'scan_at': 150.0, 'discovery': 'complete'}
         found = diagnostics.issues(state)
-        self.assertEqual({'x_intake_challenge': 100.0, 'x_intake_rate': 200.0, 'x_intake_body': 150.0},
+        # 正文待补不借扫描时刻:它自己没有时间证据就是 None(真实时序见
+        # `tests/test_intake_diag_x_times.py`)。
+        self.assertEqual({'x_intake_challenge': 100.0, 'x_intake_rate': 200.0, 'x_intake_body': None},
                          {one['kind']: one['at'] for one in found})
         rows = [{'kind': 'social', 'source_id': 9, 'problem': one['kind'], 'step': one.get('step', 2),
                  'label': one['kind'], 'evidence': '', 'at': one['at']} for one in found]

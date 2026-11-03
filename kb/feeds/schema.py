@@ -85,13 +85,24 @@ CREATE TABLE IF NOT EXISTS feed_runs (
 # 的 IF NOT EXISTS 对它们不生效,只能逐列 ALTER 补——补不上就不是"少个字段",
 # 而是整个翻译流程在老库上永远报 no such column。
 _ADDED_COLUMNS = {
+    # 下面三列(`staged_at` / `gap_at` / `linked_at`)是「问题与待办」比新旧用的
+    # **事实自己的时刻**:正文候选进入待补、历史缺口出现、候选被记进某一轮扫描。
+    # 只在那件事真的发生时写(缺口换个说法、待补在两种待补之间换档不算)——
+    # 扫描开始、失败记账都会刷新 `scan_at`,借它
+    # 会让没动过的旧待办比刚发生的限流还新(`kb.intake_diag.sources.latest`)。
+    # 存量补 0 = 没有时间证据。
     'x_intake_candidates': (
         ('unavailable', "TEXT NOT NULL DEFAULT ''"),
+        ('staged_at', 'REAL NOT NULL DEFAULT 0'),
     ),
     'x_intake_sources': (
         ('window_end', "TEXT NOT NULL DEFAULT ''"),
         ('block', "TEXT NOT NULL DEFAULT ''"),
         ('screen_waits', "TEXT NOT NULL DEFAULT '{}'"),
+        ('gap_at', 'REAL NOT NULL DEFAULT 0'),
+    ),
+    'x_intake_links': (
+        ('linked_at', 'REAL NOT NULL DEFAULT 0'),
     ),
     'x_intake_batches': (
         ('block_token', "TEXT NOT NULL DEFAULT ''"),

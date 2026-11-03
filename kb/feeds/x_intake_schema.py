@@ -8,16 +8,18 @@ CREATE TABLE IF NOT EXISTS x_intake_sources (
  discovery TEXT NOT NULL DEFAULT 'unattempted', gap TEXT NOT NULL DEFAULT '',
  scan_at REAL NOT NULL DEFAULT 0, history_at REAL NOT NULL DEFAULT 0,
  expired INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '', outside TEXT NOT NULL DEFAULT '',
- block TEXT NOT NULL DEFAULT '', screen_waits TEXT NOT NULL DEFAULT '{}'
+ block TEXT NOT NULL DEFAULT '', screen_waits TEXT NOT NULL DEFAULT '{}', gap_at REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS x_intake_candidates (
  post_id TEXT PRIMARY KEY, entry TEXT NOT NULL, published TEXT NOT NULL,
  state TEXT NOT NULL, attempted REAL NOT NULL DEFAULT 0, retry_at REAL NOT NULL DEFAULT 0,
- failures INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', unavailable TEXT NOT NULL DEFAULT ''
+ failures INTEGER NOT NULL DEFAULT 0, reason TEXT NOT NULL DEFAULT '', unavailable TEXT NOT NULL DEFAULT '',
+ staged_at REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS x_intake_links (
  source_id INTEGER NOT NULL, identity TEXT NOT NULL, post_id TEXT NOT NULL,
  delivered INTEGER NOT NULL DEFAULT 0, confirmed INTEGER NOT NULL DEFAULT 0,
+ linked_at REAL NOT NULL DEFAULT 0,
  PRIMARY KEY(source_id,identity,post_id)
 );
 CREATE INDEX IF NOT EXISTS x_intake_links_post ON x_intake_links(post_id);
