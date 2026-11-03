@@ -266,15 +266,24 @@ def existing(conn, entry):
     cached = conn.execute("SELECT entry FROM x_intake_candidates WHERE post_id=? AND state='ready'",
                           (post_id(entry),)).fetchone()
     proof = json.loads(cached['entry']) if cached else entry
-    if row and complete(dict(row)) and complete(proof) and all(row[field] == proof.get(field) for field in
-                                                               ('title', 'body', 'x_post_meta', 'body_provenance')):
+    if row and complete(dict(row)) and complete(proof) and same_version(dict(row), proof):
         return dict(row)
     return None
 
 
+def same_version(row, entry):
+    """库里那一条和这次观察到的是不是同一版。**`existing` 和 `needs_repair` 只认这一份。**
+
+    推文标题是从正文派生的、各条路派生法不同(见 `x_post_meta.same_post`),逐字比会把
+    一条正文一字未改的推文判成新版、停在 `repair` —— 没有哪一轮自动同步会再碰它,它就
+    以「正文待补」挂到滑出五天窗口为止。"""
+    return (all(row[field] == entry.get(field) for field in ('title', 'body', 'x_post_meta', 'body_provenance'))
+            or x_post_meta.same_post(row, entry))
+
+
 def needs_repair(conn, entry):
     row = conn.execute('SELECT * FROM feed_items WHERE key=?', (reg.item_key('social', entry['url']),)).fetchone()
-    return bool(row and any(row[field] != entry.get(field) for field in ('title', 'body', 'x_post_meta', 'body_provenance')))
+    return bool(row and not same_version(dict(row), entry))
 
 
 def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary='', end='', batch_id='', block_tokens=None):

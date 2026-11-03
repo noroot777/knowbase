@@ -1,5 +1,5 @@
-# 「重试失败项」的范围(kb/pipeline_retry.py + pipeline_daybook.py + pipeline_results.py +
-# feeds/sync.py + feeds/retry_targets.py + pipeline_state.py + collectors/)
+# 「重试失败项」的范围(kb/pipeline_retry.py + pipeline_verdict.py + pipeline_daybook.py +
+# pipeline_results.py + feeds/sync.py + feeds/retry_targets.py + pipeline_state.py + collectors/)
 
 > **这一份的第一节就是这一块的硬约束(不许怎样)—— 动这块代码之前先读它**,后面是完整的事故形态、
 > 实测证据、回归清单和反向验证红数。CLAUDE.md 只留跨块的元规则和一张索引。
@@ -7,6 +7,12 @@
 
 ## 硬约束
 
+- **今天欠下的那几步要念出欠在哪个来源上,而且和步骤清单出自同一次派生**(`pipeline_retry.today_owed`,
+  `today_failed` 就是它的键;状态接口的 `today_owed`,前端 `pipe_view.js` 那个区)。只念步骤名的后果:早上
+  YouTube 抓取、下午 RSS 导出各红一笔,晚上一轮大V全绿收尾,卡片在大V那一轮底下写「抓取内容、导出文章 · 今天
+  早些时候没做完」—— 人只会当成大V欠的。抓取那一步念**真会重抓**的来源(`retry_crawl_scopes`,后来抓成、
+  停用、删掉的已经摘掉),别的几步念账本快照里还红着的那几格(`_snapshot` 的 `owed_sources`)。说不出来
+  (降级、范围问不出来、旧服务没这个字段)就只念步骤名,**不编一个来源**;空串那一格(全库那几步)不挂名。
 - **这颗按钮要补的是「今天还欠的那些」,不是「最近一次运行」里那些**(`kb/pipeline_daybook.py`)。「最近一次运行」只有
   一个位子,而一天里会跑好几轮:09:12 一轮 RSS 抓取失败、10:20 一轮公众号成功收尾,后者当场把前者顶掉 —— 于是点重试
   要么收到一句「上次运行没有失败项」,要么按最近那一轮的范围从头跑一遍(2026-10-19 10:34 那一次),而 09:12 该补的那条

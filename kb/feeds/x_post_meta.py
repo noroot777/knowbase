@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
 from kb.feeds.x_article_links import quote_lines
@@ -80,3 +81,57 @@ def eligibility(entry: dict) -> tuple[str, str]:
             return 'invalid_provenance', ''
         return '', prefix
     return 'unclassified_legacy', ''
+
+
+def same_post(stored: dict, observed: dict) -> bool:
+    """Same body version of one post, whichever path derived its title.
+
+    A post title is derived from its text, and the paths disagree: the timeline
+    builders keep the whole text, the detail merge keeps the first line. Both are
+    stamped into the fingerprint, so a byte-for-byte check calls one unchanged post
+    two versions and parks it in `repair`, which no automatic round ever drains.
+    The body, its provenance and the boundary are the version; the title is not.
+    Both records must still prove themselves, and Articles keep the strict check.
+    """
+    if (stored.get('body') != observed.get('body')
+            or stored.get('body_provenance') != observed.get('body_provenance')):
+        return False
+    metas = []
+    for entry in (stored, observed):
+        if eligibility(entry)[0]:
+            return False
+        meta = json.loads(entry[FIELD])
+        meta.pop('fingerprint')
+        metas.append(meta)
+    return metas[0] == metas[1]
+
+
+_URL = re.compile(r'https?://\S+')
+
+
+def _links(text: str) -> set[str]:
+    return {re.sub(r'^https?://(?:www\.)?', '', url).rstrip('/') for url in _URL.findall(text)}
+
+
+def _prose(text: str) -> str:
+    return ' '.join(_URL.sub(' ', text).split())
+
+
+def supersedes(stored: dict, observed: dict) -> bool:
+    """`observed` is a fuller copy of the stored post: same prose, links only added.
+
+    The channels transcribe a post's links differently: the page shows the shortened
+    display address, the guest API the real one (`www.` appears); a trailing link the
+    page renders as a card is missing from the page text altogether. Those copies are
+    one post, and the one that kept every link wins. The newcomer must prove itself
+    (a stored copy whose provenance cannot is replaced by one that can); a post never
+    replaces a merged Article or vice versa, an Article keeps its headline, and any
+    lost link or changed word keeps the stored copy.
+    """
+    mine, theirs = eligibility(observed)[0], eligibility(stored)[0]
+    if mine not in ('', 'article_merged') or (mine == 'article_merged') != (theirs == 'article_merged'):
+        return False
+    if mine == 'article_merged' and stored.get('title') != observed.get('title'):
+        return False
+    old, new = stored.get('body') or '', observed.get('body') or ''
+    return bool(new) and _prose(old) == _prose(new) and _links(old) <= _links(new)

@@ -357,7 +357,7 @@ async function careLoadSections() {
     CARE.loadedScope = scope;
     if (group === 'attention' && (!CARE.stage || CARE.stage === careSourceStage())) {
       const rows = careFilterSources(CARE.overview.source_rows || []);
-      if (rows.length) CARE.sections.unshift({ lane: careSourceLane(), total: rows.length,
+      if (rows.length) CARE.sections.unshift({ lane: careSourceLane(rows), total: rows.length,
         items: rows, source: true });
     }
     careRenderList();
@@ -370,9 +370,14 @@ async function careLoadSections() {
 
 function careSourceStage() { return (CARE.overview?.stages || []).slice(-1)[0] || '来源连接'; }
 
-function careSourceLane() {
+/** 来源级那一节的节头**按这一节真有的那几档念**(每行自己的 `state` 由采集器给)。
+    原来写死成「来源受限 · 这几条订阅自己没读成」,而这一节里多半是大V的正文待补、
+    超窗 —— 它们的时间线明明读成了(`x_intake_body` 自己就写着「这不是来源连接失败」),
+    同一屏上节头和行尾那枚状态各说各的。哪一行为什么在这儿,点开详情有它自己的结论。 */
+function careSourceLane(rows) {
+  const states = [...new Set(rows.map(one => one.state).filter(Boolean))];
   return { id: CARE_SOURCE_SECTION, group: 'attention', stage: careSourceStage(),
-    state: '来源受限', summary: '这几条订阅自己没读成，跟单篇文章无关', step: 0,
+    state: states.join('、') || '来源受限', summary: '', step: 0,
     exits: ['run'] };
 }
 

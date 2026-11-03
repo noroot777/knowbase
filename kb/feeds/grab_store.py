@@ -296,37 +296,50 @@ def replace(seen: dict, entry: dict) -> bool:
     seen 必须携带 x_post_meta,如同 content_hash/content_rev 一样不能以缺省值补造。
     known 与回填候选交出的生产快照都满足这一约束;缺列的调用方必须修复取样口径。
     """
-    if not seen or not seen.get('key') or not entry.get('body'):
+    if not seen or not seen.get('key') or not entry.get('body') or unchanged(seen, entry):
         return False
+    with reg.db() as c:
+        return write_version(c, seen, entry)
+
+
+def _fresh(seen: dict, entry: dict) -> dict:
     # **「变了没有」和「这是哪一版」用同一套列**(`_VERSION_FIELDS`):它们就是
     # 导出负载。早退只比 title/body 的后果是作者、发布时间单独更新被说成「和它
     # 一样」;hash 只算正文的后果是只改标题那一次压根不产生导出欠账(第 4 轮
     # 审查两头都实测到)。entry 没给的那几项沿用库里原值 —— 重抓到的页面可能
     # 读不出作者或日期,那不是「它被清空了」。
-    fresh = {'title': entry.get('title') or seen['title'], 'body': entry['body'],
-             'author': entry.get('author') or seen.get('author') or '',
-             'published': entry.get('published') or seen.get('published') or ''}
-    if all(fresh[k] == (seen.get(k) or '') for k in _VERSION_FIELDS):
-        # **「一样」按内容比,不按 hash 比。** 三处的 hash 口径本来就不同
-        # (`put_items` 哈希整份 entry、`fulltext.body_hash` 只哈希正文、这里是
-        # 导出负载),拿它们相等当「没变」会让每次重抓都白推一轮导出和索引。
-        return False
+    return {'title': entry.get('title') or seen['title'], 'body': entry['body'],
+            'author': entry.get('author') or seen.get('author') or '',
+            'published': entry.get('published') or seen.get('published') or ''}
+
+
+def unchanged(seen: dict, entry: dict) -> bool:
+    """**「一样」按内容比,不按 hash 比。** 三处的 hash 口径本来就不同
+    (`put_items` 哈希整份 entry、`fulltext.body_hash` 只哈希正文、这里是
+    导出负载),拿它们相等当「没变」会让每次重抓都白推一轮导出和索引。"""
+    fresh = _fresh(seen, entry)
+    return all(fresh[k] == (seen.get(k) or '') for k in _VERSION_FIELDS)
+
+
+def write_version(c, seen: dict, entry: dict) -> bool:
+    """`replace` 的那一笔写,交给已经在写事务里的调用方(`x_intake_supersede` 要把它和
+    候选放行放进同一笔)。前提同 `replace`:`entry` 有正文、和 `seen` 不是同一版。"""
+    fresh = _fresh(seen, entry)
     # **判据是取样那一刻的工作身份**(`work_version(seen)`),**代次跟着加一**:
     # 这一次更新被接受之后,一切更早的工作就永远不该再有交付权。只加一、不核对的
     # 后果实测过 —— 两个页面先后重抓同一条链接,等着的那一个回来时指纹已经复原,
     # 它那份更早的抓取照旧被接受(见 `work_version`)。`seen` 一律是 `known()` 交出
     # 来的那份快照,缺了代次就该当场抛,不许退回「只比指纹」。
-    with reg.db() as c:
-        cur = c.execute(f"""UPDATE feed_items SET title=?,body=?,author=?,published=?,
-            content_hash=?,lang=?,x_post_meta=?,body_provenance=?,extract_stale=1,content_rev=content_rev+1,
-            title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
-            WHERE key=? AND content_hash=? AND content_rev=? AND {origin_body_sql()}""",
-            (fresh['title'], fresh['body'], fresh['author'], fresh['published'],
-             item_version(fresh), reg.text_language(fresh['title'], fresh['body']),
-             entry.get('x_post_meta', seen['x_post_meta']),
-             entry.get('body_provenance', ''),
-             seen['key'], *work_version(seen)))
-        return cur.rowcount > 0
+    cur = c.execute(f"""UPDATE feed_items SET title=?,body=?,author=?,published=?,
+        content_hash=?,lang=?,x_post_meta=?,body_provenance=?,extract_stale=1,content_rev=content_rev+1,
+        title_zh='',body_zh='',translated_at='',translate_error='',translate_tries=0
+        WHERE key=? AND content_hash=? AND content_rev=? AND {origin_body_sql()}""",
+        (fresh['title'], fresh['body'], fresh['author'], fresh['published'],
+         item_version(fresh), reg.text_language(fresh['title'], fresh['body']),
+         entry.get('x_post_meta', seen['x_post_meta']),
+         entry.get('body_provenance', ''),
+         seen['key'], *work_version(seen)))
+    return cur.rowcount > 0
 
 
 def reclaim_export(seen: dict) -> bool:

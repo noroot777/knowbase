@@ -41,6 +41,7 @@ let current = EVENING;          // 屏幕上这一轮
 const posted = [];              // 真被点到的那几个请求
 let owed = [];                  // 今天还欠的那几步(回包的 today_failed)
 let owedField = true;           // 回包里带不带这个字段(旧服务那一档)
+let owedBy = null;              // 每一步欠在哪几个来源上(回包的 today_owed);null = 不带
 
 const server = createServer((req, res) => {
   const path = req.url.split("?")[0];
@@ -53,6 +54,7 @@ const server = createServer((req, res) => {
     return json({ running: false, stop_requested: false, stopped: false,
                   stop_supported: true, last_run: current, log: [],
                   ...(owedField ? { today_failed: owed } : {}),
+                  ...(owedBy ? { today_owed: owedBy } : {}),
                   result_version: current.run_id });
   }
   if (path === "/api/pipeline/runs") {
@@ -142,6 +144,18 @@ check("「看第一个」照旧不在:这一轮一个红都没有,下面没有�
       seen.jumpHidden, JSON.stringify(seen));
 check("那句话说清了它为什么在",
       /今天早些时候/.test(seen.hint) && /1 个步骤/.test(seen.hint), seen.hint);
+
+// ①' 欠账那一步挂上来源名:只念步骤名的话,人会当成屏幕上刚跑完那一轮的来源欠的
+owedBy = { crawl: ["rss"] };
+await reload();
+seen = await now();
+check("早些时候欠下的那一步念出了是哪个来源", /订阅源 抓取/.test(seen.where), seen.where);
+// 反过来钉一边:不挂在具名来源上的那一格(空串)不编一个来源名
+owedBy = { crawl: [""] };
+await reload();
+seen = await now();
+check("说不出来源时只念步骤名", /抓取/.test(seen.where) && !/订阅源/.test(seen.where), seen.where);
+owedBy = null;
 
 // ③ 这一轮自己报了红、今天欠的就是它 —— 不许数两遍
 current = MORNING;
