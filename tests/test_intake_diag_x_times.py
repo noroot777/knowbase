@@ -33,7 +33,7 @@ class XFactTimeTests(IntakeBase):
             conn.execute('UPDATE x_intake_links SET linked_at=linked_at-3600')
             conn.execute('UPDATE x_intake_sources SET gap_at=gap_at-3600')
 
-    def state(self):
+    def x_state(self):
         source = dict(reg.subscription('social', self.source['id']))
         store.statuses([source], 'browser')
         return source['x_intake']
@@ -45,7 +45,7 @@ class XFactTimeTests(IntakeBase):
         return [row['problem'] for row in sources.latest(rows)]
 
     def test_a_fresh_throttle_is_not_covered_by_old_queues(self):
-        before = self.state()
+        before = self.x_state()
         kinds = {one['kind']: one['at'] for one in before['issues']}
         self.assertIn('x_intake_body', kinds)
         self.assertIn('x_intake_unconfirmed', kinds)
@@ -55,7 +55,7 @@ class XFactTimeTests(IntakeBase):
         store.set_block(self.source, throttle)
         store.attempt(self.source, 'discovery', str(xstate.session_throttled()))
         self.prepare()
-        after = self.state()
+        after = self.x_state()
         self.assertGreater(after['scan_at'], throttle['observed_at'])
         times = {one['kind']: one['at'] for one in after['issues']}
         # 扫描开始、失败记账、再起一轮都不是那几条旧待办的新事实。
@@ -71,4 +71,4 @@ class XFactTimeTests(IntakeBase):
         with reg.db() as conn:
             conn.execute("UPDATE x_intake_candidates SET attempted=? WHERE post_id='100'",
                          (time.time() + 60,))
-        self.assertEqual(['x_intake_body'], self.shown(self.state()))
+        self.assertEqual(['x_intake_body'], self.shown(self.x_state()))
