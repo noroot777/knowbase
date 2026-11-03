@@ -12,6 +12,7 @@ class YouTubeStageCache(YouTubeFixture):
     def setUp(self):
         super().setUp()
         self.row = {'video_id': self.entry()['video_id'], 'entry': self.entry(), 'channel': '测试频道'}
+        self.row['entry']['title'] = '智能体代码生成教程'
         self.selected = SimpleNamespace(provider='fixture', model_id='fixture')
         self.payload = {'title': '具体中文标题', 'summary': '保留事实与限制的中文概述。', 'body': '具体中文内容。'}
         self.blocks = [f'中文原文内容{position}。' for position in range(16)]

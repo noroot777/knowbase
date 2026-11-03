@@ -12,6 +12,7 @@ class YouTubeNotes(YouTubeFixture):
     def setUp(self):
         super().setUp()
         self.row = {'video_id': '12345678901', 'entry': self.entry(), 'channel': '测试频道'}
+        self.row['entry']['title'] = '智能体代码生成教程'
         self.selected = SimpleNamespace(provider='fixture', model_id='fixture-model')
         self.transcript = {'origin': 'automatic_captions', 'language': 'en', 'segments': [
             {'start': 0, 'end': 59, 'text': 'The AI agent builds code with limitations. ' * 120},
@@ -225,7 +226,9 @@ class YouTubeNotes(YouTubeFixture):
         with self.assertRaisesRegex(RuntimeError, '覆盖'):
             self.build(reply)
         self.assertFalse((media.cache_dir(self.row['video_id']) / 'notes-cache.json').exists())
-        self.assertEqual(2, len(self.prompts))
+        jobs = min(notes.translation_pool.MAX_REQUESTS, len(set(transcripts.blocks(self.transcript['segments']))))
+        self.assertGreaterEqual(len(self.prompts), 2)
+        self.assertLessEqual(len(self.prompts), jobs * 2)
         self.assertFalse(any('只输出 JSON' in prompt for prompt in self.prompts))
 
     def test_natural_chinese_numbers_and_translated_acronyms_do_not_create_quality_claims(self):

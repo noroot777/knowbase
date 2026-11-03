@@ -15,6 +15,7 @@ class OutputFallback(YouTubeFixture):
         self.isolate()
         self.source = self.channel()
         self.entry_value = self.entry()
+        self.entry_value['title'] = '智能体代码生成教程'
         self.row = {'video_id': self.entry_value['video_id'], 'entry': self.entry_value, 'channel': '测试频道'}
         self.selected = SimpleNamespace(provider='fixture', model_id='fixture')
         self.transcript = {'origin': 'uploaded_captions', 'language': 'en', 'segments': [

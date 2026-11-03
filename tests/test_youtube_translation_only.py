@@ -1,5 +1,6 @@
 import json
 import time
+from threading import Event
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ class TranslationOnly(YouTubeFixture):
     def setUp(self):
         super().setUp()
         self.row = {'video_id': self.entry()['video_id'], 'entry': self.entry(), 'channel': '测试频道'}
+        self.row['entry']['title'] = '智能体代码生成教程'
         self.selected = SimpleNamespace(provider='fixture', model_id='fixture')
         self.transcript = self.complete_transcript()
         self.deadline = time.monotonic() + 30
@@ -92,6 +94,71 @@ class TranslationOnly(YouTubeFixture):
         media.save_json(directory / 'notes-cache.json', {
             notes.signature(translation.STAGE, self.selected, source):
                 response(translation.prompt(source), '核验智能体生成的代码。')})
-        states = iter((False, False, True))
-        with patch.object(notes, 'model', return_value=self.selected), self.assertRaises(media.Interrupted):
-            notes.build(self.row, self.transcript, self.deadline, lambda: next(states))
+        cancelled = Event()
+        render = notes.translated_output
+
+        def validate(text, output):
+            value = render(text, output)
+            cancelled.set()
+            return value
+
+        with patch.object(notes, 'model', return_value=self.selected), \
+                patch.object(notes, 'translated_output', side_effect=validate), self.assertRaises(media.Interrupted):
+            notes.build(self.row, self.transcript, self.deadline, cancelled.is_set)
+
+    def test_foreign_title_is_translated_and_original_retained(self):
+        self.row['entry']['title'] = 'AI agents verify every generated change'
+        calls = []
+
+        def reply(prompt, *arguments):
+            calls.append(prompt)
+            return response(prompt, '智能体核验每项生成的修改。')
+
+        with patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call', side_effect=reply):
+            entry = notes.build(self.row, self.transcript, self.deadline, lambda: False)
+        self.assertEqual('智能体核验每项生成的修改。', entry['title'])
+        self.assertIn('## 视频原题\n\n' + self.row['entry']['title'], entry['body'])
+        self.assertEqual(2, len(calls))
+        self.assertTrue(all(prompt.startswith('将以下字幕') for prompt in calls))
+        with patch.object(notes, 'model', return_value=self.selected), patch.object(notes, 'call') as call:
+            self.assertEqual(entry, notes.build(self.row, self.transcript, self.deadline, lambda: False))
+        call.assert_not_called()
+
+    def test_foreign_title_with_chinese_subtitles_still_needs_translation(self):
+        self.row['entry']['title'] = 'Verify all changes before deployment'
+        self.transcript['segments'][0]['text'] = '部署前核验所有修改并记录限制。'
+        with patch.object(notes, 'model', return_value=self.selected), \
+                patch.object(notes, 'call', side_effect=lambda prompt, *arguments:
+                             response(prompt, '部署前核验所有修改')) as call:
+            entry = notes.build(self.row, self.transcript, self.deadline, lambda: False)
+        self.assertEqual('部署前核验所有修改', entry['title'])
+        self.assertEqual(1, call.call_count)
+        self.assertIn('中文字幕原文', entry['body'])
+        self.assertIn(self.row['entry']['title'], entry['body'])
+
+    def test_cached_body_only_requests_the_missing_title(self):
+        self.row['entry']['title'] = 'AI agents verify generated changes'
+        source = self.transcript['segments'][0]['text']
+        directory = media.cache_dir(self.row['video_id'])
+        media.save_json(directory / 'notes-cache.json', {
+            notes.signature(translation.STAGE, self.selected, source):
+                response(translation.prompt(source), '智能体生成代码，运行测试并核验限制。')})
+
+        def reply(prompt, *arguments):
+            self.assertEqual([self.row['entry']['title']], json.loads(prompt.split('\n\n', 1)[1])['segments'])
+            return response(prompt, '智能体核验生成的修改')
+
+        with patch.object(notes, 'model', return_value=self.selected), \
+                patch.object(notes, 'call', side_effect=reply) as call:
+            entry = notes.build(self.row, self.transcript, self.deadline, lambda: False)
+        self.assertEqual(1, call.call_count)
+        self.assertEqual('智能体核验生成的修改', entry['title'])
+        self.assertIn('智能体生成代码，运行测试并核验限制。', entry['body'])
+
+    def test_failed_title_cannot_be_hidden_by_a_successful_chinese_body(self):
+        self.row['entry']['title'] = 'Verify changes before deployment'
+        self.transcript['segments'][0]['text'] = '部署前核验修改并记录限制。'
+        with patch.object(notes, 'model', return_value=self.selected), \
+                patch.object(notes, 'call', return_value='English title without translation'), \
+                self.assertRaises(RuntimeError):
+            notes.build(self.row, self.transcript, self.deadline, lambda: False)
