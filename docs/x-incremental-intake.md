@@ -28,7 +28,7 @@
 `feedgrab` 没有可控的分页/详情拆分接口。它也服从五天过滤、全局预算、账号切片和持久 outbox；
 其上游扫描（可能内部含详情）以 `combined` 明确拥有发现和历史两阶段状态；耗时仍记在发现阶段，历史共享，指标标注
 `timeline_phases_separable=false`。由本项目执行的 Article 补全另外排队；不声称能控制 feedgrab 内部请求。
-不登录通道（`guest`）同样走 combined：每轮经 FxTwitter 从顶部翻页读到五天地板，`cursor=guest_bounded_rescan`，
+不登录通道（`guest`）同样走 combined：每轮经 FxTwitter 从顶部翻页读到五天地板（问不到时退到 X 未登录主页，只露最新几条，读不到地板就如实记未完成），`cursor=guest_bounded_rescan`，
 单账号时限 `KB_X_GUEST_ACCOUNT_SECONDS`（默认 25 秒）；两条共用 `x_intake_combined` 那一份暂存/确认/正文补全。
 
 ## 持久化与一致性

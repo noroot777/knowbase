@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""不登录通道(`x_guest`):经 FxTwitter 公开接口读时间线,一路到 feeds.db。
+"""不登录通道(`x_guest`):FxTwitter 公开接口这条主路,一路到 feeds.db。
 
-只替掉最外面那一次 HTTP(`x_guest.request`,和长文那一步的 `x_article.fetch`),
+只替掉最外面那一次 HTTP(`x_guest.request`、X 页面那件工具的 `x_guest_page.fetch`,
+和长文那一步的 `x_article.fetch`),
 翻页、归属、「读到下界」的证明、五天队列的暂存与确认、存盘事务都是真的。
 
 钉的是后果:库里落了哪几条、这条订阅算不算成功、覆盖有没有被宣布读完 ——
@@ -19,7 +20,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb.collectors import FetchScope
-from kb.feeds import registry as reg, sync, x_article, x_channels, x_guest
+from kb.feeds import registry as reg, sync, x_article, x_channels, x_guest, x_guest_page
 from kb.feeds.fetching import FeedError, Response
 from tests.test_x_channels import ChannelBase
 
@@ -59,10 +60,28 @@ class FakeApi:
 HTTP_404 = FeedError('订阅服务返回 HTTP 404；请检查来源或填写专用订阅链接')
 
 
+class FakePages:
+    """按地址给 X 未登录页面的 HTML。没登记的地址一律当成「页面没答复」—— 不许漏到真网络。"""
+
+    def __init__(self):
+        self.pages, self.asked = {}, []
+
+    def __call__(self, url, deadline):
+        self.asked.append(url)
+        page = self.pages.get(url)
+        if page is None:
+            raise x_guest_page.PageError('X 页面没答复(HTTP 404)')
+        if isinstance(page, Exception):
+            raise page
+        return page
+
+
 class GuestBase(ChannelBase):
     def setUp(self):
         super().setUp()
-        for p in (patch.object(x_guest, 'RETRY_PAUSE', 0), patch.object(x_guest, 'PAGE_PAUSE', 0)):
+        self.pages = FakePages()
+        for p in (patch.object(x_guest, 'RETRY_PAUSE', 0), patch.object(x_guest, 'PAGE_PAUSE', 0),
+                  patch.object(x_guest_page, 'fetch', self.pages)):
             p.start(); self.addCleanup(p.stop)
 
     def api(self, **pages):

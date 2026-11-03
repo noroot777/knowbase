@@ -1,4 +1,4 @@
-"""No-login channel: one FxTwitter timeline pass per account, staged as a combined scan."""
+"""No-login channel: one timeline pass per account (FxTwitter, X guest page as fallback), staged as a combined scan."""
 import time
 
 from kb.feeds import x_guest
