@@ -4,9 +4,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -111,31 +112,69 @@ def _confirmed_progress(progress, phase, incomplete, observed, boundary, end, pr
 # **SQLite 写锁也等,跟别的来源一个口径**(`reg.db()` 默认等 30 秒):页面上任何一个请求开库都会在写锁
 # 里核一遍表结构,一秒都不等的话这么短的一下也能让一个号白跑一轮(实测:切完通道立刻点同步,排在最前面
 # 的 7 个号全报 `database is locked`,第 8 个起全部正常)。**但跟维护锁一样受这一轮的停止和截止约束**
-# (`bounded`):每一笔只等到截止那一刻,按了停止就不再等(SQLite 的等待中途叫不停,所以停止之后改成
-# 拿不到当场报)—— 逐账号各等满 30 秒,锁被长期占着时一样会累加成几十分钟。等不到照旧抛,调用方照旧
-# 记成本机失败、待办保留。
+# (`bounded`),逐账号各等满 30 秒的话,锁被长期占着时一样会累加成几十分钟。
+#
+# **边界是整笔的,不是每次争锁的**:SQLite 的 `timeout` 是**每一次**争锁各自的上限,而开一笔写要争两次
+# (`reg.db()` 初始化里那个 `BEGIN IMMEDIATE`,和交出连接之后这一笔自己的),中间别人插得进来 —— 给连接
+# 一个固定的 `timeout`,整笔就能等到它的两倍;SQLite 等着的时候也叫不停。所以这里按 `SLICE` 一小段一小段
+# 地争,每段之前重算还剩多少、问一次停没停,两次争锁共用一个截止。**只在没写任何东西的地方重试**:开库
+# (失败时 `reg.db()` 自己回滚、关连接)和这一笔开头的 `BEGIN IMMEDIATE` —— 所以 `db()` 交出来的连接
+# **已经在写事务里**,调用方不要再 BEGIN。拿到之后不再有要等的:WAL 下持着写锁提交不必再争。
+# 等不到照旧抛 `database is locked`,调用方照旧记成本机失败、待办保留。
 SQLITE_WAIT = 30.0
+SLICE = 0.25
 
 
-def _sqlite_wait(deadline=None, should_stop=None):
+def _busy(error):
+    text = str(error).lower()
+    return 'locked' in text or 'busy' in text
+
+
+@contextmanager
+def _write_db(deadline=None, should_stop=None):
     stop, end = _limits(deadline, should_stop)
-    if stop and stop():
-        return 0.0
-    return SQLITE_WAIT if end is None else min(SQLITE_WAIT, max(0.0, end - time.monotonic()))
+    cap = time.monotonic() + SQLITE_WAIT
+    end = cap if end is None else min(end, cap)
+
+    def contend(take):
+        while True:
+            halted = bool(stop and stop())
+            try:
+                return take(0.0 if halted else max(0.0, min(SLICE, end - time.monotonic())))
+            except sqlite3.OperationalError as error:
+                if not _busy(error) or halted or (stop and stop()) or time.monotonic() >= end:
+                    raise
+
+    def begin(timeout):
+        conn.execute(f'PRAGMA busy_timeout={int(timeout * 1000)}')
+        conn.execute('BEGIN IMMEDIATE')
+
+    with ExitStack() as stack:
+        conn = contend(lambda timeout: stack.enter_context(reg.db(timeout=timeout)))
+        contend(begin)
+        yield conn
 
 
 def db(deadline=None):
-    return reg.db(timeout=_sqlite_wait(deadline))
+    """这一笔的写连接,交出来时已经 `BEGIN IMMEDIATE` 过了(见上)。"""
+    return _write_db(deadline)
 
 
 def read_db(timeout=None):
     return reg.read_db(timeout=_sqlite_wait() if timeout is None else timeout)
 
 
+def _sqlite_wait():
+    stop, end = _limits()
+    if stop and stop():
+        return 0.0
+    return SQLITE_WAIT if end is None else min(SQLITE_WAIT, max(0.0, end - time.monotonic()))
+
+
 def save_db(validators, should_stop):
-    """最后那次存盘的 SQLite 连接,跟 `save_lock` 同一档截止。"""
+    """最后那次存盘(`feeds.sync._save_result`)的写连接,跟 `save_lock` 同一档截止,交出来时同样已在写事务里。"""
     end = validators.get('x_deadline')
-    return reg.db(timeout=_sqlite_wait(None if end is None else end + LOCK_WAIT, should_stop))
+    return _write_db(None if end is None else end + LOCK_WAIT, should_stop)
 
 
 def utc(value):
@@ -183,7 +222,6 @@ def observed(entries):
 
 def prepare(sources, channel, now, deadline=None):
     with _lock(deadline), db(deadline) as conn:
-        conn.execute('BEGIN IMMEDIATE')
         retention.prune(conn, now)
         for source in sources:
             if not current(conn, source):
@@ -243,7 +281,6 @@ def stage(source, entries, *, phase, incomplete, observed='', now=None, boundary
     reused = 0
     now = time.time() if now is None else now
     with _lock(), db() as conn:
-        conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return None
         progress = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=?', (source['id'],)).fetchone()
@@ -292,7 +329,6 @@ def confirm(source, entries, *, phase, incomplete=None, observed, boundary, end=
             batch_id=''):
     fields = _phase_fields(phase)
     with _lock(), db() as conn:
-        conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return False
         if batch_id:
@@ -332,7 +368,6 @@ def progress(source):
 
 def set_block(source, block):
     with maintenance_lock(wait=0), db() as conn:
-        conn.execute('BEGIN IMMEDIATE')
         if current(conn, source):
             row = conn.execute('SELECT block FROM x_intake_sources WHERE source_id=? AND identity=?',
                                (source['id'], identity(source))).fetchone()
@@ -345,7 +380,6 @@ def set_block(source, block):
 
 def screen_wait(source, phase, run_started):
     with _lock(), db() as conn:
-        conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return 0
         row = conn.execute('SELECT screen_waits FROM x_intake_sources WHERE source_id=? AND identity=?',
@@ -362,7 +396,6 @@ def screen_wait(source, phase, run_started):
 def attempt(source, phase, reason=''):
     fields = _phase_fields(phase)
     with db() as conn:
-        conn.execute('BEGIN IMMEDIATE')
         if current(conn, source):
             columns = ','.join(f'{field}=?' for field in fields)
             conn.execute(f'UPDATE x_intake_sources SET {columns},error=? WHERE source_id=? AND identity=?',
@@ -400,7 +433,6 @@ def finish(source, task, entries, unavailable, reason, *, block_tokens=None, loc
     HTTP 连接挂死。"""
     end = None if lock_wait is None else time.monotonic() + lock_wait
     with _lock(end), db(end) as conn:
-        conn.execute('BEGIN IMMEDIATE')
         if not current(conn, source):
             return
         progress = conn.execute('SELECT * FROM x_intake_sources WHERE source_id=? AND identity=?',

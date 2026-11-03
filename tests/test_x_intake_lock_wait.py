@@ -10,7 +10,9 @@ RSS、YouTube 那几条路同样碰到这一下,只是等了几毫秒照常写�
 `test_x_intake_isolation`、`test_x_intake_phase_delivery` 钉着。
 
 **等也有边界**(`BoundedSqliteWaitTests`):SQLite 那一侧的等待跟维护锁(`test_x_lock_bound`)一样
-受这一轮的停止和截止约束,锁被长期占着时不许逐账号各等满 30 秒。
+受这一轮的停止和截止约束,锁被长期占着时不许逐账号各等满 30 秒。而且**边界是整笔的**
+(`WholeWriteBudgetTests`):开一笔写要争两次锁,中间别人插得进来,两次共用一个截止;等的中途按了
+停止,一小段之内就放弃。
 
 人点了按钮在等的那一下(`x_article_capture.save`)只等一小会儿,等不到如实说一句:
 那一侧在 `test_x_article_capture` 的 `LockWaitTests`。
@@ -22,6 +24,7 @@ import sys
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -161,8 +164,8 @@ class BoundedSqliteWaitTests(GuestBase):
     def gives_up(self, take):
         started = time.monotonic()
         with self.assertRaises(sqlite3.OperationalError):
-            with take() as conn:
-                conn.execute('BEGIN IMMEDIATE')
+            with take():
+                pass
         spent = time.monotonic() - started
         self.assertLess(spent, QUICK, f'等了 {spent:.1f} 秒才放弃')
 
@@ -201,6 +204,67 @@ class BoundedSqliteWaitTests(GuestBase):
         with store.bounded(lambda: False, time.monotonic() + 0.3):
             self.gives_up(store.db)
         self.gives_up(lambda: store.db(time.monotonic() + 0.3))
+
+
+class WholeWriteBudgetTests(GuestBase):
+    """一笔写的两次争锁(`reg.db()` 初始化、这一笔自己的 `BEGIN IMMEDIATE`)共用一个截止,等的中途也听停止。"""
+
+    def setUp(self):
+        super().setUp()
+        with reg.db():
+            pass
+
+    def cut_in_after_init(self, holder):
+        """`reg.db()` 初始化提交、交出连接的那一刻,另一个连接抢先拿走写锁(`holder` 起的那个)。"""
+        real = reg.db
+
+        @contextmanager
+        def interleaved(timeout=30):
+            with real(timeout=timeout) as conn:
+                if not getattr(interleaved, 'done', False):
+                    interleaved.done = True
+                    holder()
+                yield conn
+        return patch.object(reg, 'db', interleaved)
+
+    def gives_up_within(self, budget, take):
+        """开库先等了一阵,交出连接之后又被插了一下:整笔仍在那一份时限里放弃,不是再领一份。"""
+        first = hold_sqlite_writer(0.4)              # 开库那一次先吃掉时限的大半
+        started = time.monotonic()
+        with self.cut_in_after_init(lambda: hold_sqlite_until(self)), self.assertRaises(sqlite3.OperationalError):
+            take(started + budget)
+        spent = time.monotonic() - started
+        first.join(5)
+        self.assertLess(spent, budget + 0.15, f'整笔等了 {spent:.2f} 秒,时限 {budget} 秒')
+
+    def test_two_contentions_in_one_write_share_one_deadline(self):
+        def take(end):
+            with store.db(end):
+                pass
+        self.gives_up_within(0.5, take)
+
+    def test_the_manual_capture_write_keeps_its_one_short_budget(self):
+        """人工交回那 10 秒(这里缩成 0.5)是维护锁连两次 SQLite 争锁一共的。"""
+        self.gives_up_within(0.5, lambda end: store.finish({}, {}, [], [], '', lock_wait=0.5))
+
+    def test_a_stop_pressed_while_waiting_ends_it_within_a_slice(self):
+        hold_sqlite_until(self)
+        pressed = threading.Event()
+        threading.Timer(0.2, pressed.set).start()
+        started = time.monotonic()
+        with store.bounded(pressed.is_set, time.monotonic() + 10), self.assertRaises(sqlite3.OperationalError):
+            with store.db():
+                pass
+        spent = time.monotonic() - started
+        self.assertLess(spent, 0.2 + store.SLICE + 0.3, f'按了停止之后又等了 {spent - 0.2:.2f} 秒')
+
+    def test_both_contentions_are_still_waited_out_while_time_is_left(self):
+        """反过来钉一边:两次都只是短暂被占、时限还够,这一笔照常拿到写事务。"""
+        first = hold_sqlite_writer(0.3)
+        with self.cut_in_after_init(lambda: hold_sqlite_writer(0.3)):
+            with store.db(time.monotonic() + 5) as conn:
+                self.assertTrue(conn.in_transaction)
+        first.join(5)
 
 
 if __name__ == '__main__':

@@ -132,8 +132,10 @@ def _claim_write(c, source) -> bool:
 
     **不能反过来写成「先 SELECT 再升级成写事务」**:WAL 下拿不到快照报的是
     `SQLITE_BUSY_SNAPSHOT`,`busy_timeout` 管不着它(口径同清理脚本那条)。
+    大V观点那一路的连接(`x_intake_store.save_db`)交出来时已经 `BEGIN IMMEDIATE` 过了。
     """
-    c.execute('BEGIN IMMEDIATE')
+    if not c.in_transaction:
+        c.execute('BEGIN IMMEDIATE')
     return not _repointed(c, source)
 
 
