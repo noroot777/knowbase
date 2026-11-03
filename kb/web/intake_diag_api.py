@@ -151,6 +151,8 @@ def overview(kind: str = ''):
         'resolved_days': lanes.RESOLVED_DAYS,
         'min_body_chars': readable.MIN_CHARS,
         'page': lanes.PAGE,
+        # 一个写请求最多带几条。前端全选之后按它分批,不另抄一份数字。
+        'batch_max': MAX_KEYS,
         # 这一句在页头上原样显示,**它就是「两屏不打架」那条约束的落点**。
         'note': ('这里数的是全库还有多少**条内容**没走完收录；同步中心那个'
                  '「需处理」数的是这一轮/今天欠了哪几**步**，两个数字本来就不一样。'

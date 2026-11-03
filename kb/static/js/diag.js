@@ -21,7 +21,7 @@ const CARE_SOURCE_SECTION = 'source_problems';
 
 const CARE = {
   kind: '', group: 'attention', stage: '', q: '',
-  overview: null, sections: [],
+  overview: null, sections: [], loadedScope: '',
   picked: new Map(), selected: '',
   seq: 0, timer: 0, qTimer: 0,
 };
@@ -271,20 +271,51 @@ async function careMore(laneId) {
   if (!section || section.source) return;
   const mine = CARE.seq;
   try {
-    const params = { kind: CARE.kind, q: CARE.q,
-      offset: section.items.length, limit: carePage() };
-    const data = await careGet('/items',
-      laneId === 'archived' ? { group: 'archived', ...params } : { lane: laneId, ...params });
-    if (mine !== CARE.seq) return;
-    const got = data.sections[0];
-    if (!got) return;
-    // 按 key 去重:两次请求之间队列可能动过,同一条可能在两页里都露一次。
-    const seen = new Set(section.items.map(row => row.key));
-    section.items = [...section.items, ...got.items.filter(row => !seen.has(row.key))];
-    section.total = got.total;
+    const got = await careFetchPage(laneId, section.items.length);
+    if (mine !== CARE.seq || !got) return;
+    careAppendPage(section, got);
     careRenderList();
   } catch (e) {
     toast('没有读到更多', { detail: e.message });
+  }
+}
+
+function careFetchPage(laneId, offset) {
+  const params = { kind: CARE.kind, q: CARE.q, offset, limit: carePage() };
+  return careGet('/items',
+    laneId === 'archived' ? { group: 'archived', ...params } : { lane: laneId, ...params })
+    .then(data => data.sections[0] || null);
+}
+
+/** 按 key 去重:两次请求之间队列可能动过,同一条可能在两页里都露一次。 */
+function careAppendPage(section, got) {
+  const seen = new Set(section.items.map(row => row.key));
+  section.items = [...section.items, ...got.items.filter(row => !seen.has(row.key))];
+  section.total = got.total;
+}
+
+/** 列表此刻对应的那个范围。范围没变时的重取(轮询、处理完一批之后)要保住展开深度。 */
+function careScope() { return JSON.stringify([CARE.group, CARE.kind, CARE.stage, CARE.q]); }
+
+/** 往后补页,直到这一节回到原来展开到的那么多条(或者已经没有更多)。
+
+    **补页失败不拖垮整次刷新**:第一页已经拿到了,补到哪儿算哪儿、说一句。抛出去
+    的话外层 catch 清空整张列表,而批量栏还留着上一屏的勾选和按钮。 */
+async function careDeepen(section, want, mine) {
+  while (section.items.length < Math.min(want, section.total)) {
+    let got;
+    try {
+      got = await careFetchPage(section.lane.id, section.items.length);
+    } catch (e) {
+      if (mine === CARE.seq) {
+        toast(`只取回了前 ${section.items.length} 条，后面的勾选已放掉`, { detail: e.message });
+      }
+      return;
+    }
+    if (mine !== CARE.seq || !got || !got.items.length) return;
+    const before = section.items.length;
+    careAppendPage(section, got);
+    if (section.items.length === before) return;
   }
 }
 
@@ -292,8 +323,15 @@ async function careMore(laneId) {
 async function careLoadSections() {
   const mine = ++CARE.seq;
   const group = CARE.group;
+  const scope = careScope();
+  // **同一个范围上的重取按原来展开到的深度取回来。** 只取第一页的话,人展开到
+  // 第 300 条、勾了一批、处理到一半失败了,刷新把列表退回前 40 条,而批量栏只
+  // 认屏幕上还在的勾选 —— 没成功的那几条连勾选一起消失,提示却说「还勾着」。
+  const depth = new Map(scope === CARE.loadedScope
+    ? CARE.sections.filter(s => !s.source).map(s => [s.lane.id, s.items.length]) : []);
   if (group === 'running') {
     CARE.sections = [];
+    CARE.loadedScope = scope;
     careRenderList();
     return;
   }
@@ -313,7 +351,10 @@ async function careLoadSections() {
       if (mine !== CARE.seq) return;
       for (const data of got) picked.push(...data.sections);
     }
+    await Promise.all(picked.map(s => careDeepen(s, depth.get(s.lane.id) || 0, mine)));
+    if (mine !== CARE.seq) return;
     CARE.sections = picked.filter(s => s.total > 0);
+    CARE.loadedScope = scope;
     if (group === 'attention' && (!CARE.stage || CARE.stage === careSourceStage())) {
       const rows = careFilterSources(CARE.overview.sources || []);
       if (rows.length) CARE.sections.unshift({ lane: careSourceLane(), total: rows.length,

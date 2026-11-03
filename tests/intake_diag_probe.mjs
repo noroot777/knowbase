@@ -19,6 +19,7 @@
 //   HEADLESS_SHELL=<bin> node tests/intake_diag_probe.mjs http://127.0.0.1:8893
 import { writeSync } from "node:fs";
 import { launchShell } from "./probe_shell.mjs";
+import { pickProbe } from "./intake_diag_probe_pick.mjs";
 
 const base = process.argv[2];
 
@@ -374,6 +375,10 @@ await until(`CARE.group === 'attention' && CARE.sections.length > 0
              && CARE.sections.every(s => s.lane.group === 'attention')`);
 check("待决定那一组照旧勾得上",
       await evalJs(`!!document.querySelector('#care-list input[type=checkbox]')`));
+
+// ── 10c-2 / 10c-3. 全选、越过单次上限的分批、分批途中的身份 ──────────────────
+// 在 `intake_diag_probe_pick.mjs`:这一份连上它就越过了单文件 700 行的上限。
+await pickProbe({ evalJs, until, check, sleep, send });
 
 // ── 10d. 「从浏览器采集」:正文那几档的主入口,「手动补正文」退成兜底 ─────────
 // 会落到这几档的多半是「页面上没有识别出正文,可能需要登录或由脚本渲染」「这一页

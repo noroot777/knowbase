@@ -369,37 +369,59 @@ async function careRelink(row) {
    **按来源分组后才发请求**:每一类来源的执行射程不一样。立即执行那一颗在混选
    时已经被禁掉(diag_list.js),放回/搁置这几颗逐类发一次就行。 */
 
+/** 一个写请求最多带几条:服务端 `MAX_KEYS`,随概览给过来。缺省值只给还没重启的
+    旧进程兜底(它的概览里没有这一项,而它的上限就是这个数)。 */
+function careBatchMax() { return CARE.overview?.batch_max || 500; }
+
+function careChunks(list) {
+  const size = careBatchMax();
+  const out = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
+/** 此刻勾着的那几条,按来源分组。**拿走的是勾选那一刻的记录本身**(`carePick` 每勾
+    一次就新建一份,之后不再改),不是 key:分批之间要 await,人可能在等待时清除
+    选择、换分组或重新勾 —— 后面几批的身份(`life` / `decision`)要是回头去
+    `CARE.picked` 现查,查不到就缺省成空,而服务端对空 `life` 是放行的(兼容旧
+    页面),这一下就落到同一链接后来重新收进来的那一条上。 */
 function carePickedByKind() {
   const groups = new Map();
   for (const one of CARE.picked.values()) {
     if (!groups.has(one.kind)) groups.set(one.kind, []);
-    groups.get(one.kind).push(one.key);
+    groups.get(one.kind).push(one);
   }
   return groups;
 }
 
-/** 勾着的这几条各在第几世(`{key: life}`),随每个写请求发回去。
+const careKeysOf = entries => entries.map(one => one.key);
+
+/** 这几条各在第几世(`{key: life}`),随每个写请求发回去。
 
     服务端把它 AND 进写语句自己的 WHERE —— 它防的不是并发写入方(那一侧在服务端
     现取),而是**这一屏停留期间**那条内容被清理删掉又从同一个链接收回来:key 一个
     字都没变,而人的决定说的是另一条(口径在 `kb/intake_diag/warrant.py`)。 */
-function careLivesOf(keys) {
+function careLivesOf(entries) {
   const out = {};
-  for (const key of keys) {
-    const life = CARE.picked.get(key)?.life || '';
-    if (life) out[key] = life;
-  }
+  for (const one of entries) if (one.life) out[one.key] = one.life;
   return out;
 }
 
 function careRunPicked() {
   const groups = carePickedByKind();
   if (groups.size !== 1) return;
-  const [[kind, keys]] = [...groups];
+  const [[kind, entries]] = [...groups];
+  const keys = careKeysOf(entries);
+  // **立即执行不分批**:管道一次只跑一轮,拆成两次起跑第二次当场 409。
+  // 超过上限时批量栏上这颗本来就是禁用的(diag_list.js)。
+  if (keys.length > careBatchMax()) return;
   careRun(kind, keys);
 }
 
-/** 逐类来源发请求,**只把成功那几类的勾选去掉**。
+/** 逐类来源、每类按上限分批**依次**发请求,**只把成功那几批的勾选去掉**。
+
+    放回 / 搁置 / 恢复都是逐条独立的写,拆批不改语义;一批失败就停下这一类后面
+    的批(多半是同一个原因),那几条照旧勾着。
 
     上一版不管成败一律 `CARE.picked.clear()`,而填原因那个弹窗的 submit 又无条件
     返回 true 关掉自己 —— 一类超时或 500 时,失败那几条的勾选和人刚写的那段原因
@@ -409,14 +431,23 @@ async function careEachKind(path, label, build) {
   let touched = 0;
   const notes = [];
   const failed = [];
-  for (const [kind, keys] of carePickedByKind()) {
-    try {
-      const done = await carePost(path, build(kind, keys));
-      touched += done.requeued ?? done.shelved ?? done.released ?? 0;
-      if (done.detail) notes.push(done.detail);
-      for (const key of keys) CARE.picked.delete(key);
-    } catch (e) {
-      failed.push(e.message);
+  // **第一次 await 之前就冻结整份操作**:每一批都从这份快照取 key 和身份。
+  const plan = carePickedByKind();
+  for (const [kind, all] of plan) {
+    for (const chunk of careChunks(all)) {
+      try {
+        const done = await carePost(path, build(kind, chunk));
+        touched += done.requeued ?? done.shelved ?? done.released ?? 0;
+        if (done.detail) notes.push(done.detail);
+        // 只去掉**还是这一次勾选**的那几条:等待期间人清掉又重新勾上的同一个 key
+        // 是一次新的选择,不归这一下管。
+        for (const one of chunk) {
+          if (CARE.picked.get(one.key) === one) CARE.picked.delete(one.key);
+        }
+      } catch (e) {
+        failed.push(e.message);
+        break;
+      }
     }
   }
   if (failed.length) {
@@ -437,7 +468,7 @@ async function careRequeuePicked() {
     ok: '放回队列', cancel: '取消', wide: true });
   if (!ok) return;
   await careEachKind('/requeue', '放回队列',
-    (kind, keys) => ({ kind, keys, lives: careLivesOf(keys) }));
+    (kind, chunk) => ({ kind, keys: careKeysOf(chunk), lives: careLivesOf(chunk) }));
 }
 
 async function careShelfPicked(decision) {
@@ -451,14 +482,14 @@ async function careShelfPicked(decision) {
     ok: exclude ? '不再收录' : '暂缓', danger: exclude,
     // 返回假值 = 弹窗留在原地(人刚写的那段原因还在),理由见 `careEachKind`。
     submit: vals => careEachKind('/shelf', exclude ? '不再收录' : '暂缓',
-      (kind, keys) => ({ kind, keys, decision, reason: vals.reason.trim(),
-        lives: careLivesOf(keys) })) });
+      (kind, chunk) => ({ kind, keys: careKeysOf(chunk), decision, reason: vals.reason.trim(),
+        lives: careLivesOf(chunk) })) });
 }
 
 async function careReleasePicked() {
-  const ids = new Map([...CARE.picked.values()].map(one => [one.key, one.decision || '']));
   await careEachKind('/shelf/release', '恢复',
-    (kind, keys) => ({ kind, keys, decisions: keys.map(key => ids.get(key) || '') }));
+    (kind, chunk) => ({ kind, keys: careKeysOf(chunk),
+      decisions: chunk.map(one => one.decision || '') }));
 }
 
 /* ── 处理记录 ─────────────────────────────────────────────────────────────
