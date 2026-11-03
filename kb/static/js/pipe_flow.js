@@ -21,9 +21,10 @@ const PIPE_FLOW_SKIP_WHY = {
 const PIPE_FLOW_SQUARE = '<svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><rect x="2" y="2" width="6" height="6" rx="1" fill="currentColor"/></svg>';
 const PIPE_FLOW_DASH = '<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 6h6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
 
-// 展开的是哪一类(空串 = 一行都没展开)。`pinned` = 人点过(之后不再按默认挑);`view`
-// 记的是「这张卡讲的是哪一轮」,换了一轮就回到默认选择。画那几行在 `pipe_flow_rows.js`。
-let pipeFlowSel = '', pipeFlowPinned = false, pipeFlowViewKey = null, pipeFlowModelNow = null;
+// 展开的是哪一类(空串 = 一行都没展开)。只有人点才会展开,默认一行都不展开 —— 出问题的
+// 那几类行上已经是红的、带着条数,不必替人点开。`view` 记的是「这张卡讲的是哪一轮」,换了
+// 一轮就全收起。画那几行在 `pipe_flow_rows.js`。
+let pipeFlowSel = '', pipeFlowViewKey = null, pipeFlowModelNow = null;
 
 /** 这一类此刻在跑。来源那几类是同时跑的,各自记在 `lanes` 里(手上那一步做完、导出排在
  *  全库那几步之后的那一路记成空串,照样算在跑);全库那几组一次只跑一组,记在 `running`。
@@ -234,21 +235,13 @@ function pipeFlowDot(node, i) {
   return String(i + 1);
 }
 
-/** 默认展开哪一行:还在跑的那一轮一行都不展开(几路同时在跑,展开哪一路都是替人挑);
- *  收了尾的那一轮展开第一个出问题的那一类 —— 来看留档多半就是来看它。 */
-function pipeFlowDefault(model) {
-  if (model.live) return '';
-  const pick = fn => model.nodes.find(fn)?.key;
-  return pick(n => n.state.issues) || pick(n => ['unknown', 'cut'].includes(n.state.state)) || '';
-}
-
 /** 「看第一个」那颗按钮:把选中挪到这一步所在的那一类(问题最先出现的那一类)。 */
 function pipeFlowSelectStage(stage) {
   const model = pipeFlowModelNow;
   const hit = model?.nodes.find(n => n.steps.includes(stage) && n.state.issues)
     || model?.nodes.find(n => n.steps.includes(stage));
   if (!hit) return;
-  pipeFlowSel = hit.key; pipeFlowPinned = true;
+  pipeFlowSel = hit.key;
   renderPipeState(pipeSnapshot || { running: false });
 }
 

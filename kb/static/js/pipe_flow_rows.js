@@ -130,8 +130,8 @@ function renderPipeFlow(s, viewing) {
   // 「这张卡讲的是哪一轮」要带上那一轮的身份:只写 live 的话,上一轮手点展开的那一类
   // 会一直钉到下一轮
   const viewKey = viewing ? 'v:' + viewing.key : 'live:' + (model.plan?.owner || s.run_id || '');
-  if (viewKey !== pipeFlowViewKey) { pipeFlowViewKey = viewKey; pipeFlowPinned = false; }
-  if (!pipeFlowPinned || (pipeFlowSel && !model.nodes.some(n => n.key === pipeFlowSel))) pipeFlowSel = pipeFlowDefault(model);
+  if (viewKey !== pipeFlowViewKey) { pipeFlowViewKey = viewKey; pipeFlowSel = ''; }
+  if (pipeFlowSel && !model.nodes.some(n => n.key === pipeFlowSel)) pipeFlowSel = '';
   $('pipe-flow').hidden = !model.nodes.length;
   const node = model.nodes.find(n => n.key === pipeFlowSel);
   renderPipeFlowRows(model);
@@ -230,7 +230,7 @@ async function pipeFlowAct(action, key) {
 }
 
 function pipeFlowToggle(key) {
-  pipeFlowSel = pipeFlowSel === key ? '' : key; pipeFlowPinned = true;
+  pipeFlowSel = pipeFlowSel === key ? '' : key;
   renderPipeState(pipeSnapshot || { running: false });
 }
 

@@ -162,7 +162,7 @@ function pipeMatrixPick(e, row) {
 }
 
 function pipeMatrixSelect(node) {
-  pipeFlowSel = node; pipeFlowPinned = true;
+  pipeFlowSel = node;
   renderPipeState(pipeSnapshot || { running: false });
   const card = $('pipe-overview');
   if (card && card.getBoundingClientRect().top < 0) card.scrollIntoView({ block: 'start' });
