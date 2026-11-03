@@ -91,9 +91,16 @@
 .pipe-log-summary h2 { font-size: 16px; font-weight: 650; }
 .pipe-log-summary > span { font-size: 12px; color: var(--muted); }
 .pipe-log-hint { margin-left: auto; }
-.pipe-log-head { padding: 11px 20px 0; font-size: 12px; color: var(--muted); }
+.pipe-log-head { padding: 11px 20px 0; font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.pipe-log-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.pipe-log-filters button { font-size: 12px; line-height: 1.4; min-height: 0; height: auto; color: var(--ink-2); background: none; border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-weight: 400; }
+.pipe-log-filters button[aria-pressed="true"] { background: var(--ink); border-color: var(--ink); color: var(--card); }
 #pipe-log-box { height: 360px; overflow: auto; margin: 11px 0 0; padding: 18px; background: var(--ink); color: var(--paper); overscroll-behavior: contain; scroll-behavior: auto; }
-#pipe-log { font: 12px/1.9 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+#pipe-log { font: 12px/1.9 var(--font-mono); overflow-wrap: anywhere; }
+/* 一行:时间 | 谁说的(来源名;全库那几步空着)| 正文 */
+#pipe-log > div { display: grid; grid-template-columns: 62px 72px minmax(0, 1fr); gap: 10px; white-space: pre-wrap; }
+#pipe-log > div.empty { display: block; }
+#pipe-log .who { font-family: var(--font-body); opacity: .6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pipe-log-footer { padding: 11px 16px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); }
 .pipe-log-footer > :last-child { margin-left: auto; }
 /* 历史运行那张表(一行一轮、一列一类)和概况卡里那条类型线的样式在 pipe_flow.css。 */

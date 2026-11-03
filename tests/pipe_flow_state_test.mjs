@@ -4,9 +4,10 @@
 //   · 生命周期盖住失败 → 跳过余下几步把已经发生的红抹掉,四处一致念「本次跳过」;
 //   · 失败冒充生命周期 → 还没轮到的一类因为并行那一步红了就念「已完成」,「本次跳过」
 //     那颗按钮当场消失,后面那一类也不再把它算成前面要跑的。
-// 这一份 state 被四处共用(轨道点与副标题、详情头那枚标签、历史表那一格、「连着几轮卡在
-// 同一处」那个归约),所以这份回归一次把四个消费方都问一遍,并且反过来钉一边:没有失败
-// 的跳过照旧念「本次跳过」。
+// 这一份 state 被四处共用(那一行此刻那句话与行上那颗按钮、展开之后那一行说明、历史表那
+// 一格、「连着几轮卡在同一处」那个归约),所以这份回归一次把四个消费方都问一遍,并且反过来
+// 钉一边:没有失败的跳过照旧念「本次跳过」。来源同时跑之后多出来的那几件(门在等谁、没等的
+// 那一路、`lanes` 里的那几类算在跑)在文件末尾。
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
@@ -40,7 +41,7 @@ function rig() {
     renderPipeState() {}, renderPipeButtons() {}, toast() {}, confirmBox: async () => false });
   // 两份脚本必须同一次 runInContext:顶层 const/let 只活在那一次调用的词法作用域里。
   // `__cols` 是这份回归的桥 —— `pipeMatrixColsNow` 是 let,外头赋不进去。
-  vm.runInContext([borrowed, read('pipe_flow.js'), read('pipe_matrix.js'),
+  vm.runInContext([borrowed, read('pipe_flow.js'), read('pipe_flow_rows.js'), read('pipe_matrix.js'),
     'function __cols(v) { pipeMatrixColsNow = v; }'].join('\n'), ctx);
   return { ctx, element };
 }
@@ -89,10 +90,8 @@ test('跳过余下几步,盖不住已经发生的失败', () => {
   ctx.__cols(COLS);
   assert.equal(ctx.pipeMatrixTip(model, node), '1 步有问题 · 其余跳过');
   assert.match(ctx.pipeMatrixCells(model), /data-s="skip" data-issues/);
-  ctx.renderPipeFlowHead(model, node);
-  const head = element('pipe-flow-dhead').innerHTML;
-  assert.match(head, /pipe-flow-tag err/);
-  assert.match(head, /1 步有问题 · 其余本次跳过/);
+  assert.equal(ctx.pipeFlowSay(model, node), '1 步有问题 · 其余跳过');
+  assert.match(ctx.pipeFlowHead(model, node).html, /已经发生的结果照实留着/);
 });
 
 test('没有失败的跳过照旧念「本次跳过」', () => {
@@ -105,8 +104,8 @@ test('没有失败的跳过照旧念「本次跳过」', () => {
   assert.equal(ctx.pipeFlowSub(model, node), '本次跳过');
   ctx.__cols(COLS);
   assert.equal(ctx.pipeMatrixTip(model, node), '本次跳过');
-  ctx.renderPipeFlowHead(model, node);
-  assert.match(element('pipe-flow-dhead').innerHTML, /pipe-flow-tag mut">本次跳过/);
+  assert.equal(ctx.pipeFlowSay(model, node), '本次跳过');
+  assert.match(ctx.pipeFlowHead(model, node).html, /这一轮按你的选择跳过了/);
 });
 
 test('跳过之后还没轮到它:红照说,「恢复执行」照旧给', () => {
@@ -114,10 +113,8 @@ test('跳过之后还没轮到它:红照说,「恢复执行」照旧给', () => 
   const model = ctx.pipeFlowModel(live({ skips: ['ingest'] }), null);
   const node = nodeOf(model, 'ingest');
   assert.deepEqual({ state: node.state.state, issues: node.state.issues }, { state: 'skip', issues: 1 });
-  ctx.renderPipeFlowHead(model, node);
-  const head = element('pipe-flow-dhead').innerHTML;
-  assert.match(head, /1 步有问题 · 其余本次跳过/);
-  assert.match(head, /data-flow="unskip"/);
+  assert.equal(ctx.pipeFlowSay(model, node), '1 步有问题 · 其余跳过');
+  assert.match(ctx.pipeFlowRowAct(model, node), /data-flow="unskip"/);
 });
 
 test('没跳过、还没轮到它:红不许冒充「已完成」,跳过那颗按钮照旧在', () => {
@@ -127,16 +124,11 @@ test('没跳过、还没轮到它:红不许冒充「已完成」,跳过那颗按
   // 它仍在计划里、仍要执行:生命周期是「等待」,红只是跟着的那一枚
   assert.deepEqual({ state: node.state.state, issues: node.state.issues }, { state: 'wait', issues: 1 });
   assert.equal(ctx.pipeFlowSub(model, node), '1 步有问题 · 等待');
-  ctx.renderPipeFlowHead(model, node);
-  const head = element('pipe-flow-dhead').innerHTML;
-  assert.match(head, /1 步有问题 · 等待/);
-  assert.doesNotMatch(head, /已完成/);
-  assert.match(head, /data-flow="skip"/);
-  // 后面那一类还排在它后面,正在跑的那一类也要说「结束 RSS，开始入库处理」
-  ctx.renderPipeFlowHead(model, nodeOf(model, 'daily'));
-  assert.match(element('pipe-flow-dhead').innerHTML, /排在 入库处理 后面/);
-  ctx.renderPipeFlowHead(model, nodeOf(model, 'src:rss'));
-  assert.match(element('pipe-flow-dhead').innerHTML, /结束RSS，开始入库处理/);
+  assert.equal(ctx.pipeFlowSay(model, node), '1 步有问题 · 等待');
+  assert.match(ctx.pipeFlowRowAct(model, node), /data-flow="skip"/);
+  // 后面那一类还排在它后面;正在跑的那一类行上给「结束本类型」
+  assert.match(ctx.pipeFlowHead(model, nodeOf(model, 'daily')).html, /排在 入库处理 后面/);
+  assert.match(ctx.pipeFlowRowAct(model, nodeOf(model, 'src:rss')), /data-flow="cut"[^>]*>结束本类型/);
 });
 
 test('连着几轮红在同一处,跳过了余下几步也照样数得上', () => {
@@ -158,3 +150,57 @@ test('中间一轮好好跑完:连续失败在那里断开', () => {
   ctx.__cols(COLS);
   assert.deepEqual(ctx.pipeMatrixRepeats(rows), []);
 });
+
+// ── 来源同时跑 ──────────────────────────────────────────────────────────────
+const YT = { key: 'src:yt', kind: 'src', channel: 'yt', label: 'YouTube', steps: ['crawl', 'export'] };
+const OK = { status: 'ok', detail: '好了' };
+
+/** 两路同时跑:RSS 跑完了,YouTube 还在抓;门停在入库处理前面等它。 */
+function lanes(extra = {}) {
+  return { running: true, run_id: 'r-lane', planned_stages: ['crawl', 'export', 'index', 'extract'],
+    scopes: [{ channel: 'rss' }, { channel: 'yt' }],
+    results: { crawl: { rss: OK, yt: { status: 'running', detail: '频道 3/48' } }, export: { rss: OK } },
+    stages: { crawl: { status: 'running' }, export: { status: 'running' }, index: { status: 'pending' }, extract: { status: 'pending' } },
+    flow_live: { owner: 'r-lane', kind: 'sync', nodes: [SRC, YT, INGEST], running: '', step: '',
+      lanes: { 'src:yt': 'crawl' }, gate: 'wait', gate_at: '', late: [], skips: [], done: ['src:rss'], cuts: {}, results: {},
+      times: { 'src:rss': SPAN, 'src:yt': { started_at: '2026-10-28 09:00:00', finished_at: null } }, ...extra } };
+}
+
+test('lanes 里的那几类算在跑,手上那一步照它念', () => {
+  const { ctx } = rig();
+  const model = ctx.pipeFlowModel(lanes(), null);
+  const yt = nodeOf(model, 'src:yt');
+  assert.equal(yt.state.state, 'run');
+  assert.equal(ctx.pipeFlowSay(model, yt), '抓取内容 · 频道 3/48');
+  assert.match(ctx.pipeFlowRowAct(model, yt), /data-flow="cut"/);
+  // 反过来:跑完的那一路照旧是完成,不因为别的来源还在跑就念成在跑
+  assert.equal(nodeOf(model, 'src:rss').state.state, 'done');
+});
+
+test('门在等:入库处理那一行写在等谁,行上是「不等了」,跳过挪进展开那一块', () => {
+  const { ctx } = rig();
+  const model = ctx.pipeFlowModel(lanes(), null);
+  const ingest = nodeOf(model, 'ingest');
+  assert.equal(ctx.pipeFlowSay(model, ingest), '等 YouTube 跑完');
+  assert.match(ctx.pipeFlowRowAct(model, ingest), /data-flow="go"[^>]*>不等了，继续/);
+  assert.match(ctx.pipeFlowHead(model, ingest).html, /data-flow="skip"/);
+  // 反过来钉一边:门没在等(这一轮还没到那儿)时,行上照旧是「本次跳过」
+  const before = ctx.pipeFlowModel(lanes({ gate: '' }), null);
+  assert.match(ctx.pipeFlowRowAct(before, nodeOf(before, 'ingest')), /data-flow="skip"/);
+  assert.doesNotMatch(ctx.pipeFlowRowAct(before, nodeOf(before, 'ingest')), /data-flow="go"/);
+});
+
+test('没等的那一路:念「本轮不等」,抓完之后不再给「结束本类型」', () => {
+  const { ctx } = rig();
+  const model = ctx.pipeFlowModel(lanes({ gate: 'go', late: ['src:yt'], lanes: { 'src:yt': '' },
+    running: 'ingest', step: 'index', times: { 'src:rss': SPAN, 'src:yt': { started_at: '2026-10-28 09:00:00', finished_at: null },
+      ingest: { started_at: '2026-10-28 09:20:00', finished_at: null } } }), null);
+  const yt = nodeOf(model, 'src:yt');
+  assert.equal(yt.state.state, 'run', '还在后台跑的那一路不许念成跑完了');
+  assert.equal(ctx.pipeFlowSay(model, yt), '抓取做完了，导出排在入库处理之后');
+  assert.match(ctx.pipeFlowRowHtml(model, yt, null), /本轮不等 · /);
+  assert.equal(ctx.pipeFlowRowAct(model, yt), '');
+  // 入库处理已经开跑,不再是门在等的那一行
+  assert.doesNotMatch(ctx.pipeFlowRowAct(model, nodeOf(model, 'ingest')), /data-flow="go"/);
+});
+
