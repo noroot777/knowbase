@@ -54,6 +54,11 @@ def summary():
             'succeeded_ids': [], 'discovered': 0, 'ranked': 0, 'processed': 0, 'walls': {}}
 
 
+def degraded(row):
+    return bool(row and row['note'] and
+                json.loads(row['note']).get('body_provenance', '').endswith('-fallback'))
+
+
 def process(budget, max_attempts):
     manifest, dates = load('manifest.json'), load('dates.json')
     results = load('processing.json') if (AUDIT / 'processing.json').exists() else {}
@@ -64,8 +69,9 @@ def process(budget, max_attempts):
     scope = FetchScope(since=manifest['lower'][:10], until=manifest['upper'][:10], force=True)
     deadline = time.monotonic() + budget
     queue = sorted(target_ids, key=lambda video_id: (-frozen[video_id]['score'], video_id))
+    notice = ''
     with throttle.opened():
-        while queue and time.monotonic() < deadline and not throttle.notice():
+        while queue and deadline - time.monotonic() >= 30 and not throttle.notice():
             selected, queue = queue[:policy['max_videos']], queue[policy['max_videos']:]
             work = []
             for video_id in selected:
@@ -75,7 +81,10 @@ def process(budget, max_attempts):
                 row, formal = status(video_id)
                 if row and row['state'] == 'ready' and products.valid(row):
                     publish(video_id)
-                    results[video_id] = {**previous, 'complete': True, 'deduplicated': bool(formal),
+                    fallback = degraded(row)
+                    results[video_id] = {**previous, 'complete': not fallback, 'terminal': fallback,
+                                         'translation_degraded': fallback, 'deduplicated': bool(formal),
+                                         'error': 'Published explicit translation fallback; full Chinese content unresolved' if fallback else '',
                                          'attempts': previous.get('attempts', 0)}
                     save('processing.json', results)
                     continue
@@ -124,13 +133,22 @@ def process(budget, max_attempts):
                     complete = bool(current and current['state'] == 'ready' and products.valid(current))
                     if complete:
                         publish(video_id)
+                    fallback = complete and degraded(current)
+                    deferred = bool(current and current['state'] == 'deferred' and
+                                    ('本轮数量预算' in current['reason'] or
+                                     '本轮累计视频时长预算' in current['reason'] or
+                                     '时间预算用尽' in current['reason']))
                     terminal = bool(current and current['gate_code'] in
-                                    ('duration_budget', 'replay', 'shorts', 'upcoming', 'live'))
-                    results[video_id] = {'complete': complete, 'terminal': terminal,
-                                         'attempts': previous.get('attempts', 0) + 1,
+                                    ('duration_budget', 'replay', 'shorts')) or fallback
+                    error = ('Published explicit translation fallback; full Chinese content unresolved' if fallback else
+                             '' if complete else current['reason'] if deferred else
+                             (current['last_error'] or current['reason']) if current else 'missing')
+                    results[video_id] = {'complete': complete and not fallback, 'terminal': terminal,
+                                         'translation_degraded': fallback, 'scheduling_deferred': deferred,
+                                         'attempts': previous.get('attempts', 0) + (0 if deferred else 1),
                                          'state': current['state'] if current else 'missing',
                                          'gate_code': current['gate_code'] if current else '',
-                                         'error': '' if complete else (current['last_error'] or current['reason']) if current else 'missing',
+                                         'error': error,
                                          'retry_at': current['retry_at'] if current else 0,
                                          'checked_at': datetime.now(timezone.utc).isoformat()}
                 save('processing.json', results)
@@ -143,9 +161,12 @@ def process(budget, max_attempts):
             deliver()
             if queue:
                 time.sleep(1)
+        notice = throttle.notice()
     save('processing-status.json', {'known_recent': len(target_ids),
                                    'complete': sum(bool(item.get('complete')) for item in results.values()),
-                                   'remaining_unvisited': len(queue), 'throttle': throttle.notice()})
+                                   'remaining_unvisited': len(target_ids - results.keys()),
+                                   'unresolved': len(target_ids) - sum(bool(item.get('complete')) for item in results.values()),
+                                   'throttle': notice})
     print('PROCESS_DONE ' + json.dumps(load('processing-status.json')), flush=True)
 
 
@@ -221,11 +242,12 @@ def reconcile():
                 assert not current.execute('SELECT 1 FROM youtube_videos WHERE video_id=?', (video_id,)).fetchone()
                 assert not current.execute('SELECT 1 FROM youtube_video_sources WHERE video_id=?', (video_id,)).fetchone()
                 outcome = 'deleted_old'
-            elif certified and item and item['path'] and item['exported_hash'] == item['content_hash'] and index_results.get(url, {}).get('fts_found'):
+            elif certified and not degraded(candidate) and item and item['path'] and item['exported_hash'] == item['content_hash'] and index_results.get(url, {}).get('fts_found'):
                 outcome = 'already_formal' if url in before else 'new_formal'
             else:
                 outcome = 'unresolved'
             outcomes[video_id] = {'outcome': outcome, 'url': url, 'title': row['entry']['title'],
+                                  'formal_present': bool(item), 'translation_degraded': degraded(candidate) if certified else False,
                                   'date': fact, 'processing': processing.get(video_id, {}),
                                   'cleanup': cleanup.get(video_id, {})}
         for url, original in before.items():
@@ -236,6 +258,7 @@ def reconcile():
     report = {'lower': manifest['lower'], 'upper': manifest['upper'], 'total': manifest['count'],
               'counts': counts, 'date_counts': dict(Counter(item.get('classification', 'unvisited') for item in dates.values())),
               'unknown_dates': sum(not item['date'] or item['date'].get('classification') == 'unknown' for item in outcomes.values()),
+              'published_translation_fallbacks': sum(item['translation_degraded'] and item['formal_present'] for item in outcomes.values()),
               'formal_youtube_total': len(formal), 'protected_formal_before': len(before), 'outcomes': outcomes}
     save('reconciliation.json', report)
     print('RECONCILE ' + json.dumps({key: value for key, value in report.items() if key != 'outcomes'}, ensure_ascii=False), flush=True)
