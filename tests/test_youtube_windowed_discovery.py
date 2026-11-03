@@ -230,7 +230,8 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         self.assertEqual(['00000000002', '00000000003'], [entry['video_id'] for entry in accepted])
         arguments = self.calls[0]['arguments']
         self.assertNotIn('--break-match-filters', arguments)
-        self.assertNotIn('--playlist-end', arguments)
+        self.assertEqual('10', arguments[arguments.index('--playlist-end') + 1])
+        self.assertIn('--lazy-playlist', arguments)
         self.assertIn('--no-quiet', arguments)
         self.assertIn('--flat-playlist', arguments)
         self.assertIn('youtubetab:approximate_date', arguments)
@@ -239,18 +240,17 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         self.assertTrue(self.calls[0]['options']['playlist'])
         self.assertTrue(self.calls[0]['options']['partial'])
 
-    def test_known_id_archive_is_source_scoped_temporary_and_does_not_drop_old_queue(self):
+    def test_known_ids_do_not_hide_listing_boundaries_or_drop_old_queue(self):
         entry = self.entry(hours=96)
         storage.discover(self.source, [entry])
         other = self.channel(2)
         storage.discover(other, [self.entry(2)])
         prepared = sync_window.prepare(self.source, self.scope, self.now)
         with throttle.opened(), patch.object(media, 'ytdlp', side_effect=self.transport(
-                diagnostic=f'[download] {entry["video_id"]} has already been recorded in the archive')):
+                diagnostic='[download] Finished downloading playlist: fixture')):
             listed = self.fetch(prepared)
         self.assertEqual([], listed)
-        self.assertEqual(f'youtube {entry["video_id"]}\n', self.calls[0]['known'])
-        self.assertFalse(self.calls[0]['archive'].exists())
+        self.assertNotIn('--download-archive', self.calls[0]['arguments'])
         ranked = ranking.score(storage.rows([self.source['id']]), self.settings()['youtube'], self.scope)
         self.assertEqual([entry['video_id']], [row['video_id'] for row in ranked])
 
@@ -281,7 +281,7 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
                    {'id': '00000000994', 'timestamp': 'unreadable'}]
         archive = '[download] known has already been recorded in the archive'
         finished = '[download] Finished downloading playlist: fixture'
-        for diagnostic, returncode in ((archive, 0), (finished, 0), (finished, 1), (archive + '\n' + finished, 1)):
+        for diagnostic, returncode in ((finished, 0), (finished, 1), (archive + '\n' + finished, 1)):
             for usable in ([], [self.payload(1, self.now)]):
                 evidence = []
                 with self.subTest(diagnostic=diagnostic, code=returncode, usable=bool(usable)), throttle.opened(), \
@@ -474,19 +474,20 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         self.assertIn('中断', evidence[0])
         self.assertFalse(list((self.root / 'youtube/channels').glob('*.jsonl.*')))
 
-    def test_archive_is_cleaned_when_listing_fails(self):
+    def test_listing_failure_does_not_create_a_boundary_hiding_archive(self):
         storage.discover(self.source, [self.entry()])
         prepared = sync_window.prepare(self.source, self.scope, self.now)
         with throttle.opened(), patch.object(media, 'ytdlp', side_effect=self.transport(diagnostic='ERROR: unavailable')):
             with self.assertRaises(Exception):
                 self.fetch(prepared)
-        self.assertFalse(self.calls[0]['archive'].exists())
+        self.assertIsNone(self.calls[0]['archive'])
+        self.assertFalse(list((self.root / 'youtube/channels').glob('*.archive*')))
 
-    def test_local_archive_failure_is_not_reclassified_as_channel_failure(self):
+    def test_local_listing_preparation_failure_is_not_reclassified_as_channel_failure(self):
         storage.discover(self.source, [self.entry()])
         failure = OSError(errno.ENOSPC, '测试磁盘已满')
         with patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
-                patch.object(Path, 'write_text', side_effect=failure), patch.object(media, 'ytdlp') as invoked:
+                patch.object(media, 'ytdlp', side_effect=failure), patch.object(media, 'run') as invoked:
             result = collector.collect(self.scope)
         invoked.assert_not_called()
         self.assertIn('测试磁盘已满', result['local_error'])
@@ -497,10 +498,9 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
     def test_real_collector_route_records_only_in_window_new_candidates_and_reuses_known_ids(self):
         old = self.payload(1, self.floor - timedelta(days=2))
         fresh = self.payload(2, self.now)
-        first = self.transport([fresh, old])
-        repeated = self.transport(diagnostic='[download] 00000000002 has already been recorded in the archive\n'
-                                  '[download] 00000000001 has already been recorded in the archive\n'
-                                  '[download] Finished downloading playlist: fixture')
+        first = self.transport([fresh, old], diagnostic='[download] Finished downloading playlist: fixture')
+        repeated = self.transport([{**fresh, '_type': 'url'}, {**old, '_type': 'url'}],
+                                  diagnostic='[download] Finished downloading playlist: fixture')
         call_count = 0
 
         def boundary(*arguments, **options):
@@ -517,7 +517,7 @@ class YouTubeWindowedDiscovery(YouTubeFixture):
         self.assertEqual(1, result['outside_initial_window'])
         self.assertEqual(0, again['discovered'])
         self.assertEqual(1, again['ranked'])
-        self.assertEqual('youtube 00000000001\nyoutube 00000000002\n', self.calls[-1]['known'])
+        self.assertNotIn('--download-archive', self.calls[-1]['arguments'])
         self.assertEqual(['00000000002'], [row['video_id'] for row in storage.rows()])
         with reg.db() as connection:
             self.assertEqual(['00000000001'], [row['video_id'] for row in connection.execute(

@@ -1,8 +1,9 @@
 import json
 import re
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import datetime, timezone
 
-from kb.youtube import login, media
+from kb.youtube import discovery_pages, login, media
 from kb.youtube.settings import of
 from kb.youtube.ranking import stamp
 
@@ -11,7 +12,7 @@ def lightweight(output, source):
     from kb.youtube.discovery import local_identity
     entries = []
     floor = stamp(source.get('discovery_after'))
-    known = set(source.get('known_video_ids', ()))
+    known = set(source.get('known_video_ids', ())) | set(source.get('checked_old_ids', ()))
     now = datetime.now(timezone.utc)
     for line in output.read_text(encoding='utf-8', errors='replace').splitlines():
         if not line.startswith('{'):
@@ -25,11 +26,8 @@ def lightweight(output, source):
         video_id = str(payload.get('id') or '')
         if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id) or video_id in known:
             continue
-        try:
-            hint = datetime.fromtimestamp(payload['timestamp'], timezone.utc)
-        except (KeyError, TypeError, ValueError, OverflowError, OSError):
-            hint = None
-        if hint is not None and floor is not None and hint + timedelta(days=2) < floor:
+        hint = discovery_pages.timestamp(payload)
+        if hint is not None and floor is not None and hint + discovery_pages.DATE_MARGIN < floor:
             continue
         entries.append({'video_id': video_id, 'channel_id': str(payload.get('channel_id') or ''),
                         'url': 'https://www.youtube.com/watch?v=' + video_id,
@@ -124,32 +122,61 @@ def parsed(output, url, undated=None, source=None):
 
 def fetch(source, settings, deadline, notes=None):
     output = media.DATA_DIR / 'youtube' / 'channels' / f"window-{int(source['id'])}.jsonl"
-    archive = None
-    evidence, blocking = [], ''
+    evidence, entries, page = [], {}, {}
+    floor = stamp(source.get('discovery_after'))
     arguments = ['--flat-playlist', '--extractor-args', 'youtubetab:approximate_date',
-                 '--skip-download', '--dump-json', '--no-quiet']
+                 '--lazy-playlist', '--skip-download', '--dump-json', '--no-quiet']
+    limit = discovery_pages.FIRST_BATCH
+    source['discovery_pages'] = []
+    source['discovery_stop'] = 'partial'
+    source['discovery_unavailable'] = []
 
     def collect(output, url):
-        nonlocal blocking
-        noise = diagnostics(output.read_text(encoding='utf-8', errors='replace'))
-        source['discovery_unavailable'] = unavailable(noise)
-        if blocked(noise):
-            blocking = noise
-        return parsed(output, url, source['discovery_unavailable'], source)
+        text = output.read_text(encoding='utf-8', errors='replace')
+        noise = diagnostics(text)
+        missing = unavailable(noise)
+        page.update(discovery_pages.inspect(text, floor, limit))
+        page['blocked'] = noise if blocked(noise) else ''
+        page['stop_reason'] = stop_reason(noise)
+        found = parsed(output, url, missing, source)
+        source['discovery_unavailable'].extend(item for item in missing if item not in source['discovery_unavailable'])
+        return found
 
-    try:
-        if known := sorted(set(source.get('known_video_ids', ())) | set(source.get('checked_old_ids', ()))):
-            archive = media.unique(output.with_suffix('.archive'))
-            archive.write_text(''.join(f'youtube {video_id}\n' for video_id in known), encoding='utf-8')
-            arguments.extend(['--download-archive', str(archive)])
-        arguments.append(media._channel_url(source))
-        entries = media._collect_listing(arguments, output, of(settings)['cookies_browser'], deadline,
-                                         lambda: False, collect, media._channel_url(source), evidence, completed=completed)
-        if blocking and not evidence:
-            evidence.append('列表含未确认的错误，不能确认完整覆盖：' + blocking)
-        if notes is not None:
-            notes.extend(evidence)
-        return entries
-    finally:
-        if archive is not None:
-            media.heed(archive)
+    while time.monotonic() < deadline:
+        page.clear()
+        evidence.clear()
+        try:
+            found = media._collect_listing(
+                [*arguments, '--playlist-end', str(limit), media._channel_url(source)], output,
+                of(settings)['cookies_browser'], deadline, lambda: False, collect,
+                media._channel_url(source), evidence, completed=completed)
+        except Exception as error:
+            from kb.youtube.faults import local_fault
+            if not entries or local_fault(error):
+                raise
+            evidence.append('近期列表扩展中断，未确认窗口覆盖：' + str(error))
+            break
+        entries.update((entry['video_id'], entry) for entry in found)
+        source['discovery_pages'].append({'limit': limit, 'observed': page['observed']})
+        if page['blocked'] and not evidence:
+            evidence.append('列表含未确认的错误，不能确认完整覆盖：' + page['blocked'])
+        if evidence:
+            break
+        if page['boundary'] or page['stop_reason'] == 'window':
+            source['discovery_stop'] = 'window'
+            break
+        if page['exhausted']:
+            source['discovery_stop'] = 'exhausted'
+            break
+        if page['unknown_tail']:
+            evidence.append('近期列表缺少可靠的粗日期，未确认窗口覆盖；已停止扩展，未扫描全部历史')
+            break
+        if page['observed'] < limit:
+            evidence.append('近期列表未给出完成凭据，未确认窗口覆盖')
+            break
+        limit *= 2
+    else:
+        evidence.append('频道时间预算已到，未确认近期窗口覆盖')
+    if notes is not None:
+        notes.extend(evidence)
+    return list(entries.values())
