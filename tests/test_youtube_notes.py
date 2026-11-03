@@ -378,7 +378,7 @@ class YouTubeNotes(YouTubeFixture):
 
         result = self.build(reply)
         self.assertIn(value, result['body'])
-        self.assertEqual(payload['title'], result['title'])
+        self.assertEqual(self.row['entry']['title'], result['title'])
         self.assertEqual(1, sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
         count = len(self.prompts)
         self.assertEqual(result, self.build(reply))
@@ -419,31 +419,19 @@ class YouTubeNotes(YouTubeFixture):
             with self.subTest(invented=invented), self.assertRaises(translation.LanguageError):
                 notes.summary_output(value, 'Verify the output.')
 
-    def test_poisoned_native_summary_and_note_caches_are_revalidated_with_real_source(self):
+    def test_native_source_ignores_legacy_summary_and_note_caches_without_models(self):
         source = '作者说明部署流程并要求独立核验。'
         self.transcript['segments'] = [{'start': 0, 'end': 120, 'text': source}]
-        original = self.build()
         directory = media.cache_dir(self.row['video_id'])
-        original_cache = media.read_json(directory / 'notes-cache.json')
-        bad = ('作者介绍打包器性能，并强调独立核验数据和限制。' * 8 +
-               ('and then we are going to run the setup, which will install everything, '
-                'after that you can open the dashboard, and you will see the metrics, '
-                'but you still need to pin the version, otherwise the cache gets invalid, ') * 3)
-        summary_key = notes.signature('summary', self.selected, self.row['entry']['title'] + '\n' + source)
-        native_key = notes.signature('translate', self.selected, source)
-        note_key, = set(original_cache) - {summary_key, native_key}
-        for key in (native_key, summary_key, note_key):
-            cache = dict(original_cache)
-            cache[key] = (json.dumps({'title': '核验', 'summary': bad, 'body': source})
-                          if key == note_key else bad)
-            media.save_json(directory / 'notes-cache.json', cache)
-            self.prompts.clear()
-            with self.subTest(key=key):
-                self.assertEqual(original, self.build())
-                self.assertNotIn(bad, original['body'])
-                self.assertEqual(original_cache, media.read_json(directory / 'notes-cache.json'))
-                self.assertFalse(any(prompt.startswith('将以下字幕') for prompt in self.prompts))
-                self.assertEqual(0 if key == native_key else 1, len(self.prompts))
+        cache = {'old-summary': 'English summary', 'old-note': '{bad JSON'}
+        media.save_json(directory / 'notes-cache.json', cache)
+        with patch.object(notes, 'model', side_effect=AssertionError('no model needed')), \
+                patch.object(notes, 'call') as call:
+            result = notes.build(self.row, self.transcript, self.deadline, lambda: False)
+        call.assert_not_called()
+        self.assertIn(source, result['body'])
+        self.assertNotIn('English summary', result['body'])
+        self.assertEqual(cache, media.read_json(directory / 'notes-cache.json'))
 
     def test_summary_and_note_quotes_require_bounded_source_and_independent_chinese(self):
         quote = 'the server must respond with a valid JSON object containing the field name and the field value'
@@ -604,15 +592,17 @@ class YouTubeNotes(YouTubeFixture):
         with self.assertRaisesRegex(RuntimeError, '压缩'):
             notes.summary_output('中' * (notes.CONTEXT_LIMIT + 1), '原' * 12000)
 
-    def test_failed_final_note_retries_using_completed_translations(self):
-        def invalid(prompt, *rest):
-            return 'bad JSON' if '只输出 JSON' in prompt else self.reply(prompt)
+    def test_translation_is_published_without_requesting_a_final_note(self):
+        def reply(prompt, *rest):
+            self.assertTrue(prompt.startswith('将以下字幕'), prompt)
+            return self.reply(prompt)
 
-        with self.assertRaisesRegex(RuntimeError, '格式无效'):
-            self.build(invalid)
-        count = sum(prompt.startswith('将以下字幕') for prompt in self.prompts)
-        self.build()
-        self.assertEqual(count, sum(prompt.startswith('将以下字幕') for prompt in self.prompts))
+        result = self.build(reply)
+        self.assertEqual(self.row['entry']['title'], result['title'])
+        self.assertEqual(len(transcripts.blocks(self.transcript['segments'])), len(self.prompts))
+        count = len(self.prompts)
+        self.assertEqual(result, self.build(reply))
+        self.assertEqual(count, len(self.prompts))
 
     def test_no_credentials_and_interruption_are_explicit(self):
         with patch.object(notes, 'model', side_effect=RuntimeError('请配置模型')):
