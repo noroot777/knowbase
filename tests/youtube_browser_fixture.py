@@ -3,8 +3,23 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from kb.feeds import registry as reg
-from kb.youtube import collector, discovery, login, media, notes, ranking, storage, toolchain, transcripts
+from kb.youtube import collector, discovery, fulltext, login, media, notes, ranking, storage, toolchain, transcripts
 from kb.collectors import FetchScope
+from tests.youtube_translation_fixture import source_text
+
+
+def translation_reply(prompt):
+    plain = fulltext.SOURCE_START in prompt
+    segments = [source_text(prompt)] if plain else json.loads(prompt.split('\n\n', 1)[1])['segments']
+    for original, translated in (
+            ('The AI agent generates code.', '作者演示智能体编程。'),
+            ('Test every change.', '强调每次修改都要测试，不能仅凭生成结果认定正确。'),
+            ('Verify the result rather than trusting model claims.', '作者要求核验结果，而不是相信模型的声称。'),
+            ('The API budget is 64.', '接口预算为六十四。'),
+            ('The planner checks every later step before using its result.', '规划器逐步核验后续结果。')):
+        segments = [segment.replace(original, translated) for segment in segments]
+    return (segments[0] if plain else
+            '好的，以下是译文：' + json.dumps({'translations': segments}, ensure_ascii=False) + '（以上为译文）')
 
 
 def install():
@@ -55,15 +70,7 @@ def install():
 
     def reply(prompt, *arguments):
         if prompt.startswith('将以下字幕'):
-            segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-            for original, translated in (
-                    ('The AI agent generates code.', '作者演示智能体编程。'),
-                    ('Test every change.', '强调每次修改都要测试，不能仅凭生成结果认定正确。'),
-                    ('Verify the result rather than trusting model claims.', '作者要求核验结果，而不是相信模型的声称。'),
-                    ('The API budget is 64.', '接口预算为六十四。'),
-                    ('The planner checks every later step before using its result.', '规划器逐步核验后续结果。')):
-                segments = [segment.replace(original, translated) for segment in segments]
-            return '好的，以下是译文：' + json.dumps({'translations': segments}, ensure_ascii=False) + '（以上为译文）'
+            return translation_reply(prompt)
         if '只输出 JSON' in prompt:
             return '以下是笔记：' + json.dumps({'title': '智能体编程：先验证再采用',
                                'summary': '作者展示智能体编程方法，并强调测试与人工核验的重要性。',

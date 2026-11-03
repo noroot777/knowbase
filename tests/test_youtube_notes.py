@@ -3,7 +3,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from kb.youtube import fulltext, media, model_response, notes, transcripts, translation
+from kb.youtube import fulltext, media, model_response, notes, transcripts, translation, translation_cache
 from tests.youtube_fixture import YouTubeFixture
 from tests.youtube_translation_fixture import encoded
 
@@ -73,8 +73,10 @@ class YouTubeNotes(YouTubeFixture):
         self.assertTrue(before.items() <= media.read_json(directory / 'notes-cache.json').items())
 
     def test_legacy_complete_cache_is_reused_without_mutation(self):
-        source = 'Review every generated change before deployment. ' * 100
+        source = ' '.join(f'Section {position} explains the method and its limitations.' for position in range(600))
         self.transcript['segments'] = [{'start': 0, 'end': 600, 'text': source}]
+        new_blocks = transcripts.blocks(self.transcript['segments'], limit=fulltext.MAX_SOURCE_CHARS)
+        self.assertGreater(len(new_blocks), 1)
         cache = {notes.signature(translation.STAGE, self.selected, block): encoded(block, self.chinese)
                  for block in transcripts.blocks(self.transcript['segments'])}
         cache['old-summary'] = 'not a translation'
@@ -83,6 +85,55 @@ class YouTubeNotes(YouTubeFixture):
         entry = self.build(AssertionError('reuse valid old blocks'))
         self.assertIn(self.chinese, entry['body'])
         self.assertEqual(cache, media.read_json(directory / 'notes-cache.json'))
+
+    def test_partial_old_cache_translates_only_contiguous_gaps(self):
+        source = ' '.join(f'Section {position} explains the method and its limitations.' for position in range(800))
+        self.transcript['segments'] = [{'start': 0, 'end': 600, 'text': source}]
+        old_blocks = transcripts.blocks(self.transcript['segments'])
+        missing = set(range(2, len(old_blocks) - 2))
+        cache = {notes.signature(translation.STAGE, self.selected, block): encoded(block, self.chinese)
+                 for position, block in enumerate(old_blocks) if position not in missing}
+        directory = media.cache_dir(self.row['video_id'])
+        media.save_json(directory / 'notes-cache.json', cache)
+        requested = []
+
+        def reply(prompt, *arguments):
+            block = prompt.split(fulltext.SOURCE_START, 1)[1].rsplit('\n</source>', 1)[0]
+            requested.append(block)
+            return self.chinese * 60
+
+        entry = self.build(reply)
+        requested.sort(key=source.index)
+        self.assertEqual(' '.join(old_blocks[position] for position in sorted(missing)).split(),
+                         ' '.join(requested).split())
+        self.assertTrue(all(len(block) <= fulltext.MAX_SOURCE_CHARS for block in requested))
+        self.assertEqual(source.split(), entry['body'].split('## 原文对照（未改写）\n\n', 1)[1].split())
+        self.assertTrue(cache.items() <= media.read_json(directory / 'notes-cache.json').items())
+        self.build(AssertionError('completed gap cache must be reusable'))
+
+    def test_overlapping_old_and_new_caches_choose_complete_nonoverlapping_coverage(self):
+        source = ' '.join(f'Section {position} explains the method and its limitations.' for position in range(600))
+        self.transcript['segments'] = [{'start': 0, 'end': 600, 'text': source}]
+        old_blocks = transcripts.blocks(self.transcript['segments'])
+        new_blocks = transcripts.blocks(self.transcript['segments'], limit=fulltext.MAX_SOURCE_CHARS)
+        cache = {notes.signature(translation.STAGE, self.selected, block): encoded(block, self.chinese)
+                 for block in old_blocks}
+        cache[notes.signature(fulltext.STAGE, self.selected, new_blocks[0])] = self.chinese * 60
+        planned = translation_cache.plan(self.transcript, new_blocks, self.selected, cache)
+        self.assertTrue(all(value is not None for block, value in planned))
+        self.assertEqual(source.split(), ' '.join(block for block, value in planned).split())
+
+    def test_overlapping_cache_selection_preserves_repeated_sources(self):
+        self.transcript['segments'][0]['text'] = 'Repeated source sentence. ' * 1300
+        blocks = transcripts.blocks(self.transcript['segments'], limit=fulltext.MAX_SOURCE_CHARS)
+        cache = {notes.signature(fulltext.STAGE, self.selected, block): self.chinese * 60 for block in blocks}
+        planned = translation_cache.plan(self.transcript, blocks, self.selected, cache)
+        self.assertTrue(all(value is not None for block, value in planned))
+        self.assertEqual(' '.join(blocks).split(), ' '.join(block for block, value in planned).split())
+
+    def test_cache_coverage_prefers_two_complete_old_blocks_over_one_crossing_new_block(self):
+        candidates = [(0, 5, 'abcde', '旧一'), (5, 10, 'fghij', '旧二'), (0, 8, 'abcdefgh', '新一')]
+        self.assertEqual(candidates[:2], translation_cache.coverage(candidates))
 
     def test_invalid_old_cache_is_retained_but_does_not_block_plain_translation(self):
         source = self.transcript['segments'][0]['text']
@@ -177,3 +228,13 @@ class YouTubeNotes(YouTubeFixture):
         cache = media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json')
         self.assertEqual([self.chinese], list(cache.values()))
         self.assertNotIn(json.dumps({'translations': []}), entry['body'])
+
+    def test_browser_fixture_supports_plain_requests_and_retains_legacy_json_support(self):
+        from tests.youtube_browser_fixture import translation_reply
+
+        source = 'The AI agent generates code. Test every change.'
+        plain = translation_reply(fulltext.prompt(source))
+        self.assertTrue(plain.startswith('作者演示智能体编程。'))
+        self.assertNotIn('translations', plain)
+        legacy = translation_reply(translation.prompt(source))
+        self.assertIn(plain, translation.render(source, legacy))

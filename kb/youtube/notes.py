@@ -3,7 +3,7 @@ import json
 import time
 
 from kb import llm, llm_stages
-from kb.youtube import fulltext, json_output, media, model_response, transcripts, translation, translation_language, translation_pool
+from kb.youtube import fulltext, json_output, media, model_response, transcripts, translation, translation_cache, translation_language, translation_pool
 from kb.youtube.faults import local_fault
 
 
@@ -165,19 +165,6 @@ def build(row, transcript, deadline, stopped):
     return build_translation(row, transcript, blocks, deadline, stopped, directory, translator)
 
 
-def legacy_translation(text, translator, cache):
-    translated = []
-    for block in transcripts.blocks([{'text': text}]):
-        if native_chinese(block):
-            translated.append(block)
-            continue
-        try:
-            translated.append(translated_output(block, cache[signature(translation.STAGE, translator, block)]))
-        except (KeyError, RuntimeError, ValueError, TypeError):
-            return None
-    return '\n\n'.join(translated) or None
-
-
 def build_translation(row, transcript, blocks, deadline, stopped, directory, translator):
     cache = media.read_json(directory / 'notes-cache.json')
     if not isinstance(cache, dict):
@@ -196,23 +183,14 @@ def build_translation(row, transcript, blocks, deadline, stopped, directory, tra
         translated[title_key] = title_value
     else:
         jobs[title_key] = title
-    for block in blocks:
+    planned = translation_cache.plan(transcript, blocks, translator, cache)
+    blocks = [block for block, value in planned]
+    for block, value in planned:
         if stopped() or time.monotonic() >= deadline:
             raise media.Interrupted('视频处理已停止或时间预算用尽')
         key = signature(fulltext.STAGE, translator, block)
-        if native_chinese(block):
-            translated[key] = block
-            continue
-        if key in cache:
-            try:
-                translated[key] = fulltext.validate(block, cache[key])
-                continue
-            except (RuntimeError, ValueError, TypeError):
-                cache.pop(key)
-                media.save_json(directory / 'notes-cache.json', cache)
-        previous = legacy_translation(block, translator, cache)
-        if previous is not None:
-            translated[key] = previous
+        if value is not None:
+            translated[key] = value
             continue
         jobs[key] = block
 

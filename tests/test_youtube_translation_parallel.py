@@ -30,6 +30,7 @@ class ParallelTranslation(YouTubeFixture):
             self.addCleanup(override.stop)
 
     def build(self, stopped=lambda: False, deadline=None, row=None):
+        self.transcript['segments'][0]['text'] = ' '.join(self.blocks)
         return notes.build(row or self.row, self.transcript, deadline or time.monotonic() + 5, stopped)
 
     def position(self, prompt):

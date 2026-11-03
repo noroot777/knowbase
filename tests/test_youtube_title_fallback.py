@@ -5,10 +5,10 @@ from threading import Barrier, Event
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from kb.youtube import llm_request, media, model_response, notes, throttle, transcripts, translation
+from kb.youtube import fulltext, llm_request, media, model_response, notes, throttle, transcripts, translation
 from kb.youtube.diagnosis import LOCAL, MODEL
 from tests.youtube_fixture import YouTubeFixture
-from tests.youtube_translation_fixture import response
+from tests.youtube_translation_fixture import response, source_text
 
 
 class TitleFallback(YouTubeFixture):
@@ -33,7 +33,7 @@ class TitleFallback(YouTubeFixture):
         return media.read_json(media.cache_dir(self.row['video_id']) / 'notes-cache.json')
 
     def is_title(self, prompt):
-        return json.loads(prompt.split('\n\n', 1)[1])['segments'] == [self.row['entry']['title']]
+        return source_text(prompt) == self.row['entry']['title']
 
     def test_product_names_with_foreign_or_chinese_subtitles_succeed_on_first_attempt(self):
         number = 0
@@ -63,7 +63,7 @@ class TitleFallback(YouTubeFixture):
                     if chinese:
                         self.assertIsNone(self.cache())
                     else:
-                        self.assertNotIn(notes.signature(notes.TITLE_STAGE, self.selected, title), self.cache())
+                        self.assertNotIn(notes.signature(fulltext.TITLE_STAGE, self.selected, title), self.cache())
 
     def test_malformed_or_non_chinese_title_output_is_not_a_video_failure(self):
         self.transcript['segments'][0]['text'] = '独立核验每项生成的修改。'
@@ -86,6 +86,7 @@ class TitleFallback(YouTubeFixture):
 
     def test_bad_title_does_not_cancel_other_translation_jobs(self):
         blocks = ['Verify generated changes.', 'Record all observed limitations.']
+        self.transcript['segments'][0]['text'] = ' '.join(blocks)
         split = transcripts.blocks
         barrier = Barrier(3, timeout=3)
 
@@ -115,28 +116,25 @@ class TitleFallback(YouTubeFixture):
                 barrier.wait()
             return response(prompt, title)
 
-        with self.assertRaises(translation.LanguageError):
+        with self.assertRaisesRegex(RuntimeError, '未返回中文'):
             self.build(reply)
-        self.assertEqual(3, len(calls))
+        self.assertEqual(2, len(calls))
         self.assertFalse(self.cache())
-        self.assertEqual([1], list(self.failures().values()))
+        self.assertFalse(self.failures())
 
-    def test_real_subtitle_failures_still_use_the_existing_three_attempt_budget(self):
+    def test_real_subtitle_failures_remain_retryable_without_publishing_fallback(self):
         def reply(prompt, *arguments):
             if self.is_title(prompt):
                 return 'invalid title'
-            return json.dumps({'translations': json.loads(prompt.split('\n\n', 1)[1])['segments']})
+            return source_text(prompt)
 
-        for attempt in range(notes.MAX_LANGUAGE_TRIES - 1):
-            with self.assertRaises(translation.LanguageError):
+        for attempt in range(4):
+            with self.subTest(attempt=attempt), self.assertRaisesRegex(RuntimeError, '等待重试'):
                 self.build(reply)
-            self.assertEqual([attempt + 1], list(self.failures().values()))
-        entry = self.build(reply)
-        self.assertEqual('youtube:original-fallback', entry['body_provenance'])
-        self.assertEqual([notes.MAX_LANGUAGE_TRIES], list(self.failures().values()))
-        self.assertIn(self.transcript['segments'][0]['text'], entry['body'])
+            self.assertFalse(self.failures())
+            self.assertFalse(self.cache())
 
-    def test_success_with_original_title_clears_an_existing_failure_counter(self):
+    def test_success_with_original_title_leaves_legacy_failure_counter_untouched(self):
         fingerprint = (json.dumps(self.transcript, ensure_ascii=False, sort_keys=True) + '\n' +
                        self.selected.provider + '\n' + self.selected.model_id)
         key = notes.signature('language-failure-v2-translation', self.selected, fingerprint)
@@ -147,7 +145,7 @@ class TitleFallback(YouTubeFixture):
 
         entry = self.build(reply)
         self.assertEqual('youtube:uploaded_captions', entry['body_provenance'])
-        self.assertFalse(self.failures())
+        self.assertEqual({key: 2}, self.failures())
 
     def test_legacy_valid_title_and_subtitle_caches_still_skip_requests(self):
         source = self.transcript['segments'][0]['text']
@@ -163,21 +161,22 @@ class TitleFallback(YouTubeFixture):
         self.assertEqual('智能体代码生成教程', entry['title'])
         self.assertEqual(cache, self.cache())
 
-    def test_subtitle_fallback_uses_new_or_legacy_valid_title_cache(self):
+    def test_plain_subtitles_reuse_new_or_legacy_valid_title_cache(self):
         title = self.row['entry']['title']
         directory = media.cache_dir(self.row['video_id'])
-        for stage in (notes.TITLE_STAGE, translation.STAGE):
+        for stage in (notes.TITLE_STAGE, translation.STAGE, fulltext.TITLE_STAGE):
             with self.subTest(stage=stage):
                 media.save_json(directory / 'notes-cache.json', {
-                    notes.signature(stage, self.selected, title):
-                        response(translation.prompt(title), '智能体代码生成教程')})
-                entry = notes.fallback(self.row, self.transcript, directory, self.selected,
-                                       self.deadline, lambda: False)
-                self.assertEqual('原文待校验：智能体代码生成教程', entry['title'])
+                    notes.signature(stage, self.selected, title): ('智能体代码生成教程' if stage == fulltext.TITLE_STAGE else
+                        response(translation.prompt(title), '智能体代码生成教程'))})
+                entry = self.build(lambda prompt, *arguments: response(prompt, '作者说明应当独立核验生成结果。'))
+                self.assertEqual('智能体代码生成教程', entry['title'])
+                self.assertNotIn('fallback', entry['body_provenance'])
         media.save_json(directory / 'notes-cache.json', {
             notes.signature(notes.TITLE_STAGE, self.selected, title): 'invalid title'})
-        entry = notes.fallback(self.row, self.transcript, directory, self.selected, self.deadline, lambda: False)
-        self.assertEqual('原文待校验：' + title, entry['title'])
+        entry = self.build(lambda prompt, *arguments: 'invalid title' if self.is_title(prompt) else '作者要求核验生成结果。')
+        self.assertEqual(title, entry['title'])
+        self.assertNotIn('fallback', entry['body_provenance'])
 
     def test_title_transport_local_and_interruption_errors_are_not_swallowed(self):
         self.transcript['segments'][0]['text'] = '独立核验每项生成的修改。'
