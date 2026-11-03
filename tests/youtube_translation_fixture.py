@@ -1,6 +1,6 @@
 import json
 
-from kb.youtube import translation
+from kb.youtube import fulltext, translation
 
 
 def encoded(text, value):
@@ -9,5 +9,7 @@ def encoded(text, value):
 
 
 def response(prompt, value):
+    if fulltext.SOURCE_START in prompt:
+        return value
     segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
     return json.dumps({'translations': [value] * len(segments)}, ensure_ascii=False)

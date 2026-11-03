@@ -4,7 +4,7 @@ from threading import Event
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from kb.youtube import media, notes, products, storage, transcripts, translation
+from kb.youtube import fulltext, media, notes, products, storage, transcripts, translation
 from tests.youtube_fixture import YouTubeFixture
 from tests.youtube_translation_fixture import response
 
@@ -26,13 +26,13 @@ class TranslationOnly(YouTubeFixture):
     def test_each_foreign_block_has_only_one_translation_request(self):
         self.transcript['segments'][0]['text'] = ' '.join(
             f'Checkpoint {position}: check every generated change before deployment.' for position in range(200))
-        blocks = transcripts.blocks(self.transcript['segments'])
+        blocks = transcripts.blocks(self.transcript['segments'], limit=fulltext.MAX_SOURCE_CHARS)
         self.assertGreater(len(blocks), 1)
         self.assertEqual(len(blocks), len(set(blocks)))
 
         def reply(prompt, *arguments):
             self.assertTrue(prompt.startswith('将以下字幕'), prompt)
-            return response(prompt, '部署前逐项检查生成的修改。')
+            return response(prompt, '部署前逐项检查生成的修改。' * 150)
 
         with patch.object(notes, 'model', return_value=self.selected) as model, \
                 patch.object(notes, 'call', side_effect=reply) as call:
@@ -91,11 +91,10 @@ class TranslationOnly(YouTubeFixture):
     def test_cancellation_after_cached_translation_cannot_return_a_product(self):
         source = self.transcript['segments'][0]['text']
         directory = media.cache_dir(self.row['video_id'])
-        media.save_json(directory / 'notes-cache.json', {
-            notes.signature(translation.STAGE, self.selected, source):
-                response(translation.prompt(source), '核验智能体生成的代码。')})
         cancelled = Event()
-        render = notes.translated_output
+        render = fulltext.validate
+        media.save_json(directory / 'notes-cache.json', {
+            notes.signature(fulltext.STAGE, self.selected, source): '核验智能体生成的代码。'})
 
         def validate(text, output):
             value = render(text, output)
@@ -103,7 +102,7 @@ class TranslationOnly(YouTubeFixture):
             return value
 
         with patch.object(notes, 'model', return_value=self.selected), \
-                patch.object(notes, 'translated_output', side_effect=validate), self.assertRaises(media.Interrupted):
+                patch.object(fulltext, 'validate', side_effect=validate), self.assertRaises(media.Interrupted):
             notes.build(self.row, self.transcript, self.deadline, cancelled.is_set)
 
     def test_foreign_title_is_translated_and_original_retained(self):
@@ -145,7 +144,7 @@ class TranslationOnly(YouTubeFixture):
                 response(translation.prompt(source), '智能体生成代码，运行测试并核验限制。')})
 
         def reply(prompt, *arguments):
-            self.assertEqual([self.row['entry']['title']], json.loads(prompt.split('\n\n', 1)[1])['segments'])
+            self.assertIn(fulltext.SOURCE_START + self.row['entry']['title'] + '\n</source>', prompt)
             return response(prompt, '智能体核验生成的修改')
 
         with patch.object(notes, 'model', return_value=self.selected), \

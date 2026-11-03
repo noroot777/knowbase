@@ -1,4 +1,3 @@
-import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -6,7 +5,7 @@ from threading import Barrier, Event, Lock, get_ident
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from kb.youtube import llm_request, media, notes, throttle, transcripts, translation, translation_pool
+from kb.youtube import fulltext, llm_request, media, notes, throttle, transcripts, translation_pool
 from kb.youtube.diagnosis import MODEL
 from tests.youtube_fixture import YouTubeFixture
 from tests.youtube_translation_fixture import response
@@ -34,7 +33,7 @@ class ParallelTranslation(YouTubeFixture):
         return notes.build(row or self.row, self.transcript, deadline or time.monotonic() + 5, stopped)
 
     def position(self, prompt):
-        source, = json.loads(prompt.split('\n\n', 1)[1])['segments']
+        source = prompt.split(fulltext.SOURCE_START, 1)[1].rsplit('\n</source>', 1)[0]
         return self.blocks.index(source)
 
     def test_three_blocks_run_together_but_output_and_cache_remain_ordered(self):
@@ -119,7 +118,7 @@ class ParallelTranslation(YouTubeFixture):
         self.blocks = self.blocks[:3]
         saved = Event()
         save = media.save_json
-        first_key = notes.signature(translation.STAGE, self.selected, self.blocks[0])
+        first_key = notes.signature(fulltext.STAGE, self.selected, self.blocks[0])
 
         def persist(path, payload):
             save(path, payload)
