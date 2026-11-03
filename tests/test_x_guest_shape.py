@@ -94,11 +94,55 @@ class ApiShapeTests(ShapeBase):
     def test_odd_numbers_in_timestamps_are_unreadable_not_a_crash(self):
         """NaN、无穷、超出能表示的范围、布尔:都是这一条认不出来,不许把异常抛出这个号。"""
         odd = [status('alice', 20 + n, 1) | {'created_timestamp': value}
-               for n, value in enumerate([float('nan'), float('inf'), 1e300, 10 ** 30, True])]
+               for n, value in enumerate([float('nan'), float('inf'), 1e300, 10 ** 30, True, 10 ** 400])]
         self.api(alice=[[status('alice', 9, 1, '好的'), *odd, *old('alice', 3, 2, 1)]])
         got = self.scan('alice')
         self.assertEqual(['好的'], [e['body'] for e in got['entries']])
-        self.assertIn(f'5 条{UNREADABLE}', got['incomplete'])
+        self.assertIn(f'6 条{UNREADABLE}', got['incomplete'])
+
+    def test_an_author_that_names_no_valid_account_is_unreadable_not_someone_else(self):
+        """作者账号名是空串、不合法,或者转推者形状不对:说不清是谁,就不许凭它判「不是他本人、不收」。"""
+        unclear = [status('alice', 20, 1) | {'author': {'screen_name': '', 'name': 'alice'}},
+                   status('alice', 21, 1) | {'author': {'screen_name': 'a l i c e', 'name': 'alice'}},
+                   status('alice', 22, 1, reposted_by='alice'),
+                   status('alice', 23, 1, reposted_by={'screen_name': ''})]
+        self.api(alice=[[status('alice', 9, 1, '好的'), *unclear, *old('alice', 3, 2, 1)]])
+        got = self.scan('alice')
+        self.assertEqual(['好的'], [e['body'] for e in got['entries']])
+        self.assertIn(f'4 条{UNREADABLE}', got['incomplete'])
+
+    def test_only_a_null_bottom_cursor_means_the_last_page(self):
+        """0、false、[]、{}、空串、缺键、缺 cursor 都不是「翻到尽头」:第一页按没问到、改读主页。
+        反过来钉一边:`bottom` 是 null 就是读完了,覆盖照常成立、不碰主页。"""
+        self.pages.pages[PAGE.format('alice')] = html(article('alice', 9, 1, '主页上的'),
+                                                      *[article('alice', n, 130 + n) for n in (3, 2, 1)])
+        cursors = {'0': {'bottom': 0}, 'false': {'bottom': False}, '[]': {'bottom': []}, '{}': {'bottom': {}},
+                   '空串': {'bottom': ''}, '缺键': {}, '缺 cursor': None}
+        for name, cursor in cursors.items():
+            with self.subTest(name):
+                body = {'code': 200, 'results': [status('alice', 9, 1, '接口给的')]}
+                self.raw(alice=body if cursor is None else body | {'cursor': cursor})
+                got = self.scan('alice')
+                self.assertIn('翻页标记认不出来', got['notice'])
+                self.assertEqual(['主页上的'], [e['body'] for e in got['entries']])
+        self.pages.asked.clear()
+        self.raw(alice={'code': 200, 'results': [status('alice', 9, 1, '接口给的')], 'cursor': {'bottom': None}})
+        got = self.scan('alice')
+        self.assertEqual(('', '', ['接口给的']), (got['notice'], got['incomplete'], [e['body'] for e in got['entries']]))
+        self.assertEqual([], self.pages.asked)
+
+    def test_a_falsy_cursor_on_a_later_page_leaves_the_round_incomplete(self):
+        """第二页游标给个 0:收下前两页,但不许把它当成末页宣布读完。"""
+        bodies = iter([{'code': 200, 'results': [status('alice', 9, 1)], 'cursor': {'bottom': 'p1'}}]
+                      + [{'code': 200, 'results': [status('alice', 8, 2)], 'cursor': {'bottom': 0}}] * x_guest.RETRIES)
+
+        def reply(url, headers=None, *, deadline=None, **_):
+            return Response(200, url, json.dumps(next(bodies)).encode(), {})
+
+        with patch.object(x_guest, 'request', reply):
+            got = self.scan('alice')
+        self.assertEqual(['https://x.com/alice/status/9'], [e['url'] for e in got['entries']])
+        self.assertIn('第 2 页', got['incomplete'])
 
     def test_a_cursor_of_the_wrong_shape_is_an_unanswered_page_not_a_crash(self):
         """游标是个数组:第一页就当成没问到(于是改读 X 主页),不许 `.get` 炸在外面。"""
@@ -136,17 +180,23 @@ class ShapeCollectTests(ShapeBase):
         self.assertEqual('complete', rows[bob['id']]['discovery'])
 
     def test_one_account_with_a_malformed_reply_does_not_stop_the_others(self):
-        """排在最前面的号回包形状不对(游标、时间戳都怪),后面的号照样读、照样入库。"""
-        alice, bob = self.sub('alice'), self.sub('bob')
+        """排在前面的号一个游标怪、一个时间戳是几百位的整数,后面的号照样读、照样入库。"""
+        alice, carol, bob = self.sub('alice'), self.sub('carol'), self.sub('bob')
         self.settings(x_channels.GUEST)
-        self.raw(alice={'code': 200, 'results': [status('alice', 9, 1) | {'created_timestamp': 1e300}],
-                        'cursor': ['p1']},
+        giant = status('carol', 28, 1) | {'created_timestamp': 10 ** 400}
+        self.raw(alice={'code': 200, 'results': [status('alice', 9, 1)], 'cursor': ['p1']},
+                 carol={'code': 200, 'results': [status('carol', 29, 1, '丙'), giant], 'cursor': {'bottom': None}},
                  bob={'code': 200, 'results': [status('bob', 19, 1, '乙')], 'cursor': {'bottom': None}})
         self.collect()
-        self.assertEqual(['https://x.com/bob/status/19'], self.stored())
-        subs = self.subs()
+        self.assertEqual(['https://x.com/bob/status/19', 'https://x.com/carol/status/29'], self.stored())
+        subs, rows = self.subs(), self.progress()
         self.assertIn('翻页标记认不出来', subs[alice['id']]['last_error'])
+        self.assertNotEqual('complete', rows[carol['id']]['discovery'])
         self.assertTrue(subs[bob['id']]['last_success'])
+        # 区间补抓那条路(`harvest` 逐号读)同一个口径:坏的那个号如实记,后面的号照样有结果。
+        got = x_guest.harvest([('carol', ''), ('bob', '')], complete_articles=False)
+        self.assertIn(UNREADABLE, got['carol']['incomplete'])
+        self.assertEqual(['https://x.com/bob/status/19'], [e['url'] for e in got['bob']['entries']])
 
 
 class PageShapeTests(PageBase):
@@ -164,9 +214,10 @@ class PageShapeTests(PageBase):
     def test_out_of_range_timestamps_are_unreadable_not_a_crash(self):
         def stamped(ident, value):
             return re.sub(r'"timestamp":\d+', f'"timestamp":{value}', article('alice', ident, 1))
-        page = html(article('alice', 9, 1), stamped(8, '1e300'), stamped(7, 10 ** 30), stamped(6, 'NaN'))
+        page = html(article('alice', 9, 1), stamped(8, '1e300'), stamped(7, 10 ** 30), stamped(6, 'NaN'),
+                    stamped(5, 10 ** 400))
         shown, unreadable = x_guest_page.posts(page)
-        self.assertEqual((['9'], 3), ([p.ident for p in shown], unreadable))
+        self.assertEqual((['9'], 4), ([p.ident for p in shown], unreadable))
         with self.assertRaisesRegex(x_guest_page.PageError, '换了形状'):
             x_guest_page.posts(html(stamped(8, '1e300')))
 

@@ -68,6 +68,7 @@ FIRST_DAYS = 5
 SHANGHAI = ZoneInfo('Asia/Shanghai')
 _OLD_STREAK = 3
 _STATUS_URL = re.compile(r'^https://(?:x|twitter)\.com/([A-Za-z0-9_]{1,20})/status/(\d+)$')
+_HANDLE = re.compile(r'^[A-Za-z0-9_]{1,20}$')
 
 
 class GuestError(RuntimeError):
@@ -107,35 +108,57 @@ def _page(handle: str, cursor: str, deadline: float) -> dict:
 
 
 def _bottom(payload: dict) -> str | None:
-    """下一页的游标;没有下一页是 `''`,形状认不出来是 `None`(不许当成「翻到尽头了」)。"""
+    """下一页的游标;没有下一页是 `''`,形状认不出来是 `None`(不许当成「翻到尽头了」)。
+
+    **末页只认契约里那一种写法**:`cursor` 是对象、`bottom` 是 `null`(实测末页就是这样,有下一页时是
+    非空字符串)。先看原始类型再归一:`0`、`false`、`[]`、`{}`、空串、缺键、缺 `cursor` 都不是末页 ——
+    拿真假值一转就全成了「读到底了」,只读一页就宣布覆盖。
+    """
     cursor = payload.get('cursor')
-    if cursor is None:
-        return ''
-    if not isinstance(cursor, dict) or not isinstance(cursor.get('bottom') or '', str):
+    if not isinstance(cursor, dict) or 'bottom' not in cursor:
         return None
-    return cursor.get('bottom') or ''
+    bottom = cursor['bottom']
+    if bottom is None:
+        return ''
+    return bottom if isinstance(bottom, str) and bottom else None
 
 
 def _when(status: dict) -> datetime | None:
-    """推文时间;缺、不是数、NaN/无穷、超出能表示的范围,一律 `None`(该条按认不出来算)。"""
+    """推文时间;缺、不是数、NaN/无穷、超出能表示的范围,一律 `None`(该条按认不出来算)。
+
+    有限性判断本身也在保护里:几百位的整数是合法 JSON,`math.isfinite` 转浮点那一步就抛 `OverflowError`。
+    """
     stamp = status.get('created_timestamp')
-    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)) or not math.isfinite(stamp) or stamp <= 0:
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
         return None
     try:
+        if not math.isfinite(stamp) or stamp <= 0:
+            return None
         return datetime.fromtimestamp(stamp, timezone.utc)
     except (OverflowError, ValueError, OSError):
         return None
 
 
+def _account(value) -> bool:
+    """是不是一个说得清是谁的账号对象。空串、非法账号名都说不清 —— 拿它判「不是他本人」就是凭空排除。"""
+    return isinstance(value, dict) and isinstance(value.get('screen_name'), str) \
+        and bool(_HANDLE.match(value['screen_name']))
+
+
 def _well_formed(status) -> bool:
-    return (isinstance(status, dict) and isinstance(status.get('author'), dict)
-            and isinstance(status['author'].get('screen_name'), str)
+    """这一条的身份和时间读不读得懂。读得懂才谈得上「不是他的、不收」;读不懂的按认不出来算。
+
+    `reposted_by` 契约里只有两种:`null`(不是转推)、带账号名的对象(谁转的)。别的形状不许拿真假值
+    判成「是转推」。
+    """
+    return (isinstance(status, dict) and _account(status.get('author'))
+            and (status.get('reposted_by') is None or _account(status['reposted_by']))
             and isinstance(status.get('text', ''), str) and _when(status) is not None)
 
 
 def _own(status: dict, handle: str) -> bool:
     """这条是不是**这个号自己发的**(不是转推、不是别人的)。"""
-    return (not status.get('reposted_by')
+    return (status.get('reposted_by') is None
             and status['author']['screen_name'].lower() == handle.lower())
 
 

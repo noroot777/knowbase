@@ -103,9 +103,11 @@ def _with_card(text: str, card: str) -> str:
 
 def _moment(value) -> datetime | None:
     """脚本参数里的毫秒时间戳;不是数、NaN/无穷、超出能表示的范围一律 `None`(那一条按认不出来算)。"""
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    try:
+    try:                                  # 有限性判断也在里面:几百位的整数转浮点那一步就抛
+        if not math.isfinite(value) or value <= 0:
+            return None
         return datetime.fromtimestamp(value / 1000, timezone.utc)
     except (OverflowError, ValueError, OSError):
         return None
