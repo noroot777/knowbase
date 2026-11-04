@@ -121,8 +121,21 @@ class KeptTests(DriftBase):
         self.assertFalse(store.kept(stored, article))
 
 
+def visible(source):
+    """这个账号的内容列表里有几条(按订阅查内容只认订阅—内容关联)。"""
+    return reg.items('social', source_id=source['id'])['total']
+
+
 class ExpiryTests(DriftBase):
-    """改之前那几轮留下的状态,下一轮按真实顺序准备时收敛;库里没有成品的照旧报。"""
+    """改之前那几轮留下的状态,下一轮按真实顺序准备时收敛;库里没有成品的照旧报。
+    认下的那一条不在收敛时记成已交付:交付照旧走 `delivery` → 存盘 → 回执,否则这个账号的
+    列表里永远少这一条。"""
+
+    def deliver(self, source, entries):
+        reg.put_items(source, entries)
+        with reg.db() as conn:
+            store.acknowledge(conn, source, entries)
+        return visible(source)
 
     def later(self, hours=0):
         return self.now + timedelta(days=6, hours=hours)
@@ -149,7 +162,12 @@ class ExpiryTests(DriftBase):
         self.assertEqual(self.alarms(1), (0, 0))
 
         self.assertEqual(self.candidate()['state'], 'ready')
-        self.assertEqual(store.delivery(self.source)[:2], ([], 0), '已收:没有要交付的,也不欠')
+        self.assertEqual(supersede.run([self.source], self.later(1)), 0, '认过了:剩下的归交付,收尾不再重认一遍')
+        entries, pending, _, _ = store.delivery(self.source)
+        self.assertEqual(([entry['body'] for entry in entries], pending), ([stored['body']], 0),
+                         '不欠正文;交付照旧走一遍,交的是库里那一份')
+        self.assertEqual(self.deliver(self.source, entries), 1, '存盘之后这个账号的列表里查得到它')
+        self.assertEqual(store.delivery(self.source)[0], [], '交过一次就不再交')
         self.assertEqual(self.feed_row()['body'], stored['body'])
 
     def test_a_cleared_alarm_is_not_recreated(self):
@@ -221,10 +239,11 @@ class SharedPostTests(DriftBase):
         return stored
 
     def a_round(self, hours):
-        """按真实顺序:准备 → 清扫 → 各账号交付并回执。返回每个账号的(超窗数, 超窗记录数)。"""
+        """按真实顺序:准备 → 清扫 → 各账号交付并回执。返回每个账号的(超窗数, 超窗记录数, 列表里几条)。"""
         sources = [self.source, self.other]
-        store.prepare(sources, 'browser', self.now + timedelta(hours=hours))
-        supersede.run(sources)
+        moment = self.now + timedelta(hours=hours)
+        store.prepare(sources, 'browser', moment)
+        supersede.run(sources, moment)
         for source in sources:
             delivered = store.delivery(source)[0]
             reg.put_items(source, delivered)
@@ -232,17 +251,17 @@ class SharedPostTests(DriftBase):
                 store.acknowledge(conn, source, delivered)
         with reg.db() as conn:
             return [(store.progress(source)['expired'], conn.execute(
-                'SELECT count(*) FROM x_intake_expirations WHERE source_id=?', (source['id'],)).fetchone()[0])
-                for source in sources]
+                'SELECT count(*) FROM x_intake_expirations WHERE source_id=?', (source['id'],)).fetchone()[0],
+                visible(source)) for source in sources]
 
     def assert_settled_for_both(self):
-        self.assertEqual(self.a_round(1), [(0, 0), (0, 0)])
-        self.assertEqual(self.a_round(2), [(0, 0), (0, 0)])
+        self.assertEqual(self.a_round(1), [(0, 0, 1), (0, 0, 1)], '两个账号的列表里都有这一条')
+        self.assertEqual(self.a_round(2), [(0, 0, 1), (0, 0, 1)])
         with reg.db() as conn:
             conn.execute('DELETE FROM x_intake_expirations')
             links = conn.execute('SELECT confirmed,delivered FROM x_intake_links ORDER BY source_id').fetchall()
         self.assertEqual([tuple(row) for row in links], [(1, 1), (1, 1)], '两个账号各自那条关联都认下了')
-        self.assertEqual(self.a_round(3), [(0, 0), (0, 0)], '删掉的报警不重建')
+        self.assertEqual(self.a_round(3), [(0, 0, 1), (0, 0, 1)], '删掉的报警不重建')
 
     def test_the_library_copy_settles_every_account(self):
         stored = self.shared_and_expired(TEXT, CHANGED)
@@ -263,7 +282,26 @@ class SharedPostTests(DriftBase):
         with reg.db() as conn:
             conn.execute("UPDATE feed_items SET x_post_meta=''")
 
-        self.assertEqual(self.a_round(1), [(1, 1), (1, 1)])
+        self.assertEqual(self.a_round(1), [(1, 1, 1), (1, 1, 0)], '第一个账号那一条是摆盘时存的盘')
+
+    def interrupted(self, confirm):
+        """不靠旧状态:第一个账号正常收下,第二个账号这一轮看到了它、在确认前或存盘前断了。"""
+        self.saved_by_detail_page()
+        self.other = self.sub('Other')
+        self.prepare([self.source, self.other])
+        self.stage([self.timeline_full_text()], source=self.other, confirm=confirm)
+        self.assertEqual(visible(self.other), 0, '这一局的前提')
+
+    def test_an_unconfirmed_account_gets_the_post_after_the_window(self):
+        self.interrupted(confirm=False)
+
+        self.assertEqual(self.a_round(6 * 24 + 1), [(0, 0, 1), (0, 0, 1)])
+
+    def test_a_confirmed_account_still_gets_the_delivery_it_was_owed(self):
+        self.interrupted(confirm=True)
+        self.assertEqual(len(store.delivery(self.other)[0]), 1, '这一局的前提:欠它一次交付')
+
+        self.assertEqual(self.a_round(6 * 24 + 1), [(0, 0, 1), (0, 0, 1)])
 
     def candidate_entry(self):
         return json.loads(self.candidate()['entry'])

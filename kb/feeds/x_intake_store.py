@@ -298,15 +298,17 @@ def collected(row, entry, outside):
 
 def adopt(conn, source_id, ident, post_id, entry_json, state, row, outside) -> bool:
     """认库里那一行为这条候选的成品,写在调用方的写事务里;判据待在 UPDATE 自己的 WHERE 里
-    (候选还是读到的那一份)。窗口外的再没有哪一轮会来确认、交付它,所以这个账号这一条直接记成
-    已确认、已交付(交付本来也只是 `DO NOTHING`),它名下那条超窗记录一并删掉。"""
+    (候选还是读到的那一份)。窗口外的再没有哪一轮会来确认它,所以这个账号这一条直接记成已确认、
+    名下那条超窗记录一并删掉;**交付不在这里记** —— 照旧由 `delivery` 交出去、存盘之后 `acknowledge`。
+    `put_items` 撞上库里那一行时内容是 `DO NOTHING`,订阅—内容关联却照写(按订阅查内容只认它);
+    在这里顺手记成已交付,这个账号的列表里就永远少这一条,而交付再也不会补它。"""
     if not conn.execute('''UPDATE x_intake_candidates SET state='ready',reason='',entry=?
             WHERE post_id=? AND state=? AND entry=?''',
             (json.dumps(row, ensure_ascii=False), post_id, state, entry_json)).rowcount:
         return False
     if outside:
-        conn.execute('''UPDATE x_intake_links SET confirmed=1,delivered=1
-            WHERE source_id=? AND identity=? AND post_id=?''', (source_id, ident, post_id))
+        conn.execute('UPDATE x_intake_links SET confirmed=1 WHERE source_id=? AND identity=? AND post_id=?',
+                     (source_id, ident, post_id))
         conn.execute('DELETE FROM x_intake_expirations WHERE source_id=? AND identity=? AND post_id=?',
                      (source_id, ident, post_id))
     return True
@@ -332,13 +334,16 @@ def settle(conn, source, now) -> set:
     都核对。**按这个账号自己那条关联判,不按共享候选的档位判**:候选按 `post_id` 全库一行,确认、
     交付、超窗却是逐账号的 —— 别的账号先把它收敛成 `ready` 之后,这个账号那条未确认的关联照样会
     被 `expire` 记超窗,只认 `pending`/`repair`/`expired` 的话它从此没人核对。`ready` 只看这个账号
-    还没交付的(交付过的就是收下了);其余三档不看交付标记 —— 它们挂着「正文待补」或超窗,跟这个账号
-    早先交付过没有关系。永久排除的不碰。
+    还没交付、又还有事可做的:没确认的,或者确认过、名下还挂着候选转回 `ready` 之前记下的超窗的;
+    已确认、没报警的归 `delivery`,在这里每轮重认一遍只会把放行数数虚。其余三档不看交付标记 ——
+    它们挂着「正文待补」或超窗,跟这个账号早先交付过没有关系。永久排除的不碰。
     返回收敛了哪几条(`post_id`)。"""
     ident, outside_before = identity(source), (now - capacity.WINDOW).isoformat()
     rows = conn.execute('''SELECT p.post_id,p.entry,p.state,p.published FROM x_intake_candidates p
         JOIN x_intake_links l USING(post_id) WHERE l.source_id=? AND l.identity=?
-        AND (p.state IN ('pending','repair','expired') OR p.state='ready' AND l.delivered=0)''',
+        AND (p.state IN ('pending','repair','expired') OR p.state='ready' AND l.delivered=0 AND (l.confirmed=0
+            OR EXISTS (SELECT 1 FROM x_intake_expirations e
+                WHERE e.source_id=l.source_id AND e.identity=l.identity AND e.post_id=l.post_id)))''',
         (source['id'], ident)).fetchall()
     settled = set()
     for candidate in rows:
