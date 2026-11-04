@@ -246,12 +246,10 @@ def prepare(sources, channel, now, deadline=None):
                 (source['id'], identity(source), channel, floor, now.isoformat(),
                  _coverage_gap(previous['covered'], previous['coverage_end'], floor, now.isoformat())
                  if previous else '最近五天尚未确认完整覆盖', now.timestamp()))
+            settle(conn, source, now)
             retention.expire(conn, source['id'], identity(source), floor, now)
             batches.expire(conn, source['id'], identity(source), floor)
-            expired = retention.recent(conn, source['id'], identity(source), now)
-            outside = retention.notice(utc(floor), expired)
-            conn.execute('UPDATE x_intake_sources SET expired=?,outside=? WHERE source_id=?',
-                         (expired, outside, source['id']))
+            note_expiry(conn, source['id'], identity(source), now)
 
 
 def excluded(conn, entry):
@@ -266,13 +264,103 @@ def existing(conn, entry):
     cached = conn.execute("SELECT entry FROM x_intake_candidates WHERE post_id=? AND state='ready'",
                           (post_id(entry),)).fetchone()
     proof = json.loads(cached['entry']) if cached else entry
-    if row and complete(dict(row)) and complete(proof) and same_version(dict(row), proof):
+    if row and kept(dict(row), proof):
         return dict(row)
     return None
 
 
+def kept(row, entry):
+    """库里那一条就是这条推文的成品:按链接认出来的这一行能证明自己完整,这次看到的那份
+    也完整、同属帖子或同属长文,而且不比库里那份全(`x_post_meta.supersedes`)。
+
+    **「收没收」看链接,「换不换」才看内容**:两份都完整、只是抄法不同(标题派生、空白、
+    某个字),库里那份就是成品,这条算已收,不进 `repair` 挂成待办、滑出窗口报超窗。
+    只多了链接的新版不认库里那份,留给 `x_intake_supersede` 覆盖;库里那份证不了自己
+    (升级前入库、没有完整证明)或帖子/长文对不上的,照旧走 `repair` 等版本化回填。"""
+    if not (complete(row) and complete(entry)) or x_post_meta.eligibility(row)[0] != x_post_meta.eligibility(entry)[0]:
+        return False
+    return same_version(row, entry) or not x_post_meta.supersedes(row, entry)
+
+
+def collected(row, entry, outside):
+    """库里那一行算不算这条候选的成品。这次那份完整时问的就是 `kept`(比库里全的那份留给
+    `x_intake_supersede` 覆盖 —— 新版就在手里,跨没跨窗口都写得进去)。这次那份不完整、又已经
+    **滑出窗口**的,再没有哪一轮会来补它,库里那行能自证完整就是成品 —— 除非这条候选等的是一篇
+    长文、库里那行却不是长文。窗口内不完整的归正文阶段。"""
+    if complete(entry) or not outside:
+        return kept(row, entry)
+    if not complete(row):
+        return False
+    if x_article.HINT in entry or x_article.needs_article(entry):
+        return x_post_meta.eligibility(row)[0] == 'article_merged'
+    return True
+
+
+def adopt(conn, source_id, ident, post_id, entry_json, state, row, outside) -> bool:
+    """认库里那一行为这条候选的成品,写在调用方的写事务里;判据待在 UPDATE 自己的 WHERE 里
+    (候选还是读到的那一份)。窗口外的再没有哪一轮会来确认它,所以这个账号这一条直接记成已确认、
+    名下那条超窗记录一并删掉;**交付不在这里记** —— 照旧由 `delivery` 交出去、存盘之后 `acknowledge`。
+    `put_items` 撞上库里那一行时内容是 `DO NOTHING`,订阅—内容关联却照写(按订阅查内容只认它);
+    在这里顺手记成已交付,这个账号的列表里就永远少这一条,而交付再也不会补它。"""
+    if not conn.execute('''UPDATE x_intake_candidates SET state='ready',reason='',entry=?
+            WHERE post_id=? AND state=? AND entry=?''',
+            (json.dumps(row, ensure_ascii=False), post_id, state, entry_json)).rowcount:
+        return False
+    if outside:
+        conn.execute('UPDATE x_intake_links SET confirmed=1 WHERE source_id=? AND identity=? AND post_id=?',
+                     (source_id, ident, post_id))
+        conn.execute('DELETE FROM x_intake_expirations WHERE source_id=? AND identity=? AND post_id=?',
+                     (source_id, ident, post_id))
+    return True
+
+
+def note_expiry(conn, source_id, ident, now):
+    """按超窗记录现算这个账号的超窗计数和那句提示,写回进度行(收尾时那句提示会进订阅的
+    `last_notice`)。`prepare` 记完账、清扫删掉报警之后各调一次,两处一个口径。"""
+    row = conn.execute('SELECT floor FROM x_intake_sources WHERE source_id=? AND identity=?',
+                       (source_id, ident)).fetchone()
+    if row:
+        expired = retention.recent(conn, source_id, ident, now)
+        conn.execute('UPDATE x_intake_sources SET expired=?,outside=? WHERE source_id=? AND identity=?',
+                     (expired, retention.notice(utc(row['floor']), expired), source_id, ident))
+
+
+def settle(conn, source, now) -> set:
+    """**超窗记账之前**,把这个账号名下库里其实已有成品的候选收敛成已收(`collected`)。
+
+    超窗报警从候选状态派生(`retention.expire` 连 `expired` 也计),所以光删报警下一轮就会重建;
+    只在收尾时清 `repair` 又晚了一步 —— `prepare` 先把跨过窗口的那几条转成 `expired`,从此再没人
+    核对它。窗口内只收 `repair`(正文待补那几条归正文阶段,`ready` 归交付);窗口外连 `ready` 在内
+    都核对。**按这个账号自己那条关联判,不按共享候选的档位判**:候选按 `post_id` 全库一行,确认、
+    交付、超窗却是逐账号的 —— 别的账号先把它收敛成 `ready` 之后,这个账号那条未确认的关联照样会
+    被 `expire` 记超窗,只认 `pending`/`repair`/`expired` 的话它从此没人核对。`ready` 只看这个账号
+    还没交付、又还有事可做的:没确认的,或者确认过、名下还挂着候选转回 `ready` 之前记下的超窗的;
+    已确认、没报警的归 `delivery`,在这里每轮重认一遍只会把放行数数虚。其余三档不看交付标记 ——
+    它们挂着「正文待补」或超窗,跟这个账号早先交付过没有关系。永久排除的不碰。
+    返回收敛了哪几条(`post_id`)。"""
+    ident, outside_before = identity(source), (now - capacity.WINDOW).isoformat()
+    rows = conn.execute('''SELECT p.post_id,p.entry,p.state,p.published FROM x_intake_candidates p
+        JOIN x_intake_links l USING(post_id) WHERE l.source_id=? AND l.identity=?
+        AND (p.state IN ('pending','repair','expired') OR p.state='ready' AND l.delivered=0 AND (l.confirmed=0
+            OR EXISTS (SELECT 1 FROM x_intake_expirations e
+                WHERE e.source_id=l.source_id AND e.identity=l.identity AND e.post_id=l.post_id)))''',
+        (source['id'], ident)).fetchall()
+    settled = set()
+    for candidate in rows:
+        entry, outside = json.loads(candidate['entry']), candidate['published'] < outside_before
+        if (not outside and candidate['state'] != 'repair') or excluded(conn, entry):
+            continue
+        row = conn.execute("SELECT * FROM feed_items WHERE kind='social' AND key=?",
+                           (reg.item_key('social', entry['url']),)).fetchone()
+        if row and collected(dict(row), entry, outside) and adopt(
+                conn, source['id'], ident, candidate['post_id'], candidate['entry'], candidate['state'], dict(row), outside):
+            settled.add(candidate['post_id'])
+    return settled
+
+
 def same_version(row, entry):
-    """库里那一条和这次观察到的是不是同一版。**`existing` 和 `needs_repair` 只认这一份。**
+    """库里那一条和这次观察到的是不是同一版。**`needs_repair` 只认这一份**;`existing` 认的是
+    更宽的 `kept`(同一版,或两份都完整、这次那份不比库里全),它也从这一份起判。
 
     推文标题是从正文派生的、各条路派生法不同(见 `x_post_meta.same_post`),逐字比会把
     一条正文一字未改的推文判成新版、停在 `repair` —— 没有哪一轮自动同步会再碰它,它就
@@ -455,7 +543,9 @@ def finish(source, task, entries, unavailable, reason, *, block_tokens=None, loc
             'ready' if entry else 'unavailable' if audit else 'pending')
         if state == 'unavailable':
             reason = audit.get('reason', '')
-        if state == 'ready' and needs_repair(conn, entry):
+        if state == 'ready' and (saved := existing(conn, entry)):
+            entry = saved
+        elif state == 'ready' and needs_repair(conn, entry):
             state = 'repair'
             reason = '存量正文缺少同版完整证明，需走版本化回填；未覆盖旧正文'
         failures = task['failures'] + (state == 'pending')

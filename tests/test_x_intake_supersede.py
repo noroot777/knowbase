@@ -6,7 +6,8 @@
 仓库主人拍板:这种按更完整的那份覆盖。
 
 判据落在后果上:库里那一条变没变成新版、候选还欠不欠、译文有没有作废重排。反过来钉住:
-新版少了链接、改了字、覆盖没写成(别人刚改过库里那条),库里原样、候选照旧留在 `repair`。
+新版少了链接、改了字,库里原样(库里那份能自证,这条直接算已收,见 `tests/test_x_intake_kept.py`);
+覆盖没写成(别人刚改过库里那条),库里原样、候选照旧留在 `repair`。
 
 三条集成边界各钉一次:同一条推文也被订阅源收过时,改的是大V那一条、订阅源那篇原样;
 订阅在收尾前被停用/改过,旧那一轮一个字都不写;旧推文只缺完整证明时补的是证明,
@@ -14,6 +15,7 @@
 
 跑:  uv run --offline python -m unittest tests.test_x_intake_supersede -v
 """
+from datetime import timedelta
 from unittest.mock import patch
 
 from kb.feeds import grab_store, registry as reg, x_post_meta
@@ -66,21 +68,24 @@ class SupersedeTests(DriftBase):
         self.assertEqual(self.feed_row()['body'], fuller)
         self.assertNotEqual(self.candidate()['state'], 'repair')
 
-    def test_a_copy_that_lost_a_link_never_replaces(self):
-        stored = self.parked(SHORT, SHORT.split('https://')[0].rstrip() + '\n\nsee you')
+    def seen_again(self, stored_text, seen_text):
+        """库里一份 `stored_text`,这一轮从时间线看到 `seen_text`,再跑一遍清扫。"""
+        stored = self.saved_by_detail_page(stored_text)
+        self.stage([self.timeline_full_text(seen_text)])
+        supersede.run([self.source])
+        return stored
 
-        self.assertEqual(0, supersede.run([self.source]))
+    def test_a_copy_that_lost_a_link_never_replaces(self):
+        stored = self.seen_again(SHORT, SHORT.split('https://')[0].rstrip() + '\n\nsee you')
 
         self.assertEqual(self.feed_row()['body'], stored['body'])
-        self.assertEqual(self.candidate()['state'], 'repair')
+        self.assertEqual(self.candidate()['state'], 'ready', '库里那份能自证:认它,算已收')
 
     def test_a_changed_word_never_replaces(self):
-        stored = self.parked(SHORT, SHORT.replace('episodes', 'shows'))
-
-        self.assertEqual(0, supersede.run([self.source]))
+        stored = self.seen_again(SHORT, SHORT.replace('episodes', 'shows'))
 
         self.assertEqual(self.feed_row()['body'], stored['body'])
-        self.assertEqual(self.candidate()['state'], 'repair')
+        self.assertEqual(self.candidate()['state'], 'ready', '库里那份能自证:认它,算已收')
 
     def test_the_candidate_is_released_only_once_the_copy_is_written(self):
         """覆盖没写成(库里那条的版本 CAS 拒了)就不许放行:放行和改写同一笔、一起回滚。"""
@@ -157,6 +162,44 @@ class SupersedeTests(DriftBase):
         self.assertEqual(row['content_rev'], stored['content_rev'] + 1)
         self.assertEqual(self.candidate()['state'], 'ready')
         self.assertEqual(store.delivery(self.source)[1], 0)
+
+    def expired_before_the_sweep(self, stored_text, seen_text):
+        """停进 `repair` 之后还没等到收尾这一步,下一轮准备时就跨过了窗口:转成 `expired`、记下超窗。"""
+        stored = self.parked(stored_text, seen_text)
+        store.prepare([self.source], 'browser', self.now + timedelta(days=6))
+        self.assertEqual((self.candidate()['state'], store.progress(self.source)['expired']), ('expired', 1),
+                         '这一局的前提')
+        return stored
+
+    def alarm_rows(self):
+        with reg.db() as conn:
+            return conn.execute('SELECT count(*) FROM x_intake_expirations').fetchone()[0]
+
+    def test_a_fuller_copy_that_crossed_the_window_still_replaces_and_stops_alarming(self):
+        fuller = SHORT.replace('https://', 'https://www.')
+        self.expired_before_the_sweep(SHORT, fuller)
+
+        self.assertEqual(1, supersede.run([self.source], self.now + timedelta(days=6)))
+
+        self.assertEqual(self.feed_row()['body'], fuller)
+        self.assertEqual(self.candidate()['state'], 'ready')
+        self.assertEqual(self.alarm_rows(), 0)
+        progress = store.progress(self.source)
+        self.assertEqual((progress['expired'], progress['outside']), (0, ''), '收尾那句提示也跟着撤')
+        store.prepare([self.source], 'browser', self.now + timedelta(days=6, hours=1))
+        self.assertEqual(self.alarm_rows(), 0, '下一轮准备时不重建')
+
+    def test_a_crossed_copy_of_another_kind_keeps_alarming(self):
+        """反过来钉住:跨窗的那一条,库里那行是长文、这次是帖子 —— 既不是同一份成品,也不许互相覆盖。"""
+        stored = self.expired_before_the_sweep(SHORT, SHORT.replace('https://', 'https://www.'))
+        article = x_post_meta.stamp({k: v for k, v in stored.items() if k != x_post_meta.FIELD}, 'article', '')
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET x_post_meta=?', (article[x_post_meta.FIELD],))
+
+        self.assertEqual(0, supersede.run([self.source], self.now + timedelta(days=6)))
+
+        self.assertEqual(self.feed_row()['body'], stored['body'])
+        self.assertEqual((self.candidate()['state'], self.alarm_rows()), ('expired', 1))
 
     def kind_row(self, kind):
         with reg.db() as conn:

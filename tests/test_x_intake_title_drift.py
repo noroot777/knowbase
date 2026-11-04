@@ -5,7 +5,8 @@
 (`x_guest._build` / `x_browser._entry`)。两份标题都盖进了指纹,逐字比就把它判成新版,
 落进 `repair` —— 没有哪一轮自动同步会再碰它,「问题与待办」上它以「正文待补」挂着,
 直到滑出五天窗口变成「已超自动窗口」。判据落在后果上:候选落哪一档、还欠不欠、
-库里那一条有没有被改写。反过来钉两边:正文真不一样的、库里那份证不了自己的,照旧扣留。
+库里那一条有没有被改写。反过来钉住:库里那份证不了自己的,照旧扣留。正文差了字的那一半
+归 `tests/test_x_intake_kept.py`(库里那份能自证就认它,不再扣留)。
 """
 from datetime import timedelta
 from unittest.mock import patch
@@ -82,15 +83,6 @@ class TitleDriftTests(DriftBase):
 
         self.assertEqual(self.candidate()['state'], 'ready')
         self.assertEqual(store.delivery(self.source)[1], 0)
-
-    def test_different_body_still_waits_for_versioned_backfill(self):
-        stored = self.saved_by_detail_page()
-        changed = TEXT.replace('bottleneck', 'constraint')   # 改了字,不是只多了链接
-        self.stage([self.timeline_full_text(changed)])
-
-        self.assertEqual(self.candidate()['state'], 'repair')
-        self.assertEqual(store.delivery(self.source)[:2], ([], 1))
-        self.assertEqual(self.feed_row()['body'], stored['body'], '正文不同的那一版不许直接覆盖')
 
     def test_stored_row_that_cannot_prove_itself_is_not_reused(self):
         stored = self.saved_by_detail_page()
