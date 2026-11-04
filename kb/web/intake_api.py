@@ -168,11 +168,13 @@ def set_settings(kind: str,body: Settings):
 
 @router.get('/youtube/ranking')
 def youtube_ranking(source_id: int | None = None):
-    """`rank_limit` 跟着榜单一起给:面板按它标出哪几条下一轮准入,用的必须是
-    `ranking.select` 准入时读的同一份设置,不能让前端另读一份(那份可能是没保存的草稿)。"""
+    """「当前准入」那面旗在这儿按 `ranking.admissible` 判好再给前端,用的是准入时读的同一份
+    设置 —— 前端只比名次的话,不处理、退避中的条目照样标着准入;另读一份设置又可能是没保存
+    的草稿。`rank_limit` 只给页头那行事实用。"""
     from kb.youtube.settings import of
     from kb.youtube.storage import listing
-    return {**listing(source_id), 'rank_limit': of(reg.get_settings('youtube'))['rank_limit']}
+    policy = of(reg.get_settings('youtube'))
+    return {**listing(source_id, settings=policy), 'rank_limit': policy['rank_limit']}
 
 
 @router.get('/youtube/status')

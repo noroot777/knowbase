@@ -56,10 +56,21 @@ export async function dialog({ evaluate, wait, click, fill, send, check, screens
         skipped.querySelector('summary').textContent.includes('1 条') &&
         skipped.textContent.includes('轻量过滤') && !groups.some(node => node.textContent.includes('第 1 期'));
     })`), await evaluate(`[...document.querySelectorAll('.youtube-rank-group summary')].map(node => node.textContent).join(' | ')`));
-  check('准入名次以内的就地标出下一轮准入', await evaluate(`
-    [...document.querySelectorAll('[data-group^="d"] .youtube-rank-item')].every(node => !!node.querySelector('.youtube-rank-next')) &&
-    !document.querySelector('[data-group="skipped"] .youtube-rank-next')`));
+  // 「当前准入」由后端按真实准入条件判(`admitted`),页面只照着标:比的是**哪几条**,不只是有没有。
+  const admittedMatches = `fetch('/api/intake/youtube/ranking').then(response => response.json()).then(value => {
+    const expected = value.items.filter(item => item.admitted).map(item => item.url).sort().join();
+    const marked = [...document.querySelectorAll('.youtube-rank-item')].filter(node => node.querySelector('.youtube-rank-next'))
+      .map(node => node.querySelector('a').getAttribute('href')).sort().join();
+    return expected !== '' && expected === marked && !document.querySelector('[data-group="skipped"] .youtube-rank-next');
+  })`;
+  check('当前准入照后端判定就地标出', await evaluate(admittedMatches));
   await screenshot('ranking-desktop');
+  // 搜索时未排名那几格的组头说匹配了几条,不拿全组总数冒充。
+  await fill('#youtube-rank-q', 'travel');
+  await wait(`!!document.querySelector('[data-group="skipped"]')`);
+  check('搜索时未排名那格的组头报匹配条数', await evaluate(`
+    document.querySelector('[data-group="skipped"] summary').textContent.includes('匹配 1 条 · 共 1 条') &&
+    !document.querySelector('[data-group^="d"]')`));
   await fill('#youtube-rank-q', '不会有这个标题zz');
   await wait(`$('youtube-ranking').textContent.includes('没有匹配的候选')`);
   check('候选榜搜索筛掉不匹配的条目', await evaluate(`document.querySelectorAll('.youtube-rank-item').length === 0`));
@@ -95,10 +106,10 @@ export async function dialog({ evaluate, wait, click, fill, send, check, screens
 }
 
 export async function limit({ evaluate, wait, click, fill, send, check }) {
-  // 准入名次改成 2 之后,第 3 名不再标下一轮准入;反过来钉一边:前两名照旧标着。
+  // 准入名次改成 2 之后,第 3 名不再标当前准入;反过来钉一边:前两名照旧标着。
   await click('#youtube-rank-open');
   await wait(`document.querySelectorAll('.youtube-rank-group').length > 0`);
-  check('改了准入名次就按新名次标下一轮准入', await evaluate(`(() => {
+  check('改了准入名次就按新名次标当前准入', await evaluate(`(() => {
     const cards = [...document.querySelectorAll('[data-group^="d"] .youtube-rank-item')];
     const marked = cards.filter(node => node.querySelector('.youtube-rank-next')).map(${rankOf}).sort((a, b) => a - b);
     return $('youtube-rank-count').textContent.endsWith('每轮准入前 2 名') && marked.join() === '1,2' && cards.length === 3;

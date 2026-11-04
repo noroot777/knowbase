@@ -224,9 +224,16 @@ def score(rows, settings, scope, now=None):
     return ranked
 
 
+def admissible(row, settings, force=False):
+    """这一条按**现在**的名次和状态进不进这一轮。`select` 和候选榜上那面「当前准入」都过它
+    —— 面板只比名次的话,被判成不处理的直播回放、还在退避里的失败条目照样标着准入
+    (它们的名次要等下一次重排才清,审查实测)。"""
+    return (not row.get('excluded') and row['state'] != 'ready' and
+            (row['state'] != 'excluded' or force) and
+            (force or row['retry_at'] <= time.time()) and
+            row['score_rank'] <= settings['rank_limit'])
+
+
 def select(rows, settings, force=False):
-    eligible = [row for row in rows if not row.get('excluded') and row['state'] != 'ready' and
-                (row['state'] != 'excluded' or force) and
-                (force or row['retry_at'] <= time.time()) and
-                row['score_rank'] <= settings['rank_limit']]
+    eligible = [row for row in rows if admissible(row, settings, force)]
     return sorted(eligible, key=lambda row: (row['score_rank'], -row['score'], row['video_id']))

@@ -307,25 +307,37 @@ def ready(source):
 def shelf(row):
     """候选榜上这一条归哪一格。面板按它分组,口径只有这一份。
 
-    `ranked` 是排上名、还在等处理的 —— 面板按发布日期把它们摊开,名次在 `rank_limit` 以内的
-    标出下一轮准入(`ranking.select` 每轮准入的那一刀)。没排上名的分三格:已完成、不处理
-    (过滤或用户移除)、暂未排名(候选身份还在、名次被清掉了,比如元数据挂起等核实,下一轮
-    排名时回榜)。
+    **不处理的判据排在名次前面。** 处理那一步拒掉一条(直播回放、Shorts)只改状态和理由,
+    名次要等下一次重排才清 —— 先看名次的话,它照旧落在日期榜里(审查实测)。
+    `ranked` 是排上名、还在等处理的,面板按发布日期把它们摊开;没排上名的分三格:已完成、
+    不处理(过滤、判定不处理或用户移除)、暂未排名(候选身份还在、名次被清掉了,比如元数据
+    挂起等核实,下一轮排名时回榜)。
     """
-    if row['score_rank']:
-        return 'ranked'
     if row['state'] == 'ready':
         return 'ready'
     if row['state'] in ('filtered', 'excluded') or row.get('excluded'):
         return 'skipped'
+    if row['score_rank']:
+        return 'ranked'
     return 'waiting'
 
 
-def listing(source_id=None, limit=100):
+def listing(source_id=None, limit=100, settings=None):
     """**排上名的一条都不截**:截在第 100 条,名次靠后的那些就从它们那天的分组里消失,
     人只会以为那天就这么几条。没排上名的那三格各留最近 `limit` 条,总数在 `shelves` 里照报
-    —— 已完成那一格只增不减,不截的话这一包会跟着历史无限长下去。"""
+    —— 已完成那一格只增不减,不截的话这一包会跟着历史无限长下去。
+
+    「最近」按**时刻**比,不按字符串比:库里的发布时间带着不同的偏移(列表估算写 UTC、
+    元数据写上海时区),字典序不等于先后。解析走 `ranking.stamp`,跟排名用的是同一份;
+    解析不出来的排最后。`settings` 给了才标 `admitted`(`ranking.admissible`)。
+    """
+    from kb.youtube.ranking import admissible, stamp  # 延迟 import:ranking 顶上就 import 了本模块
     candidates = rows([source_id] if source_id is not None else None)
+
+    def moment(row):
+        published = stamp(row['entry'].get('published', ''))
+        return published.timestamp() if published else float('-inf')
+
     counts, shelves, kept = {}, {}, {}
     for row in candidates:
         counts[row['state']] = counts.get(row['state'], 0) + 1
@@ -334,17 +346,20 @@ def listing(source_id=None, limit=100):
         kept.setdefault(group, []).append(row)
     shown = kept.pop('ranked', [])
     for members in kept.values():
-        members.sort(key=lambda row: row['entry'].get('published', ''), reverse=True)
+        members.sort(key=moment, reverse=True)
         shown.extend(members[:limit])
     shown.sort(key=lambda row: (row['score_rank'] or 100000, -row['score']))
     result = []
     for row in shown:
-        entry = row['entry']
+        entry, group = row['entry'], shelf(row)
+        published = stamp(entry.get('published', ''))
         result.append({key: row[key] for key in ('video_id', 'source_id', 'channel', 'views',
                       'score', 'score_rank', 'state', 'reason', 'duration')}
                       | {key: entry.get(key, '') for key in ('title', 'url', 'published')}
                       # **估出来的那条要带上这面旗。** flat 列表发现时 `views` 一律写 0
                       # (列表页读不到播放量),面板不知道这回事就会把「没数据」显示成
                       # 「0 次观看」—— 那是在替 YouTube 说一句它没说过的话。
-                      | {'approximate': bool(entry.get('approximate')), 'shelf': shelf(row)})
+                      | {'approximate': bool(entry.get('approximate')), 'shelf': group,
+                         'published_at': published.timestamp() if published else None,
+                         'admitted': bool(settings) and group == 'ranked' and admissible(row, settings)})
     return {'items': result, 'total': len(candidates), 'counts': counts, 'shelves': shelves}

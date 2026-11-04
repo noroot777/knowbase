@@ -308,7 +308,7 @@ function filterYouTubeRanking() {
   const items = youtubeRankItems.filter(item => (item.title + ' ' + item.channel).toLowerCase().includes(query));
   // **只有一张榜**(仓库主人拍板:不再区分热度和价值),所以这里没有排序下拉 ——
   // 一张榜只有一个顺序,按发布日期分组只是把它摊开,组内照旧按名次排。
-  box.innerHTML = youtubeRankGroups(items).map(group => {
+  box.innerHTML = youtubeRankGroups(items, query).map(group => {
     const open = query ? true : youtubeRankOpen.get(group.key) ?? group.open;
     return `<details class="youtube-rank-group" data-group="${group.key}"${open ? ' open' : ''}>
       <summary><b>${group.title}</b><span>${group.meta}</span>${arrow('caretDown')}</summary>${group.items.map(youtubeRankItem).join('')}</details>`;
@@ -319,8 +319,11 @@ function filterYouTubeRanking() {
  * 北京时间凌晨发布的视频会被归到前一天(CLAUDE.md 元规则:时间一律按项目时区)。 */
 function youtubeRankDay(value) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString('sv-SE', {timeZone:'Asia/Shanghai'});
+  return value === null || Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString('sv-SE', {timeZone:'Asia/Shanghai'});
 }
+// 发布时刻(毫秒)。由后端按 `ranking.stamp` 解析好给(`published_at`),这里不再自己解析
+// 字符串:库里的时间带着不同偏移,字符串比大小不等于比先后。读不出来的排最后。
+const youtubeRankMoment = item => item.published_at === null ? -Infinity : item.published_at * 1000;
 
 function youtubeRankDayTitle(day) {
   if (!day) return '日期未知';
@@ -330,32 +333,35 @@ function youtubeRankDayTitle(day) {
   return day === today ? '今天 · ' + label : day === yesterday ? '昨天 · ' + label : label;
 }
 
-/** 排上名的按**发布日期**分组(新的在上,组内按名次),名次在 `rank_limit` 以内的就地标出
- * 「下一轮准入」。不写「第几期 / 哪天处理」:每天都有新视频排进来,把后面的往后挤,按名次
- * 推算出来的处理日期几乎总是错的,写出来等于替排名许一个兑现不了的诺。
- * 没排上名的三格(`storage.shelf` 判,这里不另判)跟在后面、默认收起。 */
-function youtubeRankGroups(items) {
-  const limit = youtubeRankResult.rank_limit, days = new Map(), groups = [];
+/** 排上名的按**发布日期**分组(新的在上,组内按名次),「当前准入」就地标出。不写「第几期 /
+ * 哪天处理」:每天都有新视频排进来,把后面的往后挤,按名次推算出来的处理日期几乎总是错的。
+ * 「当前准入」也只说**现在**:按此刻的名次和状态,现在同步就会处理它(后端按
+ * `ranking.admissible` 判好的 `admitted`,这里不拿名次自己比 —— 不处理、退避中的条目名次
+ * 还留着)。没排上名的三格(`storage.shelf` 判)跟在后面、默认收起。 */
+function youtubeRankGroups(items, query) {
+  const days = new Map(), groups = [];
   for (const item of items.filter(item => item.shelf === 'ranked')) {
-    const day = youtubeRankDay(item.published);
+    const day = youtubeRankDay(item.published_at === null ? null : item.published_at * 1000);
     if (!days.has(day)) days.set(day, []);
     days.get(day).push(item);
   }
   // 日期未知(空串)排在所有日期之后。
   for (const day of [...days.keys()].sort((left, right) => (right || '0').localeCompare(left || '0'))) {
     const members = days.get(day).sort((left, right) => left.score_rank - right.score_rank);
-    const next = members.filter(item => item.score_rank <= limit).length;
+    const admitted = members.filter(item => item.admitted).length;
     groups.push({key:'d' + day, title:youtubeRankDayTitle(day), open:true, items:members,
-      meta:`${members.length} 条${next ? ` · 下一轮准入 ${next} 条` : ''}`});
+      meta:`${members.length} 条${admitted ? ` · 当前准入 ${admitted} 条` : ''}`});
   }
   for (const [shelf, title] of Object.entries(youtubeRankShelves)) {
     const members = items.filter(item => item.shelf === shelf)
-      .sort((left, right) => String(right.published).localeCompare(String(left.published)));
+      .sort((left, right) => youtubeRankMoment(right) - youtubeRankMoment(left));
     if (!members.length) continue;
     const total = youtubeRankResult.shelves?.[shelf] || members.length;
     const listed = youtubeRankItems.filter(item => item.shelf === shelf).length;
+    // 搜索时组头说匹配了几条,不拿全组总数冒充 —— 卡片只有匹配的那几张。
     groups.push({key:shelf, title, open:false, items:members,
-      meta:`${total} 条${listed < total ? ` · 列出最近 ${listed} 条` : ''}`});
+      meta: query ? `匹配 ${members.length} 条 · 共 ${total} 条`
+        : `${total} 条${listed < total ? ` · 列出最近 ${listed} 条` : ''}`});
   }
   return groups;
 }
@@ -368,12 +374,11 @@ function youtubeRankItem(item) {
     if (item.approximate) facts.push('日期为估算');
   } else if (item.published) facts.push(esc(sourceTime(item.published)));
   facts.push(item.approximate ? '播放量未知' : item.views + ' 次观看');
-  const next = item.shelf === 'ranked' && item.score_rank <= youtubeRankResult.rank_limit;
   // 已完成那一格的状态就是格名本身,再写一遍「中文笔记已完成」是同一句话说两次。
   const state = item.state === 'ready' ? '' :
     esc(youtubeRankStates[item.state] || item.state) + (item.reason ? '：' + esc(item.reason) : '');
   return `<article class="youtube-rank-item"><a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a>
-    <p class="hint">${next ? '<b class="youtube-rank-next">下一轮准入</b>' : ''}${facts.join(' · ')}</p>${state ? `<p class="hint">${state}</p>` : ''}</article>`;
+    <p class="hint">${item.admitted ? '<b class="youtube-rank-next">当前准入</b>' : ''}${facts.join(' · ')}</p>${state ? `<p class="hint">${state}</p>` : ''}</article>`;
 }
 
 // ── 登录态与 yt-dlp ────────────────────────────────────────────────────────
