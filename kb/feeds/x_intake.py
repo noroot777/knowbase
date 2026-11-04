@@ -371,7 +371,7 @@ class Intake:
                         raise
                     self.local_error(source, error, '确认进度')
         try:
-            # 只比库里多了链接的那几条 `repair`:覆盖库里那一条、放行候选,下面的交付照常带走它。
+            # 清 `repair`:只多了链接的覆盖库里那一条,库里已是成品的认它;都放行候选,下面的交付照常带走。
             self.metrics.count('superseded', supersede.run(self.sources))
         except Exception as error:
             if not local_fault(error):

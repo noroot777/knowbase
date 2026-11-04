@@ -266,9 +266,22 @@ def existing(conn, entry):
     cached = conn.execute("SELECT entry FROM x_intake_candidates WHERE post_id=? AND state='ready'",
                           (post_id(entry),)).fetchone()
     proof = json.loads(cached['entry']) if cached else entry
-    if row and complete(dict(row)) and complete(proof) and same_version(dict(row), proof):
+    if row and kept(dict(row), proof):
         return dict(row)
     return None
+
+
+def kept(row, entry):
+    """库里那一条就是这条推文的成品:按链接认出来的这一行能证明自己完整,这次看到的那份
+    也完整、同属帖子或同属长文,而且不比库里那份全(`x_post_meta.supersedes`)。
+
+    **「收没收」看链接,「换不换」才看内容**:两份都完整、只是抄法不同(标题派生、空白、
+    某个字),库里那份就是成品,这条算已收,不进 `repair` 挂成待办、滑出窗口报超窗。
+    只多了链接的新版不认库里那份,留给 `x_intake_supersede` 覆盖;库里那份证不了自己
+    (升级前入库、没有完整证明)或帖子/长文对不上的,照旧走 `repair` 等版本化回填。"""
+    if not (complete(row) and complete(entry)) or x_post_meta.eligibility(row)[0] != x_post_meta.eligibility(entry)[0]:
+        return False
+    return same_version(row, entry) or not x_post_meta.supersedes(row, entry)
 
 
 def same_version(row, entry):
@@ -455,7 +468,9 @@ def finish(source, task, entries, unavailable, reason, *, block_tokens=None, loc
             'ready' if entry else 'unavailable' if audit else 'pending')
         if state == 'unavailable':
             reason = audit.get('reason', '')
-        if state == 'ready' and needs_repair(conn, entry):
+        if state == 'ready' and (saved := existing(conn, entry)):
+            entry = saved
+        elif state == 'ready' and needs_repair(conn, entry):
             state = 'repair'
             reason = '存量正文缺少同版完整证明，需走版本化回填；未覆盖旧正文'
         failures = task['failures'] + (state == 'pending')

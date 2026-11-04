@@ -1,4 +1,7 @@
-"""`repair` 里那几条「只比库里多了链接 / 只多了完整证明」的新版,用它覆盖库里那一条。
+"""清 `repair`:「只比库里多了链接 / 只多了完整证明」的新版覆盖库里那一条;库里那条已是成品的
+(`x_intake_store.kept`)直接认它、放行候选。后者是 `stage` / `finish` 现在就会走的那条路,这里
+兜的是升级前已经停进 `repair` 的那几条 —— 没有这一步,它们要等下一次被看到才自愈,滑出窗口前
+没被看到就以「已超自动窗口」报红,而那条推文其实早在库里。
 
 **硬约束在 `docs/decisions/x-channels.md` 第一节。** 两条通道抄同一条推文的链接不一样
 (判据在 `x_post_meta.supersedes`),于是库里那一份和这次看到的那一份正文对不上,候选停在
@@ -29,7 +32,7 @@ class _Lost(Exception):
 
 
 def run(sources) -> int:
-    """覆盖并放行了几条。读写失败照抛,由调用方按本机故障处理(那几条留在 `repair`)。"""
+    """覆盖或认库里那条、放行了几条。读写失败照抛,由调用方按本机故障处理(那几条留在 `repair`)。"""
     released = 0
     for source in sources:
         with store.read_db() as conn:
@@ -59,6 +62,11 @@ def _supersede(source, post_id, entry_json) -> int:
             return 0
         seen = conn.execute("SELECT * FROM feed_items WHERE key=? AND kind='social'",
                             (reg.item_key('social', entry['url']),)).fetchone()
+        if seen and store.kept(dict(seen), entry):
+            # 交付的是库里那一份(`DO NOTHING` 写不动它),口径同 `stage` 里 `existing` 那条路
+            conn.execute('UPDATE x_intake_candidates SET entry=? WHERE post_id=?',
+                         (json.dumps(dict(seen), ensure_ascii=False), post_id))
+            return 1
         if not seen or not x_post_meta.supersedes(dict(seen), entry) or not _write(conn, dict(seen), entry):
             raise _Lost
         return 1

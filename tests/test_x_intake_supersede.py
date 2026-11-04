@@ -6,7 +6,8 @@
 仓库主人拍板:这种按更完整的那份覆盖。
 
 判据落在后果上:库里那一条变没变成新版、候选还欠不欠、译文有没有作废重排。反过来钉住:
-新版少了链接、改了字、覆盖没写成(别人刚改过库里那条),库里原样、候选照旧留在 `repair`。
+新版少了链接、改了字,库里原样(库里那份能自证,这条直接算已收,见 `tests/test_x_intake_kept.py`);
+覆盖没写成(别人刚改过库里那条),库里原样、候选照旧留在 `repair`。
 
 三条集成边界各钉一次:同一条推文也被订阅源收过时,改的是大V那一条、订阅源那篇原样;
 订阅在收尾前被停用/改过,旧那一轮一个字都不写;旧推文只缺完整证明时补的是证明,
@@ -66,21 +67,24 @@ class SupersedeTests(DriftBase):
         self.assertEqual(self.feed_row()['body'], fuller)
         self.assertNotEqual(self.candidate()['state'], 'repair')
 
-    def test_a_copy_that_lost_a_link_never_replaces(self):
-        stored = self.parked(SHORT, SHORT.split('https://')[0].rstrip() + '\n\nsee you')
+    def seen_again(self, stored_text, seen_text):
+        """库里一份 `stored_text`,这一轮从时间线看到 `seen_text`,再跑一遍清扫。"""
+        stored = self.saved_by_detail_page(stored_text)
+        self.stage([self.timeline_full_text(seen_text)])
+        supersede.run([self.source])
+        return stored
 
-        self.assertEqual(0, supersede.run([self.source]))
+    def test_a_copy_that_lost_a_link_never_replaces(self):
+        stored = self.seen_again(SHORT, SHORT.split('https://')[0].rstrip() + '\n\nsee you')
 
         self.assertEqual(self.feed_row()['body'], stored['body'])
-        self.assertEqual(self.candidate()['state'], 'repair')
+        self.assertEqual(self.candidate()['state'], 'ready', '库里那份能自证:认它,算已收')
 
     def test_a_changed_word_never_replaces(self):
-        stored = self.parked(SHORT, SHORT.replace('episodes', 'shows'))
-
-        self.assertEqual(0, supersede.run([self.source]))
+        stored = self.seen_again(SHORT, SHORT.replace('episodes', 'shows'))
 
         self.assertEqual(self.feed_row()['body'], stored['body'])
-        self.assertEqual(self.candidate()['state'], 'repair')
+        self.assertEqual(self.candidate()['state'], 'ready', '库里那份能自证:认它,算已收')
 
     def test_the_candidate_is_released_only_once_the_copy_is_written(self):
         """覆盖没写成(库里那条的版本 CAS 拒了)就不许放行:放行和改写同一笔、一起回滚。"""
