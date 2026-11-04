@@ -25,3 +25,4 @@
 .youtube-rank-item > a { color: var(--ink); font-size: 14px; font-weight: 600; text-decoration: none; }
 .youtube-rank-item > a:hover { color: var(--accent); text-decoration: underline; }
 .youtube-rank-item p { margin: 5px 0 0; }
+.youtube-rank-next { color: var(--ok); font-weight: 600; margin-right: 8px; }

@@ -168,7 +168,7 @@ def set_settings(kind: str,body: Settings):
 
 @router.get('/youtube/ranking')
 def youtube_ranking(source_id: int | None = None):
-    """`rank_limit` 跟着榜单一起给:面板按它把名次切成一期一期,用的必须是
+    """`rank_limit` 跟着榜单一起给:面板按它标出哪几条下一轮准入,用的必须是
     `ranking.select` 准入时读的同一份设置,不能让前端另读一份(那份可能是没保存的草稿)。"""
     from kb.youtube.settings import of
     from kb.youtube.storage import listing

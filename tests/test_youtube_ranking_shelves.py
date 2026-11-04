@@ -1,7 +1,7 @@
 """候选排名那一页按格分组(`storage.shelf` / `storage.listing`)与它带出去的 `rank_limit`。
 
-面板把排上名的按 `rank_limit` 切成一期一期,所以**排上名的一条都不许截** —— 截在第 100 条
-等于把后几期整期丢掉,人只会以为后面没东西了。没排上名的那几格各截最近 100 条,但总数照报。
+面板把排上名的全部按发布日期摊开,所以**排上名的一条都不许截** —— 截在第 100 条,名次靠后
+的那些就从它们那天的分组里消失,人只会以为那天就这么几条。没排上名的那几格各截最近 100 条,但总数照报。
 """
 from datetime import datetime, timedelta, timezone
 
@@ -29,7 +29,7 @@ class RankingShelves(YouTubeFixture):
         listed = storage.listing()
         ranked = [item for item in listed['items'] if item['shelf'] == 'ranked']
         self.assertEqual(list(range(1, 131)), [item['score_rank'] for item in ranked],
-                         '第 11 期之后被截掉了,面板上后几期整期消失')
+                         '第 100 名之后被截掉了,那几天的分组里少了人')
         self.assertEqual(130, listed['shelves']['ranked'])
 
     def test_unranked_shelves_keep_the_latest_hundred_and_report_the_true_count(self):
@@ -54,7 +54,7 @@ class RankingShelves(YouTubeFixture):
         self.assertEqual({'ranked': 1, 'ready': 1, 'skipped': 1, 'waiting': 1}, listed['shelves'])
 
     def test_the_endpoint_carries_the_saved_rank_limit(self):
-        """面板按它切期,必须是准入时读的那一份;反过来钉一边:改了设置就跟着变。"""
+        """面板按它标「下一轮准入」,必须是准入时读的那一份;反过来钉一边:改了设置就跟着变。"""
         self.assertEqual(10, self.client.get('/api/intake/youtube/ranking').json()['rank_limit'])
         self.settings(rank_limit=3)
         self.assertEqual(3, self.client.get('/api/intake/youtube/ranking').json()['rank_limit'])
