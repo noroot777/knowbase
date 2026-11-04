@@ -260,7 +260,14 @@ def api_ask_stream(body: AskRequest):
     if not q:
         raise HTTPException(400, "问题不能为空")
     model = body.model or llm.get_default_model()
-    conn = store.connect()
+    # **这条连接会跨线程**:本函数在一个线程池线程里开它,而 StreamingResponse 对
+    # 同步生成器是 `iterate_in_threadpool` —— 每一次 next() 各自从线程池借一个线程,
+    # 借到哪个看当时谁空着。agent 研究要十几秒,期间别的请求(页面每两秒一次的
+    # 状态轮询)把原来那个线程占走,收尾的 `_save_qa` 就落在另一个线程上,默认的
+    # 同线程检查当场抛 ProgrammingError:流被砍断(浏览器只报一句 network error),
+    # 这一轮也没落库。各次 next() 是一个接一个 await 的、从不并发,所以要放开的
+    # 只是「必须同一个线程」这道检查,不是互斥。
+    conn = store.connect(check_same_thread=False)
     try:
         history = _load_history(conn, body.conversation_id)   # 404 在开流前抛,干净
     except BaseException:
