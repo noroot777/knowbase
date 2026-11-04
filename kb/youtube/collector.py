@@ -525,6 +525,16 @@ def _round(scope):
         for source_id, reasons in process(ranked, settings, scope, summary,
                                           processing_started + of(settings)['run_seconds']).items():
             failures.setdefault(source_id, []).extend(reasons)
+        # 处理完再看:第一次探到超长的那几条是在 `process` 里才记下时长的。
+        lengthy = {}
+        for row in ranking.over_length(storage.rows([source['id'] for source in succeeded]), of(settings), scope):
+            for source_id in row['eligible_sources']:
+                lengthy.setdefault(source_id, []).append(row)
+        for source in succeeded:
+            if source['id'] in lengthy:
+                summary['notices'].append({'source_id': source['id'], 'title': source['name'],
+                                           'reason': source_status.over_length(
+                                               lengthy[source['id']], of(settings)['max_video_minutes'])})
     except Exception as error:
         if not local_fault(error):
             raise

@@ -132,6 +132,27 @@ def qualify(row, settings, scope, now, floor):
              'unverified': not eligible}, reasons, unknown)
 
 
+def over_length(rows, settings, scope, now=None):
+    """只差单条时长上限这一道才没做的视频(返回代表归属,带 `eligible_sources`)。
+
+    它们在窗口里、其余资格全过得去,只是按**当前**设置不做 —— 同步结果里得点名说出来。
+    一个字不提的话,面板上只有「排名 0 条、入库 0 条」,人只会以为频道没更新(真机形态:
+    AI Search 三天前那期 54 分钟的周报,上限 45 分钟)。判据跟 `rejection` 是同一份:
+    把上限拿掉再 `qualify` 一次,不另写一套「在不在窗口里」。
+    """
+    now = now or datetime.now(timezone.utc)
+    floor = now - timedelta(days=settings['window_days'])
+    unlimited = {**settings, 'max_video_minutes': math.inf}
+    found = []
+    for row in rows:
+        if row['state'] in ('ready', 'processing') or not row['duration'] > settings['max_video_minutes'] * 60:
+            continue
+        representative, _, _ = qualify(row, unlimited, scope, now, floor)
+        if representative is not None and not representative['unverified']:
+            found.append(representative)
+    return found
+
+
 def score(rows, settings, scope, now=None):
     now = now or datetime.now(timezone.utc)
     floor = now - timedelta(days=settings['window_days'])

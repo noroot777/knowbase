@@ -1,6 +1,13 @@
 from kb.youtube import diagnosis, login
 
 
+def over_length(rows, limit):
+    """`ranking.over_length` 挑出来的那几条,写成频道卡片上的一句跳过说明。"""
+    named = '、'.join(f"「{row['entry']['title']}」{row['duration'] / 60:.0f} 分钟" for row in rows[:3])
+    more = f' 等 {len(rows)} 条' if len(rows) > 3 else ''
+    return f'超过单条时长上限 {limit} 分钟未处理：{named}{more}；可在设置里调高「单条时长上限」'
+
+
 def fields(source, summary, pending=False, videos=()):
     identity = str(source['id'])
     partial = [item['reason'] for item in summary.get('partial', ())

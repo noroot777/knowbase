@@ -793,6 +793,11 @@ RSS 取不到时改用 yt-dlp 列频道（当时的 `discovery.approximate`，�
 时长在 `admission.gate` 拒掉那一刻写进 `duration`；判据按当前设置，调高上限后下一轮照常回榜。
 **`rejection` 里判得准的拒绝胜过任何一道「还判不了」，不论排在哪一道**：逐道早退的话，估算日期或空简介
 那几道会抢在后面的事实之前返回「判不了」，探到超长的估算条目照旧拿第 1 名、每轮被选中。回归 `tests/test_youtube_duration_slot.py`。
+**在窗口里、只差时长上限这一道才没做的视频，同步结果和频道卡片要点名说出来**（`ranking.over_length`：拿掉上限再过一次
+`qualify`，口径跟 `rejection` 同一份；文案 `source_status.over_length`，进本频道 `notices`）。在 `process` 之后算 ——
+第一次探到超长的那条是在那里才记下时长的。不说的话那一轮只剩「排名 0 条、入库 0 条」，人只会以为频道没更新
+（真机形态：只同步 AI Search，三天前那期 54 分钟的周报被 45 分钟上限挡掉）。窗口外的、调高上限之后的都不说。
+回归 `tests/test_youtube_over_length_notice.py`。
 
 默认准入：最近 7 天，候选榜前 10（`rank_limit`），单条不超过 45 分钟。
 **一轮做多少只由准入名次和处理时间上限决定**：每轮条数（`max_videos`）和累计视频时长（`max_minutes`）两道预算
