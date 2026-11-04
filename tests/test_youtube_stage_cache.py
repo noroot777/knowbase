@@ -1,11 +1,9 @@
-import json
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from kb.youtube import media, notes
 from tests.youtube_fixture import YouTubeFixture
-from tests.youtube_translation_fixture import encoded
 
 
 class YouTubeStageCache(YouTubeFixture):
@@ -14,7 +12,6 @@ class YouTubeStageCache(YouTubeFixture):
         self.row = {'video_id': self.entry()['video_id'], 'entry': self.entry(), 'channel': '测试频道'}
         self.row['entry']['title'] = '智能体代码生成教程'
         self.selected = SimpleNamespace(provider='fixture', model_id='fixture')
-        self.payload = {'title': '具体中文标题', 'summary': '保留事实与限制的中文概述。', 'body': '具体中文内容。'}
         self.blocks = [f'中文原文内容{position}。' for position in range(16)]
         self.transcript = self.complete_transcript()
 
@@ -25,7 +22,8 @@ class YouTubeStageCache(YouTubeFixture):
             product = notes.build(self.row, self.transcript, time.monotonic() + 30, lambda: False)
         return product, call
 
-    def test_long_chinese_source_needs_no_reduction_or_final_note(self):
+    def test_long_chinese_source_is_published_without_any_model_call(self):
+        """中文原文不进模型，旧流水线留在缓存里的摘要/成稿条目原样不动(87cc380 起没有那两段了)。"""
         directory = media.cache_dir(self.row['video_id'])
         cache = {'old-reduce': 'bad summary', 'old-note': '{bad json'}
         media.save_json(directory / 'notes-cache.json', cache)
@@ -36,25 +34,3 @@ class YouTubeStageCache(YouTubeFixture):
         self.assertIn('中文字幕原文', product['body'])
         self.assertEqual(self.row['entry']['title'], product['title'])
         self.assertEqual(cache, media.read_json(directory / 'notes-cache.json'))
-
-    def test_invalid_stage_outputs_are_not_cached_and_good_stages_survive(self):
-        directory = media.cache_dir(self.row['video_id'])
-        cache = {'valid-transcript': '已校验原文'}
-        for output in ('', 'English summary without Chinese', '中' * (notes.CONTEXT_LIMIT + 1)):
-            with self.subTest(output=output[:20]), self.assertRaises(RuntimeError):
-                notes.cached(directory, cache, 'bad-summary', lambda: output, notes.summary_output)
-            self.assertNotIn('bad-summary', cache)
-            self.assertEqual('已校验原文', cache['valid-transcript'])
-        cache['bad-summary'] = ''
-        output = notes.cached(directory, cache, 'bad-summary', lambda: '可用的中文要点。', notes.summary_output)
-        self.assertEqual('可用的中文要点。', output)
-
-    def test_bad_cached_translation_and_final_json_are_revalidated(self):
-        directory = media.cache_dir(self.row['video_id'])
-        cache = {'translation': 'English only', 'note': '{bad json'}
-        source = 'The original AI tutorial has important facts.'
-        translation = notes.cached(directory, cache, 'translation', lambda: encoded(source, '中文事实和限制。'),
-                                   lambda output: notes.translated_output(source, output))
-        payload = notes.cached(directory, cache, 'note', lambda: json.dumps(self.payload), notes.note_payload)
-        self.assertIn('中文', translation)
-        self.assertEqual(self.payload, payload)

@@ -1,7 +1,7 @@
 """假 yt-dlp 和「跑一整轮」那套夹具:**两份用例文件共用这一份,不许各抄一遍。**
 
 拆成两份是 700 行上限逼出来的(`test_youtube_throttle` 验熔断与拒绝,
-`test_youtube_diagnostics` 验诊断的运输与归并)。夹具抄两份之后,其中一份会跟着
+`test_youtube_diagnosis` 验诊断的运输与归并)。夹具抄两份之后,其中一份会跟着
 代码慢慢走偏,而红只在另一份上出现 —— 搬出来这一份就是为了让两边验的是同一个工具。
 """
 import json
@@ -128,7 +128,7 @@ sys.exit(0)
 class FakeToolCase(YouTubeFixture):
     """从真子进程跑起的那一半:**断言的是「这次调用压根没发生」。**
 
-    打桩在 `discovery.fetch` / `media.probe` 之上验不了这几条 —— 后路、部分成功、
+    打桩在 `discovery.fetch` / `media.probe` 之上验不了这几条 —— 列表那一层的分档、部分成功、
     发现到处理的阶段切换全在被绕过的那一段里。**这个类自己不带用例**,只带工具和夹具。
     """
 

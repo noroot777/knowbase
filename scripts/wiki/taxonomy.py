@@ -397,11 +397,6 @@ def load_run_map(path: Path, part: dict[str, str]) -> dict[str, list[str]]:
     return out
 
 
-def load_runs(path: Path, part: dict[str, str]) -> list[list[str]]:
-    """只要批次内容、不要身份时用这个(质量判定按批各验各的)。"""
-    return list(load_run_map(path, part).values())
-
-
 # ── LLM 批量判定 ───────────────────────────────────────────────────────────────
 
 # 提示词 / 调模型 / 解析回包搬到了 taxo_llm.py(理由同 taxo_tables.py:这个文件
@@ -433,7 +428,7 @@ VOID_MIN_N = 20
 def _void_bad(codes: list[str], void: frozenset[str]) -> int:
     """这一**批**判定算不算「等于没判」?算就返回落在 void 上的条数(>0),
     不算返回 0。判据只有这一份:这一轮自己判的那批、和从暂存里续上的每一批,
-    都拿它各验各的(见 `load_runs`)。"""
+    都拿它各验各的(见 `load_run_map`)。"""
     n_void = sum(1 for c in codes if c in void)
     return n_void if len(codes) >= VOID_MIN_N and n_void >= len(codes) * VOID_SHARE else 0
 

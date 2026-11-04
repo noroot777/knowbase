@@ -373,7 +373,7 @@ HTTP 200**,余下 7 条变成有信息的真失败(付费墙 401、拒代理 IP 
   DoH 那条路(否则「每次取值前都清一遍」也全绿,而那会让这一层再也没有回归)。
 - `tests/test_egress_env.py` 的 `EgressWarningTests`(本轮)—— 探测到 / 探不到各走哪条路,
   以及状态行把端点的 path/query 脱敏(NextDNS 那类端点把 token 写在 path 里)。
-- **两份实现各有自己的红**:`request` 和 `public_url` 两个调用方各一条。
+- **两份实现各有自己的红**:`request` 和 `public_addresses`(「测一下」那颗按钮直接调它)两个调用方各一条。
 - `tests/test_feed_egress.py` 的后四组(审查第 1 轮之后)—— 坏地址在保存那一关被拒、
   而存量坏值照旧打得开面板(`UrlShapeTests`);页面原样回传时兜底值不落盘、`***` 没有旧值
   可沿用时拒掉、环境变量来的代理照旧交给 `trust_env` 以免作废 `NO_PROXY`

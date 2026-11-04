@@ -1,9 +1,13 @@
+"""旧格式译文(`translate-coverage-v1` 那种 `{"translations": [...]}`)的验收口径。
+
+87cc380 / e93e29c 之后新译文走 `fulltext`,这套口径**只剩一处用场**:`translation_cache.plan`
+拿它校验磁盘上的旧缓存,过了才复用、不过就重译 —— 所以它判宽了,旧缓存里的英文回显会被当成
+译文直接发出去。经由 `notes.translate` / 小段兜底 / 摘要与成稿那几段的断言随那些代码一起删了。
+"""
 import json
-from types import SimpleNamespace
-from unittest.mock import patch
 
 from kb.feeds.registry import text_language
-from kb.youtube import json_output, media, model_response, notes, transcripts, translation, translation_language
+from kb.youtube import json_output, model_response, notes, transcripts, translation, translation_language
 from tests.youtube_fixture import YouTubeFixture
 
 
@@ -13,10 +17,6 @@ CODE = ('npm install --save-dev vitest && npx vitest run --coverage . '
 
 
 class TranslationOutput(YouTubeFixture):
-    def setUp(self):
-        super().setUp()
-        self.selected = SimpleNamespace(provider='fixture', model_id='fixture')
-
     def test_inline_result_wrappers_do_not_reintroduce_format_promises(self):
         answer = json.dumps({'translations': ['作者要求独立核验。']}, ensure_ascii=False)
         for output in ('好的，以下是译文：' + answer, answer + '  （以上为译文）',
@@ -26,8 +26,6 @@ class TranslationOutput(YouTubeFixture):
                        answer + '\nI hope this will be helpful!', answer + '\n注：要点 [1]；遗漏：[]'):
             with self.subTest(output=output):
                 self.assertEqual('作者要求独立核验。', translation.render('Verify every change.', output))
-        note = {'title': '独立核验', 'summary': '核验改动。', 'body': '先核验，再使用。'}
-        self.assertEqual(note, notes.note_payload('以下是笔记：' + json.dumps(note) + '（以上为笔记）'))
         for output in ('我会按 ' + answer + ' 的格式输出。', 'I will output ' + answer,
                        '以下是结果：[' + answer + ']'):
             with self.subTest(output=output), self.assertRaises(ValueError):
@@ -54,10 +52,6 @@ class TranslationOutput(YouTubeFixture):
             with self.subTest(source=source):
                 self.assertEqual('en', text_language(value))
                 self.assertEqual(value, translation.render(source, output))
-                self.assertEqual(value, translation.unit_output(source, 0, output))
-                with patch.object(notes, 'call', return_value=output) as call:
-                    self.assertEqual(value, notes.translate(source, self.selected, 10**10, lambda: False))
-                self.assertEqual(1, call.call_count)
 
     def test_only_independent_result_objects_are_extracted_and_prompt_echoes_are_rejected(self):
         example = json.dumps({'translations': ['第一段译文', '第二段译文']}, ensure_ascii=False)
@@ -72,22 +66,8 @@ class TranslationOutput(YouTubeFixture):
             json_output.object_payload(wrapped, example)
         wrapped = '参考 {placeholder}\n实际结果：\n```json\n' + answer + '\n```\n说明 {结束}'
         self.assertEqual(json.loads(answer), json_output.object_payload(wrapped, example))
-        note = json.dumps({'title': '示例标题', 'summary': '示例摘要', 'body': '示例正文'}, ensure_ascii=False)
-        with self.assertRaisesRegex(RuntimeError, '格式'):
-            notes.note_payload(note, '示例：\n' + note)
 
-    def test_translation_prompt_has_no_parseable_answer_template(self):
-        source = 'Verify every generated change before use. ' * 18
-        self.assertEqual(2, len(translation.units(source)))
-        instructions = translation.prompt(source).split('\n\n', 1)[0]
-        self.assertNotIn('{', instructions)
-        self.assertNotIn('第一段译文', instructions)
-        echo = '好的，我会按 {"translations":["第一段译文","第二段译文"]} 的格式输出。'
-        with patch.object(notes, 'call', return_value=echo) as call, self.assertRaises(RuntimeError):
-            notes.translate(source, self.selected, 10**10, lambda: False)
-        self.assertEqual(2, call.call_count)
-
-    def test_term_lists_and_source_bound_quotes_survive_batch_and_unit_validation(self):
+    def test_term_lists_and_source_bound_quotes_survive_validation(self):
         source = ('We compare GPT 4o, Claude 3.5 Sonnet, Gemini 1.5 Pro, Llama 3.1, Mistral Large, '
                   'Command R, DeepSeek V2, Qwen 2.5, Phi 3 and Yi 34B on the same benchmark.')
         value = ('我们在同一套基准上对比 GPT 4o、Claude 3.5 Sonnet、Gemini 1.5 Pro、Llama 3.1、'
@@ -97,13 +77,6 @@ class TranslationOutput(YouTubeFixture):
             output = json.dumps({'translations': [expected]})
             with self.subTest(separator=separator):
                 self.assertEqual(expected, translation.render(source, output))
-                self.assertEqual(expected, translation.unit_output(source, 0, output))
-                self.assertEqual(expected, notes.summary_output(expected, source))
-                payload = {'title': '模型基准比较', 'summary': expected, 'body': expected}
-                self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=source))
-                with patch.object(notes, 'call', return_value=output) as call:
-                    self.assertEqual(expected, notes.translate(source, self.selected, 10**10, lambda: False))
-                call.assert_called_once()
         quote = 'the server must respond with a valid JSON object containing the field name and the field value'
         source = ('The author describes the implementation constraints, the deployment plan, the rollout schedule, '
                   'and the independent verification process. The spec says: "' + quote + '". '
@@ -111,7 +84,6 @@ class TranslationOutput(YouTubeFixture):
                   'against the published requirements.')
         value = '作者说明实现约束、部署计划与独立核验流程。规范原文写的是：“' + quote + '”。团队记录延迟与失败并核对要求。'
         self.assertEqual(value, translation.render(source, json.dumps({'translations': [value]})))
-        self.assertEqual(value, translation.unit_output(source, 0, json.dumps({'translations': [value]})))
         with self.assertRaises(translation.LanguageError):
             translation.render('The author describes the server.', json.dumps({'translations': [value]}))
         source = 'The spec says: "' + (quote + ' ') * 12 + '".'
@@ -131,17 +103,6 @@ class TranslationOutput(YouTubeFixture):
             with self.subTest(name=name):
                 self.assertFalse(notes.native_chinese(source))
                 self.assertEqual(value, translation.render(source, output))
-                self.assertEqual(value, translation.unit_output(source, 0, output))
-                self.assertEqual(value, notes.summary_output(value))
-                self.assertEqual(value, notes.summary_output(value, value, chinese_source=True))
-                payload = {'title': value, 'summary': value, 'body': value}
-                self.assertEqual(payload, notes.note_payload(json.dumps(payload)))
-                self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=value, chinese_source=True))
-                bad = value + 'the remaining explanation is still entirely in English and must not be published'
-                with self.assertRaises(RuntimeError):
-                    notes.summary_output(bad, value, chinese_source=True)
-                with self.assertRaises(RuntimeError):
-                    notes.note_payload(json.dumps(dict(payload, body=bad)), source=value, chinese_source=True)
 
     def test_source_bound_code_urls_and_commands_do_not_dilute_translated_narrative(self):
         narrative = 'The author explains how to verify the command before using it.'
@@ -177,25 +138,13 @@ class TranslationOutput(YouTubeFixture):
             with self.subTest(value=values[0]):
                 with self.assertRaises(RuntimeError):
                     translation.render(source, json.dumps({'translations': values}))
-                for position, value in enumerate(values):
-                    with self.assertRaises(RuntimeError):
-                        translation.unit_output(source, position, json.dumps({'translations': [value]}))
-                def reply(prompt, *arguments):
-                    segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-                    return json.dumps({'translations': [transform(block) for block in segments]})
-                with patch.object(notes, 'call', side_effect=reply), self.assertRaises(RuntimeError):
-                    notes.translate(source, self.selected, 10**10, lambda: False)
         source = '作者说明应当核验结果。' * 20 + 'Today we build an agent from scratch and verify every generated change before use.'
         self.assertEqual('zh', text_language(source))
         self.assertFalse(notes.native_chinese(source))
         translated = '作者说明应当核验结果。' * 20 + '今天从零构建智能体，并在使用前核验每一项生成的修改。'
-        with patch.object(notes, 'call', return_value=json.dumps({'translations': [translated]})) as call:
-            self.assertEqual(translated, notes.translate(source, self.selected, 10**10, lambda: False))
-            call.assert_called_once()
-        with patch.object(notes, 'call', return_value=json.dumps({'translations': [source]})) as call, \
-                self.assertRaises(translation.LanguageError):
-            notes.translate(source, self.selected, 10**10, lambda: False)
-        self.assertEqual(2, call.call_count)
+        self.assertEqual(translated, translation.render(source, json.dumps({'translations': [translated]})))
+        with self.assertRaises(translation.LanguageError):
+            translation.render(source, json.dumps({'translations': [source]}))
         self.assertTrue(translation_language.valid('先完整核对所有参数 ' + ' '.join(['token'] * 10) + '，再独立验证后使用。', [], source))
         self.assertFalse(translation_language.valid('先完整核对所有参数 ' + ' '.join(['token'] * 11) + '，再独立验证后使用。', [], source))
 
@@ -212,12 +161,6 @@ class TranslationOutput(YouTubeFixture):
                 self.assertEqual('en', text_language(value))
                 with self.assertRaises(translation.LanguageError):
                     translation.render(source, output)
-                with self.assertRaises(translation.LanguageError):
-                    translation.unit_output(source, 0, output)
-                with patch.object(notes, 'call', return_value=output) as call, \
-                        self.assertRaises(translation.LanguageError):
-                    notes.translate(source, self.selected, 10**10, lambda: False)
-                self.assertEqual(2, call.call_count)
 
     def test_quotes_are_bounded_source_evidence_not_unlimited_translation_exemptions(self):
         quote = ('We are going to ship the new runtime next quarter and the migration guide will land '
@@ -255,8 +198,6 @@ class TranslationOutput(YouTubeFixture):
         values = [('作者要求独立核验部署结果。' + ' '.join(context) if position == 0 else
                    ' '.join(context) + '作者要求独立核验部署结果。') for position, context in enumerate(contexts)]
         self.assertIn(quote, translation.render(source, json.dumps({'translations': values})))
-        for position, value in enumerate(values):
-            self.assertEqual(value, translation.unit_output(source, position, json.dumps({'translations': [value]})))
 
     def test_lowercase_source_bound_names_are_not_rejected_as_long_english_prose(self):
         names = ['npm', 'pnpm', 'yarn', 'bun', 'vite', 'esbuild', 'rollup', 'webpack', 'swc',
@@ -267,10 +208,6 @@ class TranslationOutput(YouTubeFixture):
             output = json.dumps({'translations': [value]})
             with self.subTest(count=count):
                 self.assertEqual(value, translation.render(source, output))
-                self.assertEqual(value, translation.unit_output(source, 0, output))
-                self.assertEqual(value, notes.summary_output(value, source))
-                payload = {'title': '工具链缓存策略', 'summary': value, 'body': value}
-                self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=source))
         for source, value in (
                 ('Tools: ' + ', '.join(names[:11]), '工具包括 ' + '、'.join(names) + '，需要核验。'),
                 ('Tools: ' + ', '.join(names), '工具包括 npm、' + '、'.join(names) + '，需要核验。'),
@@ -282,24 +219,6 @@ class TranslationOutput(YouTubeFixture):
                  'we move on now, then we review results, next we record failures, finally we ship changes')):
             with self.subTest(source=source, value=value):
                 self.assertFalse(translation_language.chinese_output(value, source))
-
-    def test_bounded_quote_evidence_survives_compression_without_licensing_new_quotes(self):
-        quote = 'the server must respond with a valid JSON-RPC object containing the field name and the field value'
-        source = ('Reviewers independently verify implementation constraints before deployment. ' * 4 +
-                  'The spec says: "' + quote + '".')
-        quotes = translation_language.contexts(source, [source], quoted=True)[0]
-        self.assertEqual([quote], quotes)
-        value = '规范要求：“' + quote + '”。作者要求独立核验。'
-        self.assertFalse(translation_language.chinese_output(value, value))
-        self.assertTrue(translation_language.chinese_output(value, value, quotes))
-        self.assertEqual(value, notes.summary_output(value, value, quotes))
-        payload = {'title': '核验规范', 'summary': value, 'body': value}
-        self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=value, quotes=quotes))
-        for original, output in (('作者要求独立核验。', value), (value, value + value),
-                                 (value, value + '模型补充：“a new statement that was never in the source '
-                                  'and contains far too many English words to pass”。')):
-            with self.subTest(source=original, output=output):
-                self.assertFalse(translation_language.chinese_output(output, original, quotes))
 
     def test_source_bound_flags_and_identifiers_never_swallow_surrounding_prose(self):
         source = 'Use packr add package_name --frozen before independently reviewing every generated change.'
@@ -333,17 +252,11 @@ class TranslationOutput(YouTubeFixture):
                 literals = translation_language.contexts(source, [source])[0]
                 self.assertEqual(['re-read'], literals)
                 self.assertTrue(translation_language.valid(value, literals, source))
-                self.assertEqual(value, notes.summary_output(value, source))
-                payload = {'title': '协议错误核验', 'summary': value, 'body': value}
-                self.assertEqual(payload, notes.note_payload(json.dumps(payload), source=source))
                 blocks = [unit['text'] for unit in translation.units(source)]
                 contexts = translation_language.contexts(source, blocks, quoted=True)
                 values = ['作者独立核验握手规范并对比部署失败。' + ''.join(context) for context in contexts]
                 rendered = translation.render(source, json.dumps({'translations': values}))
                 self.assertIn(name, rendered)
-                for position, translated in enumerate(values):
-                    self.assertEqual(translated, translation.unit_output(source, position,
-                                                                        json.dumps({'translations': [translated]})))
         quote = 'the protocol error details are described in https://example.test/error'
         source = narrative + '「' + quote + '」' + tail
         self.assertEqual([quote], translation_language.contexts(source, [source], quoted=True)[0])
@@ -363,11 +276,8 @@ class TranslationOutput(YouTubeFixture):
                     output = json.dumps({'translations': [value]})
                     with self.assertRaises(RuntimeError):
                         translation.render(source, output)
-                    with self.assertRaises(RuntimeError):
-                        translation.unit_output(source, 0, output)
-                with patch.object(notes, 'call', return_value=json.dumps({'translations': ['作者介绍技术并要求核验。']})) as call:
-                    self.assertEqual('作者介绍技术并要求核验。', notes.translate(source, self.selected, 10**10, lambda: False))
-                    call.assert_called_once()
+                self.assertEqual('作者介绍技术并要求核验。',
+                                 translation.render(source, json.dumps({'translations': ['作者介绍技术并要求核验。']})))
         literal = 'https://example.test/人工知能/アイウエオ'
         self.assertTrue(notes.native_chinese('作者给出原始地址：' + literal))
         self.assertTrue(notes.native_chinese('作者说明状态管理・渲染分离。'))
@@ -386,14 +296,9 @@ class TranslationOutput(YouTubeFixture):
         self.assertNotIn('\n', source)
         blocks = [unit['text'] for unit in translation.units(source)]
         self.assertGreaterEqual(len(blocks), 5)
-        for position, block in enumerate(blocks):
-            with self.subTest(position=position), self.assertRaises(RuntimeError):
-                translation.unit_output(source, position, json.dumps({'translations': [block]}))
         incomplete = json.dumps({'translations': ['作者介绍智能体框架。', *blocks[1:]]})
         with self.assertRaises(RuntimeError):
             translation.render(source, incomplete)
-        with patch.object(notes, 'call', return_value=incomplete), self.assertRaises(RuntimeError):
-            notes.translate(source, self.selected, 10**10, lambda: False)
         spans = translation_language.literal_spans(source)
         self.assertTrue(spans)
         self.assertTrue(all('The planner' not in source[start:end] for start, end in spans))
@@ -415,37 +320,3 @@ class TranslationOutput(YouTubeFixture):
         self.assertIn(command, rendered)
         self.assertIn('\n\n', rendered)
         self.assertNotIn('The planner', rendered)
-
-    def test_valid_narrative_and_literal_unit_caches_survive_another_unit_failure(self):
-        first = ('Review every generated change before use. ' * 8).strip()
-        last = ('Check the generated result independently. ' * 8).strip()
-        literal = 'npm install --save-dev ' + 'package_' * 50
-        source = first + '\n\n' + literal + '\n\n' + last
-        expected = [unit['text'] for unit in translation.units(source)]
-        self.assertEqual([first, literal, last], expected)
-        requested, cache = [], {}
-        broken = True
-        directory = media.cache_dir('00000000001')
-
-        def reply(prompt, *arguments):
-            segments = json.loads(prompt.split('\n\n', 1)[1])['segments']
-            requested.append(segments)
-            if len(segments) > 1:
-                values = []
-            elif segments[0] == expected[1] or broken and segments[0] == last:
-                values = segments
-            else:
-                values = ['作者要求独立核验所有生成的改动。']
-            return json.dumps({'translations': values})
-
-        with patch.object(notes, 'call', side_effect=reply):
-            for attempt in range(2):
-                with self.subTest(attempt=attempt), self.assertRaises(RuntimeError):
-                    notes.translation_request(source, self.selected, 10**10, lambda: False, directory, cache)
-                self.assertEqual({notes.signature('translate-unit-v1', self.selected, unit) for unit in expected[:2]},
-                                 set(cache))
-            broken = False
-            output = notes.translation_request(source, self.selected, 10**10, lambda: False, directory, cache)
-        self.assertIn(expected[1], translation.render(source, output))
-        self.assertEqual([expected, *[[unit] for unit in expected], expected, [last], expected, [last]], requested)
-        self.assertEqual(3, len(cache))

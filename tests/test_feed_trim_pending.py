@@ -19,7 +19,8 @@ class PendingTranslationTests(TrimFixture, unittest.TestCase):
     """`--pending-translation`:清掉某个源还排在翻译队列里的条目。
 
     给服务已经停掉的源用(2026-10-08:HN Top 100 Blogs 的源站停了,284 条还排
-    在队列里,每一轮都占着 `translate.MAX_ITEMS` 的额度把还活着的源挤到后面)。
+    在队列里;当时每轮翻译有条数上限,它们占着额度把还活着的源挤到后面。上限后来
+    取消了(e308f66),这些条目照样每轮重试到 `MAX_TRIES` 次,白花模型调用)。
     筛的维度是翻译队列,不是日期 —— 所以这一路**不钉 `history_floor`**。
     """
 

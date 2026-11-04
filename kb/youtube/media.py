@@ -295,8 +295,9 @@ def channel_videos(source, settings, deadline, stopped, limit=20, notes=None):
     实测:flat 列一个频道 1.4~30 秒(端侧抖动很大)。**它和 `detailed_videos` 的差别只有
     `--flat-playlist` 这一个参数**,而代价差一个数量级:flat 拿不到播放量、发布时间和简介
     (连 `youtubetab:approximate_date` 也不给),非 flat 每条约 4.3 秒(20 条 78 秒,早先记的
-    「25 秒 0 条」是当时只给了 25 秒预算被超时掐掉,不是 bot 墙,已更正)。所以这条排在
-    `detailed_videos` 之后、只在它也没取到时兜底 —— 估出来的日期要等 `media.probe` 才收口。
+    「25 秒 0 条」是当时只给了 25 秒预算被超时掐掉,不是 bot 墙,已更正)。它原先排在
+    `detailed_videos` 之后兜底;普通一轮改走 `windowed_discovery` 之后(ccb4851),生产里
+    只剩登录检查(`login_check`,`limit=1`)和 `discovery.approximate` 两个调用方。
 
     **列不出东西一律抛**:真空频道和列举失败在这条路上分不开,而抛的代价只是按 URL 去重地
     重列一次,漏报则是这个频道从此「今天没有新内容」。**但「列了几条之后失败」不算列不出**

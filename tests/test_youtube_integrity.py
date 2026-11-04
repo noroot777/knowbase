@@ -55,15 +55,13 @@ class YouTubeIntegrity(YouTubeFixture):
     def test_timestamp_free_notes_are_published_and_exported(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
         translated = '作者演示智能体生成代码并运行测试，强调必须核验结果与限制。'
-        payload = {'title': '智能体代码生成的实践', 'summary': '作者展示方法并提示核验限制。',
-                   'body': '## 核验要求\n每次生成的改动都需要验证。'}
         prompts = []
 
         def reply(prompt, *arguments):
             prompts.append(prompt)
             if prompt.startswith('将以下字幕'):
                 return response(prompt, translated)
-            return json.dumps(payload, ensure_ascii=False) if '只输出 JSON' in prompt else translated
+            raise AssertionError('意外的模型提示词：' + prompt[:40])
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
@@ -97,10 +95,7 @@ class YouTubeIntegrity(YouTubeFixture):
                     return '独立核验生成结果'
                 requested.append(value)
                 return translated + '\n\n' + literal
-            if '只输出 JSON' in prompt:
-                return json.dumps({'title': '独立核验生成结果', 'summary': '运行命令前先审查生成的修改。',
-                                   'body': '## 核验步骤\n先审查，再运行测试。'})
-            return '作者要求独立审查生成的代码，然后运行测试命令。'
+            raise AssertionError('意外的模型提示词：' + prompt[:40])
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
@@ -132,11 +127,7 @@ class YouTubeIntegrity(YouTubeFixture):
                     return '核验代码中的每个事实'
                 requested.append(value)
                 return translated
-            if '只输出 JSON' in prompt:
-                return '好的，以下是笔记：\n```json\n' + json.dumps({
-                    'title': '核验代码中的每个事实', 'summary': '先核验再使用生成的代码。',
-                    'body': '## 方法\n逐项验证生成的修改。'}) + '\n```\n笔记结束。'
-            return '作者要求逐项核验生成的代码。'
+            raise AssertionError('意外的模型提示词：' + prompt[:40])
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
@@ -154,26 +145,6 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertEqual(1, len(files))
         body = files[0].read_text()
         self.assertEqual(1, body.count(translated))
-        self.assertNotIn('以下是笔记', body)
-        self.assertNotIn('笔记结束', body)
-
-    def test_format_echo_cannot_become_a_ready_note_or_export(self):
-        selected = SimpleNamespace(provider='fixture', model_id='fixture')
-        source = 'Verify every generated change before use. ' * 18
-        echo = '好的，我会按 {"translations":["第一段译文","第二段译文"]} 的格式输出。'
-        with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
-                patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
-                patch.object(notes, 'available', return_value=(True, '')), \
-                patch.object(notes, 'model', return_value=selected), patch.object(notes, 'call', return_value=echo) as call, \
-                patch.object(media, 'probe', return_value=self.metadata), \
-                patch.object(media, 'obtain', return_value={'origin': 'uploaded_captions', 'language': 'en',
-                    'segments': [{'start': 0, 'end': 600, 'text': source}]}):
-            result = collector.collect(FetchScope(force=True))
-        self.assertEqual((0, 0), (result['processed'], result['added']), result)
-        self.assertEqual('failed', storage.rows()[0]['state'])
-        self.assertEqual(2, call.call_count)
-        self.assertEqual(frozenset(), collector.YouTubeCollector('youtube').materialize())
-        self.assertFalse(list((self.root / 'vault' / 'source' / 'youtube').rglob('*.md')))
 
     def test_cleaned_caption_command_echo_is_rejected_from_cache_and_recovers_before_export(self):
         selected = SimpleNamespace(provider='fixture', model_id='fixture')
@@ -202,10 +173,7 @@ class YouTubeIntegrity(YouTubeFixture):
                 for original, translated in sentences.items():
                     value = value.replace(original, translated)
                 return value
-            if '只输出 JSON' in prompt:
-                return json.dumps({'title': '核验智能体的逐步执行', 'summary': '说明规划与执行的验证边界。',
-                                   'body': '## 方法\n规划器分配预算，执行器核验每步结果。'})
-            return '作者说明规划器分配预算，执行器逐步核验结果。'
+            raise AssertionError('意外的模型提示词：' + prompt[:40])
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
@@ -252,10 +220,7 @@ class YouTubeIntegrity(YouTubeFixture):
             prompts.append(prompt)
             if prompt.startswith('将以下字幕'):
                 raise AssertionError('中文原文不依赖翻译模型配合')
-            if '只输出 JSON' in prompt:
-                return json.dumps({'title': '状态管理与渲染分离', 'summary': '作者说明缓存边界并要求实际核验。',
-                                   'body': '## 方法\n保留文档原话，实际核验编译器的缓存行为。'})
-            return '作者说明编译器插入缓存边界，需要独立核验结果。'
+            raise AssertionError('意外的模型提示词：' + prompt[:40])
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
@@ -288,10 +253,7 @@ class YouTubeIntegrity(YouTubeFixture):
             prompts.append(prompt)
             if prompt.startswith('将以下字幕'):
                 return source_text(prompt) if broken else '作者说明状态管理与渲染的分离。'
-            if '只输出 JSON' in prompt:
-                return json.dumps({'title': '状态管理的方法', 'summary': '作者说明状态管理与渲染的分离。',
-                                   'body': '## 方法\n先分离状态与渲染，再实际核验。'})
-            return '作者说明状态管理与渲染的分离，要求实际核验。'
+            raise AssertionError('意外的模型提示词：' + prompt[:40])
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
@@ -333,10 +295,7 @@ class YouTubeIntegrity(YouTubeFixture):
                     return '核验命令执行结果'
                 requested.append(value)
                 return value.replace(narrative, '作者解释每次生成的修改都需要独立核验。')
-            if '只输出 JSON' in prompt:
-                return json.dumps({'title': '核验命令执行结果', 'summary': '先独立核验，再采用生成结果。',
-                                   'body': '## 方法\n运行原始命令并核验结果。'})
-            return '作者要求先独立核验命令和生成的修改。'
+            raise AssertionError('意外的模型提示词：' + prompt[:40])
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
@@ -367,10 +326,7 @@ class YouTubeIntegrity(YouTubeFixture):
             prompts.append(prompt)
             if prompt.startswith('将以下字幕'):
                 return '过短摘要。' if broken else '每次修改都要独立核验。' * 20
-            if '只输出 JSON' in prompt:
-                return json.dumps({'title': '逐项核验生成结果', 'summary': '每次修改需要核验。',
-                                   'body': '## 方法\n使用前独立核验。'})
-            return '作者强调每次修改需要独立核验。'
+            raise AssertionError('意外的模型提示词：' + prompt[:40])
 
         with patch.object(discovery, 'fetch', return_value=[self.entry_value]), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \

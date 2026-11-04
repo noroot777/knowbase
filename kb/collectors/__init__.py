@@ -534,15 +534,6 @@ def active_collector(channel: str | None = None) -> SourceCollector:
     return get_collector(channel)
 
 
-def wechat_channel() -> str:
-    """公众号那条通道的 id。
-
-    留着这个名字是因为"默认范围里的绿泡泡是哪条"有好几个读取方(定时同步、
-    日报),它们不该各写一个字面量。
-    """
-    return _DEFAULT_CHANNEL
-
-
 def _channel_info(key: str) -> dict:
     c = get_collector(key)
     return {"id": key, "label": getattr(c, "channel_label", c.label),

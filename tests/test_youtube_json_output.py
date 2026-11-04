@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from kb.youtube import json_output, model_response, notes, translation
+from kb.youtube import json_output, model_response, translation
 
 
 class UniqueModelObject(unittest.TestCase):
@@ -60,14 +60,12 @@ class UniqueModelObject(unittest.TestCase):
                 with self.subTest(prefix=prefix, suffix=suffix):
                     output = prefix + '\n```json\n' + self.answer + '\n```\n' + suffix
                     self.assertEqual(self.payload, json_output.object_payload(output))
-                    self.assertEqual(self.payload, notes.note_payload(output))
         source, chinese = 'Verify every generated change independently before use.', '使用前独立核验每一项生成的修改。'
         answer = json.dumps({'translations': [chinese]}, ensure_ascii=False)
         for suffix in suffixes:
             with self.subTest(suffix=suffix):
                 output = answer + '\n' + suffix
                 self.assertEqual(chinese, translation.render(source, output))
-                self.assertEqual(chinese, translation.unit_output(source, 0, output))
 
     def test_expected_fields_ignore_non_results_but_not_same_shape_templates(self):
         decorations = ('[1]', '[]', '{"footnotes": [1]}', '{"segments": ["input"]}',
@@ -77,27 +75,21 @@ class UniqueModelObject(unittest.TestCase):
             for output in (decoration + '\n' + self.answer, self.answer + '\n注：' + decoration):
                 with self.subTest(decoration=decoration, output=output):
                     self.assertEqual(self.payload, json_output.object_payload(output, required_fields=fields))
-                    self.assertEqual(self.payload, notes.note_payload(output))
         for template in ('{"title": "", "summary": "", "body": ""}',
                          '{"title": null, "summary": null, "body": null}'):
             with self.subTest(template=template), self.assertRaises(model_response.OutputError):
-                notes.note_payload(self.answer + '\n' + template)
+                json_output.object_payload(self.answer + '\n' + template, required_fields=fields)
         source, chinese = 'Verify every generated change independently before use.', '使用前独立核验每一项生成的修改。'
         answer = json.dumps({'translations': [chinese]}, ensure_ascii=False)
         output = json.dumps({'segments': [source]}) + '\n' + answer + '\n注：[1]；遗漏：[]'
         self.assertEqual(chinese, translation.render(source, output))
-        self.assertEqual(chinese, translation.unit_output(source, 0, output))
         with self.assertRaises(model_response.OutputError):
             translation.render(source, answer + '\n{"translations": []}')
 
-    def test_note_and_both_translation_consumers_reject_same_shape_drafts(self):
+    def test_translation_consumer_rejects_same_shape_drafts(self):
         source = 'Verify every generated change independently before use.'
         answer = json.dumps({'translations': ['使用前独立核验每一项生成的修改。']}, ensure_ascii=False)
         draft = json.dumps({'translations': ['这是另一份未经确认的备选译文。']}, ensure_ascii=False)
-        for first, second in ((self.answer, self.draft), (self.draft, self.answer)):
-            with self.subTest(first=first), self.assertRaises(model_response.OutputError):
-                notes.note_payload(first + '\n' + second)
         for first, second in ((answer, draft), (draft, answer)):
-            for consumer in (translation.render, lambda text, output: translation.unit_output(text, 0, output)):
-                with self.subTest(first=first, consumer=consumer), self.assertRaises(model_response.OutputError):
-                    consumer(source, first + '\n' + second)
+            with self.subTest(first=first), self.assertRaises(model_response.OutputError):
+                translation.render(source, first + '\n' + second)

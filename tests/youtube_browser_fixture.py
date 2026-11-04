@@ -3,14 +3,13 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from kb.feeds import registry as reg
-from kb.youtube import collector, discovery, fulltext, login, media, notes, ranking, storage, toolchain, transcripts
+from kb.youtube import collector, discovery, login, media, notes, ranking, storage, toolchain, transcripts
 from kb.collectors import FetchScope
 from tests.youtube_translation_fixture import source_text
 
 
 def translation_reply(prompt):
-    plain = fulltext.SOURCE_START in prompt
-    segments = [source_text(prompt)] if plain else json.loads(prompt.split('\n\n', 1)[1])['segments']
+    segments = [source_text(prompt)]
     for original, translated in (
             ('The AI agent generates code.', '作者演示智能体编程。'),
             ('Test every change.', '强调每次修改都要测试，不能仅凭生成结果认定正确。'),
@@ -20,8 +19,7 @@ def translation_reply(prompt):
             # 标题和字幕走同一个直译提示(`notes.build_translation`),没有这一条它就保留英文原题。
             ('AI agent coding tutorial', '智能体编程实操教程')):
         segments = [segment.replace(original, translated) for segment in segments]
-    return (segments[0] if plain else
-            '好的，以下是译文：' + json.dumps({'translations': segments}, ensure_ascii=False) + '（以上为译文）')
+    return segments[0]
 
 
 def install():
@@ -71,13 +69,11 @@ def install():
         return entries if selected['id'] == source['id'] else []
 
     def reply(prompt, *arguments):
-        if prompt.startswith('将以下字幕'):
-            return translation_reply(prompt)
-        if '只输出 JSON' in prompt:
-            return '以下是笔记：' + json.dumps({'title': '智能体编程：先验证再采用',
-                               'summary': '作者展示智能体编程方法，并强调测试与人工核验的重要性。',
-                               'body': '## 方法与限制\n生成代码后运行测试；模型声称正确不等于结果经过验证。'}, ensure_ascii=False) + '（以上为笔记）'
-        return '作者演示智能体编程，指出必须运行测试并核验生成结果。'
+        # 标题和字幕都只走 `fulltext.prompt` 这一种提示词(87cc380 起没有 JSON 成稿、摘要两段了)。
+        # 别的提示词进来就是生产又多了一段模型调用,让它当场红,不要随手编一句话放过去。
+        if not prompt.startswith('将以下字幕'):
+            raise AssertionError('意外的模型提示词：' + prompt[:40])
+        return translation_reply(prompt)
 
     # ── 登录态与工具那一块:钉成一个「配好了、但那个浏览器里没登录」的确定局面 ──
     # 真去读本机 cookie、连一次 YouTube、问一次 PyPI,这三件事在测试里既慢又不确定。

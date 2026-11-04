@@ -6,14 +6,15 @@
 拖长,面板上多出几十条不是它们自己毛病的失败,它们还一起进了退避,**下一轮想试都试不了**。
 
 **只在两个外层 `except` 上挡是不够的**(审查实测的三种漏法一条都不经过那个 `except`):
-① 逐条解析撞 429、后路 flat 照旧起一个进程,它要是成功了限流只剩一句被丢弃的说明文字;
+① 逐条解析撞 429、后路 flat 照旧起一个进程,它要是成功了限流只剩一句被丢弃的说明文字
+(那条后路后来整个删了,ccb4851;指定日期那一轮逐条解析撞 429 照样得当场收手);
 ② 同一个进程先印出一条正常视频再 429,转成「部分成功」,`walls` 是空的;
 ③ 发现阶段退出之后处理阶段无条件开跑,去探前一个**发现成功**的频道的视频,把那条本来
 正常的视频也带成 `failed` 和退避。所以后半边这些用例一律**从真子进程跑起**,断言的是
 「哪几次调用真的发生了」和「库里那几条的末态」。
 
 反过来的几边少一边就各错一头:普通失败(地址坏了、网络抖一下)**不许**收手,否则一个频道
-就能把整轮同步掐掉,后路也不该被顺手关掉;没轮到的那些频道**一个字都不许写**(不记失败、
+就能把整轮同步掐掉;没轮到的那些频道**一个字都不许写**(不记失败、
 不推退避);模型服务的 429 **不许**被说成 YouTube 出口限流 —— 状态码相同不能证明请求来自
 同一个服务,照那句话去换出口对模型配额一点用都没有。
 """
@@ -135,7 +136,8 @@ class StopOnThrottle(YouTubeFixture):
         """归并的输入里**一条 YouTube 的都没有时,输出绝不许默认成 YouTube**。
 
         审查实测:把工具输出目录改成不可写,直接调用时 `origin=local` 判得对,同一个错误
-        过一次两路归并就变成没有来源的失败,`coded` 按 YouTube 重判 —— `permission denied`
+        过一次归并(当年是两条发现路,如今是字幕几种语言、频道那一侧的 `discovery._combined`)
+        就变成没有来源的失败,`coded` 按 YouTube 重判 —— `permission denied`
         在 `login._COOKIE` 里,于是面板让人去钥匙串放行,而问题在磁盘上。
         **反过来钉一边**:混着一条 YouTube 失败的那种照旧按 YouTube 算 —— 里面确实有一条,
         标成本机会把 cookie 那一档的线索一起丢掉。
@@ -288,26 +290,22 @@ class ThrottleIsRequestLevel(FakeToolCase):
     """熔断与拒绝这一半:**断言的是「那几次请求压根没发生」。**
 
     假工具和跑一轮的夹具在 `tests.youtube_tool_stub`(两份用例文件共用);诊断怎么
-    运输、几条失败怎么归并在 `tests/test_youtube_diagnostics.py`。
+    运输、几条失败怎么归并在 `tests/test_youtube_diagnosis.py`。
     """
 
-    def test_the_flat_fallback_never_starts_after_a_rate_limited_detail_pass(self):
-        """逐条解析撞上 429:后路 flat **一个进程都不许起**。
+    def test_a_rate_limited_ranged_detail_pass_stops_the_round(self):
+        """指定日期那一轮逐条解析撞上 429:**这一轮当场收手,下一个频道一个进程都不起。**
 
-        同一个出口刚说了「请求过于频繁」,换掉一个参数再问一次只是把惩罚加深。原先这条
-        后路照旧跑,它要是成功了,限流就只留在被丢弃的原因列表里 —— `walls` 是空的,
-        这一轮接着查下一个频道,面板上看不出自己正在挨罚(审查实测)。
-
-        **逐条解析如今只在指定日期那一轮走**(普通一轮的主路就是 flat,见 `discovery.fetch`),
-        所以这条要在指定日期的一轮里跑:普通一轮里压根没有「逐条解析之后」这回事,
-        用例会在第一个 flat 进程上红,验的却不是这件事。
+        逐条解析如今只在指定日期那一轮走(普通一轮是轻量列表,见 `discovery.fetch`),
+        它和普通一轮是两段代码,收手判据得在这一段上也钉一次。这条原先钉的是「后路 flat
+        不许再起」,那条后路已经整个删了(ccb4851)。
         """
         today = datetime.now(media.TZ).date().isoformat()
         with patch.object(tool_stub, 'FetchScope', lambda: FetchScope(since=today, until=today)):
-            summary = self.sync([('--flat-playlist', 'ok'), ('--dump-json', 'limit')])
-        self.assertEqual([], self.ran('--flat-playlist'), '后路还是起了进程')
-        self.assertEqual(1, len(self.ran('--dump-json')), '只该有那一次逐条解析')
+            summary = self.sync([('--dump-json', 'limit')])
+        self.assertEqual(1, len(self.ran('--dump-json')), '撞墙之后又去查了下一个频道')
         self.assertEqual((1, 1), (summary['checked'], summary['skipped']))
+        self.assertEqual(['rate_limited'], list(summary['walls']), summary['message'])
         self.assertIn('提前收手', summary['message'])
     def test_an_ordinary_listing_failure_does_not_stop_the_round(self):
         """反过来钉一边:**真子进程**上的普通失败(网络超时)照旧往下查。

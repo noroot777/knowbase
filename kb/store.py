@@ -478,29 +478,15 @@ def doc_body(conn: sqlite3.Connection, path: str) -> str:
     return (row["body"] if row and row["body"] else "") or ""
 
 
-def doc_body_version(conn: sqlite3.Connection, path: str) -> tuple[str, str]:
-    """正文 + **它所属的那一版** content_hash,一条语句读出来。
-
-    拆成两句读是不安全的:提取 worker 读完正文、主线程落「这一版没有文字」终态
-    之间,另一条连接的索引完全可能把这一篇换成一版**有正文**的内容(合法交错,
-    提取不持维护锁)。那时两句分别落在换版前后,终态就会被盖到新版上 —— 新正文
-    从此既不提取也不提醒(2026-10-09 审查实测)。一条语句只有一个快照,正文和
-    版本号必然同属一版;「这一版还是不是当前那一版」由写入侧的条件 UPDATE 回答
-    (见 kb/extract.py 的 mark_no_body)。
-
-    没有这一行文档时返回 ("", "")。
-    """
-    snap = doc_input_snapshot(conn, path)
-    return (snap["version"], snap["body"]) if snap else ("", "")
-
-
 def doc_input_snapshot(conn: sqlite3.Connection, path: str) -> dict | None:
     """一篇文章喂给模型的那组输入 + 它所属的那一版,**一条语句一个快照**。
 
-    `doc_body_version` 的全量版:多带上 title / account,因为这两样也进 prompt
-    (软广判定按「这个号在卖什么」读文末那段,账号名是判据的一部分)。分两次
-    查询读的话,两次之间另一条连接的索引可以把这一篇换版,于是候选里带的是
-    **旧标题配新正文**,而后面那道按 `content_hash` 的条件写拿到的是新版本号、
+    正文和版本号拆成两句读是不安全的:提取 worker 读完正文、主线程落「这一版没有
+    文字」终态之间,另一条连接的索引完全可能把这一篇换成一版**有正文**的内容(合法
+    交错,提取不持维护锁),终态就会被盖到新版上 —— 新正文从此既不提取也不提醒。
+    title / account 也一起读,因为这两样也进 prompt(软广判定按「这个号在卖什么」
+    读文末那段,账号名是判据的一部分)。分两次查询读的话,两次之间另一条连接的
+    索引可以把这一篇换版,于是候选里带的是**旧标题配新正文**,而后面那道按 `content_hash` 的条件写拿到的是新版本号、
     照样放行 —— 判的是一份没人写过的东西。一条语句只有一个快照,四样必然同属
     一版;「这一版还是不是当前那一版」由写入侧回答(见 kb/extract.py 的
     `mark_no_body` 与 `kb/extract_promo.py` 的 `commit_promo`)。

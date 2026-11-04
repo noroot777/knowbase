@@ -286,18 +286,20 @@ class CacheTests(ResolveBase):
 
 
 class BothCallersTests(ResolveBase):
-    def test_public_url_also_goes_through_the_trusted_resolver(self):
+    """另一个调用方是面板上「测一下」那颗按钮(`/api/egress/probe`),它直接调 `public_addresses`。"""
+
+    def test_public_addresses_also_goes_through_the_trusted_resolver(self):
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED) as dns:
             self.assertEqual('https://example.org/rss',
-                             fetching.public_url('https://example.org/rss'))
+                             fetching.public_addresses('https://example.org/rss')[0])
         self.assertEqual(0, dns.call_count)
         self.assertEqual([1, 28], self.types())
 
-    def test_public_url_reports_the_egress_failure_too(self):
+    def test_public_addresses_reports_the_egress_failure_too(self):
         self.arm({'Status': 2})
         with patch.object(fetching.socket, 'getaddrinfo', return_value=POISONED):
             with self.assertRaisesRegex(fetching.FeedError, '出口与解析'):
-                fetching.public_url('https://example.org/rss')
+                fetching.public_addresses('https://example.org/rss')
 
 
 

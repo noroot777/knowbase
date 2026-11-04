@@ -107,7 +107,7 @@ class GrabCase(unittest.TestCase):
         self.root = Path(self.temp.name)
         # 维护锁的 lockfile 在 DATA_DIR 下:不指到 tmp 的话这些用例会去 flock
         # 生产那一个(口径同 tests/test_feed_sources.py)。
-        # `config.DB_PATH` 是 `grab._indexed` 要只读打开的那个库:不指到 tmp 的话
+        # `config.DB_PATH` 是 `grab_store._indexed` 要只读打开的那个库:不指到 tmp 的话
         # 「这一篇索引进去了没有」会去问**生产那一个** kb.db —— 答案跟着本机内容
         # 变,而且这组用例从此不可重放。
         for p in (patch.object(reg, 'DB_PATH', self.root / 'feeds.db'),
@@ -178,7 +178,7 @@ class GrabCase(unittest.TestCase):
         """假装导出 + 索引都走完了:vault 里有这一篇,`documents` 记着**它当前
         这一版**的 `content_hash`。
 
-        **两边一起摆才试得出东西。** `grab._indexed` 问的是版本(口径借
+        **两边一起摆才试得出东西。** `grab_store._indexed` 问的是版本(口径借
         `scanner.file_hash` + `store.doc_needs_reindex`),只往 `documents` 插一行
         路径的话,「库里还是上一版」那档漏报在用例里压根显不出来 —— 第二轮审查
         逮到的正是这个形态。`store.connect()` 这条路要加载 sqlite_vec、跑一串

@@ -33,12 +33,12 @@ RANGE_DISCOVERY_CEILING = 1800.0
 class _Told(RuntimeError):
     """交给主干那个共用出口之前,**把展示文本按统一口径定下来**。
 
-    `_save_failure` 自己 `str(error)[:FAILURE_CAP]`,那一刀**从头裁**;而
-    `discovery.merge` 的消息是两份各约 800 字的工具摘要拼起来的、轻松超过那道上限 ——
-    审查实测:详细路径报超时、后路 flat 末尾报 `challenge solver` 和
-    `Requested format is not available`,分档和完整诊断都对(`js_challenge`),写进库的
+    `_save_failure` 自己 `str(error)[:FAILURE_CAP]`,那一刀**从头裁**;而一条列表失败的
+    消息轻松超过那道上限(`media._collect_listing` 把半截输出底下那条真实失败的约 800 字
+    摘要写进摘要,`ToolFailure` 再拼一份诊断摘要,`discovery._combined` 外面再加路名)——
+    审查实测(当年是两条发现路的摘要拼在一起):分档和完整诊断都对(`js_challenge`),写进库的
     频道 `last_error` 恰好 1200 字、决定性那两行一个字都没留下,面板上展开「查看失败原因」
-    看到的只有先前那次超时和后路开头的普通上下文。**上一轮说那一刀「只是冗余带」是错的**。
+    看到的只有先前那次超时的普通上下文。**上一轮说那一刀「只是冗余带」是错的**。
 
     **主干那一侧不动**:它服务所有来源,而 `diagnostic` 这个约定今天只有 YouTube 有
     (主干不认识任何具体来源)。所以转换放在这条适配边界上 —— 过了 `shown` 之后文本

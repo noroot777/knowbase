@@ -7,7 +7,7 @@
 在一起算占比,20 条全废的被 180 条正常的稀释成 10%,当场随整份缓存提交,再下
 一轮全命中缓存、不再问模型,坏结果永久固化(2026-09-22 复审第 4 轮发现)。
 
-所以暂存记下「哪几条是同一趟判出来的」(`taxonomy.load_runs`),恢复时按批次
+所以暂存记下「哪几条是同一趟判出来的」(`taxonomy.load_run_map`),恢复时按批次
 各验各的,这一趟自己判的那批也只跟自己比。
 
 跑:  python -m unittest discover -s tests -v
@@ -218,7 +218,7 @@ class StagingIdentityTest(unittest.TestCase):
         self.assertEqual(T.load_raw(T.SKILLS, self.stage)[0],
                          {"a": "S1", "b": "S2"})
         self.assertEqual([sorted(g) for g in
-                          T.load_runs(self.stage, {"a": "S1", "b": "S2"})],
+                          list(T.load_run_map(self.stage, {"a": "S1", "b": "S2"}).values())],
                          [["a"], ["b"]], "两趟判的被揉成一批了(质量判定会互相稀释)")
 
     def test_restash_never_shadows_the_official_cache(self):
@@ -233,7 +233,7 @@ class StagingIdentityTest(unittest.TestCase):
         self.assertFalse(self.stage.exists())
         T._restash(T.SKILLS, {"x": "S1"}, {"x": "名X"})
         self.assertEqual(T.load_raw(T.SKILLS, self.stage)[0], {"x": "S1"})
-        self.assertEqual(T.load_runs(self.stage, {"x": "S1"}), [["x"]])
+        self.assertEqual(list(T.load_run_map(self.stage, {"x": "S1"}).values()), [["x"]])
 
     def test_restash_write_failure_only_warns(self):
         """并不回去顶多是下一轮重判一遍,不该让「不发布」这条安全路径异常退出。"""
@@ -286,7 +286,7 @@ class StagingIdentityTest(unittest.TestCase):
         T._edit_stage(T.SKILLS, put={"a": "S1"}, put_id="run1", names={})
         T._edit_stage(T.SKILLS, put={"a": "S1", "b": "S1"}, put_id="run1", names={})
         self.assertEqual(T_load(self.stage), {"a": "S1", "b": "S1"})
-        self.assertEqual(T.load_runs(self.stage, {"a": "S1", "b": "S1"}),
+        self.assertEqual(list(T.load_run_map(self.stage, {"a": "S1", "b": "S1"}).values()),
                          [["a", "b"]])
 
     # ── 发布序号:内容一样不等于没人发布过 ──────────────────────────────────

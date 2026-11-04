@@ -161,7 +161,7 @@
   按最保守的 `empty` 办。**读不到文件**同理落 `empty`。
 - **终态存的是当时那份 `content_hash`,不是一个布尔**(`documents.no_body_hash`)—— 布尔是永久封死,按 hash 走则是 index 一写
   新 hash 就自动回队列。`no_body_hash <> ''` 那半不能省。写回按元规则带条件,**正文和它的版本号要在同一个快照里读出来**
-  (`store.doc_body_version`,一条语句)。
+  (`store.doc_input_snapshot`,一条语句;经 `extract.model_input` 取)。
 - **`pending_docs` 是唯一口径**,所以一处改动同时治提取队列和面板那个「当前待处理 N 项」。**新那档的文案里不许出现「正文空」
   三个字** —— `retry_failed_plan` 就是按这三个字决定要不要跑回填脚本的。**它不判红、不进 failures 明细**,落终态时要把这一篇的
   旧失败计数一起清掉。

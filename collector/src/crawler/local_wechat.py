@@ -10,7 +10,6 @@ import os
 import re
 import shutil
 import subprocess
-import time
 from datetime import datetime
 from html import unescape
 from pathlib import Path
@@ -182,50 +181,3 @@ def session_biz(reader: LocalReader, username: str, on_error=None) -> str | None
     """
     first = next(reader.articles(username, on_error=on_error), None)
     return first["biz"] if first else None
-
-
-def resolve_accounts(reader: LocalReader, accounts: list[dict], cached: dict,
-                     progress=lambda name: None, on_error=None, *, discovery=None) -> dict[str, str]:
-    """名字只用于加速找候选；最终始终用推送 URL 的 __biz 核实。"""
-    sessions = reader.accounts()
-    by_username = {s["username"]: s for s in sessions}
-    wanted = {a["fakeid"] for a in accounts}
-    names = {a.get("display_name") or a["name"] for a in accounts} | {a["name"] for a in accounts}
-    ordered = sorted(sessions, key=lambda s: (
-        s["username"] not in set(cached.values()), s.get("display_name") not in names))
-    found = {biz: username for biz, username in cached.items()
-             if biz in wanted and username in by_username}
-    discovery = discovery if discovery is not None else {}
-    now = time.time()
-    for session in ordered:
-        if wanted <= found.keys():
-            break
-        username = session["username"]
-        if username in found.values():
-            continue
-        # 空会话缓存五分钟；有图文的会话身份缓存一天。新推送到达立即失效。
-        stamp = session.get("last_timestamp")
-        previous = discovery.get(username, {})
-        ttl = 86400 if previous.get("biz") else 300
-        if (previous.get("stamp") == stamp
-                and 0 <= now - previous.get("checked_at", 0) < ttl):
-            biz = previous.get("biz")
-            if biz in wanted:
-                found[biz] = username
-            continue
-        progress(session.get("display_name") or "公众号")
-        parse_errors = []
-        try:
-            biz = session_biz(reader, username, parse_errors.append)
-            if biz in wanted:
-                found[biz] = username
-            if biz or not parse_errors:
-                discovery[username] = {"biz": biz, "stamp": stamp, "checked_at": now}
-        except LocalReaderError as e:
-            parse_errors.append(str(e))
-        for error in dict.fromkeys(parse_errors):
-            message = f"匹配公众号 {session.get('display_name') or username}: {error}"
-            if on_error is None:
-                raise LocalReaderError(message)
-            on_error(message)
-    return found

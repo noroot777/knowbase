@@ -225,7 +225,9 @@ def watermark_patch(channel: str, value: str) -> dict:
 def save_watermark(source_id: int, channel: str, value: str, conn=None) -> None:
     """只改自己那个键,别的键原样留着(另一条通道的水位、将来别人加的字段)。
 
-    `conn` 非空时并进调用方那个事务(存盘那条路要的就是这个),否则自己开一个。
+    `conn` 非空时并进调用方那个事务,否则自己开一个。生产的存盘那条路(`sync._save_result`)
+    直接拿 `watermark_patch` 并进条目那个事务(8222b73),这个函数现在只给测试造水位用 ——
+    它和生产写的是同一份补丁、同一个 `merge_config`,造出来的库状态一致。
     """
     from kb.feeds import registry as reg
     if patch := watermark_patch(channel, value):

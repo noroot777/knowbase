@@ -229,12 +229,10 @@ class YouTubeNotes(YouTubeFixture):
         self.assertEqual([self.chinese], list(cache.values()))
         self.assertNotIn(json.dumps({'translations': []}), entry['body'])
 
-    def test_browser_fixture_supports_plain_requests_and_retains_legacy_json_support(self):
+    def test_browser_fixture_answers_plain_requests(self):
         from tests.youtube_browser_fixture import translation_reply
 
         source = 'The AI agent generates code. Test every change.'
         plain = translation_reply(fulltext.prompt(source))
         self.assertTrue(plain.startswith('作者演示智能体编程。'))
         self.assertNotIn('translations', plain)
-        legacy = translation_reply(translation.prompt(source))
-        self.assertIn(plain, translation.render(source, legacy))
