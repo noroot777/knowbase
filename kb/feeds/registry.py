@@ -184,12 +184,39 @@ def _seed_defaults(conn) -> None:
     conn.execute("INSERT OR REPLACE INTO feed_meta VALUES('defaults-rev',?)", (str(DEFAULTS_REV),))
 
 
+#: 这个进程已经替哪几个库跑过一遍 `db()` 的建表补列(`(路径, inode)`)。
+_READ_READY: set[tuple[str, int]] = set()
+
+
+def _schema_ready() -> None:
+    """只读连接之前,这个进程替这个库跑过一遍 `db()` 没有。
+
+    只读连接不建表也不补列,所以升级后的第一问若是它,就撞上 `no such column`。
+    只判「库文件在不在」不够:存量库一直都在,缺的是新代码要的那几列。每个进程
+    每个库跑一次就够 —— 补列只增不减,跑过之后对这个进程永远成立。认 inode 是因为
+    测试会在同一个路径上删掉重建一个库。
+    """
+    try:
+        stat = DB_PATH.stat()
+    except FileNotFoundError:
+        stat = None
+    if stat and (str(DB_PATH.resolve()), stat.st_ino) in _READ_READY:
+        return
+    with db():
+        pass
+    _READ_READY.add((str(DB_PATH.resolve()), DB_PATH.stat().st_ino))
+
+
 @contextmanager
 def read_db(timeout=30):
-    """Read an initialized WAL database without schema writes or a reserved writer lock."""
-    if not DB_PATH.exists():
-        with db(timeout=timeout):
-            pass
+    """Read an initialized WAL database without schema writes or a reserved writer lock.
+
+    **纯读的地方用它,不用 `db()`。** `db()` 每开一次都要在 `BEGIN IMMEDIATE` 里把
+    建表补列种默认值跑一遍,也就是**每一次读都先排队抢写锁**:别的连接握着一笔写事务
+    多久,这一问就卡多久(实测握 3 秒,「问题与待办」的概览和列表各卡 3 秒)。WAL
+    下只读连接不跟写入方抢,读到的是开始那一刻提交过的快照。
+    """
+    _schema_ready()
     conn = sqlite3.connect(DB_PATH.resolve().as_uri() + '?mode=ro', uri=True, timeout=timeout)
     conn.row_factory = sqlite3.Row
     try:
@@ -265,10 +292,13 @@ def _upgrade_settings(kind: str, settings: dict) -> dict:
     return settings
 
 
-def get_settings(kind: str) -> dict:
+def get_settings(kind: str, conn=None) -> dict:
+    """`conn`:调用方手里那条连接(比如只读的 `read_db`);不给就开一条 `db()`。"""
     check_kind(kind)
-    with db() as c:
-        row = c.execute('SELECT value FROM feed_settings WHERE kind=?', (kind,)).fetchone()
+    if conn is None:
+        with db() as c:
+            return get_settings(kind, c)
+    row = conn.execute('SELECT value FROM feed_settings WHERE kind=?', (kind,)).fetchone()
     # `enabled` / `interval_minutes` / `next_run` 是**按来源类型自动同步**那一档
     # 留下的,那一档整条拆掉了(见 `kb.pipeline._scheduler_tick`),现在没有任何
     # 地方读它们。**键一个都不删**(元规则「只增不减」):盘上存量里就有,摘掉

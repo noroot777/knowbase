@@ -139,8 +139,9 @@ def problems(kind: str) -> list[dict]:
     同理 —— 那是同一个端点的另一句 400。
     """
     out: list[dict] = []
-    settings = reg.get_settings(reg.check_kind(kind))
-    sources = reg.subscriptions(kind)
+    with reg.read_db() as c:
+        settings = reg.get_settings(reg.check_kind(kind), c)
+        sources = reg.subscriptions(kind, c)
     if kind == 'social':
         from kb.feeds import x_channels, x_intake_store
         x_intake_store.statuses(sources, x_channels.channel_of(settings))

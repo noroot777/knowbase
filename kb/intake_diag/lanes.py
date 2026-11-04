@@ -239,7 +239,7 @@ def counts(kinds=None) -> dict[str, dict[str, int]]:
     """
     wanted = list(kinds or reg.KINDS)
     out: dict[str, dict[str, int]] = {kind: {} for kind in wanted}
-    with reg.db() as c:
+    with reg.read_db() as c:
         for lane in LANES:
             cond, args = exclusive_where(lane.id)
             rows = c.execute(f'SELECT kind,count(*) FROM feed_items WHERE {cond}'
@@ -299,7 +299,7 @@ def rows(lane_id: str, kind: str = '', query: str = '',
     extra, more = _narrow(kind, query, _SEARCH)
     sql_where = f'{cond}{extra}'
     params = [*args, *more]
-    with reg.db() as c:
+    with reg.read_db() as c:
         total = c.execute(f'SELECT count(*) FROM feed_items WHERE {sql_where}',
                           params).fetchone()[0]
         found = c.execute(f'{_COLUMNS} FROM feed_items WHERE {sql_where}{_ORDER}',
@@ -311,7 +311,7 @@ def shelved(kind: str = '', query: str = '', offset: int = 0, limit: int = PAGE)
     """已搁置那一组。**暂缓和不再收录分别带回去,绝不合并**(状态契约)。"""
     extra, more = _narrow(kind, query, ('title', 'title_zh', 'url'))
     sql_where = f'{shelf.live_sql()}{extra}'
-    with reg.db() as c:
+    with reg.read_db() as c:
         total = c.execute(f'SELECT count(*) FROM feed_items WHERE {sql_where}',
                           more).fetchone()[0]
         found = c.execute(
@@ -323,7 +323,7 @@ def shelved(kind: str = '', query: str = '', offset: int = 0, limit: int = PAGE)
 
 def one(key: str) -> dict | None:
     """单条的全部字段(详情抽屉用)。搁置列一起带上,搁置着的也要打得开。"""
-    with reg.db() as c:
+    with reg.read_db() as c:
         row = c.execute(f'{_COLUMNS}{_SHELF_COLUMNS} FROM feed_items'
                         ' WHERE feed_items.key=?', (key,)).fetchone()
     return dict(row) if row else None
