@@ -88,11 +88,13 @@ class ChannelLength(YouTubeFixture):
         result, obtained = self.collect({source['id']: [self.long]})
         self.assertEqual([], obtained)
 
-    def calibrated(self, real_days):
-        """估算日期一天前、真实日期 `real_days` 天前;宽的那个订阅历史下界五天,窄的那个三十天。
+    def calibrated(self, real_days, estimated_days=1):
+        """估算日期 `estimated_days` 天前、真实日期 `real_days` 天前;宽的那个订阅历史下界五天,
+        窄的那个三十天。代表归属是窄的那个(同权取较小 ID)。
 
-        代表归属是窄的那个(同权取较小 ID),首次准入按估算日期下两个归属里最宽的 60 分钟放行。
-        走 `process` 自己探元数据那一路(元数据预更新预算没轮到的候选就走这里)。
+        走 `process` 自己探元数据那一路(元数据预更新预算没轮到的候选就走这里)。估算一天前时
+        两个归属都合格,首次准入按最宽的 60 分钟看;估算六天前时宽的那个按估算日期判不了,
+        合格的只有窄的那个 —— 两头都得由事实日期下的最终归属定时长。
         """
         plain = self.channel(1)
         wide = self.channel(2, youtube={'max_video_minutes': 60})
@@ -102,7 +104,8 @@ class ChannelLength(YouTubeFixture):
                                ((now - timedelta(days=30)).date().isoformat(), plain['id']))
             connection.execute('UPDATE subscriptions SET history_floor=? WHERE id=?',
                                ((now - timedelta(days=5)).date().isoformat(), wide['id']))
-        estimated = {**self.long, 'approximate': True, 'published': (now - timedelta(days=1)).isoformat()}
+        estimated = {**self.long, 'approximate': True,
+                     'published': (now - timedelta(days=estimated_days)).isoformat()}
         for source in (plain, wide):
             storage.discover(reg.subscription('youtube', source['id']), [estimated])
         self.published[self.long['video_id']] = now - timedelta(days=real_days)
@@ -129,6 +132,21 @@ class ChannelLength(YouTubeFixture):
         self.assertEqual([self.long['video_id']], obtained)
         self.assertEqual('ready', row['state'])
 
+    def test_real_date_bringing_the_wide_owner_in_processes_it(self):
+        """估算日期下只有 45 分钟那个合格,事实日期把 60 分钟那个放进来:不许按估算的归属先拒掉。"""
+        obtained, row = self.calibrated(real_days=4, estimated_days=6)
+        self.assertEqual([self.long['video_id']], obtained)
+        self.assertEqual('ready', row['state'])
+        self.assertFalse(row['entry'].get('approximate'))
+
+    def test_real_date_leaving_only_the_narrow_owner_rejects_it(self):
+        """反过来:估算六天前、实际也只有窄的那个合格 —— 照旧拒,事实日期落库、时长记下。"""
+        obtained, row = self.calibrated(real_days=6, estimated_days=6)
+        self.assertEqual([], obtained)
+        self.assertEqual(('filtered', 3234), (row['state'], row['duration']))
+        self.assertIn('上限 45 分钟', row['reason'])
+        self.assertFalse(row['entry'].get('approximate'))
+
     def test_each_owner_gets_its_own_over_length_notice(self):
         """60 分钟那个放行不等于 45 分钟那个不用说明:后者那边看到的仍是零新增。"""
         plain = self.channel(1)
@@ -138,3 +156,4 @@ class ChannelLength(YouTubeFixture):
         storage.update(self.long['video_id'], state='candidate', duration=3234)
         named = ranking.over_length(storage.rows(), reg.get_settings('youtube')['youtube'], FetchScope())
         self.assertEqual([[plain['id']]], [row['eligible_sources'] for row in named])
+        self.assertEqual([{plain['id']: 45}], [row['limits'] for row in named])

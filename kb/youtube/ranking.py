@@ -135,7 +135,8 @@ def qualify(row, settings, scope, now, floor, length=True):
 
 
 def over_length(rows, settings, scope, now=None):
-    """只差单条时长上限这一道才没做的视频,`eligible_sources` 是卡在时长上的那几个归属。
+    """只差单条时长上限这一道才没做的视频,`eligible_sources` 是卡在时长上的那几个归属,
+    `limits` 是判它们时各自用的上限(分钟)。
 
     它们在窗口里、其余资格全过得去,只是按**当前**设置不做 —— 同步结果里得点名说出来。
     一个字不提的话,面板上只有「排名 0 条、入库 0 条」,人只会以为频道没更新(真机形态:
@@ -150,11 +151,15 @@ def over_length(rows, settings, scope, now=None):
     for row in rows:
         if row['state'] in ('ready', 'processing') or not row['duration']:
             continue
-        owners = [owner['source_id'] for owner in row['owners']
+        owners = [owner for owner in row['owners']
                   if not rejection({**row, **owner}, settings, scope, now, floor, length=False)[0]
                   and rejection({**row, **owner}, settings, scope, now, floor)[0]]
         if owners:
-            found.append({**row, 'eligible_sources': owners})
+            # 说明里那个上限数字要跟判它的是同一份频道设置(`limits`),别另读一份:
+            # 同步途中改了频道上限的话,两份对不上,说明里写的上限跟实际判据不一致。
+            found.append({**row, 'eligible_sources': [owner['source_id'] for owner in owners],
+                          'limits': {owner['source_id']: video_minutes(settings, config(owner))
+                                     for owner in owners}})
     return found
 
 

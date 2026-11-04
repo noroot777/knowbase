@@ -16,7 +16,7 @@ from kb.youtube import (candidate_metadata, diagnosis, discovery, login, media, 
 from kb.youtube.admission import TEMPORARY, UNDATED, calibrate, gate
 from kb.youtube.channels import config
 from kb.youtube.faults import local_fault, record_local
-from kb.youtube.settings import of, video_minutes
+from kb.youtube.settings import of
 
 
 def stopped():
@@ -208,7 +208,14 @@ def process(rows, settings, scope, summary, deadline):
             with heeded(summary, row.get('eligible_sources', [row['source_id']])):
                 metadata = row.get('_metadata') or media.probe(
                     row, settings, deadline, stopped, scope.force or row['gate_code'] in TEMPORARY)
-            if decision := gate(metadata, policy, row):
+            decision = gate(metadata, policy, row)
+            # **估算日期那一档的时长不在这里判。** 这一刻的合格归属是按估算日期算的,事实日期
+            # 可能换掉它(审查实测:估六天前、实际四天前,60 分钟那个订阅按估算被历史下界挡在外面,
+            # 只剩 45 分钟那个,54 分钟的视频在这里被拒、事实日期都没落库)。时长交给下面校准之后
+            # 带着时长的逐归属重判 —— 放行和拒绝都由事实下的最终归属决定。
+            if decision and decision.code == 'duration_budget' and row['entry'].get('approximate'):
+                decision = None
+            if decision:
                 # 超长那一档把时长记下来:下一轮排名据此直接判掉它(`ranking.rejection`),
                 # 不再每轮占一个名额、再探一次。
                 measured = {'duration': float(metadata['duration'])} if decision.code == 'duration_budget' else {}
@@ -232,10 +239,10 @@ def process(rows, settings, scope, summary, deadline):
                 # **重判要对每个归属都来一次**,而且走 `ranking.qualify` 那一份口径 ——
                 # 只重判代表那一个归属的话,新订阅的历史下界会把这条视频对老订阅也一起
                 # 判死(审查实测:老订阅单独判是合格的,结果全局 excluded、下一轮入选 0)。
-                # **探到的时长一起带进重判。** 上面那道 `gate` 是按估算日期下的合格归属放行时长的,
-                # 事实日期可能把放得宽的那个归属剔掉(审查实测:60 分钟那个订阅的历史下界拦住了
-                # 真实日期,只剩 45 分钟那个,54 分钟的视频照样被下载入库)。逐归属判时长之后,
-                # 留下来的每个归属都放得下它 —— 下载之前这条不变量由同一个 `rejection` 保证。
+                # **探到的时长一起带进重判**,这一档的时长准入就在这里定(上面那道 `gate` 让过了)。
+                # 事实日期既可能剔掉放得宽的那个归属(审查实测:只剩 45 分钟那个,54 分钟的视频
+                # 照样被下载入库),也可能放进来一个(见上面那道)。逐归属判时长之后,留下来的每个
+                # 归属都放得下它 —— 下载之前这条不变量由同一个 `rejection` 保证。
                 calibrated_row = {**row, 'entry': calibrated, 'duration': float(metadata['duration'])}
                 representative, reasons, unknown = ranking.qualify(calibrated_row, policy, scope, now, floor)
                 if representative is None:
@@ -539,7 +546,7 @@ def _round(scope):
             if source['id'] in lengthy:
                 summary['notices'].append({'source_id': source['id'], 'title': source['name'],
                                            'reason': source_status.over_length(
-                                               lengthy[source['id']], video_minutes(of(settings), config(source)))})
+                                               lengthy[source['id']], lengthy[source['id']][0]['limits'][source['id']])})
     except Exception as error:
         if not local_fault(error):
             raise
