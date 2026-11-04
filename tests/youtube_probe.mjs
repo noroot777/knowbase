@@ -176,10 +176,10 @@ try {
   await settled();
   // 候选榜收在「候选排名」那颗按钮后面:订阅清单里一条都不许夹着它,点开才取、才显示。
   check('订阅清单里不夹着候选榜', await evaluate(`
-    !$('source-list').querySelector('.youtube-rank-item') && $('youtube-rank-modal').style.display === 'none' &&
+    !$('source-list').querySelector('.youtube-rank-item') && !$('youtube-rank-modal') &&
     document.querySelectorAll('.source-subscription').length === 52`));
   await click('#youtube-rank-open');
-  await wait(`$('youtube-rank-modal').style.display !== 'none' && document.querySelectorAll('.youtube-rank-item').length === 4`);
+  await wait(`!!$('youtube-rank-modal') && document.querySelectorAll('.youtube-rank-item').length === 4`);
   check('候选榜显示且非 AI 视频被过滤', await evaluate(`
     document.querySelectorAll('.youtube-rank-item').length === 4 &&
     $('youtube-ranking').textContent.includes('轻量过滤')`));
@@ -208,8 +208,28 @@ try {
   check('清空搜索后候选榜原样回来', true);
   await send('Input.dispatchKeyEvent', {type:'keyDown', key:'Escape', code:'Escape', windowsVirtualKeyCode:27});
   await send('Input.dispatchKeyEvent', {type:'keyUp', key:'Escape', code:'Escape', windowsVirtualKeyCode:27});
-  await wait(`$('youtube-rank-modal').style.display === 'none'`);
+  await wait(`!$('youtube-rank-modal')`);
   check('Esc 关掉候选榜并把焦点还给入口按钮', await evaluate(`document.activeElement === $('youtube-rank-open')`));
+  // **「还在读」不许被说成「是空的」。** 把榜单那一包压慢,读取途中往搜索框敲字:
+  // 页面得照旧说正在读取,不能叫人去点同步;回包落地后按刚敲的那个词筛。
+  await evaluate(`(() => {
+    const real = window.pipeJson;
+    window.pipeJson = (path, ...rest) => String(path).includes('/youtube/ranking')
+      ? new Promise(resolve => setTimeout(resolve, 1500)).then(() => real(path, ...rest)) : real(path, ...rest);
+    window.__restorePipeJson = () => { window.pipeJson = real; };
+    return true;
+  })()`);
+  await click('#youtube-rank-open');
+  await wait(`$('youtube-ranking')?.textContent.includes('正在读取')`);
+  await fill('#youtube-rank-q', 'agent');
+  check('读取途中搜索不误报空榜', await evaluate(`
+    $('youtube-ranking').textContent.includes('正在读取') && !$('youtube-ranking').textContent.includes('还没有候选')`),
+    await evaluate(`$('youtube-ranking').textContent`));
+  await wait(`document.querySelectorAll('.youtube-rank-item').length > 0`);
+  check('回包落地后按读取途中敲的词筛选', await evaluate(`
+    [...document.querySelectorAll('.youtube-rank-item')].every(node => node.textContent.toLowerCase().includes('agent')) &&
+    document.querySelectorAll('.youtube-rank-item').length < 4`));
+  await evaluate(`window.__restorePipeJson(); closeYouTubeRanking(); true`);
   check('设置里只剩一个准入名次，说明文字也不再提两榜', await evaluate(`
     !!$('youtube-rank_limit') && !document.querySelector('#youtube-heat_limit')
     && !document.querySelector('#youtube-value_limit')
@@ -575,7 +595,7 @@ try {
   await click('#subs-switch-rss');
   await wait(`sourceKind === 'rss' && $('source-title').textContent === 'RSS' && !$('source-add').disabled`);
   check('切换 RSS 不遗留 YouTube 排名', await evaluate(`
-    $('youtube-rank-open').hidden && $('youtube-rank-modal').style.display === 'none' &&
+    $('youtube-rank-open').hidden && !$('youtube-rank-modal') &&
     !$('source-list').querySelector('.youtube-rank-item')`));
   await click('#source-add');
   await wait(`$('source-editor').style.display !== 'none'`);
@@ -596,6 +616,23 @@ try {
   })()`));
   await screenshot('ranking-mobile');
   await evaluate(`closeYouTubeRanking(); true`);
+  // **入口跟着「现在是哪一页」走,不跟着「列表渲染成功没有」走。** 从 YouTube 的订阅管理
+  // 切到一个读取失败的来源:列表渲染根本不会发生,入口照样得收起,而且点不开 YouTube 的榜。
+  await evaluate(`(() => {
+    const real = window.pipeJson;
+    window.pipeJson = (path, ...rest) => String(path).endsWith('/api/intake/rss')
+      ? Promise.reject(new Error('模拟 RSS 接口不可用')) : real(path, ...rest);
+    window.__restorePipeJson = () => { window.pipeJson = real; };
+    return true;
+  })()`);
+  await click('#subs-switch-rss');
+  await wait(`sourceKind === 'rss' && $('source-error-text').textContent.includes('模拟 RSS 接口不可用')`);
+  check('切到读取失败的来源时收起候选排名入口', await evaluate(`
+    $('youtube-rank-open').hidden && (openYouTubeRanking(), !$('youtube-rank-modal'))`));
+  await evaluate(`window.__restorePipeJson(); true`);
+  await click('#subs-switch-youtube');
+  await wait(`sourceKind === 'youtube' && sourceView === 'manage' && !!sourceData`);
+  check('回到 YouTube 订阅管理入口照旧露出', await evaluate(`!$('youtube-rank-open').hidden`));
   check('没有浏览器脚本异常', errors.length === 0, errors.join('\n'));
   writeFileSync(`${output}/checks.json`, JSON.stringify(results, null, 2));
   console.log(JSON.stringify(results));

@@ -212,21 +212,46 @@ function youtubeSettingsPayload() {
 // ── 候选排名 ──────────────────────────────────────────────────────────────
 //
 // 候选榜单独开一个弹窗,不压在订阅清单顶上:订阅管理那一栏只放订阅,榜单要看才点开。
-// 入口只在 YouTube 的订阅管理里露出,数据在**打开那一刻**才取 —— 关着的时候不为它
-// 发请求。代次 `youtubeRankGeneration` 只管这一个资源:关掉、重开、点重试都推一格,
-// 迟到的回包一个字都不许写进弹窗。
+// 数据在**打开那一刻**才取 —— 关着的时候不为它发请求。代次 `youtubeRankGeneration`
+// 只管这一个资源:关掉、重开、点重试都推一格,迟到的回包一个字都不许写进弹窗。
+//
+// **入口显隐跟着「现在是哪一页」走,不跟着「上一次列表渲染成功没有」走。** 挂在
+// `updateSourceFilterControls` 上,切来源、切视图那一下就同步;挂在列表渲染上的话,
+// 切到一个读取失败的来源时渲染根本不发生,旧入口留在 RSS 页上,点开是 YouTube 的榜
+// (审查实测)。打开那一下再核对一次身份,是同一条不变量的第二道。
+//
+// 弹窗标记在这儿现建、关了就删,不写进 index.html(那份已经顶着 700 行上限),口径同
+// `egress.js` 顶上那段:现建的弹窗 MutationObserver 只看得见它的建和删。
 let youtubeRankItems = [];
+// 榜单这一份数据现在是什么状态。**「还在读」和「读到了、是空的」不许共用一个空数组**:
+// 读取途中在搜索框敲一个字,空数组会被当成「还没有候选」,叫人去点同步。
+let youtubeRankState = 'loading';
 const youtubeRankStates = {candidate:'候选待处理', deferred:'留待下轮', filtered:'轻量过滤', excluded:'不自动处理',
   processing:'正在处理', ready:'中文笔记已完成', failed:'处理失败，待重试'};
 
+function youtubeRankingHere() {
+  return sourceKind === 'youtube' && sourceView === 'manage' && sourceActive();
+}
+
 function updateYouTubeRankingEntry() {
   const button = $('youtube-rank-open');
-  if (button) button.hidden = !(sourceKind === 'youtube' && sourceView === 'manage');
+  if (button) button.hidden = !youtubeRankingHere();
 }
 
 function openYouTubeRanking() {
-  $('youtube-rank-q').value = '';
-  $('youtube-rank-modal').style.display = '';
+  if (!youtubeRankingHere()) { updateYouTubeRankingEntry(); return; }
+  closeYouTubeRanking();
+  const mask = document.createElement('div');
+  mask.id = 'youtube-rank-modal'; mask.className = 'modal-mask';
+  mask.innerHTML = `<div class="modal youtube-rank-modal" role="dialog" aria-modal="true" aria-labelledby="youtube-rank-title">
+    <header class="youtube-rank-heading"><h2 id="youtube-rank-title">候选排名</h2><span id="youtube-rank-count" role="status"></span><button class="icon-button" aria-label="关闭候选排名">×</button></header>
+    <input id="youtube-rank-q" type="search" placeholder="搜索标题或频道…" aria-label="搜索候选视频">
+    <div id="youtube-ranking" class="youtube-ranking" aria-live="polite"></div></div>`;
+  mask.addEventListener('click', event => { if (event.target === mask) closeYouTubeRanking(); });
+  mask.querySelector('.icon-button').onclick = closeYouTubeRanking;
+  mask.querySelector('#youtube-rank-q').oninput = filterYouTubeRanking;
+  document.body.append(mask);
+  overlayClosers['youtube-rank-modal'] = closeYouTubeRanking;
   // 先同步登记一次弹窗,让它记下「关掉时把焦点还给谁」是这颗入口按钮,再把焦点挪到搜索框
   // —— 等 MutationObserver 异步登记的话,它记下的就是已经挪进弹窗的那个搜索框。
   syncOverlays();
@@ -236,18 +261,19 @@ function openYouTubeRanking() {
 
 function closeYouTubeRanking() {
   ++youtubeRankGeneration;
-  $('youtube-rank-modal').style.display = 'none';
+  $('youtube-rank-modal')?.remove();
 }
 
 async function loadYouTubeRanking() {
   const generation = ++youtubeRankGeneration;
-  youtubeRankItems = [];
+  youtubeRankItems = []; youtubeRankState = 'loading';
   $('youtube-rank-count').textContent = '';
   $('youtube-ranking').innerHTML = '<p class="hint">正在读取…</p>';
   try {
     const result = await pipeJson('/api/intake/youtube/ranking');
     if (generation !== youtubeRankGeneration) return;
     youtubeRankItems = [...result.items].sort((left,right) => (left.score_rank || 100000) - (right.score_rank || 100000));
+    youtubeRankState = 'ready';
     // 页头那一行只放事实:总条数、一轮准入几名(「分批处理」就是这个数说的)、列表截在哪。
     const limit = sourceData?.settings?.youtube?.rank_limit;
     $('youtube-rank-count').textContent = [`${result.total} 条`, limit ? `每轮准入前 ${limit} 名` : '',
@@ -255,6 +281,7 @@ async function loadYouTubeRanking() {
     filterYouTubeRanking();
   } catch (error) {
     if (generation !== youtubeRankGeneration) return;
+    youtubeRankState = 'failed';
     const message = document.createElement('p'); message.setAttribute('role','alert'); message.textContent = '候选排名读取失败：' + error.message;
     const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'ghost'; retry.textContent = '重试'; retry.onclick = loadYouTubeRanking;
     $('youtube-ranking').replaceChildren(message, retry);
@@ -263,7 +290,7 @@ async function loadYouTubeRanking() {
 
 function filterYouTubeRanking() {
   const box = $('youtube-ranking');
-  if (box.querySelector('[role=alert]')) return;
+  if (!box || youtubeRankState !== 'ready') return;
   if (!youtubeRankItems.length) {
     box.innerHTML = '<p class="hint">还没有候选。点一次「同步全部」先取轻量候选，不会直接处理全部视频。</p>';
     return;

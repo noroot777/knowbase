@@ -411,12 +411,6 @@
   <div id="source-edit-error" class="field-err" role="alert"></div><div class="source-form-actions"><button type="button" class="ghost" onclick="closeSourceEditor()">取消</button><button type="submit" id="source-edit-save">保存订阅</button></div>
   </form></div></div>
 
-<div id="youtube-rank-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeYouTubeRanking()"><div class="modal youtube-rank-modal">
-  <header class="youtube-rank-heading"><h2 id="youtube-rank-title">候选排名</h2><span id="youtube-rank-count" role="status"></span><button class="icon-button" onclick="closeYouTubeRanking()" aria-label="关闭候选排名">×</button></header>
-  <input id="youtube-rank-q" type="search" placeholder="搜索标题或频道…" aria-label="搜索候选视频" oninput="filterYouTubeRanking()">
-  <div id="youtube-ranking" class="youtube-ranking" aria-live="polite"></div>
-</div></div>
-
 <div id="pipe-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closePipeModal()">
   <div class="modal pipe-setup">
     <div class="pipe-setup-heading"><div><h2>新建同步</h2></div><button class="icon-button" onclick="closePipeModal()" aria-label="关闭同步配置">×</button></div>
