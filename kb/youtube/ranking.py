@@ -77,6 +77,13 @@ def rejection(row, settings, scope, now, floor):
         return '尚未发布', not estimated
     if settings['ai_only'] and not AI.search(entry['title'] + ' ' + entry.get('description', '')):
         return '标题与简介未发现明确的 AI 相关信息', not estimated
+    # **探到过、确实超过单条时长上限的,不再占准入名次。** 只留 `deferred` 的话它每轮都排回
+    # 前几名、每轮再探一次、再被 `admission.gate` 拒一次 —— 名额被它永久占着,后面的普通
+    # 视频永远轮不到(实测前 10 名里两条长视频连占三天)。判据是**当前**上限:用户调高之后
+    # 下一轮这里放行,它照常回榜。已完成的不受影响(「已完成的仍保留名次」)。
+    limit = settings['max_video_minutes']
+    if row['state'] not in ('ready', 'processing') and row['duration'] > limit * 60:
+        return f"超过单条视频时长预算（{row['duration'] / 60:.0f} 分钟，上限 {limit} 分钟）", True
     return '', True
 
 

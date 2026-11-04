@@ -208,8 +208,11 @@ def process(rows, settings, scope, summary, deadline):
                 metadata = row.get('_metadata') or media.probe(
                     row, settings, deadline, stopped, scope.force or row['gate_code'] in TEMPORARY)
             if decision := gate(metadata, policy, row):
+                # 超长那一档把时长记下来:下一轮排名据此直接判掉它(`ranking.rejection`),
+                # 不再每轮占一个名额、再探一次。
+                measured = {'duration': float(metadata['duration'])} if decision.code == 'duration_budget' else {}
                 storage.update(row['video_id'], state=decision.state, reason=decision.reason,
-                               gate_code=decision.code, retry_at=time.time() + decision.retry_seconds)
+                               gate_code=decision.code, retry_at=time.time() + decision.retry_seconds, **measured)
                 continue
             # ── 事实日期一到手就闭环:换掉估算值,再用**同一个** `rejection` 重判资格 ──
             # 排名那一轮是拿估出来的日子排的(后路只有频道页的列表顺序),所以指定日期
