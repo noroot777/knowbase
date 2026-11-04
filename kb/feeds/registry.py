@@ -11,7 +11,9 @@ import ipaddress
 import json
 import re
 import sqlite3
+import time
 from contextlib import contextmanager, suppress
+from functools import lru_cache
 # 直接按名字拿:`sqlite3` 这个模块名在测试里会被换成一个只有 connect/Row 的替身,
 # 而异常类不随连接工厂变 —— 走 `sqlite3.OperationalError` 会在那种替身下 AttributeError。
 from sqlite3 import OperationalError
@@ -21,6 +23,7 @@ from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
+from kb.feeds import read_ready
 from kb.feeds.exclusion import item_key
 # 库结构整组搬去了 `kb/feeds/schema.py`(这边到了 700 行上限):建表语句、后加的
 # 那些列、以及老库的补列。这里**原地再导出**:`reg.SCHEMA` / `reg._migrate` 那些
@@ -184,13 +187,61 @@ def _seed_defaults(conn) -> None:
     conn.execute("INSERT OR REPLACE INTO feed_meta VALUES('defaults-rev',?)", (str(DEFAULTS_REV),))
 
 
+def _upgrade(conn) -> None:
+    """补列、种默认值、YouTube 那几张表。调用方必须已经持有写锁(见 `db()`)。
+
+    `read_ready` 拿它在内存库上从零建一遍,当作「当前代码要的样子」—— 两边走同一份,
+    改了迁移那一侧的比对标准自动跟上。"""
+    _migrate(conn)
+    _seed_defaults(conn)
+    from kb.youtube.storage import initialize
+    initialize(conn)
+
+
+@lru_cache(maxsize=4)
+def _statements(script: str) -> tuple[str, ...]:
+    """`SCHEMA` 拆成单句,在 `BEGIN IMMEDIATE` 里逐句跑(见 `db()`)。按调用时的
+    `SCHEMA` 取,和上面「`db()` 拿的是模块属性」同一个口径。"""
+    out, pending = [], ''
+    for line in script.splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            out.append(pending.strip())
+            pending = ''
+    return tuple(out)
+
+
+def _build(conn) -> None:
+    for statement in _statements(SCHEMA):
+        conn.execute(statement)
+    _upgrade(conn)
+
+
+def _wait_until(conn, deadline: float | None) -> None:
+    """下一次争锁最多等到 `deadline`。SQLite 的 busy 超时管的是**每一次**争锁,不是整笔。"""
+    if deadline is not None:
+        left = max(0, int((deadline - time.monotonic()) * 1000))
+        conn.execute(f'PRAGMA busy_timeout={left}')
+
+
 @contextmanager
 def read_db(timeout=30):
-    """Read an initialized WAL database without schema writes or a reserved writer lock."""
-    if not DB_PATH.exists():
-        with db(timeout=timeout):
+    """Read an initialized WAL database without schema writes or a reserved writer lock.
+
+    **纯读的地方用它,不用 `db()`。** `db()` 每开一次都要在 `BEGIN IMMEDIATE` 里把
+    建表补列种默认值跑一遍,也就是**每一次读都先排队抢写锁**:别的连接握着一笔写事务
+    多久,这一问就卡多久(实测握 3 秒,「问题与待办」的概览和列表各卡 3 秒)。WAL
+    下只读连接不跟写入方抢,读到的是开始那一刻提交过的快照。
+    """
+    deadline = time.monotonic() + timeout
+
+    def migrate(until):
+        with db(timeout=max(0.0, until - time.monotonic()), deadline=until):
             pass
-    conn = sqlite3.connect(DB_PATH.resolve().as_uri() + '?mode=ro', uri=True, timeout=timeout)
+    # 库已经是当前样子就不碰写锁;真要迁也只等 `timeout` 里剩下的那点(`read_ready`)。
+    read_ready.ensure(DB_PATH, _build, migrate, deadline)
+    conn = sqlite3.connect(DB_PATH.resolve().as_uri() + '?mode=ro', uri=True,
+                           timeout=max(0.0, deadline - time.monotonic()))
     conn.row_factory = sqlite3.Row
     try:
         conn.execute('PRAGMA query_only=ON')
@@ -200,7 +251,8 @@ def read_db(timeout=30):
 
 
 @contextmanager
-def db(timeout=30):
+def db(timeout=30, deadline: float | None = None):
+    """`deadline`(`time.monotonic()` 口径):建表补列这一段整笔最多等到那一刻(`read_db` 用)。"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=timeout)
     conn.row_factory = sqlite3.Row
@@ -213,16 +265,18 @@ def db(timeout=30):
     with suppress(OperationalError):
         conn.execute('PRAGMA journal_mode=WAL')
     try:
-        conn.executescript(SCHEMA)
         # One transaction: deleting a default never brings it back on restart.
         # 补列也在这把写锁里:它先读列集合再 ALTER,锁外跑的话两个首访连接会
         # 读到同一份旧列集合,后一个 ALTER 报 duplicate column(见 `_migrate`)。
+        # **建表也在这把锁里,所以整段只争一次锁。** 原先 `executescript(SCHEMA)` 在锁外
+        # 逐句自动提交,缺表的库上每一句各争一次,随后 `BEGIN IMMEDIATE` 再争一次 ——
+        # 每一次都能等满一份 busy 超时,调用方给的整笔时限(`read_db(timeout=…)`)就守不住。
+        _wait_until(conn, deadline)
         conn.execute('BEGIN IMMEDIATE')
-        _migrate(conn)
-        _seed_defaults(conn)
-        from kb.youtube.storage import initialize
-        initialize(conn)
+        _build(conn)
+        _wait_until(conn, deadline)
         conn.commit()
+        read_ready.mark(DB_PATH)
         yield conn
         conn.commit()
     except Exception:
@@ -265,10 +319,13 @@ def _upgrade_settings(kind: str, settings: dict) -> dict:
     return settings
 
 
-def get_settings(kind: str) -> dict:
+def get_settings(kind: str, conn=None) -> dict:
+    """`conn`:调用方手里那条连接(比如只读的 `read_db`);不给就开一条 `db()`。"""
     check_kind(kind)
-    with db() as c:
-        row = c.execute('SELECT value FROM feed_settings WHERE kind=?', (kind,)).fetchone()
+    if conn is None:
+        with db() as c:
+            return get_settings(kind, c)
+    row = conn.execute('SELECT value FROM feed_settings WHERE kind=?', (kind,)).fetchone()
     # `enabled` / `interval_minutes` / `next_run` 是**按来源类型自动同步**那一档
     # 留下的,那一档整条拆掉了(见 `kb.pipeline._scheduler_tick`),现在没有任何
     # 地方读它们。**键一个都不删**(元规则「只增不减」):盘上存量里就有,摘掉

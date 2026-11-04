@@ -148,9 +148,16 @@ function careRunExit(name, row, lane) {
   return careShelf(row.kind, [row.key], name, careRowLives(row));
 }
 
-async function careAfter(detail) {
+/** 写请求成功之后:报一句,整屏在后台重读。
+
+    **刻意不 await 重读。** 弹窗等的是「这一下写进去没有」,服务端回包就是答案;
+    整屏重读是概览加上这一组每一档的列表(展开过的还要逐页补回来),好几问里任何
+    一问慢下来(库上有别的写事务、机器内存吃紧时的冷请求),弹窗就跟着等。原来弹窗
+    等它读完才关:提示已经弹出「已不再收录」,按钮却还停在「处理中…」。重读失败由 `refreshCare` 自己说,
+    并发的几次重读按请求序号丢掉过期回包。 */
+function careAfter(detail) {
   toast(detail, { type: 'ok', ms: 6000 });
-  await refreshCare(false);
+  refreshCare(false);
 }
 
 /** 立即执行。**射程声明由服务端给**,前端只负责显示和回传指纹。 */
@@ -171,7 +178,7 @@ async function careRun(kind, keys, extra = {}) {
     // 「条目化提取不在这一步」,而另一条路带着它)。
     const done = await carePost('/run',
       { kind, keys, plan: plan.plan, ...extra });
-    await careAfter(done.detail || '已开始，结果以同步中心为准');
+    careAfter(done.detail || '已开始，结果以同步中心为准');
   } catch (e) {
     toast('没有开始', { detail: e.message });
   }
@@ -201,7 +208,7 @@ async function careRequeue(kind, keys, lives = {}) {
   if (!ok) return;
   try {
     const done = await carePost('/requeue', { kind, keys, lives });
-    await careAfter(done.detail);
+    careAfter(done.detail);
   } catch (e) {
     toast('没有放回', { detail: e.message });
   }
@@ -223,7 +230,7 @@ async function careShelf(kind, keys, decision, lives = {}) {
       try {
         const done = await carePost('/shelf',
           { kind, keys, decision, reason: vals.reason.trim(), lives });
-        await careAfter(done.detail);
+        careAfter(done.detail);
         return true;
       } catch (e) {
         fail('reason', e.message);
@@ -238,7 +245,7 @@ async function careShelf(kind, keys, decision, lives = {}) {
 async function careRelease(kind, keys, decisions) {
   try {
     const done = await carePost('/shelf/release', { kind, keys, decisions });
-    await careAfter(done.detail);
+    careAfter(done.detail);
     return done.released > 0;
   } catch (e) {
     toast('没有恢复', { detail: e.message });
@@ -326,7 +333,7 @@ async function carePasteBody(row) {
       try {
         const done = await carePost('/body',
           { key: row.key, body: vals.body, life: row.life || '' });
-        await careAfter(done.detail);
+        careAfter(done.detail);
         return true;
       } catch (e) {
         fail('body', e.message);
@@ -356,7 +363,7 @@ async function careRelink(row) {
       try {
         const done = await carePost('/link',
           { kind: row.kind, key: row.key, url: vals.url.trim(), life: row.life || '' });
-        await careAfter(done.detail);
+        careAfter(done.detail);
         return true;
       } catch (e) {
         fail('url', e.message);
@@ -454,8 +461,8 @@ async function careEachKind(path, label, build) {
     toast(`${label}没有全部完成，没成功的那几条还勾着`,
       { detail: failed.join('；') });
   }
-  if (touched || notes.length) await careAfter(notes.join('；'));
-  else await refreshCare(false);
+  if (touched || notes.length) careAfter(notes.join('；'));
+  else refreshCare(false);
   return !failed.length;
 }
 

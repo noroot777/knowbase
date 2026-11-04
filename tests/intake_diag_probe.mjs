@@ -327,7 +327,43 @@ check("页面发出去的那一问带着它",
         return (body.lives || {})[carried.key] === carried.life; })(),
       carried.sent);
 
-// ── 10. 处理记录:有记录,而且不给「撤销」那种快照回滚 ──────────────────────
+// ── 9d. 写进去了弹窗就关,不等整屏重读 ─────────────────────────────────────
+// 弹窗等的是「写进去没有」,回包就是答案;整屏重读(概览 + 这一组每一档)是好几问,
+// 任何一问慢下来弹窗就跟着等(`diag_actions.careAfter`)。这里写请求原样给一个
+// 成功回答(库里一个字节都没动),它之后的概览那一问扣住不回,看弹窗关没关。
+await evalJs(`(() => {
+  const real = window.fetch;
+  const hold = { posted: false, waiting: [] };
+  hold.open = () => { window.fetch = real; hold.waiting.splice(0).forEach(go => go()); };
+  window.__probeHold = hold;
+  window.fetch = (input, init) => {
+    const path = new URL(String(input), location.origin).pathname;
+    if (path === '/api/intake-care/shelf') {
+      hold.posted = true;
+      return Promise.resolve(new Response(JSON.stringify({ shelved: 1, keys: [], decisions: [],
+        asked: 1, decision: 'exclude', detail: '探针拦下了这一问' }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    }
+    if (path === '/api/intake-care' && hold.posted) {
+      return new Promise(done => hold.waiting.push(() => done(real(input, init))));
+    }
+    return real(input, init);
+  };
+})()`);
+await evalJs(`void careShelf('rss', [${JSON.stringify(queuedKey)}], 'exclude')`);
+await until(`!!document.querySelector('.care-form textarea')`);
+await evalJs(`document.querySelector('.care-form .confirm-acts button:last-child').click()`);
+await until(`window.__probeHold.waiting.length > 0 && !document.querySelector('.care-form')`, 5000);
+const held = JSON.parse(await evalJs(`JSON.stringify({
+  waiting: window.__probeHold.waiting.length,
+  form: !!document.querySelector('.care-form'),
+  told: [...document.querySelectorAll('.toast')].some(t => t.textContent.includes('探针拦下了这一问')) })`));
+check("写进去了弹窗当场关掉、提示弹出,不等概览那一问回来",
+      held.waiting > 0 && !held.form && held.told, JSON.stringify(held));
+await evalJs(`window.__probeHold.open()`);
+await until(`CARE.group === 'queued' && CARE.sections.some(s => s.lane.id === 'body_queued')`);
+
+// ── 10.处理记录:有记录,而且不给「撤销」那种快照回滚 ──────────────────────
 await evalJs(`openCareLog()`);
 await until(`!!document.querySelector('.modal-mask .care-log-rows')`, 8000);
 const logText = await evalJs(`document.querySelector('.modal-mask .care-log-rows').textContent`);
