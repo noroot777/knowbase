@@ -141,16 +141,52 @@ const setDaily = on => evalJs(`(() => {
   i.checked = ${on}; onPipeDailyToggle(); return true; })()`);
 const openSubs = kind => evalJs(`(async () => { switchTab('subs'); await openSubsPanel('${kind}'); return true; })()`);
 
+// ── 等待判据:认「这一次」,不认「上一次留下的」 ───────────────────────────────
+// 门禁上红过、机器一忙才出的那一次:回到 RSS 那一页只等 `#source-sync` 出现就调
+// `syncSource([12])` —— 那个元素上一节就摆着,等它等于没等。`openSourceModule` 一进来
+// 先把 `sourceData` 清空再去后端重读,读回来之前编号 12 对不上任何一条订阅,锁退成
+// 「整条来源」;而「弹窗开着 && 只剩 rss 一个来源」对这一档同样成立,于是当场放行、
+// 拍到整条全选折着的那一份(把那次重读延迟 1.5s 能稳定复现)。**这是探针的竞争,
+// 不是页面的**:真人点不到那个窗口 —— 每行那颗「同步」是按 `sourceData` 画的,
+// `actOnSource` 先在里面认过那一条才调它。所以订阅页要等**这一次**的数据落地、
+// 而且里面有要点的那一条(`subsReady`)。
+// 弹窗那一侧:`.click()` 不等处理函数跑完,`openPipeModal` 先把弹窗摆出来、`await`
+// 之后才上锁,中间读到的 `pipeReadyChannels()` 是上一次的缓存。今天那段 `await` 只隔
+// 几个微任务,轮询插不进去;在上锁之前多一段真异步,只看「开着 + 状态」的等待就
+// 红(2c 那条,实测)。所以「这一次打开做完了」只认 `openPipeModal` 自己结算(一层只
+// 计数、不改行为的包装)。触发前先确认上一个弹窗关了 —— 弹窗还开着、或者上一次起跑
+// 没结算时 `openPipeModal` 只弹一句 toast 就返回,计数照涨,弹窗还是旧的。这一道
+// **今天红 0 条**(`startPipeFromModal` 被 `evalJs` 整个等完、关窗是同步的),留它是
+// 构造上的理由。**不许改成睡一段时间**:负载敏感的根就是靠时间。
+const subsReady = (name, kind, id = null) => setup(name, until(`sourceKind === '${kind}' && !!sourceData
+  ${id === null ? '' : `&& sourceData.sources.some(s => s.id === ${id})`}
+  && !document.getElementById('source-sync').disabled`, 8000));
+// 每份文档装一次(刷新之后要重装)
+const spyOpens = () => evalJs(`(() => {
+  if (typeof window.__pipeOpens === 'number') return true;
+  window.__pipeOpens = 0;
+  const real = openPipeModal;
+  openPipeModal = async (...a) => { try { return await real(...a); } finally { window.__pipeOpens++; } };
+  return true; })()`);
+const openModal = async (name, trigger, ready = 'true') => {
+  await setup(`${name}(上一次的弹窗已经关了)`, until(`!pipeModalOpen() && !pipeAction`, 8000));
+  const n = await evalJs(`window.__pipeOpens`);
+  await evalJs(trigger);
+  await setup(name, until(`window.__pipeOpens > ${n} && pipeModalOpen() && (${ready})`, 8000));
+};
+const CENTER = `(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`;
+const RSS_READY = `pipeAccounts.get('rss')?.state === 'ready'`;
+
 try {
 await send("Page.navigate", { url: `${base}/#pipe` });
 await setup("面板连上后端", until(`typeof pipeConnected !== 'undefined' && pipeConnected`, 8000));
+await spyOpens();
 
 // ── 1. RSS 那一页的「同步全部」:弹窗锁在 rss ────────────────────────────────
 await openSubs("rss");
-await setup("RSS 那一页摆出来了", until(`document.getElementById('source-sync') && !document.getElementById('source-sync').disabled`, 8000));
-await evalJs(`document.getElementById('source-sync').click()`);
-await setup("弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
-  && pipeReadyChannels().length === 1`, 8000));
+await subsReady("RSS 那一页摆出来了", "rss");
+await openModal("弹窗开了", `document.getElementById('source-sync').click()`,
+                `pipeReadyChannels().length === 1`);
 let s = await snap();
 check("从 RSS 那一页进来:只勾着 rss,整组灰掉点不动",
       s.on.join() === 'rss' && s.off.sort().join() === 'inbox,rss,wechat_local', JSON.stringify(s));
@@ -183,10 +219,8 @@ check("声明了这一下是人按的(退避由后端照此跳过)", p.body.trig
 
 // ── 2. 行内那颗「同步」:连订阅也锁死 ────────────────────────────────────────
 await openSubs("rss");
-await setup("回到 RSS 那一页", until(`document.getElementById('source-sync') !== null`, 6000));
-await evalJs(`syncSource([12])`);
-await setup("弹窗又开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
-  && pipeReadyChannels().length === 1`, 8000));
+await subsReady("回到 RSS 那一页", "rss", 12);
+await openModal("弹窗又开了", `syncSource([12])`, `pipeReadyChannels().length === 1`);
 s = await snap();
 // 锁到具体几条时名单**必须摊开、而且折不起来**(折着的那一行写的是「全部」,
 // 而这一次不是)—— 所以那一档连折叠按钮都不摆
@@ -210,9 +244,7 @@ check("请求里的订阅只有点的那一条,而且走的是编号那个字段
       JSON.stringify(p.body.channels));
 
 // **反过来钉一边**:锁到单条那一次不许改写同步中心记着的订阅选择
-await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
-await setup("同步中心的弹窗开了(查订阅记忆)", until(`document.getElementById('pipe-modal').style.display !== 'none'
-  && pipeReadyChannels().length >= 1`, 8000));
+await openModal("同步中心的弹窗开了(查订阅记忆)", CENTER, `pipeReadyChannels().length >= 1`);
 await evalJs(`(() => { const i = document.querySelector('#pipe-channel-list input[data-run-channel=rss]');
   if (!i.checked) { i.checked = true; i.dispatchEvent(new Event('change', { bubbles: true })); } return true; })()`);
 await setup("rss 的订阅读出来了", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
@@ -226,10 +258,8 @@ await evalJs(`closePipeModal()`);
 // 条的「同步」两条都被抓(第 1 轮审查 R2)。这一条判的就是「发出去的那一份能不能
 // 只认出一条」。
 await openSubs("rss");
-await setup("又回到 RSS 那一页", until(`document.getElementById('source-sync') !== null`, 6000));
-await evalJs(`syncSource([13])`);
-await setup("同名那一条的弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
-  && pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await subsReady("又回到 RSS 那一页", "rss", 13);
+await openModal("同名那一条的弹窗开了", `syncSource([13])`, RSS_READY);
 posted.length = 0;
 await evalJs(`startPipeFromModal()`);
 await setup("同名那一条发出了请求", sleep(500).then(() => posted.length > 0));
@@ -242,8 +272,7 @@ check("两条同名订阅只点了一条:请求里是那一条的编号,不是�
 // ── 2c. 「同步全部」就是全部,不看同步中心收窄过的那一份 ─────────────────────
 // 锁定「整条来源」那一档原来也会去读 `pipeDrafts`:同步中心上次只勾了两个,
 // 从订阅页点「同步全部」就只跑那两个,而按钮上写着「全部」(第 1 轮审查 R1)。
-await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
-await setup("同步中心的弹窗开了(准备收窄)", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await openModal("同步中心的弹窗开了(准备收窄)", CENTER, RSS_READY);
 // **先摆回全选再收窄**:摆局不许依赖前面几节留下的勾选 —— 依赖了的话,这一节会
 // 在「摆局没成」上中断,把后面几条都带着跳过,而红在哪一条看不出来。
 await evalJs(`pipeSelectAll()`);
@@ -254,11 +283,8 @@ const narrowed = await evalJs(`pipeSelected('rss').size`);
 await evalJs(`closePipeModal()`);
 await setup("收窄生效了", Promise.resolve(narrowed === 2));
 await openSubs("rss");
-await setup("再回 RSS 那一页", until(`document.getElementById('source-sync') !== null
-  && !document.getElementById('source-sync').disabled`, 8000));
-await evalJs(`document.getElementById('source-sync').click()`);
-await setup("「同步全部」的弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
-  && pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await subsReady("再回 RSS 那一页", "rss");
+await openModal("「同步全部」的弹窗开了", `document.getElementById('source-sync').click()`, RSS_READY);
 check("订阅页的「同步全部」真的是全部(没沿用同步中心收窄过的那一份)",
       await evalJs(`pipeSelected('rss').size`) === 3, await evalJs(`JSON.stringify([...pipeSelected('rss')])`));
 await evalJs(`closePipeModal()`);
@@ -271,21 +297,17 @@ const centerState = () => evalJs(`JSON.stringify({
   sel: [...pipeSelected('rss')].sort(),
   daily: document.getElementById('pipe-daily').checked,
   draft: (pipeDrafts.get('rss') || []).slice().sort() })`);
-await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
-await setup("同步中心又开了(摆原始配置)", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await openModal("同步中心又开了(摆原始配置)", CENTER, RSS_READY);
 await setDaily(true);
 // 判据是「跟进去之前**一模一样**」,不是某个写死的名单 —— 这一刻同步中心正好是
 // 上一节收窄过的那两条,而「锁定一次之后它还剩几条」正是出事的地方
 const before = await centerState();
 await evalJs(`closePipeModal()`);
 await openSubs("rss");
-await setup("第三次回 RSS 那一页", until(`document.getElementById('source-sync') !== null`, 6000));
-await evalJs(`syncSource([11])`);
-await setup("单条的弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
-  && pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await subsReady("第三次回 RSS 那一页", "rss", 11);
+await openModal("单条的弹窗开了", `syncSource([11])`, RSS_READY);
 await evalJs(`closePipeModal()`);          // 不执行,直接取消
-await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
-await setup("同步中心最后一次开", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await openModal("同步中心最后一次开", CENTER, RSS_READY);
 const after = await centerState();
 const back = JSON.parse(after);
 check("打开再取消一条订阅的同步:同步中心那一份原样还在(订阅选择 + 草稿)",
@@ -298,9 +320,8 @@ await evalJs(`closePipeModal()`);
 await openSubs("wechat");
 await setup("公众号那一页摆出来了", until(`!document.getElementById('subs-wechat').hidden
   && !document.getElementById('subs-wechat-sync').disabled`, 8000));
-await evalJs(`document.getElementById('subs-wechat-sync').click()`);
-await setup("弹窗第三次开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
-  && pipeReadyChannels().length === 1`, 8000));
+await openModal("弹窗第三次开了", `document.getElementById('subs-wechat-sync').click()`,
+                `pipeReadyChannels().length === 1`);
 s = await snap();
 check("公众号那一页进来:锁在本机绿泡泡那条通道上",
       s.on.join() === 'wechat_local' && s.off.sort().join() === 'inbox,rss,wechat_local', JSON.stringify(s));
@@ -316,8 +337,7 @@ check("请求里带着步骤清单(缺了它后端会兜底成六段全跑)",
 
 // ── 4. 手动收录照旧直接起跑,不进这个弹窗 ───────────────────────────────────
 await openSubs("inbox");
-await setup("手动收录那一页摆出来了", until(`document.getElementById('source-sync') !== null
-  && !document.getElementById('source-sync').disabled`, 8000));
+await subsReady("手动收录那一页摆出来了", "inbox");
 posted.length = 0;
 await evalJs(`document.getElementById('source-sync').click()`);
 await setup("它自己发了请求", sleep(600).then(() => posted.length > 0));
@@ -327,9 +347,8 @@ check("手动收录没有可轮询的源:照旧直接走 intake,不开弹窗",
       JSON.stringify(posted[0]));
 
 // ── 5. **反过来钉一边**:同步中心那颗「新建同步」没被入口改掉 ────────────────
-await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
-await setup("同步中心的弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
-  && document.querySelectorAll('#pipe-channel-list input').length === 3`, 8000));
+await openModal("同步中心的弹窗开了", CENTER,
+                `document.querySelectorAll('#pipe-channel-list input').length === 3`);
 s = await snap();
 check("同步中心进来:三个来源都点得动,一个都没灰",
       s.off.length === 0 && !/只同步/.test(s.hint), JSON.stringify(s));
@@ -387,18 +406,15 @@ await send("Page.reload", { ignoreCache: true });
 await setup("刷新后重新连上后端(真换过文档了)",
             until(`typeof window.__coldMark === 'undefined'
                    && typeof pipeConnected !== 'undefined' && pipeConnected`, 10000));
+await spyOpens();
 await setup("刷新后内存是空的(冷态摆成了)",
             until(`typeof pipeAccounts !== 'undefined'
                    && pipeAccounts.size === 0 && pipeDrafts.size === 0`, 8000));
 await openSubs("rss");
-await setup("刷新后 RSS 那一页摆出来了", until(`document.getElementById('source-sync')
-  && !document.getElementById('source-sync').disabled`, 8000));
-await evalJs(`document.getElementById('source-sync').click()`);
-await setup("冷态下锁定弹窗开了", until(`document.getElementById('pipe-modal').style.display !== 'none'
-  && pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await subsReady("刷新后 RSS 那一页摆出来了", "rss");
+await openModal("冷态下锁定弹窗开了", `document.getElementById('source-sync').click()`, RSS_READY);
 await evalJs(`closePipeModal()`);          // 暂不执行
-await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
-await setup("冷态下同步中心开了", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await openModal("冷态下同步中心开了", CENTER, RSS_READY);
 const cold = () => evalJs(`JSON.stringify({ sel: [...pipeSelected('rss')].sort(),
   draft: pipeDrafts.get('rss') || null, off: document.getElementById('pipe-start').disabled })`);
 let c = JSON.parse(await cold());
@@ -408,8 +424,7 @@ check("刷新后先从订阅页打开再取消:同步中心照旧全选、「开
 // 不勾」一概当成没初始化、再给补回全选(那三种状态必须分得开)。
 await evalJs(`pipeSelectNone()`);
 await evalJs(`closePipeModal()`);
-await evalJs(`(async () => { switchTab('pipe'); await openPipeModal(); return true; })()`);
-await setup("清空之后又开了一次", until(`pipeAccounts.get('rss')?.state === 'ready'`, 8000));
+await openModal("清空之后又开了一次", CENTER, RSS_READY);
 c = JSON.parse(await cold());
 check("明确清空过的那一份照旧是空的(没被当成未初始化补成全选)",
       c.sel.length === 0 && c.off === true, await cold());
