@@ -217,6 +217,11 @@ def doc_from_text(text: str, md_path: Path, src: Source,
     )
 
 
+# `_doc_from_file` 读不成一篇 Doc 时会抛的那几类。`scan_all` 把它们记成读失败,
+# `vault_census` 把那一篇当作不在 —— 两边对「哪一篇读得出来」只有这一份口径。
+READ_ERRORS = (OSError, UnicodeError, ValueError, yaml.YAMLError)
+
+
 def _doc_from_file(md_path: Path, src: Source) -> Doc:
     lineage = capture(md_path, src.root, VAULT_ROOT)
     before = stat_signature(md_path.stat())
@@ -250,7 +255,7 @@ def iter_md(sources: list[Source] | None = None, *,
 
     「哪些树要扫、树里跳过哪些子目录」只有这一份实现。拆出来是因为"枚举该扫
     哪些文件"和"把文件读成 Document"是两件事:要枚举的人(本函数)不该为了拿
-    一个路径清单去读上万篇正文。目前只有 `scan_all` 过它。
+    一个路径清单去读上万篇正文。`scan_all` 和 `vault_census` 过它。
     """
     report = report if report is not None else ScanReport()
     report.start(sources if sources is not None else SOURCES, VAULT_ROOT)
@@ -267,7 +272,7 @@ def scan_all(*, report: ScanReport | None = None) -> Iterator[Doc]:
     for src, md_path in iter_md(report=report):
         try:
             doc = _doc_from_file(md_path, src)
-        except (OSError, UnicodeError, ValueError, yaml.YAMLError) as error:
+        except READ_ERRORS as error:
             report.fail(src, md_path, error)
         else:
             yield doc

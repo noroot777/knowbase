@@ -521,17 +521,18 @@ def start_scheduler() -> None:
 # ── 待处理数(空闲时给面板显示)────────────────────────────────────────────────
 
 def pending_counts(channel: str | None = None) -> dict:
-    """各阶段待处理数。文件扫描有成本,管道运行中不要调。"""
+    """各阶段待处理数。管道运行中不要调(跑着时文件一直在变,数出来也没意义)。"""
     out: dict = {}
     # 导出待处理:采集器那边已有、但还没落进 vault 的条数(采集器自己算)
     out["export"] = source_pending(channel)
     # 索引/提取待处理
     try:
         from kb import store
-        from kb.scanner import scan_all
+        from kb.vault_census import census
         conn = store.connect()
+        # 不扫全库:没变过的文件用上一次读出来的指纹(见 `vault_census`)
         out["index"] = sum(
-            1 for d in scan_all()
+            1 for d in census()
             if store.doc_needs_reindex(conn, d.path, d.content_hash)
         )
         from kb.extract import pending_docs
