@@ -13,6 +13,7 @@ import re
 import sqlite3
 import time
 from contextlib import contextmanager, suppress
+from functools import lru_cache
 # 直接按名字拿:`sqlite3` 这个模块名在测试里会被换成一个只有 connect/Row 的替身,
 # 而异常类不随连接工厂变 —— 走 `sqlite3.OperationalError` 会在那种替身下 AttributeError。
 from sqlite3 import OperationalError
@@ -197,9 +198,30 @@ def _upgrade(conn) -> None:
     initialize(conn)
 
 
+@lru_cache(maxsize=4)
+def _statements(script: str) -> tuple[str, ...]:
+    """`SCHEMA` 拆成单句,在 `BEGIN IMMEDIATE` 里逐句跑(见 `db()`)。按调用时的
+    `SCHEMA` 取,和上面「`db()` 拿的是模块属性」同一个口径。"""
+    out, pending = [], ''
+    for line in script.splitlines(keepends=True):
+        pending += line
+        if sqlite3.complete_statement(pending):
+            out.append(pending.strip())
+            pending = ''
+    return tuple(out)
+
+
 def _build(conn) -> None:
-    conn.executescript(SCHEMA)
+    for statement in _statements(SCHEMA):
+        conn.execute(statement)
     _upgrade(conn)
+
+
+def _wait_until(conn, deadline: float | None) -> None:
+    """下一次争锁最多等到 `deadline`。SQLite 的 busy 超时管的是**每一次**争锁,不是整笔。"""
+    if deadline is not None:
+        left = max(0, int((deadline - time.monotonic()) * 1000))
+        conn.execute(f'PRAGMA busy_timeout={left}')
 
 
 @contextmanager
@@ -213,8 +235,8 @@ def read_db(timeout=30):
     """
     deadline = time.monotonic() + timeout
 
-    def migrate(left):
-        with db(timeout=left):
+    def migrate(until):
+        with db(timeout=max(0.0, until - time.monotonic()), deadline=until):
             pass
     # 库已经是当前样子就不碰写锁;真要迁也只等 `timeout` 里剩下的那点(`read_ready`)。
     read_ready.ensure(DB_PATH, _build, migrate, deadline)
@@ -229,7 +251,8 @@ def read_db(timeout=30):
 
 
 @contextmanager
-def db(timeout=30):
+def db(timeout=30, deadline: float | None = None):
+    """`deadline`(`time.monotonic()` 口径):建表补列这一段整笔最多等到那一刻(`read_db` 用)。"""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=timeout)
     conn.row_factory = sqlite3.Row
@@ -242,12 +265,16 @@ def db(timeout=30):
     with suppress(OperationalError):
         conn.execute('PRAGMA journal_mode=WAL')
     try:
-        conn.executescript(SCHEMA)
         # One transaction: deleting a default never brings it back on restart.
         # 补列也在这把写锁里:它先读列集合再 ALTER,锁外跑的话两个首访连接会
         # 读到同一份旧列集合,后一个 ALTER 报 duplicate column(见 `_migrate`)。
+        # **建表也在这把锁里,所以整段只争一次锁。** 原先 `executescript(SCHEMA)` 在锁外
+        # 逐句自动提交,缺表的库上每一句各争一次,随后 `BEGIN IMMEDIATE` 再争一次 ——
+        # 每一次都能等满一份 busy 超时,调用方给的整笔时限(`read_db(timeout=…)`)就守不住。
+        _wait_until(conn, deadline)
         conn.execute('BEGIN IMMEDIATE')
-        _upgrade(conn)
+        _build(conn)
+        _wait_until(conn, deadline)
         conn.commit()
         read_ready.mark(DB_PATH)
         yield conn

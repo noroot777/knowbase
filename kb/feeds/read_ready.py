@@ -10,8 +10,9 @@
    个一次性迁移留下的记号。比的标准不手抄,是拿 `build` 在内存库上从零建一遍得出来的 ——
    和 `db()` 走的是同一份建表补列(`registry._upgrade`),改了迁移这里自动跟上。够了就
    登记、放行,全程不碰写锁;
-3. 真缺东西才开一次 `db()`,而且**只用调用方剩下的那点时限**:`read_db(timeout=…)` 的
+3. 真缺东西才开一次 `db()`,而且**整笔只等到调用方的截止时刻**:`read_db(timeout=…)` 的
    调用方(X 长文那几问给的是整笔 10 秒)说的是这一问总共等多久,不是迁移另算 30 秒。
+   截止时刻原样交给 `db(deadline=…)`,由它在每一个争锁点之前按剩下的时间重设上限。
 
 同一个库的首访在进程内排队:几问同时到达时只有一问去比、去迁,其余等它的结果,同样只等
 各自剩下的时限。认 `(路径, inode)`:测试会在同一个路径上删掉重建一个库。
@@ -98,8 +99,8 @@ def _current(path: Path, build, left: float) -> bool:
 def ensure(path: Path, build, migrate, deadline: float) -> None:
     """保证 `path` 已是当前代码要的样子,最多等到 `deadline`(`time.monotonic()` 口径)。
 
-    `build(conn)` 在空连接上建出当前的完整结构;`migrate(left)` 开一次 `db(timeout=left)`
-    (它跑完会自己 `mark`)。等不到就抛 `sqlite3.OperationalError`,和 busy 超时同一句话。
+    `build(conn)` 在空连接上建出当前的完整结构;`migrate(deadline)` 开一次
+    `db(deadline=deadline)`(它跑完会自己 `mark`)。等不到就抛 `sqlite3.OperationalError`,和 busy 超时同一句话。
     """
     with suppress(FileNotFoundError):
         if _key(path) in _READY:
@@ -116,6 +117,6 @@ def ensure(path: Path, build, migrate, deadline: float) -> None:
             if _current(path, build, max(0.0, deadline - time.monotonic())):
                 _READY.add(key)
                 return
-        migrate(max(0.0, deadline - time.monotonic()))
+        migrate(deadline)
     finally:
         first.release()
