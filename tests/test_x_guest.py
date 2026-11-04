@@ -99,7 +99,7 @@ class GuestBase(ChannelBase):
 class NoLoginTests(GuestBase):
     def test_the_channel_is_ready_with_no_login_anywhere(self):
         """**这一档存在的全部理由**:没有 profile、没有 cookie、没有调试端口,照样就绪;
-        订阅也不会被记成「待配置」跳过。反过来钉一边:同样的空环境下默认那档仍要登录。"""
+        订阅也不会被记成「待配置」跳过。反过来钉一边:同样的空环境下独立 profile 那档仍要登录。"""
         source = self.sub('alice')
         self.settings(x_channels.GUEST)
         settings = reg.get_settings('social')

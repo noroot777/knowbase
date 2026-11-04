@@ -279,10 +279,10 @@ def get_settings(kind: str) -> dict:
         from kb.youtube.settings import DEFAULTS
         default['youtube'] = dict(DEFAULTS)
     if feed_types()[kind].adapter == 'social':
-        # X 的取法是个设置 —— 存量库里这一段压根没有这个键,
-        # 读出来必须和升级前逐字同义。
+        # X 的取法是个设置 —— 存量库里这一段压根没有这个键,读出来必须和升级前同义:
+        # 默认换成不登录之后,登录过独立 profile 却没存过通道的照旧是 browser(`unsaved_default`)。
         from kb.feeds import x_channels
-        default |= {'x_channel': x_channels.DEFAULT, 'x_feedgrab_bin': '',
+        default |= {'x_channel': x_channels.unsaved_default(), 'x_feedgrab_bin': '',
                     'x_chrome_path': ''}
     settings = {**default, **(json.loads(row['value']) if row else {})}
     if 'x_channel' in settings:

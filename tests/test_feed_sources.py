@@ -48,7 +48,9 @@ class FeedTests(unittest.TestCase):
         # 那一个,被 kb-web 正在跑的一轮索引(整趟持锁)挂住(见 kb.maintenance)。
         self.patches = [patch.object(reg,'DB_PATH',self.root/'feeds.db'),
                         patch.object(maintenance,'DATA_DIR',self.root),
-                        patch.object(sync,'VAULT_ROOT',self.root/'vault')]
+                        patch.object(sync,'VAULT_ROOT',self.root/'vault'),
+                        # 「没登录过」不押在数据目录里恰好没有 profile 上
+                        patch.object(x_channels,'BROWSER_PROFILE',self.root/'xprof-none')]
         for p in self.patches:
             p.start(); self.addCleanup(p.stop)
         self.state = deepcopy(pipeline_state._state)
@@ -424,9 +426,11 @@ class FeedTests(unittest.TestCase):
         self.assertTrue(collect.call_args.args[1].force)
 
     def test_default_social_waits_for_configuration_without_starting_pipeline(self):
+        # 默认那档(不登录)装好就能跑;这里验的是「通道还没配好」那一侧,所以显式选一档要登录的
+        reg.save_settings('social', {'x_channel': x_channels.BROWSER})
         overview = self.client.get('/api/intake/social').json()
         self.assertEqual((51, 0), (overview['unconfigured'], overview['ready']))
-        self.assertEqual(x_channels.DEFAULT, overview['settings']['x_channel'])
+        self.assertEqual(x_channels.BROWSER, overview['settings']['x_channel'])
         self.assertFalse(get_collector('social').status().ready)
         with patch.object(pipeline, 'start_pipeline') as start:
             response = self.client.post('/api/intake/social/sync', json={})
@@ -444,6 +448,7 @@ class FeedTests(unittest.TestCase):
         """**填了专用订阅链接的那条不看通道脸色。** 它走的是普通 HTTP,通道登
         没登录都跟它无关;反过来,通道就绪也不许把"就绪"算到别人头上之外的事
         上——两边各自独立。"""
+        reg.save_settings('social', {'x_channel': x_channels.BROWSER})     # 一档还没登录过的通道
         source = reg.subscriptions('social')[0]
         reg.save_subscription('social', {'feed_url':'https://example.org/account/rss'}, source['id'])
         data = self.client.get('/api/intake/social').json()

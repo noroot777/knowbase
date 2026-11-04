@@ -29,6 +29,8 @@ def main():
         from kb import pipeline, embedder
         from kb.feeds import registry, sync
         from kb.feeds.fetching import FeedError
+        # 默认的不登录那档装好就能跑、一点同步就真去问 X;这里承诺不访问真实订阅,显式选一档没登录的
+        registry.save_settings('social', {'x_channel': 'browser'})
 
         pipeline.start_scheduler = lambda: None
         embedder.embed_pending_chunks = lambda *args, **kwargs: 0

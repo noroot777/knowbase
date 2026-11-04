@@ -91,15 +91,43 @@ class ChannelBase(unittest.TestCase):
 
 
 class ChannelChoiceTests(ChannelBase):
-    def test_a_fresh_install_defaults_to_the_independent_profile(self):
-        """**默认必须是一条真能无人值守跑的档。** 原来是第三方 RSS 桥接,它删掉
-        之后默认落在独立 profile 上:那一档登录一次(或从日常浏览器导一次)之后
-        每天零弹窗。"""
+    def test_a_fresh_install_defaults_to_no_login(self):
+        """**默认必须是一条真能无人值守跑的档,而且装好就能跑。** 原来是第三方 RSS 桥接,
+        删掉之后落在独立 profile 上(要先登录一次,新装的 51 个账号全是「待配置」);现在是
+        不登录那档:什么都不用准备,订阅当场就绪。"""
         s = reg.get_settings('social')
-        self.assertEqual(x_channels.BROWSER, s['x_channel'])
+        self.assertEqual(x_channels.GUEST, s['x_channel'])
         self.assertEqual('', s['x_feedgrab_bin'])
         self.assertEqual('', s['x_chrome_path'])
         self.assertNotIn('x_channel', reg.get_settings('rss'))
+        source = self.sub('alice')
+        self.assertEqual('', reg.configuration_error(source, s))
+
+    def login_footprint(self):
+        cookies = x_channels.BROWSER_PROFILE / 'Default' / 'Cookies'
+        cookies.parent.mkdir(parents=True)
+        cookies.write_bytes(b'x')
+
+    def test_an_install_that_logged_in_without_saving_a_channel_stays_on_the_profile(self):
+        """默认还是独立 profile 那时,在面板上点「登录 X」不会把通道写进设置(下拉没改过),
+        这样的存量库一直靠缺省值跑在 browser 上:升级之后不许被静默换到不登录。
+        存量设置行里没有这个键(更早的版本)也一样。"""
+        self.login_footprint()
+        self.assertEqual(x_channels.BROWSER, reg.get_settings('social')['x_channel'])
+        reg.save_settings('youtube', {})                      # 别的来源存过,social 这一行照旧没有
+        with reg.db() as c:
+            c.execute("INSERT INTO feed_settings VALUES('social', ?)",
+                      (json.dumps({'enabled': False, 'interval_minutes': 1440}),))
+        self.assertEqual(x_channels.BROWSER, reg.get_settings('social')['x_channel'])
+
+    def test_a_saved_channel_is_read_as_saved_whatever_the_profile_holds(self):
+        """反过来钉一边:存过的值不看 profile 脸色 —— 存过 guest 的登录过也是 guest,
+        存过 browser 的没登录也是 browser(那就是「待配置」,不许替他换成能跑的那档)。"""
+        self.settings(x_channels.BROWSER)
+        self.assertEqual(x_channels.BROWSER, reg.get_settings('social')['x_channel'])
+        self.login_footprint()
+        self.settings(x_channels.GUEST)
+        self.assertEqual(x_channels.GUEST, reg.get_settings('social')['x_channel'])
 
     def test_an_unknown_channel_name_falls_back_to_the_default(self):
         self.assertEqual(x_channels.DEFAULT, x_channels.resolve('no-such-thing'))
@@ -111,11 +139,12 @@ class ChannelChoiceTests(ChannelBase):
         认不出来就会当成"没配"——那是在用户没动过任何设置的情况下静默换档,
         而且连「他原来选的是哪一档」都丢了。口径只有 `resolve()` 一份。
         """
-        self.assertEqual(x_channels.DEFAULT, x_channels.resolve('bridge'))
+        # 落到它删掉那时的默认档(独立 profile),不跟着现在的默认换成不登录
+        self.assertEqual(x_channels.BROWSER, x_channels.resolve('bridge'))
         self.assertIn('bridge', x_channels._RETIRED)
         self.assertNotIn('bridge', x_channels.CHANNELS)
         # 翻得出人话名字:历史运行记录里写着的可能正是它。
-        self.assertEqual(x_channels.LABELS[x_channels.DEFAULT],
+        self.assertEqual(x_channels.LABELS[x_channels.BROWSER],
                          x_channels.label('bridge'))
 
     def test_a_retired_name_is_translated_rather_than_dropped(self):

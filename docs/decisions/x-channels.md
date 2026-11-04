@@ -381,10 +381,17 @@
   文案明确失败发生在重开验证阶段。加载中的明确错误不再被误报网络不通,采集与详情页仍须连续
   两次相同结论,详情页仍须路由身份匹配;同一共享判据覆盖三个消费方。
 
-- **同一批大V账号,四条互斥的取法,选哪条是一个设置**(`social` 的 `x_channel`,默认 `browser`):`feedgrab`
+- **同一批大V账号,四条互斥的取法,选哪条是一个设置**(`social` 的 `x_channel`,默认 `guest`):`feedgrab`
   一份 X cookie 调 X 自己的接口(子进程调用用户装好的 CLI)、`browser` 复用**独立 profile** 里的登录态
   (我们起的无头 Chrome,CDP over 管道)、`attach` 直连用户**已经开着**的日常浏览器(CDP over WebSocket)、
   `guest` **完全不登录**(`x_guest`,FxTwitter 公开接口 + X 自己的未登录页面,每一步挑合适的那件)。**口径只有 `x_channels` 一份。**
+- **默认是 `guest`(装好就能跑),但存量库不许被静默换档**:设置里没存过 `x_channel` 的,独立 profile 里有登录
+  痕迹就照旧是 `browser`(`x_channels.unsaved_default`,`registry.get_settings` 补缺省值只走它)。默认还是
+  `browser` 那时,面板上「登录 X」「从日常浏览器导入」在下拉没改过时不写设置,登录过却从没存过通道的库是常态。
+  存过的值一律照存着的读;退役名 `bridge` 照旧落 `browser`,不跟着默认走。**测试夹具和隔离服务要「没配好」那
+  一侧的,显式存一档 `browser`**(`tests/serve_sources.py`、`serve_reader_membership.py`、`intake_diag_fixture`)
+  —— 不存的话新库那 51 个默认账号当场就绪,一点同步就真去问 FxTwitter / x.com。回归 `tests/test_x_channels.py`
+  的 `ChannelChoiceTests`。
 - **`guest` 不许依赖任何登录态,也不许在失败时退到要登录的路上**(用户的 X 号被冻结过,这一档就是为那种
   时候准备的)。它不起浏览器、不读 profile、不碰 cookie;长文同样走 `x_article.fill(session=None)`,没有浏览器后路。
   就绪判断只问接口地址是不是空的。
@@ -1016,7 +1023,7 @@
   不据此改已转出的连接检查、账号生命周期、合法空媒体或完整 Article 审计资格。
 
 - **同一批大V账号,三条互斥的取法,选哪条是一个设置**(`social` 的
-  `x_channel`,默认 `browser`):
+  `x_channel`,当时默认 `browser`;后来加了第四条 `guest` 并改成默认,见第一节):
   `feedgrab` 用一份 X cookie 调 X 自己的接口(子进程调用用户装好的 feedgrab
   CLI)、`browser` 复用一个**独立 profile** 里的登录态(我们自己起的无头 Chrome,
   CDP over 管道)、`attach` 直连用户**已经开着**的那个日常浏览器(他自己勾开远程

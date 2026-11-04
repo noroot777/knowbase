@@ -36,6 +36,9 @@ def main():
         from kb.feeds import sync
         from kb.feeds.fetching import FeedError
         from kb.feeds import registry as reg
+        # X 那一档显式选独立 profile(没登录 = 待配置):默认的不登录那档装好就能跑,一点同步就会真去问
+        # FxTwitter / x.com,而这个夹具承诺不访问真实订阅;探针们验的也是「51 个账号待配置」那一侧
+        reg.save_settings('social', {'x_channel': 'browser'})
         if args.layout_fixture:
             from tests.subs_layout_fixture import populate
             populate()

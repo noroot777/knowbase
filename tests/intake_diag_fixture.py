@@ -36,6 +36,9 @@ def _key(kind: str, url: str) -> str:
 
 def populate() -> dict:
     now = datetime.now()
+    # X 那一档要「还没配好」(下面的 X 覆盖行、水位都按独立 profile 那一档摆):默认换成不登录之后
+    # 不显式选的话,它装好就能跑,X 那一行就成了可执行的
+    reg.save_settings('social', {'x_channel': 'browser'})
 
     def at(hours: float) -> str:
         return (now - timedelta(hours=hours)).strftime('%Y-%m-%d %H:%M')

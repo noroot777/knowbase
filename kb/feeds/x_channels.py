@@ -16,7 +16,11 @@
 
 **`bridge`(第三方 RSS 桥接)这一档已经删掉**:公共实例常年不稳,而三条登录态
 通道都已经能无人值守跑。它只以**退役别名**的形式活着(见下面 `_RETIRED`)——
-存量设置里写着 `bridge` 的,解析成现在的默认档。
+存量设置里写着 `bridge` 的,解析成独立 profile 那一档(它删掉那时的默认档)。
+
+**默认是 `guest`**:装好就能跑,不用任何账号。但**存量库里没存过这个键、而独立 profile 里
+登录过的,照旧是 `browser`**(`unsaved_default`)—— 默认还是 `browser` 那时,登录一次并不会
+把通道写进设置,那些人一直靠「没存 = browser」在跑,升级之后不许被静默换档。
 
 **`browser` 和 `attach` 的差别是「谁的浏览器」**:`browser` 我们自己起一个独立 profile 的无头
 Chrome(所以要在那里面单独登录一次,但不依赖用户在不在);`attach` 直连用户
@@ -50,7 +54,7 @@ from kb.feeds.x_cdp import has_login_footprint
 from kb.source_types import feed_types
 
 FEEDGRAB, BROWSER, ATTACH, GUEST = 'feedgrab', 'browser', 'attach', 'guest'
-DEFAULT = BROWSER
+DEFAULT = GUEST
 CHANNELS = (BROWSER, ATTACH, FEEDGRAB, GUEST)
 LABELS = {
     FEEDGRAB: 'feedgrab(cookie)',
@@ -81,7 +85,8 @@ HINTS = {
            '两头都不可用就下一轮自动重试,不会换去走要登录的路。',
 }
 # 退役名 → 现用名。一个都不许删(见模块注释)。
-# `bridge` = 删掉的那条第三方 RSS 桥接:存量设置里写着它的,落到现在的默认档。
+# `bridge` = 删掉的那条第三方 RSS 桥接:存量设置里写着它的,落到它删掉那时的默认档(独立 profile)。
+# **不跟着 `DEFAULT` 走**:存着的值读出来要和升级前同义,默认换成不登录不改它。
 _RETIRED: dict[str, str] = {'bridge': BROWSER}
 
 # 浏览器 profile 和 feedgrab 的工作目录都放在 data/ 下:它们装着登录态,
@@ -100,6 +105,18 @@ def resolve(name: str) -> str:
     value = (name or '').strip()
     value = _RETIRED.get(value, value)
     return value if value in CHANNELS else DEFAULT
+
+
+def unsaved_default() -> str:
+    """设置里**没存过** `x_channel` 时用哪一档(`registry.get_settings` 补缺省值只走这里)。
+
+    默认原来是 `browser`,而面板上「登录 X」「从日常浏览器导入」那两颗按钮在下拉没改过时不写设置
+    (草稿等于存着的那一份,见 `x_channel.js` 的 `xChanEnsureSaved`)—— 所以**登录过、却从没存过通道**
+    的存量库是常态,它们一直靠这个缺省值跑在 `browser` 上。判据是独立 profile 里有没有登录痕迹
+    (口径同 `readiness`):有,照旧 `browser`;没有,那一档本来就是「待配置」、一条都没抓过,落到
+    装好就能跑的 `guest`。存过的值一律照存着的读,不经这里。
+    """
+    return BROWSER if has_login_footprint(BROWSER_PROFILE) else DEFAULT
 
 
 def label(name: str) -> str:
