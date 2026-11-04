@@ -15,6 +15,7 @@
 
 跑:  uv run --offline python -m unittest tests.test_x_intake_supersede -v
 """
+from datetime import timedelta
 from unittest.mock import patch
 
 from kb.feeds import grab_store, registry as reg, x_post_meta
@@ -161,6 +162,44 @@ class SupersedeTests(DriftBase):
         self.assertEqual(row['content_rev'], stored['content_rev'] + 1)
         self.assertEqual(self.candidate()['state'], 'ready')
         self.assertEqual(store.delivery(self.source)[1], 0)
+
+    def expired_before_the_sweep(self, stored_text, seen_text):
+        """停进 `repair` 之后还没等到收尾这一步,下一轮准备时就跨过了窗口:转成 `expired`、记下超窗。"""
+        stored = self.parked(stored_text, seen_text)
+        store.prepare([self.source], 'browser', self.now + timedelta(days=6))
+        self.assertEqual((self.candidate()['state'], store.progress(self.source)['expired']), ('expired', 1),
+                         '这一局的前提')
+        return stored
+
+    def alarm_rows(self):
+        with reg.db() as conn:
+            return conn.execute('SELECT count(*) FROM x_intake_expirations').fetchone()[0]
+
+    def test_a_fuller_copy_that_crossed_the_window_still_replaces_and_stops_alarming(self):
+        fuller = SHORT.replace('https://', 'https://www.')
+        self.expired_before_the_sweep(SHORT, fuller)
+
+        self.assertEqual(1, supersede.run([self.source]))
+
+        self.assertEqual(self.feed_row()['body'], fuller)
+        self.assertEqual(self.candidate()['state'], 'ready')
+        self.assertEqual(self.alarm_rows(), 0)
+        progress = store.progress(self.source)
+        self.assertEqual((progress['expired'], progress['outside']), (0, ''), '收尾那句提示也跟着撤')
+        store.prepare([self.source], 'browser', self.now + timedelta(days=6, hours=1))
+        self.assertEqual(self.alarm_rows(), 0, '下一轮准备时不重建')
+
+    def test_a_crossed_copy_of_another_kind_keeps_alarming(self):
+        """反过来钉住:跨窗的那一条,库里那行是长文、这次是帖子 —— 既不是同一份成品,也不许互相覆盖。"""
+        stored = self.expired_before_the_sweep(SHORT, SHORT.replace('https://', 'https://www.'))
+        article = x_post_meta.stamp({k: v for k, v in stored.items() if k != x_post_meta.FIELD}, 'article', '')
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET x_post_meta=?', (article[x_post_meta.FIELD],))
+
+        self.assertEqual(0, supersede.run([self.source]))
+
+        self.assertEqual(self.feed_row()['body'], stored['body'])
+        self.assertEqual((self.candidate()['state'], self.alarm_rows()), ('expired', 1))
 
     def kind_row(self, kind):
         with reg.db() as conn:

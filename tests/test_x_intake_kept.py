@@ -5,7 +5,9 @@
 滑出五天窗口再以「已超自动窗口」报红一天,而那条推文一直好好地在库里(实测 11 条全是这样)。
 
 判据落在后果上:候选落哪一档、交付的是哪一份、库里那一行有没有被改写、窗口过去之后报不报超窗。
-反过来钉住:库里那份证不了自己的、帖子和长文对不上的,照旧留在 `repair`,窗口外照旧报。
+**超窗那一半要按真实顺序走一遍下一轮的 `prepare`**:报警是从候选状态派生的,光删报警、或者只在
+收尾清 `repair`,下一轮准备时都会重建(`ExpiryTests`)。
+反过来钉住:库里那份证不了自己的、帖子和长文对不上的、库里压根没有的,窗口外照旧报。
 只多了链接的那一版照旧交给覆盖(`tests/test_x_intake_supersede.py` 的 `parked` 前提钉着)。
 
 跑:  uv run --offline python -m unittest tests.test_x_intake_kept -v
@@ -13,7 +15,7 @@
 from datetime import timedelta
 from unittest.mock import patch
 
-from kb.feeds import registry as reg, x_post, x_post_meta
+from kb.feeds import registry as reg, x_article, x_post, x_post_meta
 from kb.feeds import x_intake_store as store
 from kb.feeds import x_intake_supersede as supersede
 from tests.test_x_intake_title_drift import TEXT, DriftBase
@@ -101,3 +103,79 @@ class KeptTests(DriftBase):
 
         self.assertTrue(store.kept(stored, observed))
         self.assertFalse(store.kept(stored, article))
+
+
+class ExpiryTests(DriftBase):
+    """改之前那几轮留下的状态,下一轮按真实顺序准备时收敛;库里没有成品的照旧报。"""
+
+    def later(self, hours=0):
+        return self.now + timedelta(days=6, hours=hours)
+
+    def expired_under_old_rules(self):
+        """改之前:差一个字停进 `repair`,跨过窗口时被转成 `expired`、记下一条超窗。"""
+        stored = self.saved_by_detail_page()
+        with patch.object(store, 'kept', return_value=False), patch.object(store, 'settle', return_value=0):
+            self.stage([self.timeline_full_text(CHANGED)])
+            store.prepare([self.source], 'browser', self.later())
+        self.assertEqual((self.candidate()['state'], store.progress(self.source)['expired']), ('expired', 1),
+                         '这一局的前提')
+        return stored
+
+    def alarms(self, hours):
+        store.prepare([self.source], 'browser', self.later(hours))
+        with reg.db() as conn:
+            rows = conn.execute('SELECT count(*) FROM x_intake_expirations').fetchone()[0]
+        return store.progress(self.source)['expired'], rows
+
+    def test_an_expired_post_the_library_holds_stops_alarming_next_round(self):
+        stored = self.expired_under_old_rules()
+
+        self.assertEqual(self.alarms(1), (0, 0))
+
+        self.assertEqual(self.candidate()['state'], 'ready')
+        self.assertEqual(store.delivery(self.source)[:2], ([], 0), '已收:没有要交付的,也不欠')
+        self.assertEqual(self.feed_row()['body'], stored['body'])
+
+    def test_a_cleared_alarm_is_not_recreated(self):
+        self.expired_under_old_rules()
+        with reg.db() as conn:                 # 只删报警、候选照旧 expired
+            conn.execute('DELETE FROM x_intake_expirations')
+
+        self.assertEqual(self.alarms(1), (0, 0))
+
+    def test_a_repair_crossing_the_window_is_settled_before_expiry_accounting(self):
+        self.saved_by_detail_page()
+        with patch.object(store, 'kept', return_value=False):               # = 改之前那一轮
+            self.stage([self.timeline_full_text(CHANGED)])
+        self.assertEqual(self.candidate()['state'], 'repair', '这一局的前提')
+
+        self.assertEqual(self.alarms(0), (0, 0))
+        self.assertEqual(self.candidate()['state'], 'ready')
+
+    def test_an_unfinished_preview_of_a_collected_post_does_not_alarm(self):
+        self.saved_by_detail_page()
+        self.stage([self.raw(TEXT.splitlines()[0], truncated=True)])
+        self.assertEqual(self.candidate()['state'], 'pending', '这一局的前提')
+
+        self.assertEqual(self.alarms(0), (0, 0))
+
+    def test_an_unfinished_preview_of_an_uncollected_post_still_alarms(self):
+        self.prepare()
+        self.stage([self.raw(TEXT.splitlines()[0], truncated=True)])
+
+        self.assertEqual(self.alarms(0), (1, 1))
+        self.assertEqual(self.candidate()['state'], 'expired')
+
+    def test_a_missing_article_still_alarms_when_the_library_holds_only_the_post(self):
+        self.saved_by_detail_page()
+        self.stage([dict(self.timeline_full_text(), **{x_article.HINT: '1'})])
+        self.assertEqual(self.candidate()['state'], 'pending', '这一局的前提')
+
+        self.assertEqual(self.alarms(0), (1, 1))
+
+    def test_an_unproven_stored_copy_still_alarms(self):
+        self.expired_under_old_rules()
+        with reg.db() as conn:                 # 升级前入库的那一批:没有完整证明
+            conn.execute("UPDATE feed_items SET x_post_meta=''")
+
+        self.assertEqual(self.alarms(1), (1, 1))
