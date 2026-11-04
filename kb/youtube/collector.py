@@ -56,8 +56,9 @@ class _Told(RuntimeError):
 
 
 def save_failure(source, error, summary):
+    """YouTube 这一侧交给主干共用出口的**唯一**入口:文本在这里先过 `_Told`。"""
     previous = len(summary.get('notices', ()))
-    saved = _save_failure(source, error, summary)
+    saved = _save_failure(source, _Told(error), summary)
     for notice in summary.get('notices', ())[previous:]:
         notice['source_id'] = source['id']
     return saved
@@ -478,7 +479,7 @@ def _round(scope):
                 summary['deferred'] += 1
             else:
                 wall(summary, [source['id']], error)
-                save_failure(source, _Told(error), summary)
+                save_failure(source, error, summary)
                 throttle.caught(error)
         summary['checked'] += 1
         _stage('crawl', 'running', f"YouTube · 频道列表 {summary['checked']}/{len(sources)} 个频道")

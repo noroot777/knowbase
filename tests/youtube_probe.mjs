@@ -527,7 +527,7 @@ try {
     $('source-reader-body').textContent.includes('不能仅凭生成结果')`));
   check('自动译文不承诺未经核验的完整性且不依赖时间戳链接', await evaluate(`
     $('source-reader-body').textContent.includes('中文译文（自动生成）') &&
-    $('source-reader-body').textContent.includes('未经逐段完整性核验') &&
+    $('source-reader-body').textContent.includes('未进行逐句语义审校') &&
     !$('source-reader-body').textContent.includes('完整中文转录') &&
     $('source-reader-body').textContent.includes('不能仅凭生成结果') &&
     !document.querySelector('#source-reader-body a[href*="&t="]')`));
@@ -538,9 +538,13 @@ try {
     $('source-reader-body').textContent.includes('npm install --save-dev vitest && npx vitest run --coverage') &&
     !$('source-reader-body').textContent.includes('第一段译文') &&
     !$('source-reader-body').textContent.includes('第二段译文')`));
-  check('单行字幕的命令后叙述确实翻译成中文', await evaluate(`
-    $('source-reader-body').textContent.includes('规划器逐步核验后续结果') &&
-    !$('source-reader-body').textContent.includes('The planner checks every later step')`));
+  // 英文原句按决策留在文末「原文对照（未改写）」里,所以只看那一节之前的译文部分;
+  // 反过来钉一边:原句确实还在对照区里。
+  check('单行字幕的命令后叙述确实翻译成中文', await evaluate(`(() => {
+    const [translated, original = ''] = $('source-reader-body').textContent.split('原文对照（未改写）');
+    return translated.includes('规划器逐步核验后续结果') &&
+      !translated.includes('The planner checks every later step') &&
+      original.includes('The planner checks every later step'); })()`));
   check('候选完成原因不混入翻译误报', await evaluate(`
     fetch('/api/intake/youtube/ranking').then(response=>response.json()).then(value=>
       value.items.filter(row=>row.state==='ready').length===1 &&

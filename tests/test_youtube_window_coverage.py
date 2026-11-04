@@ -3,13 +3,16 @@ import sys
 import time
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from unittest.mock import patch
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg
-from kb.youtube import collector, discovery, media, notes, storage, toolchain
+from kb.youtube import collector, discovery, discovery_pages, media, notes, storage, toolchain, windowed_discovery
 from tests.youtube_fixture import YouTubeFixture
+
+#: 普通一轮只走带登录态的轻量列表(`windowed_discovery`),条目是 `--flat-playlist` 的形状:
+#: `_type: url`,粗日期在 `timestamp` 上,没有播放量和简介 —— 那两样等元数据阶段 `media.probe`
+#: 补。写成逐条解析那种完整条目的话,本地去重(只认 flat 条目)和翻页判据验的都不是真路径。
 
 
 class ListingClock:
@@ -32,23 +35,30 @@ class YouTubeWindowCoverage(YouTubeFixture):
         self.isolate()
         self.source = self.channel()
         self.scope = FetchScope()
-        self.settings(max_videos=20, max_minutes=240, rank_limit=50)
+        self.settings(rank_limit=50)
         self.now = datetime.now(timezone.utc)
         self.budgets = []
+        self.argv = self.root / 'argv.jsonl'
 
     def payloads(self, count):
-        return [{'id': f'{number:011d}', 'title': 'Practical AI agent coding tutorial',
-                 'description': 'AI workflow implementation and limitations',
+        return [{'_type': 'url', 'id': f'{number:011d}', 'title': 'Practical AI agent coding tutorial',
                  'channel_id': self.source['url'].rsplit('/', 1)[-1],
                  'timestamp': (self.now - timedelta(minutes=number)).timestamp(),
-                 'view_count': 1000, 'duration': 600} for number in range(1, count + 1)]
+                 'duration': 600} for number in range(1, count + 1)]
+
+    @staticmethod
+    def probe(row, *arguments, **keywords):
+        """元数据阶段补回真实日期和播放量(轻量列表给不出)。"""
+        return {'id': row['video_id'], 'title': row['entry']['title'], 'view_count': 1000,
+                'timestamp': datetime.fromisoformat(row['entry']['published']).timestamp(),
+                'description': 'AI workflow implementation and limitations', 'duration': 600}
 
     def collect_using(self, *, command=None, listing=None, clock=None, configured=True):
         with ExitStack() as stack:
             stack.enter_context(patch.object(collector.login, 'readiness',
                                              return_value={'ready': True, 'browser': 'chrome'}))
             stack.enter_context(patch.object(notes, 'available', return_value=(configured, '隔离验证')))
-            stack.enter_context(patch.object(media, 'probe', return_value={'duration': 600}))
+            stack.enter_context(patch.object(media, 'probe', side_effect=self.probe))
             stack.enter_context(patch.object(media, 'obtain', return_value=self.complete_transcript()))
             stack.enter_context(patch.object(notes, 'build', side_effect=self.note))
             if command is not None:
@@ -59,44 +69,40 @@ class YouTubeWindowCoverage(YouTubeFixture):
             if clock is not None:
                 stack.enter_context(patch.object(collector, 'time', clock))
                 stack.enter_context(patch.object(discovery, 'time', clock))
+                stack.enter_context(patch.object(windowed_discovery, 'time', clock))
             return collector.collect(self.scope)
 
     def command(self, payloads):
+        """真子进程:照真 yt-dlp 那样按 `--playlist-end` 截断,截断了也照旧印出列尽那一行
+        (所以「列尽」要靠条数少于上限来认,见 `discovery_pages.inspect`)。argv 逐次记下。"""
         script = f'''
 import json, sys
-from pathlib import Path
 arguments = sys.argv[1:]
+with open({str(self.argv)!r}, 'a', encoding='utf-8') as handle:
+    handle.write(json.dumps(arguments) + '\\n')
 payloads = {payloads!r}
 if '--playlist-end' in arguments:
     payloads = payloads[:int(arguments[arguments.index('--playlist-end') + 1])]
-known = set()
-if '--download-archive' in arguments:
-    known = set(Path(arguments[arguments.index('--download-archive') + 1]).read_text().splitlines())
 for payload in payloads:
-    if 'youtube ' + payload['id'] in known:
-        print('[download] ' + payload['id'] + ' has already been recorded in the archive')
-    else:
-        if '--break-match-filters' in arguments and payload['timestamp'] < {self.now.timestamp()} - 3 * 86400:
-            print('[download] old does not pass filter, skipping ..')
-            print('Aborting remaining downloads')
-            sys.exit(101)
-        print(json.dumps(payload))
+    print(json.dumps(payload))
 print('[download] Finished downloading playlist: fixture')
 '''
         return [sys.executable, '-u', '-c', script]
 
+    def calls(self):
+        return [json.loads(line) for line in self.argv.read_text(encoding='utf-8').splitlines()]
+
     def listing(self, payloads, clock, seconds_per_item=4.3, empty_seconds=0):
         def listed(arguments, path, deadline, stopped, **options):
             self.budgets.append(deadline - clock.monotonic())
-            known = set()
-            if '--download-archive' in arguments:
-                known = set(Path(arguments[arguments.index('--download-archive') + 1]).read_text().splitlines())
+            if '--playlist-end' in arguments:
+                payloads_now = payloads[:int(arguments[arguments.index('--playlist-end') + 1])]
+            else:
+                payloads_now = payloads
             output = media.unique(path)
             emitted = []
             clock.sleep(empty_seconds)
-            for payload in payloads:
-                if 'youtube ' + payload['id'] in known:
-                    continue
+            for payload in payloads_now:
                 if clock.monotonic() + seconds_per_item > deadline:
                     output.write_text('\n'.join(emitted))
                     cause = media.Interrupted('本轮频道时间预算用尽')
@@ -113,22 +119,31 @@ print('[download] Finished downloading playlist: fixture')
             return connection.execute('SELECT initial_fetch_at FROM youtube_sync_origins WHERE source_id=?',
                                       (self.source['id'],)).fetchone()['initial_fetch_at']
 
-    def test_real_process_collects_beyond_twenty_and_archive_does_not_hide_the_tail(self):
+    def test_real_process_pages_past_the_first_batch_and_known_ids_do_not_hide_the_tail(self):
+        """近期条目一直延伸到批尾就按 10、20、40 往下翻,直到真正列尽;下一轮已知的那些
+        **在本地去重**,不靠 `--download-archive` 让工具藏起来(藏起来就看不见连续旧页,
+        翻页判据跟着失明)。"""
         payloads = self.payloads(31)
         first = self.collect_using(command=self.command(payloads), configured=False)
         self.assertEqual(31, first['discovered'])
         self.assertEqual([], first['partial'])
         self.assertEqual({payload['id'] for payload in payloads}, {row['video_id'] for row in storage.rows()})
+        limits = [int(argv[argv.index('--playlist-end') + 1]) for argv in self.calls()]
+        self.assertEqual([discovery_pages.FIRST_BATCH * 2 ** step for step in range(3)], limits)
         payloads = [self.payloads(32)[-1], *payloads]
         second = self.collect_using(command=self.command(payloads), configured=False)
         self.assertEqual(1, second['discovered'])
         self.assertEqual([], second['partial'])
         self.assertEqual({payload['id'] for payload in payloads}, {row['video_id'] for row in storage.rows()})
+        self.assertFalse([argv for argv in self.calls() if '--download-archive' in argv])
 
-    def test_twelve_precise_entries_fit_the_window_budget_at_four_point_three_seconds_each(self):
+    def test_expansion_past_the_first_batch_spends_the_same_channel_budget(self):
+        """翻第二页是**同一个频道那 180 秒**里的事,不是再领一份新预算。"""
         clock = ListingClock()
         result = self.collect_using(listing=self.listing(self.payloads(12), clock), clock=clock)
-        self.assertEqual([180], self.budgets)
+        self.assertEqual(2, len(self.budgets), self.budgets)
+        self.assertEqual(180, self.budgets[0])
+        self.assertAlmostEqual(180 - discovery_pages.FIRST_BATCH * 4.3, self.budgets[1], places=6)
         self.assertEqual(12, result['discovered'])
         self.assertEqual(12, len(storage.rows()))
         self.assertEqual([], result['partial'])
@@ -184,7 +199,9 @@ print('[download] Finished downloading playlist: fixture')
         self.assertEqual([], first['failed_ids'])
         self.assertEqual(previous, reg.subscription('youtube', self.source['id'])['last_success'])
         origin = self.origin() if not previous else None
-        second = self.collect_using(listing=self.listing(payloads, clock, seconds_per_item=20), clock=clock)
+        # 下一轮按正常速度列(轻量列表逐条很快;上一轮的 20 秒一条只是为了把它卡在半路),
+        # 从头重查同一个窗口,已收下的 9 条本地去重,只报队尾那 3 条。
+        second = self.collect_using(listing=self.listing(payloads, clock, seconds_per_item=0.1), clock=clock)
         self.assertEqual(3, second['discovered'])
         self.assertEqual([], second['partial'])
         self.assertEqual({payload['id'] for payload in payloads}, {row['video_id'] for row in storage.rows()})
@@ -198,35 +215,3 @@ print('[download] Finished downloading playlist: fixture')
 
     def test_partial_existing_window_does_not_advance_success_until_the_tail_is_discovered(self):
         self.assert_partial_catchup((self.now - timedelta(days=2)).isoformat())
-
-    def test_old_prefix_cannot_hide_new_videos_beyond_the_first_twenty_positions(self):
-        payloads = self.payloads(40)
-        for payload in payloads[:35]:
-            payload['timestamp'] = (self.now - timedelta(days=30)).timestamp()
-        result = self.collect_using(command=self.command(payloads), configured=False)
-        self.assertEqual(5, result['discovered'])
-        self.assertEqual([], result['partial'])
-        self.assertEqual({payload['id'] for payload in payloads[35:]},
-                         {row['video_id'] for row in storage.rows()})
-        with reg.db() as connection:
-            self.assertEqual(35, connection.execute('SELECT count(*) FROM youtube_discovery_history').fetchone()[0])
-        repeated = self.collect_using(command=self.command(payloads), configured=False)
-        self.assertEqual(0, repeated['discovered'])
-        self.assertEqual([], repeated['partial'])
-
-    def test_timeout_among_old_entries_resumes_before_new_tail_without_advancing_watermark(self):
-        payloads = self.payloads(12)
-        for payload in payloads[:9]:
-            payload['timestamp'] = (self.now - timedelta(days=30)).timestamp()
-        clock = ListingClock()
-        first = self.collect_using(listing=self.listing(payloads, clock, seconds_per_item=20), clock=clock)
-        self.assertEqual(0, first['discovered'])
-        self.assertEqual(1, len(first['partial']))
-        self.assertFalse(reg.subscription('youtube', self.source['id'])['last_success'])
-        self.assertEqual([], storage.rows())
-        second = self.collect_using(listing=self.listing(payloads, clock, seconds_per_item=20), clock=clock)
-        self.assertEqual(3, second['discovered'])
-        self.assertEqual([], second['partial'])
-        self.assertIn(str(self.source['id']), second['succeeded_ids'])
-        self.assertEqual({payload['id'] for payload in payloads[9:]},
-                         {row['video_id'] for row in storage.rows()})

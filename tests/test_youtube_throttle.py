@@ -309,16 +309,20 @@ class ThrottleIsRequestLevel(FakeToolCase):
         self.assertEqual(1, len(self.ran('--dump-json')), '只该有那一次逐条解析')
         self.assertEqual((1, 1), (summary['checked'], summary['skipped']))
         self.assertIn('提前收手', summary['message'])
-    def test_an_ordinary_detail_failure_still_falls_back_to_flat(self):
-        """反过来钉一边:普通失败照旧走后路。
+    def test_an_ordinary_listing_failure_does_not_stop_the_round(self):
+        """反过来钉一边:**真子进程**上的普通失败(网络超时)照旧往下查。
 
-        把后路一并关掉的话,一次网络抖动就等于这个频道这一轮颗粒无收 —— 而后路本来
-        就是为这种情况留的。
+        普通一轮只有一条轻量列表路、没有后路(`discovery.fetch`),所以收手判据宽了的后果
+        直接落在下一个频道上:频道 1 超时就把整轮掐掉,频道 2 那条新视频这一轮颗粒无收。
         """
-        summary = self.sync([('--flat-playlist', 'ok'), ('--dump-json', 'broken')])
-        self.assertEqual(2, len(self.ran('--flat-playlist')), '两个频道的后路都该跑')
+        summary = self.sync([('UC' + f'{1:022d}', 'broken')])
+        self.assertEqual(2, len(self.ran('--flat-playlist')), '普通失败之后没再查下一个频道')
         self.assertEqual((2, 0), (summary['checked'], summary['skipped']))
-        self.assertEqual(2, summary['discovered'], '后路带回来的条目要入库')
+        self.assertEqual(1, summary['discovered'], '频道 2 的那条要入库')
+        self.assertEqual({}, summary['walls'], summary['message'])
+        standing = {item['name']: item['last_error'] for item in reg.subscriptions('youtube')}
+        self.assertTrue(standing['频道 1'], '真失败的那一个要留原文')
+        self.assertEqual('', standing['频道 2'])
     def test_a_partial_listing_that_ends_in_a_rate_limit_still_stops_the_round(self):
         """先印出一条正常视频、再 429:**条目收下,这一轮收手。**
 
@@ -477,14 +481,20 @@ class ThrottleIsRequestLevel(FakeToolCase):
         for action, state, failed in (('warned', 'deferred', False), ('limit', 'failed', True)):
             with self.subTest(action=action):
                 self.setUp()
-                self.sync([('--dump-single-json', action)], channels=1, transcript=False)
+                summary = self.sync([('--dump-single-json', action)], channels=1, transcript=False)
                 rows = storage.rows()
                 self.assertEqual([state], [row['state'] for row in rows], rows[0]['reason'])
                 self.assertEqual(failed, rows[0]['attempts'] > 0, '没发出去的那次不该记一次尝试')
                 self.assertEqual(failed, rows[0]['retry_at'] > 0, '没发出去的那次不该推退避')
+                # 频道列表这一轮正常返回了:**两种情形都不许动订阅连接账**(视频失败只记在
+                # 视频和本频道提醒上,`docs/decisions/youtube-intake.md`「视频失败保留候选错误…」)。
                 standing = [item for item in reg.subscriptions('youtube') if item['name'] == '频道 1'][0]
-                self.assertEqual(failed, bool(standing['last_error']), standing['last_error'])
-                self.assertEqual(failed, standing['retry_at'] > 0, '频道被连坐推进了退避')
+                self.assertEqual(('', 0), (standing['last_error'], standing['retry_at']), '频道被连坐了')
+                # 真撞上的那一次照旧要看得见:进本频道提醒、进重试目标;没发出去的那次两样都不该有。
+                self.assertEqual(failed, '视频处理未完成' in standing['last_notice'], standing['last_notice'])
+                if failed:
+                    self.assertIn('429', standing['last_notice'], '撞上的原文没走到频道提醒上')
+                self.assertEqual(failed, str(standing['id']) in summary['failed_ids'], summary['failed_ids'])
     def test_a_channel_that_never_sent_a_request_keeps_a_clean_slate(self):
         """发现阶段同一道口径:**一次请求都没发出去的频道一个字都不写。**
 

@@ -334,7 +334,9 @@ ID,而恢复出来的那份库以另一个历史 ID 保存着同一原文。那�
 
 - `tests/test_pipeline_failure_drop.py`(23 条):账本与过滤口径、账本的回收判据、账本的并发与互斥、端点的两步顺序、
   `link` 一路送到 CLI 的 argv、采集器契约,外加一条真浏览器探针(`@requires_headless`)。
-- `tests/pipe_drop_probe.mjs`(33 项):CDP 直连 chrome-headless-shell,自带 mock 后端。链接的
+- `tests/pipe_drop_probe.mjs`:CDP 直连 chrome-headless-shell,自带 mock 后端。同步中心默认一行都不展开
+  (`sync-flow.md`),所以它先像人一样点开来源那一行(提取那一段点全库那一行)再看明细 —— 不点的话明细
+  照样在文档里、只是零尺寸,查得到按钮却点不中。链接的
   `href`/`target`/箭头 svg、有没有按钮、自绘确认框、取消不发请求、确认后请求体(含 `link`)、删完那
   一条消失、剩下的不受牵连、明细标题的计数、**待处理数不被在途那份旧回包盖回去**、历史条目可移除且
   不误删最新条目、同一身份在各轮同步消失、不影响正在运行的最新一轮、整轮零 JS 错误。

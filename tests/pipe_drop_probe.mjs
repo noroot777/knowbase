@@ -151,6 +151,10 @@ try {
 
 // ── 1. 明细展开:带身份的点得开、带按钮,没身份的两样都没有 ──────────────────
 await evalJs(`switchTab('pipe'); true`);
+// 默认一行都不展开(`docs/decisions/sync-flow.md`):明细挂在展开那一块里,得像人一样先点开
+// 这个来源那一行。不点的话明细照样在文档里,只是零尺寸 —— 查得到元素、点不中按钮。
+await setup("点开了这个来源那一行", clickAt(
+  `#pipe-flow-rail .pipe-flow-row[data-node="src:${CHANNEL}"]`));
 await setup("明细里有三条", until(
   `document.querySelectorAll('#pipe-stage-export .pipe-failures p').length === 3`));
 await setup("待处理数读到了(2 项)", until(
@@ -326,6 +330,11 @@ latest.stages.extract = { status: "error", detail: "1 篇提取失败", failures
 }] };
 state = { ...state, stages: latest.stages };
 await evalJs(`refreshPipe(); true`);
+// 提取挂在全库那一类上,不在来源那一行里 —— 同样得先点开它所在的那一行。
+const extractNode = await evalJs(
+  `pipeFlowModelNow?.nodes.find(n => n.steps.includes('extract'))?.key || ''`);
+await setup("点开了提取所在的那一行", clickAt(
+  `#pipe-flow-rail .pipe-flow-row[data-node="${extractNode}"]`));
 await setup("提取失败明细出现", until(
   `document.querySelectorAll('#pipe-stage-extract .pipe-failures p').length === 1`));
 await evalJs(`$('pipe-stage-extract').querySelector('details').open = true; true`);

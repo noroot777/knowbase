@@ -329,13 +329,15 @@ class DiagnosticsTravel(FakeToolCase):
     def test_a_local_tool_failure_is_not_read_as_a_youtube_wall(self):
         """反过来钉一边:本机工具(ffmpeg、whisper-cli)的报错不许进 YouTube 那套判据。
 
-        `permission denied` 在 `login._COOKIE` 里 —— 按文本一判,一次 ffmpeg 权限错误就
-        成了「读不出 chrome 的 cookie」,面板让人去钥匙串放行,而问题在磁盘上。
-        **两份实现各有自己的红**:同一条命令不标上游时照旧判成 cookie 那一档。
+        `permission denied` 同一行带着 cookie 语境时归 cookie 那一档(`login._COOKIE_CONTEXTUAL`)
+        —— 按文本一判,一次本机工具的权限错误就成了「读不出 chrome 的 cookie」,面板让人去
+        钥匙串放行,而问题在磁盘上。**两份实现各有自己的红**:同一条命令按 YouTube 算时照旧
+        判成 cookie 那一档。(光秃秃一句 `permission denied` 如今在哪个上游都不算 cookie,
+        那样的输出两边都是 `unknown`,这条用例就分不出上游门控有没有起作用。)
         """
         script = self.root / 'noisy.py'
-        script.write_text('import sys\nsys.stdout.write("ERROR: permission denied\\n")\nsys.exit(1)\n',
-                          encoding='utf-8')
+        script.write_text('import sys\nsys.stdout.write("ERROR: could not copy cookies file: permission denied\\n")\n'
+                          'sys.exit(1)\n', encoding='utf-8')
         command = [sys.executable, str(script)]
         for origin, expected in ((LOCAL, 'unknown'), ('youtube', 'cookie_unreadable')):
             with self.subTest(origin=origin):

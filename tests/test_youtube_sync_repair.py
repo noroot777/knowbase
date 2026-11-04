@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg
-from kb.youtube import candidate_metadata, discovery, media, notes, ranking, storage, sync_window, throttle
+from kb.youtube import candidate_metadata, discovery, discovery_pages, media, notes, ranking, storage, sync_window, throttle
 from tests.youtube_fixture import YouTubeFixture
 
 
@@ -49,7 +49,10 @@ class YouTubeSyncRepair(YouTubeFixture):
         self.assertTrue(all(entry['channel_id'] for entry in entries))
         probe.assert_not_called()
         self.assertIn('--flat-playlist', self.calls[0])
-        self.assertNotIn('--playlist-end', self.calls[0])
+        # 首批只读最新那一小批(`discovery_pages.FIRST_BATCH`);少于上限又列尽了,就不再往下翻。
+        self.assertEqual(str(discovery_pages.FIRST_BATCH),
+                         self.calls[0][self.calls[0].index('--playlist-end') + 1])
+        self.assertEqual(1, len(self.calls))
         self.assertNotIn('--break-match-filters', self.calls[0])
         self.assertFalse(self.prepared['discovery_unavailable'])
 

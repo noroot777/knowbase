@@ -3,7 +3,7 @@
 
 这条用例替掉的是一张**人手维护的入口名单**。判据原先靠「记得在每个入口调一次
 `permits_link_body()`」落实,而名单只能写在注释和一条列举式用例里:前四处都接上了,
-第五处(`grab_store.replace`,人点「重新抓一次」那条路)照旧把简报里一条简讯的 28 字摘要
+第五处(`grab_store.replace`,人点「重新抓一次」那条路;写正文那一句如今在 `write_version`)照旧把简报里一条简讯的 28 字摘要
 换成了外链那篇仓库 README 的全文 —— 走的是公开接口、不是内部直调,审查实测可达。
 漏接的形态是**静默覆盖**:简报不进补抓队列,没有任何一轮同步会把那两句话补回来。
 
@@ -87,7 +87,7 @@ DECLARED: dict[tuple[str, str], tuple[str, ...]] = {
     # 证据(断言正文属于这篇文章的是人自己)。所以带的也是同一道闸。
     ('kb/browser_capture.py', 'save_pasted'): (LINK,),
     # 人点「重新抓一次」:拿这一行的 `url` 重抓**它本人**替换库里那一份。
-    ('kb/feeds/grab_store.py', 'replace'): (ORIGIN,),
+    ('kb/feeds/grab_store.py', 'write_version'): (ORIGIN,),
     # X 长文回填:拿推文链接问公开接口,取回**这条推文自己**的长文 —— 和上面那条
     # 同一个来路,所以同一道闸。
     ('scripts/x_article_backfill.py', 'apply_one'): (ORIGIN,),
@@ -221,7 +221,7 @@ class LinkBodyEntryTests(unittest.TestCase):
         """
         self.assertGreaterEqual(sum(len(v) for v in self.found.values()), 7)
         gates = {where: {s['gate'] for s in items} for where, items in self.found.items()}
-        self.assertEqual({ORIGIN}, gates[('kb/feeds/grab_store.py', 'replace')])
+        self.assertEqual({ORIGIN}, gates[('kb/feeds/grab_store.py', 'write_version')])
         self.assertEqual({LINK}, gates[('kb/feeds/fulltext.py', '_save')])
         self.assertNotIn('link_body_sql', [name for _, name in self.found])
         self.assertNotIn('origin_body_sql', [name for _, name in self.found])

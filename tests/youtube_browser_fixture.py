@@ -16,7 +16,9 @@ def translation_reply(prompt):
             ('Test every change.', '强调每次修改都要测试，不能仅凭生成结果认定正确。'),
             ('Verify the result rather than trusting model claims.', '作者要求核验结果，而不是相信模型的声称。'),
             ('The API budget is 64.', '接口预算为六十四。'),
-            ('The planner checks every later step before using its result.', '规划器逐步核验后续结果。')):
+            ('The planner checks every later step before using its result.', '规划器逐步核验后续结果。'),
+            # 标题和字幕走同一个直译提示(`notes.build_translation`),没有这一条它就保留英文原题。
+            ('AI agent coding tutorial', '智能体编程实操教程')):
         segments = [segment.replace(original, translated) for segment in segments]
     return (segments[0] if plain else
             '好的，以下是译文：' + json.dumps({'translations': segments}, ensure_ascii=False) + '（以上为译文）')

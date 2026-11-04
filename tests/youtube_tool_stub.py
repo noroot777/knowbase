@@ -50,7 +50,11 @@ def video_id():
 def listed():
     body = {'id': video_id(), 'title': 'AI agent coding tutorial', 'duration': 600,
             'channel_id': identity(), 'description': 'Practical AI workflow for engineers'}
-    if '--flat-playlist' not in ARGS:
+    if '--flat-playlist' in ARGS:
+        # 真 yt-dlp 的 flat 条目:`_type: url`,`youtubetab:approximate_date` 给的粗日期在
+        # `timestamp` 上。少了这两样,轻量发现一条都认不出来,整轮「颗粒无收」看着像限流没认出来。
+        body.update(_type='url', timestamp=@NOW@)
+    else:
         body.update(upload_date='@TODAY@', view_count=1000)
     return json.dumps(body)
 
@@ -114,6 +118,9 @@ if '--write-subs' in ARGS or '--write-auto-subs' in ARGS:
             encoding='utf-8')
     sys.exit(0)
 sys.stdout.write(listed() + '\\n')
+if '--flat-playlist' in ARGS:
+    # 列尽的凭据:一条条目、比 `--playlist-end` 少,再加这一行,轻量发现才算确认了窗口覆盖。
+    sys.stdout.write('[download] Finished downloading playlist: fixture\\n')
 sys.exit(0)
 '''
 
@@ -142,7 +149,8 @@ class FakeToolCase(YouTubeFixture):
         # **发布日期按当天算,不写死。** 写死的那一版在 7 天窗口外就什么都排不进来,
         # 而红出来的形态是「一条候选都没有」—— 看着像排名坏了。
         script.write_text(FAKE_TOOL.replace('@CALLS@', str(self.calls)).replace('@PLAN@', str(self.plan))
-                          .replace('@TODAY@', datetime.now(media.TZ).strftime('%Y%m%d')),
+                          .replace('@TODAY@', datetime.now(media.TZ).strftime('%Y%m%d'))
+                          .replace('@NOW@', str(int(datetime.now(media.TZ).timestamp()))),
                           encoding='utf-8')
         return patch.object(toolchain, 'command', return_value=[sys.executable, str(script)])
 

@@ -390,9 +390,10 @@ class NoFailureExitTruncatesOnItsOwn(unittest.TestCase):
                 if not (isinstance(handed, ast.Call) and getattr(handed.func, 'id', '') == '_Told'):
                     raw.append(f'{path.name}:{node.lineno}')
         self.assertEqual([], raw, '这些交付点把原始异常直接交给了主干那一刀')
-        self.assertGreater(len([1 for line in Path(collector.__file__).read_text(encoding='utf-8')
-                                .splitlines() if '_save_failure(' in line and '_Told(' in line]), 2,
-                           '一个交付点都没扫到,上面那条断言恒绿')
+        # 交付点如今收在 `collector.save_failure` 这一个包装里(各处都调它),所以至少要扫到它那一处。
+        self.assertGreaterEqual(len([1 for line in Path(collector.__file__).read_text(encoding='utf-8')
+                                     .splitlines() if '_save_failure(' in line and '_Told(' in line]), 1,
+                                '一个交付点都没扫到,上面那条断言恒绿')
 
 
 if __name__ == '__main__':
