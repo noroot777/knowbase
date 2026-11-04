@@ -51,7 +51,6 @@ class YouTubeExclusions(YouTubeFixture):
                 self.assert_no_work(*self.collect(force=force))
                 row = storage.rows()[0]
                 self.assertTrue(row['excluded'])
-                self.assertTrue(row['repair_pending'])
                 self.assertEqual(0, row['score_rank'])
                 self.assertEqual([], storage.ready(self.source))
 

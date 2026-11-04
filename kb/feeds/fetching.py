@@ -177,10 +177,6 @@ def public_addresses(url: str, *, deadline: float | None = None,
     return url, _require_public(_public_only(found))
 
 
-def public_url(url: str) -> str:
-    return public_addresses(url)[0]
-
-
 def remaining(deadline: float, collect_deadline: float | None = None) -> float:
     now = time.monotonic()
     # Keep the cause of the limiting deadline, even if a blocking operation

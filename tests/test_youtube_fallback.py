@@ -1,8 +1,8 @@
-"""轻量列表与显式日期详细发现、估算数据的写入保护、窗口收口及列频道解析。
+"""增量轻量列表与显式日期详细发现、估算数据的写入保护、窗口收口及列频道解析。
 
 **为什么写入保护要有「反过来」那一条**:两条发现路给的东西不一样,逐条解析带真实播放量和
-发布时间,flat 列举只有列表顺序估出来的时间和 `views=0`。只钉「精确能覆盖估算」是不够的
-—— 真正会静默丢数据的是另一个方向,而那个方向只在主路某一轮取不到时才走到。
+发布时间,flat 列举只有粗日期和 `views=0`。只钉「精确能覆盖估算」是不够的 —— 真正会静默
+丢数据的是另一个方向:精确数据先进库,下一轮普通同步的 flat 列表又列到同一条。
 
 **为什么窗口判断要钉「非估算条目不走它」**:逐条解析来的条目在 `ranking.rejection` 已经过了
 同一道窗口。两处各判一遍的话,口径就有两份,改一处另一处不跟着走。
@@ -12,38 +12,23 @@
 import json
 import time
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from kb.collectors import FetchScope
-from kb.feeds import registry as reg
+from kb.feeds import fetching, registry as reg
 from kb.feeds.fetching import FeedError
 from kb.youtube.ranking import TZ
 from kb.youtube import (admission, collector, discovery, login, media, notes, products,
-                        ranking, storage)
+                        ranking, storage, sync_window, windowed_discovery)
 from kb.youtube.settings import of
 from tests.youtube_fixture import YouTubeFixture
 
-#: 一份最小的频道 Atom:只要够 feedparser 认出版本、视频 ID 和归属。
-FEED_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
-<feed xmlns:yt="http://www.youtube.com/xml/schemas/2015"
-      xmlns:media="http://search.yahoo.com/mrss/" xmlns="http://www.w3.org/2005/Atom">
- <entry><id>yt:video:00000000001</id><yt:videoId>00000000001</yt:videoId>
-  <yt:channelId>UC0000000000000000000001</yt:channelId><title>AI agent tutorial</title>
-  <published>2026-10-26T01:02:03+00:00</published>
-  <media:group><media:description>An AI agent writes code.</media:description>
-   <media:community><media:statistics views="4321"/></media:community></media:group>
- </entry>
-</feed>
-"""
-
-
 class DiscoveryFallback(YouTubeFixture):
-    """**配了浏览器就全程带登录态**:公开那份 Atom 只留给「没有登录态」那一档。
+    """**全程带登录态**:普通一轮走增量轻量列表,指定日期那一轮逐条解析,公开那份 Atom 不再有入口。
 
     仓库主人两次点名(「那就全程登录态吧」、「改成 daily-report 那种」),性能代价也如实
-    报过、他没收回。所以这里的判据不是「哪条路先成功」,而是**配了浏览器的那一轮里,
-    公开请求一次都不许发出去** —— 发现入口和归属解析两处都算。
+    报过、他没收回。所以这里的判据不是「哪条路先成功」,而是**这一轮里公开请求一次都不许
+    发出去** —— 发现入口和归属解析两处都算。
     """
 
     def setUp(self):
@@ -51,10 +36,6 @@ class DiscoveryFallback(YouTubeFixture):
         self.source = self.channel()
         # handle 订阅:地址里没有 UC…,库里也没缓存过 —— 归属要靠工具自己报的那一份。
         self.handle = self.channel(2, url='https://www.youtube.com/@ai-handle')
-        self.listed = [{'video_id': f'{number:011d}', 'title': f'AI news {number}',
-                        'duration': 600.0 + number, 'channel_id': '',
-                        'url': f'https://www.youtube.com/watch?v={number:011d}'}
-                       for number in range(1, 4)]
         # 主路(带登录态逐条解析)的返回样本:真实日期、真实播放量,没有估算标记。
         self.detailed = [{'video_id': f'{number:011d}', 'title': f'AI agents {number}',
                           'published': (datetime.now(TZ) - timedelta(hours=number)).isoformat(),
@@ -63,60 +44,57 @@ class DiscoveryFallback(YouTubeFixture):
                           'url': f'https://www.youtube.com/watch?v={number:011d}'}
                          for number in range(1, 3)]
 
-    def test_a_configured_browser_never_sends_a_public_request(self):
+    def flat(self, owners):
+        """照 `--flat-playlist` 的样子印几行,`owners` 是每一行里工具报的归属(空串 = 没报)。"""
+        lines = [json.dumps({'_type': 'url', 'id': f'{number:011d}', 'channel_id': owner,
+                             'title': f'AI news {number}', 'duration': 600.0 + number,
+                             'timestamp': time.time() - 3600 * number})
+                 for number, owner in enumerate(owners, 1)]
+        lines.append('[download] Finished downloading playlist: fixture')
+
+        def listed(arguments, path, deadline, stopped, **options):
+            output = media.unique(path)
+            output.write_text('\n'.join(lines))
+            return output
+        return listed
+
+    def test_a_logged_in_round_never_sends_a_public_request(self):
         """**全程登录态的判据只有一条:这一轮一个无登录态请求都没发出去。**
 
         原来是「先试公开订阅,失败再带登录态」—— 那每轮都先付一次 404 的风险(那批 47/48
         就是这么来的)和一次重试的时间,而用户要的是另一件事。这里连 handle 订阅一起钉:
         它的归属原先要先解析一次公开主页,**带登录态的工具因此可能还没起跑就被公开请求
-        拦住**。反过来钉一边(`test_without_settings_...`):真的没有登录态时,公开那条照旧走。
+        拦住**。归属以工具自己报的那一份为准;工具没报时退回地址里那一份,不许留空也不许
+        为它去发请求。
         """
-        for source, label in ((self.source, '/channel/UC… 订阅'), (self.handle, 'handle 订阅')):
+        reported = ['UC' + f'{number:022d}' for number in range(1, 4)]
+        for source, owners, expected, label in (
+                (self.source, ['', '', ''], [self.source['url'][-24:]] * 3, '/channel/UC… 订阅、工具没报归属'),
+                (self.handle, reported, reported, 'handle 订阅、工具报了归属')):
             with self.subTest(source=label):
                 asked = []
-                listed = [dict(item, channel_id='UC' + f'{number:022d}')
-                          for number, item in enumerate(self.listed, 1)]
-                with patch.object(discovery, 'request', side_effect=lambda url, **kwargs: asked.append(url)), \
+                prepared = sync_window.prepare(source, FetchScope(), datetime.now(timezone.utc))
+                with patch.object(fetching, 'request', side_effect=lambda url, **kwargs: asked.append(url)), \
                         patch.object(media, 'detailed_videos') as detailed, \
-                        patch.object(media, 'channel_videos', return_value=listed) as listing:
-                    entries = discovery.fetch(source, {'youtube': {}})
-                self.assertEqual([], asked, '配了浏览器的那一轮不许发无登录态请求')
+                        patch.object(media, 'ytdlp', side_effect=self.flat(owners)) as listing:
+                    entries = discovery.fetch(prepared, {'youtube': {}})
+                self.assertEqual([], asked, '带登录态的那一轮不许发无登录态请求')
                 detailed.assert_not_called()
                 listing.assert_called_once()
-                self.assertEqual(3, len(entries))
-                # 归属以工具自己报的那一份为准 —— 补它不该再去发一次请求。
-                self.assertEqual(['UC' + f'{number:022d}' for number in range(1, 4)],
-                                 [entry['channel_id'] for entry in entries])
+                self.assertEqual(expected, [entry['channel_id'] for entry in entries])
 
     def test_lightweight_logged_in_listing_does_not_expand_details(self):
+        """普通一轮只列 flat、不逐条展开;flat 给不出的那几项如实标成「估算」,等核实。"""
+        prepared = sync_window.prepare(self.source, FetchScope(), datetime.now(timezone.utc))
         with patch.object(media, 'detailed_videos') as detailed, \
-                patch.object(media, 'channel_videos', return_value=self.listed) as listing:
-            entries = discovery.fetch(self.source, {'youtube': {}})
+                patch.object(media, 'ytdlp', side_effect=self.flat(['', '', ''])) as listing:
+            entries = discovery.fetch(prepared, {'youtube': {}})
         detailed.assert_not_called()
-        listing.assert_called_once()
+        self.assertIn('--flat-playlist', listing.call_args.args[0])
         self.assertEqual(3, len(entries))
         self.assertTrue(all(entry['approximate'] for entry in entries))
         self.assertEqual([0, 0, 0], [entry['views'] for entry in entries])
-        self.assertEqual([0, 1, 2], [entry['listing_position'] for entry in entries])
-        self.assertEqual(20, listing.call_args.kwargs['limit'])
-        self.assertIn('notes', listing.call_args.kwargs)
-
-    def test_flat_listing_marks_unknown_values_for_later_calibration(self):
-        with patch.object(media, 'detailed_videos', side_effect=RuntimeError('逐条解析也没取到')), \
-                patch.object(media, 'channel_videos', return_value=self.listed):
-            entries = discovery.fetch(self.source, {'youtube': {}})
-        self.assertEqual(3, len(entries))
-        self.assertTrue(all(entry['approximate'] for entry in entries))
-        self.assertTrue(all(entry['views'] == 0 for entry in entries))
-        # 频道页是时间倒序,**估算时间必须跟着位置递减** —— 同分时还要知道谁更新。
-        stamps = [entry['published'] for entry in entries]
-        self.assertEqual(stamps, sorted(stamps, reverse=True))
-        self.assertEqual(len(stamps), len(set(stamps)), '估算时间不能挤成同一个值')
-        floor = datetime.now(timezone.utc) - timedelta(days=1)
-        self.assertTrue(all(datetime.fromisoformat(stamp) > floor for stamp in stamps),
-                        '估算时间要落在默认窗口里,否则后路发现的条目全被 ranking 挡掉')
-        self.assertTrue(all(entry['channel_id'] == self.source['url'][-24:] for entry in entries),
-                        'flat 列举没报归属时退回地址里那一份,不许留空也不许去发请求')
+        self.assertEqual(['', '', ''], [entry['description'] for entry in entries])
 
     def test_ranged_round_refuses_guesses_but_still_takes_the_logged_in_path(self):
         """**显式日期范围那一轮只禁「估算」那一条,不是禁掉所有退路。**
@@ -126,82 +104,34 @@ class DiscoveryFallback(YouTubeFixture):
         反过来钉一边:估算那条在这一轮仍然一次都不许起。
         """
         with patch.object(media, 'detailed_videos', return_value=self.detailed), \
-                patch.object(media, 'channel_videos') as listing:
+                patch.object(windowed_discovery, 'fetch') as listing:
             entries = discovery.fetch(self.source, {'youtube': {}}, estimates=False)
         listing.assert_not_called()
         self.assertEqual(2, len(entries))
         self.assertTrue(all('approximate' not in entry for entry in entries),
                         '这条路的日期是真的,不许打估算标记')
         with patch.object(media, 'detailed_videos', side_effect=RuntimeError('没解析出带发布时间的视频')), \
-                patch.object(media, 'channel_videos') as listing:
+                patch.object(windowed_discovery, 'fetch') as listing:
             with self.assertRaises(FeedError) as raised:
                 discovery.fetch(self.source, {'youtube': {}}, estimates=False)
         listing.assert_not_called()
         self.assertIn('没解析出带发布时间的视频', str(raised.exception))
 
-    def test_without_settings_the_public_feed_is_the_only_path_and_gets_retried(self):
-        """**反过来钉一边:真的没有登录态时,公开那条照旧是唯一的办法,而且要重试。**
-
-        那批 47/48 的 404 是间歇性的(事后同样 4 路并发复测 52 个频道全部 200),所以这条路
-        上第一道防线是同一条路多试两次,代价接近零(照 daily-report 的
-        `--retry 3 --retry-delay 1 --retry-all-errors`)。没有 `cookies_browser` 就没有
-        登录态,带登录态那两条路一次都不许起 —— 它们起来也只会再撞同一道墙。
-        """
-        calls = []
-
-        def flaky(url, deadline=None, **kwargs):
-            calls.append(url)
-            if len(calls) < 3:
-                raise FeedError('订阅服务返回 HTTP 404')
-            return SimpleNamespace(body=FEED_XML, status=200, headers={})
-
-        with patch.object(discovery, 'RSS_BACKOFF', 0.01), \
-                patch.object(discovery, 'request', side_effect=flaky), \
-                patch.object(media, 'detailed_videos') as detailed, \
-                patch.object(media, 'channel_videos') as listing:
-            entries = discovery.fetch(self.source, settings=None)
-        self.assertEqual(3, len(calls), '同一条路要再试,次数照 RSS_ATTEMPTS')
-        self.assertEqual(1, len(entries))
-        self.assertGreaterEqual(discovery.RSS_ATTEMPTS, 2, '只试一次等于没有重试')
-        detailed.assert_not_called()
-        listing.assert_not_called()
-
-        # 次数用完还不行就是失败:没有登录态,这里没有下一条路可以让位。
-        calls.clear()
-        with patch.object(discovery, 'RSS_BACKOFF', 0.01), \
-                patch.object(discovery, 'RSS_ATTEMPTS', 2), \
-                patch.object(discovery, 'request',
-                             side_effect=FeedError('订阅服务返回 HTTP 404')), \
-                patch.object(media, 'detailed_videos') as detailed:
-            with self.assertRaises(FeedError):
-                discovery.fetch(self.source, settings=None)
-        detailed.assert_not_called()
-
-    def test_retrying_never_sleeps_past_its_own_budget(self):
-        """退避放不下就别退避 —— 不许把预算睡掉之后才报失败。"""
-        with patch.object(discovery, 'RSS_BACKOFF', 5.0), \
-                patch.object(discovery, 'request', side_effect=FeedError('订阅服务返回 HTTP 404')):
-            started = time.monotonic()
-            with self.assertRaises(FeedError):
-                discovery.fetch(self.source, settings=None, timeout=6)
-        self.assertLess(time.monotonic() - started, 4, '退避放不下就别退避')
-
     def test_listing_gets_the_budget_without_first_waiting_for_details(self):
         with patch.object(discovery.time, 'monotonic', return_value=100), \
                 patch.object(media, 'detailed_videos') as detailed, \
-                patch.object(media, 'channel_videos', return_value=self.listed) as listing:
-            entries = discovery.fetch(self.source, {'youtube': {}}, timeout=6)
-        self.assertEqual(3, len(entries))
+                patch.object(windowed_discovery, 'fetch', return_value=[]) as listing:
+            discovery.fetch(self.source, {'youtube': {}}, timeout=6)
         self.assertEqual(106, listing.call_args.args[2])
         detailed.assert_not_called()
 
     def test_listing_failure_is_visible_without_expensive_fallback(self):
         with patch.object(media, 'detailed_videos') as detailed, \
-                patch.object(media, 'channel_videos', side_effect=RuntimeError('没列出任何视频')):
+                patch.object(windowed_discovery, 'fetch', side_effect=RuntimeError('没列出任何视频')):
             with self.assertRaises(FeedError) as raised:
                 discovery.fetch(self.source, {'youtube': {}})
         detailed.assert_not_called()
-        for fragment in ('带登录态轻量列表', '没列出任何视频'):
+        for fragment in ('带登录态增量轻量列表', '没列出任何视频'):
             self.assertIn(fragment, str(raised.exception))
 
 
@@ -334,7 +264,7 @@ class EstimateNeverOverwritesFacts(YouTubeFixture):
     def test_the_listing_says_the_view_count_is_unknown_instead_of_zero(self):
         """**估出来的 `views=0` 是「读不到」,面板不能把它显示成「没人看」。**
 
-        后路是从频道列表页发现的,那上面没有播放量。榜单那一行带上这面旗才分得清
+        flat 列表是从频道列表页发现的,那上面没有播放量。榜单那一行带上这面旗才分得清
         「0 次观看」和「播放量未知」—— 不带的话等于替 YouTube 说一句它没说过的话。
         反过来钉一边:精确那条不许带旗,否则真实的 0 播放量也被说成未知。
         """
@@ -344,7 +274,7 @@ class EstimateNeverOverwritesFacts(YouTubeFixture):
         self.assertFalse(storage.listing()['items'][0]['approximate'])
 
     def test_facts_arriving_second_do_overwrite_the_guess(self):
-        """反过来钉一边:精确数据照旧覆盖估算 —— 否则 RSS 恢复之后那条永远停在估算值上。"""
+        """反过来钉一边:精确数据照旧覆盖估算 —— 否则核实元数据或指定日期补抓之后那条永远停在估算值上。"""
         storage.discover(self.source, [self.guess])
         self.assertEqual((0, True, self.guess['published']), self.stored())
         storage.discover(self.source, [self.precise])
@@ -381,7 +311,7 @@ class FactsReplaceEstimates(YouTubeFixture):
                                          {'upload_date': '20261025', 'view_count': 4200})
         self.assertEqual('2026-10-25', calibrated['published'][:10])
         self.assertNotIn('approximate', calibrated, '标记留着的话下一轮还会被当成估算条目')
-        self.assertEqual(4200, calibrated['views'], '后路给的 0 不是「没人看」,是「不知道」')
+        self.assertEqual(4200, calibrated['views'], 'flat 列表给的 0 不是「没人看」,是「不知道」')
         self.assertEqual(entry['title'], calibrated['title'], '其余字段照旧')
 
     def test_unreadable_date_defers_and_stays_reprobeable(self):

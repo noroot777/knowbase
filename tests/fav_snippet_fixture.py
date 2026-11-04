@@ -57,7 +57,7 @@ tags:
 
 
 def seed_vault(test: unittest.TestCase, root: Path, text: str = DOC_MD) -> str:
-    """盘上真摆一篇 `DOC`,把 `favorites_api.VAULT_ROOT` 指过去;回它的正文版本号。
+    """盘上真摆一篇 `DOC`,把 `kb.web.common.VAULT_ROOT` 指过去;回它的正文版本号。
 
     绑文档的收藏落库前要按**盘上此刻**那一份算一次版本号(`_doc_version_now`),
     所以这些用例不能只有 documents 里那一行 —— 没有文件的话一律 503。

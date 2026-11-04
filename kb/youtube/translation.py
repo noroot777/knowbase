@@ -68,12 +68,3 @@ def render(text, output):
            for value, context, block, quoted in zip(translated, literals, blocks, quotes)):
         raise LanguageError(INVALID)
     return translation_language.joined(text, blocks, translated)
-
-
-def unit_output(text, position, output):
-    blocks = [unit['text'] for unit in units(text)]
-    value = values(blocks[position], output)[0]
-    if not translation_language.valid(value, translation_language.contexts(text, blocks)[position], blocks[position],
-                                      translation_language.contexts(text, blocks, quoted=True)[position]):
-        raise LanguageError(INVALID)
-    return value

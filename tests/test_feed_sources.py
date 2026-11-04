@@ -98,7 +98,7 @@ class FeedTests(unittest.TestCase):
 
     def test_dns_private_and_redirect_private_rejected(self):
         with patch.object(fetching.socket,'getaddrinfo',return_value=[(2,1,6,'',('10.0.0.1',443))]):
-            with self.assertRaises(fetching.FeedError): fetching.public_url('https://example.org/rss')
+            with self.assertRaises(fetching.FeedError): fetching.public_addresses('https://example.org/rss')
         # Public URL validation itself is applied for every redirect in request().
         with patch.object(fetching,'public_addresses',side_effect=[('https://example.org/rss',['8.8.8.8']),fetching.FeedError('private')]), \
              patch.object(fetching.httpx,'Client') as client:

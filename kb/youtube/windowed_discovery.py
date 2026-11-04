@@ -3,7 +3,8 @@ import re
 import time
 from datetime import datetime, timezone
 
-from kb.youtube import discovery_pages, login, media
+from kb.youtube import discovery_pages, login, media, throttle
+from kb.youtube.diagnosis import ToolFailure, dropped
 from kb.youtube.settings import of
 from kb.youtube.ranking import stamp
 
@@ -83,41 +84,27 @@ def stop_reason(text):
         return ''
     if re.search(r'^\[download\] Finished downloading playlist:', text, re.M):
         return 'playlist'
-    if re.search(r'^\[download\] .*does not pass filter', text, re.M):
-        return 'window'
     return ''
 
 
-def completed(output, returncode):
+def completed(output):
     try:
-        reason = stop_reason(output.read_text(encoding='utf-8', errors='replace'))
-        return reason == ('window' if returncode == 101 else 'playlist')
+        return stop_reason(output.read_text(encoding='utf-8', errors='replace')) == 'playlist'
     except OSError:
         return False
 
 
-def parsed(output, url, undated=None, source=None):
-    text = output.read_text(encoding='utf-8', errors='replace')
-    noise = diagnostics(text)
-    archived = re.search(r'^\[download\] .*has already been recorded in the archive', noise, re.M)
-    complete = not blocked(noise) and bool(archived or stop_reason(noise))
-    flat = lightweight(output, source) if source is not None else []
-    flat_ids = {entry['video_id'] for entry in flat}
-    precise_output = media.unique(output)
-    try:
-        lines = []
-        for line in text.splitlines():
-            try:
-                payload = json.loads(line) if line.startswith('{') else {}
-            except ValueError:
-                payload = {}
-            if payload.get('_type') not in ('url', 'url_transparent'):
-                lines.append(line)
-        precise_output.write_text('\n'.join(lines), encoding='utf-8')
-        precise = media._detailed(precise_output, url, allow_empty=complete or bool(flat), undated=undated)
-    finally:
-        media.heed(precise_output)
-    return [entry for entry in precise if entry['video_id'] not in flat_ids] + flat
+def parsed(output, url, source):
+    """flat 列表解出来的条目。**一条没有时要有「列完了」的凭据才算合法的空**:已知的、太旧的
+    都被本地去重滤掉是常态;可没有凭据的空,就是「拿到东西了、却一条都没解析出来」。"""
+    entries = lightweight(output, source)
+    if not entries:
+        text = output.read_text(encoding='utf-8', errors='replace')
+        noise = diagnostics(text)
+        if not stop_reason(noise):
+            dropped(text, noise)
+            raise ToolFailure(f'yt-dlp 没有从 {url} 列出可确认的视频', noise, throttle.witness(noise))
+    return entries
 
 
 def fetch(source, settings, deadline, notes=None):
@@ -137,8 +124,7 @@ def fetch(source, settings, deadline, notes=None):
         missing = unavailable(noise)
         page.update(discovery_pages.inspect(text, floor, limit))
         page['blocked'] = noise if blocked(noise) else ''
-        page['stop_reason'] = stop_reason(noise)
-        found = parsed(output, url, missing, source)
+        found = parsed(output, url, source)
         source['discovery_unavailable'].extend(item for item in missing if item not in source['discovery_unavailable'])
         return found
 
@@ -162,7 +148,7 @@ def fetch(source, settings, deadline, notes=None):
             evidence.append('列表含未确认的错误，不能确认完整覆盖：' + page['blocked'])
         if evidence:
             break
-        if page['boundary'] or page['stop_reason'] == 'window':
+        if page['boundary']:
             source['discovery_stop'] = 'window'
             break
         if page['exhausted']:

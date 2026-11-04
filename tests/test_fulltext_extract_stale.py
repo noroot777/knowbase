@@ -126,8 +126,7 @@ class StaleExtractionTests(StaleCase):
     def test_nothing_is_retired_while_the_full_text_waits_for_translation(self):
         """vault 里还是那份壳时,旧提取一个字都不许动。
 
-        补抓成功之后这一条要排队等翻译(一轮只译 `translate.MAX_ITEMS` 条,这里
-        用一次模型故障造出同一个形状)。提前清掉 `extracted_at` 的话,提取阶段
+        补抓成功之后这一条要排队等翻译(这里用一次模型故障造出「还在等翻译」这个形状)。提前清掉 `extracted_at` 的话,提取阶段
         会拿**这份壳**再买一次提取、写回一个同样过时的结论,而 `extracted_at`
         跟着又非空了 —— 等正文真译完导出之后,摘要和主题照旧是壳的。
         """

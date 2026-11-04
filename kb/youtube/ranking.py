@@ -37,7 +37,7 @@ UNKNOWN = '发布时间与简介仍是估算值，排到就先核实一次元数
 def rejection(row, settings, scope, now, floor):
     """返回 `(理由, 判得准)`。理由为空就是合格;**`判得准=False` 不是拒绝,是「还判不了」**。
 
-    后路(`discovery.approximate`)的条目日期是按频道页列表顺序估的、简介是空的 —— 拿它去
+    flat 列表(`windowed_discovery.lightweight`)的条目日期是粗估的、简介是空的 —— 拿它去
     判日期范围、窗口下界或 AI 相关性,判出来的「不合格」其实只是「不知道」。**未知不等于
     不合格**:这一档既不放行也不判死,留在榜上等 `collector.process` 探一次元数据
     (`admission.calibrate` 换成事实值),再过**同一个** `rejection` 定论。

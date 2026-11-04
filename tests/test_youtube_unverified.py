@@ -33,7 +33,7 @@ class UnknownIsNotUnqualified(YouTubeFixture):
         self.settings = reg.get_settings('youtube')
 
     def guessed(self, title='AI agent coding tutorial', **values):
-        """后路那种条目(`discovery.approximate`):日期按频道页列表顺序估的,简介空着,播放量 0。"""
+        """flat 列表那种条目(`windowed_discovery.lightweight`):日期是粗估的,简介空着,播放量 0。"""
         entry = {'video_id': '00000000001', 'url': 'https://www.youtube.com/watch?v=00000000001',
                  'title': title, 'description': '', 'views': 0, 'approximate': True,
                  'published': datetime.now(timezone.utc).isoformat(), **values}

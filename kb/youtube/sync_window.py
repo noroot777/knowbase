@@ -72,6 +72,9 @@ def prepare(source, scope, when=None, settings=None):
                 (source['id'], source['url'], initial.isoformat(), days))
         known = connection.execute('''SELECT video_id FROM youtube_video_sources
             WHERE source_id=? AND source_url=?''', (source['id'], source['url'])).fetchall()
+        # 同步里**不再有人写**这张表:写它的是逐条解析那一半(窗口外的精确日期),普通一轮改走 flat
+        # 列表之后就一条都写不出来了。存量那些照旧当「查过的旧视频」去重 —— 表和触发器不删
+        # (迁移只增不减),读也不撤:撤了的话其中没带粗日期的那几条会重新挤进候选。
         history = connection.execute('''SELECT video_id,published FROM youtube_discovery_history
             WHERE source_id=? AND source_url=?''', (source['id'], source['url'])).fetchall()
         return {**source, 'discovery_after': floor.isoformat(),
@@ -85,20 +88,3 @@ def record(connection, source):
         connection.execute('''INSERT INTO youtube_sync_origins(source_id,source_url,initial_fetch_at)
             VALUES(?,?,?) ON CONFLICT(source_id) DO NOTHING''',
             (source['id'], source['url'], source['initial_fetch_at']))
-    connection.executemany('''INSERT INTO youtube_discovery_history(source_id,source_url,video_id,published)
-        VALUES(?,?,?,?) ON CONFLICT(source_id,video_id) DO UPDATE SET
-        source_url=excluded.source_url,published=excluded.published''',
-        [(source['id'], source['url'], entry['video_id'], entry['published'])
-         for entry in source.get('observed_before_window', ())])
-
-
-def recent(source, entries, scope):
-    floor = stamp(source.get('discovery_after'))
-    if scope.ranged or floor is None:
-        return entries
-    known = set(source.get('known_video_ids', ()))
-    source['observed_before_window'] = [entry for entry in entries
-        if entry['video_id'] not in known and not entry.get('approximate') and
-        (published := stamp(entry.get('published'))) is not None and published < floor]
-    return [entry for entry in entries if entry['video_id'] in known or entry.get('approximate') or
-            (published := stamp(entry.get('published'))) is None or published >= floor]

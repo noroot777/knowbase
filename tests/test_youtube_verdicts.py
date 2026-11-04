@@ -100,10 +100,16 @@ class VerdictsSurviveTheMerge(unittest.TestCase):
         429 是「网页根本没下下来」,后面那些墙都是它的下游 —— 两条一起回来时要说 429,
         照挑战那一档说会让人去装解题脚本,而这一轮压根没走到挑战那一步。
         """
-        merged = login.merge(RuntimeError('两条都失败'),
-                             [failure('js_challenge'), failure('rate_limited', '429 原文')])
-        self.assertEqual('rate_limited', login.coded(merged))
-        self.assertIn('429 原文', merged.diagnostic)
+        # **不按到达先后**:字幕几种语言依次失败时(`media` 里那几处 `login.merge`),
+        # 先到的是机器人验证、后到的是 429 也得说 429 —— 照前者说会让本来就带着登录态的
+        # 人去重新登录。原先由一条「两条发现路」的整轮用例钉着,那两条路已经没了。
+        for wall in ('js_challenge', 'bot_wall'):
+            for order in (1, -1):
+                errors = [failure(wall), failure('rate_limited', '429 原文')][::order]
+                with self.subTest(wall=wall, order=order):
+                    merged = login.merge(RuntimeError('两条都失败'), errors)
+                    self.assertEqual('rate_limited', login.coded(merged))
+                    self.assertIn('429 原文', merged.diagnostic)
 
     def test_nothing_recognisable_is_still_undecided(self):
         """另一边也要钉住:**判不出来的照旧落「别再判了」,不许顺手升一档。**
@@ -299,10 +305,11 @@ class AnEarlyLineIsNotSqueezedOut(YouTubeFixture):
 class TheChannelExitGoesThroughTheSameContract(YouTubeFixture):
     """**频道那一侧的末端**:它交给主干那个共用出口,不许绕开统一口径。
 
-    审查实测:详细路径报超时、后路 flat 末尾报 `challenge solver` 和
-    `Requested format is not available`,分档和完整诊断都对(`js_challenge`),而写进库的
-    `last_error` 恰好 1200 字、决定性那两行一个字都没留下 —— 主干那一刀是**从头裁**,
-    而 `discovery.merge` 的消息是两份各约 800 字的摘要拼起来的、轻松超过它。
+    审查实测:分档和完整诊断都对(`js_challenge`),而写进库的 `last_error` 恰好 1200 字、
+    决定性那两行一个字都没留下 —— 主干那一刀是**从头裁**。当年是两条发现路的摘要拼在一起
+    超的上限;两条路早没了(ccb4851),**一条列表失败照样超得过**:`media._collect_listing`
+    把半截输出底下那条真实失败的消息(自带约 800 字的两头摘要)写进摘要,`ToolFailure`
+    再拼一份诊断摘要,`discovery._combined` 外面再加上路名。
     """
 
     def setUp(self):
@@ -311,10 +318,10 @@ class TheChannelExitGoesThroughTheSameContract(YouTubeFixture):
         self.summary = {'errors': [], 'failed_ids': []}
 
     def merged(self):
-        """`discovery.merge` 的原样:两条原因、各自的完整消息拼进 carrier。"""
-        slow = ToolFailure('逐条解析失败', 'WARNING: ordinary context\n' * 30 + 'ERROR: timed out', '', YOUTUBE)
-        wall = failure('js_challenge')
-        return login.merge(discovery.FeedError('；'.join([str(slow), str(wall)])), [slow, wall])
+        """今天频道那一侧交出去的原样:一条列表失败,经 `discovery._combined` 包上路名。"""
+        slow = ToolFailure('yt-dlp 执行失败', 'WARNING: ordinary context\n' * 30 + 'ERROR: timed out', '', YOUTUBE)
+        wall = ToolFailure('；'.join([str(slow), '没有可解析的条目']), NOISE, 'js_challenge', YOUTUBE)
+        return discovery._combined([f'带登录态增量轻量列表：{wall}'], [wall])
 
     def test_the_decisive_line_survives_the_shared_exit(self):
         error = self.merged()
@@ -323,7 +330,7 @@ class TheChannelExitGoesThroughTheSameContract(YouTubeFixture):
                            '原消息要真的超过那道上限,否则这条用例什么都没验')
         self.assertNotIn(TAIL, str(error)[:FAILURE_CAP], '从头裁本来就会丢掉它')
         # **机制本身也要钉。** 上面那条端到端断言在这个形状上还有第二条满足路径:
-        # `discovery.merge` 的消息尾部本来就带着诊断的尾巴,两头都留的摘要那一半会把它
+        # 合并后的消息尾部本来就带着诊断的尾巴,两头都留的摘要那一半会把它
         # 带回来 —— 所以它证得了「用户看得到」,证不了「那一刀真成了冗余带」。
         # 这一条直接问那件事:交过去的文本必须已经压到主干那道上限之内。
         handed = collector._Told(error)
@@ -390,9 +397,10 @@ class NoFailureExitTruncatesOnItsOwn(unittest.TestCase):
                 if not (isinstance(handed, ast.Call) and getattr(handed.func, 'id', '') == '_Told'):
                     raw.append(f'{path.name}:{node.lineno}')
         self.assertEqual([], raw, '这些交付点把原始异常直接交给了主干那一刀')
-        self.assertGreater(len([1 for line in Path(collector.__file__).read_text(encoding='utf-8')
-                                .splitlines() if '_save_failure(' in line and '_Told(' in line]), 2,
-                           '一个交付点都没扫到,上面那条断言恒绿')
+        # 交付点如今收在 `collector.save_failure` 这一个包装里(各处都调它),所以至少要扫到它那一处。
+        self.assertGreaterEqual(len([1 for line in Path(collector.__file__).read_text(encoding='utf-8')
+                                     .splitlines() if '_save_failure(' in line and '_Told(' in line]), 1,
+                                '一个交付点都没扫到,上面那条断言恒绿')
 
 
 if __name__ == '__main__':

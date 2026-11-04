@@ -1,3 +1,9 @@
+"""普通一轮的窗口起点(`sync_window.prepare`):首次同步回看几天、成功之后怎么续、设置放宽之后怎么退。
+
+窗口只决定**从哪天起列**;条目是否真在窗口里,由 flat 列表的粗日期先挡一道
+(`windowed_discovery.lightweight`),核实元数据之后由 `ranking.rejection` 按真实日期定论。
+`youtube_discovery_history` 只剩存量行(同步里不再写它),这里用 SQL 直接种,钉它的读口径和清理。
+"""
 import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -19,6 +25,13 @@ class YouTubeInitialWindow(YouTubeFixture):
 
     def prepare(self, source=None, scope=None, when=None):
         return sync_window.prepare(source or self.source, scope or self.scope, when or self.now)
+
+    def checked(self, source, *entries):
+        """种几条存量的「查过的旧视频」(同步里已经不再写这张表)。"""
+        with reg.db() as connection:
+            connection.executemany('''INSERT INTO youtube_discovery_history(source_id,source_url,video_id,published)
+                VALUES(?,?,?,?)''', [(source['id'], source['url'], entry['video_id'], entry['published'])
+                                     for entry in entries])
 
     def test_missing_fetch_time_starts_five_shanghai_calendar_days_ago(self):
         when = datetime(2026, 10, 30, 18, tzinfo=timezone.utc)
@@ -57,8 +70,7 @@ class YouTubeInitialWindow(YouTubeFixture):
         source = self.prepare()
         self.assertNotIn('initial_fetch_at', source)
         self.assertEqual(previous, source['last_success'])
-        entries = [self.entry(hours=96)]
-        self.assertEqual(entries, sync_window.recent(source, entries, self.scope))
+        self.assertLess(ranking.stamp(source['discovery_after']), self.now - timedelta(hours=96))
 
     def test_invalid_previous_timestamp_uses_the_safe_initial_default(self):
         with reg.db() as connection:
@@ -79,15 +91,6 @@ class YouTubeInitialWindow(YouTubeFixture):
         with reg.db() as connection:
             self.assertEqual(source['initial_fetch_at'], connection.execute(
                 'SELECT initial_fetch_at FROM youtube_sync_origins WHERE source_id=?', (source['id'],)).fetchone()[0])
-
-    def test_exact_dates_use_inclusive_start_and_estimates_remain_unknown(self):
-        source = self.prepare()
-        floor = ranking.stamp(source['initial_fetch_at'])
-        entries = [{**self.entry(1), 'published': (floor - timedelta(seconds=1)).isoformat()},
-                   {**self.entry(2), 'published': floor.isoformat()},
-                   {**self.entry(3), 'published': (floor - timedelta(days=10)).isoformat(), 'approximate': True},
-                   {**self.entry(4), 'published': ''}]
-        self.assertEqual(entries[1:], sync_window.recent(source, entries, self.scope))
 
     def test_existing_estimated_candidate_survives_new_origin_and_metadata_calibration(self):
         with reg.db() as connection:
@@ -124,7 +127,6 @@ class YouTubeInitialWindow(YouTubeFixture):
         with reg.db() as connection:
             self.assertEqual(0, connection.execute('SELECT count(*) FROM youtube_sync_origins').fetchone()[0])
         source = self.prepare()
-        self.assertEqual([entry], sync_window.recent(source, [entry], scope))
         storage.discover(source, [entry])
         settings = self.settings()['youtube']
         self.assertEqual(1, len(ranking.score(storage.rows(), settings, self.scope)))
@@ -165,11 +167,10 @@ class YouTubeInitialWindow(YouTubeFixture):
         with reg.db() as connection:
             self.assertEqual(0, connection.execute('SELECT count(*) FROM youtube_sync_origins').fetchone()[0])
 
-    def test_old_scan_progress_is_source_scoped_resettable_and_not_a_candidate(self):
+    def test_legacy_old_scan_progress_is_source_scoped_resettable_and_not_a_candidate(self):
         source = self.prepare()
         old = self.entry(hours=6 * 24)
-        self.assertEqual([], sync_window.recent(source, [old], self.scope))
-        storage.discover(source, [])
+        self.checked(source, old)
         again = self.prepare()
         self.assertEqual((old['video_id'],), again['checked_old_ids'])
         self.assertEqual((), again['known_video_ids'])
@@ -184,16 +185,15 @@ class YouTubeInitialWindow(YouTubeFixture):
 
     def test_widened_window_can_reconsider_old_scan_progress(self):
         source = self.prepare()
-        old = self.entry(hours=96)
-        sync_window.recent(source, [old], self.scope)
-        storage.discover(source, [])
+        old = self.entry(hours=10 * 24)
+        self.checked(source, old)
         with reg.db() as connection:
             connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
                                ((self.now - timedelta(days=6)).isoformat(), source['id']))
+        self.assertEqual((old['video_id'],), self.prepare()['checked_old_ids'])
         self.settings(window_days=14)
         widened = self.prepare()
         self.assertEqual((), widened['checked_old_ids'])
-        self.assertEqual([old], sync_window.recent(widened, [old], self.scope))
         reg.delete_subscription('youtube', source['id'])
         with reg.db() as connection:
             self.assertEqual(0, connection.execute('SELECT count(*) FROM youtube_discovery_history').fetchone()[0])
@@ -203,18 +203,16 @@ class YouTubeInitialWindow(YouTubeFixture):
         first = self.prepare()
         original = first['initial_fetch_at']
         entries = [self.entry(1, hours=6 * 24), self.entry(2, hours=20 * 24), self.entry(3, hours=40 * 24)]
-        self.assertEqual([], sync_window.recent(first, entries, self.scope))
+        self.checked(first, *entries)
         storage.discover(first, [])
         with reg.db() as connection:
             connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
                                (self.now.isoformat(), self.source['id']))
         ordinary = self.prepare()
         self.assertEqual({entry['video_id'] for entry in entries}, set(ordinary['checked_old_ids']))
-        self.assertEqual([], sync_window.recent(ordinary, entries, self.scope))
         self.settings(window_days=30)
         widened = self.prepare()
         self.assertEqual((entries[2]['video_id'],), widened['checked_old_ids'])
-        self.assertEqual(entries[:2], sync_window.recent(widened, entries, self.scope))
         storage.discover(widened, entries[:2])
         self.assertEqual({entry['video_id'] for entry in entries[:2]}, {row['video_id'] for row in storage.rows()})
         with reg.db() as connection:
@@ -224,9 +222,7 @@ class YouTubeInitialWindow(YouTubeFixture):
 
     def test_initial_floor_survives_first_success_same_day_and_following_days(self):
         first = self.prepare()
-        entries = [self.entry(number, hours=hours) for number, hours in enumerate((5, 48, 144, 168), 1)]
-        self.assertEqual(entries[:2], sync_window.recent(first, entries, self.scope))
-        storage.discover(first, entries[:2])
+        storage.discover(first, [])
         with reg.db() as connection:
             connection.execute('UPDATE subscriptions SET last_success=? WHERE id=?',
                                (self.now.isoformat(), self.source['id']))
@@ -235,10 +231,6 @@ class YouTubeInitialWindow(YouTubeFixture):
                 repeated = self.prepare(when=self.now + elapsed)
                 self.assertGreaterEqual(ranking.stamp(repeated['discovery_after']),
                                         ranking.stamp(first['initial_fetch_at']))
-                self.assertEqual(entries[:2], sync_window.recent(repeated, entries, self.scope))
-                self.assertTrue({entries[2]['video_id'], entries[3]['video_id']} <= set(repeated['checked_old_ids']))
-                storage.discover(repeated, sync_window.recent(repeated, entries, self.scope))
-        self.assertEqual({entry['video_id'] for entry in entries[:2]}, {row['video_id'] for row in storage.rows()})
 
     def test_existing_origin_schema_migrates_without_implicitly_widening(self):
         first = self.prepare()
@@ -267,8 +259,8 @@ class YouTubeInitialWindow(YouTubeFixture):
                                (previous.isoformat(), self.source['id']))
         self.assertEqual(previous - timedelta(days=1), ranking.stamp(self.prepare()['discovery_after']))
 
-    def test_round_records_origin_and_skips_new_old_entries_before_storage(self):
-        fetched = [self.entry(1, hours=6 * 24), self.entry(2)]
+    def test_round_records_origin_once_across_repeated_rounds(self):
+        fetched = [self.entry(2)]
         with patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'chrome'}), \
                 patch.object(discovery, 'fetch', return_value=fetched), \
                 patch.object(notes, 'available', return_value=(False, '测试不调用模型')), \
@@ -277,10 +269,9 @@ class YouTubeInitialWindow(YouTubeFixture):
             repeated = collector.collect(self.scope)
         probe.assert_not_called()
         self.assertEqual(1, result['discovered'])
-        self.assertEqual(1, result['outside_initial_window'])
         self.assertEqual(1, result['ranked'])
         self.assertEqual(result['initial_fetch_at'], repeated['initial_fetch_at'])
-        self.assertEqual([fetched[1]['video_id']], [row['video_id'] for row in storage.rows()])
+        self.assertEqual([fetched[0]['video_id']], [row['video_id'] for row in storage.rows()])
         self.assertFalse(reg.subscription('youtube', self.source['id'])['last_success'])
 
     def test_unconfigured_gateway_does_not_claim_a_fetch_origin(self):
@@ -303,9 +294,11 @@ class YouTubeInitialWindow(YouTubeFixture):
         self.assertFalse(retried['last_success'])
         self.assertEqual('临时网络错误', retried['last_error'])
         self.assertEqual(1, retried['failures'])
-        floor = ranking.stamp(origin)
-        missed = {**self.entry(), 'published': (floor + timedelta(hours=1)).isoformat()}
-        self.assertEqual([], sync_window.recent(retried, [missed], self.scope))
+        # 起点留着做账,**请求窗口**却按这一轮重新算:失败五天之后不许从最初那天一路列回来。
+        today = (self.now + timedelta(days=5)).astimezone(sync_window.TZ).replace(
+            hour=0, minute=0, second=0, microsecond=0)
+        self.assertEqual(today - timedelta(days=sync_window.INITIAL_DAYS), ranking.stamp(retried['discovery_after']))
+        self.assertLess(ranking.stamp(origin), ranking.stamp(retried['discovery_after']))
 
     def test_previous_initial_window_filter_is_repaired_without_clearing_error_history(self):
         storage.discover(self.source, [self.entry(hours=96), self.entry(2, hours=96)])
@@ -331,4 +324,3 @@ class YouTubeInitialWindow(YouTubeFixture):
         storage.discover(source, [])
         ranked = ranking.score(storage.rows(), self.settings()['youtube'], self.scope)
         self.assertEqual(3, len(ranked))
-        self.assertEqual(entries, sync_window.recent(source, entries, self.scope))

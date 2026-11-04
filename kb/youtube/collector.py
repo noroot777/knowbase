@@ -33,12 +33,12 @@ RANGE_DISCOVERY_CEILING = 1800.0
 class _Told(RuntimeError):
     """交给主干那个共用出口之前,**把展示文本按统一口径定下来**。
 
-    `_save_failure` 自己 `str(error)[:FAILURE_CAP]`,那一刀**从头裁**;而
-    `discovery.merge` 的消息是两份各约 800 字的工具摘要拼起来的、轻松超过那道上限 ——
-    审查实测:详细路径报超时、后路 flat 末尾报 `challenge solver` 和
-    `Requested format is not available`,分档和完整诊断都对(`js_challenge`),写进库的
+    `_save_failure` 自己 `str(error)[:FAILURE_CAP]`,那一刀**从头裁**;而一条列表失败的
+    消息轻松超过那道上限(`media._collect_listing` 把半截输出底下那条真实失败的约 800 字
+    摘要写进摘要,`ToolFailure` 再拼一份诊断摘要,`discovery._combined` 外面再加路名)——
+    审查实测(当年是两条发现路的摘要拼在一起):分档和完整诊断都对(`js_challenge`),写进库的
     频道 `last_error` 恰好 1200 字、决定性那两行一个字都没留下,面板上展开「查看失败原因」
-    看到的只有先前那次超时和后路开头的普通上下文。**上一轮说那一刀「只是冗余带」是错的**。
+    看到的只有先前那次超时的普通上下文。**上一轮说那一刀「只是冗余带」是错的**。
 
     **主干那一侧不动**:它服务所有来源,而 `diagnostic` 这个约定今天只有 YouTube 有
     (主干不认识任何具体来源)。所以转换放在这条适配边界上 —— 过了 `shown` 之后文本
@@ -56,8 +56,9 @@ class _Told(RuntimeError):
 
 
 def save_failure(source, error, summary):
+    """YouTube 这一侧交给主干共用出口的**唯一**入口:文本在这里先过 `_Told`。"""
     previous = len(summary.get('notices', ()))
-    saved = _save_failure(source, error, summary)
+    saved = _save_failure(source, _Told(error), summary)
     for notice in summary.get('notices', ())[previous:]:
         notice['source_id'] = source['id']
     return saved
@@ -215,7 +216,7 @@ def process(rows, settings, scope, summary, deadline):
                                gate_code=decision.code, retry_at=time.time() + decision.retry_seconds, **measured)
                 continue
             # ── 事实日期一到手就闭环:换掉估算值,再用**同一个** `rejection` 重判资格 ──
-            # 排名那一轮是拿估出来的日子排的(后路只有频道页的列表顺序),所以指定日期
+            # 排名那一轮是拿估出来的日子排的(flat 列表只有粗日期),所以指定日期
             # 范围、订阅历史下界、未来时间这几道当时判的都是估算值。**这一轮不许只判
             # 窗口**:审查实测,估 10-27 而实际 10-25 的那条,在 `since=until=10-27` 的
             # 补抓里一路走到成品,日期还是 10-27。
@@ -386,7 +387,7 @@ def _round(scope):
                'errors': [], 'partial': [], 'notices': [], 'repointed': 0, 'cautions': {},
                'stopped': False, 'failed_ids': [], 'succeeded_ids': [],
                'discovered': 0, 'ranked': 0, 'processed': 0, 'walls': {},
-               'initial_fetch_at': {}, 'outside_initial_window': 0,
+               'initial_fetch_at': {},
                'browser': of(settings)['cookies_browser']}
     pending = []
     for source in sources:
@@ -431,27 +432,28 @@ def _round(scope):
             if time.monotonic() + per_source > discovery_deadline:
                 break
         source, pending = pending[0], pending[1:]
-        # 显式日期范围那一轮只禁**估算**那条路(第 2 条);带登录态逐条解析那条拿的是
-        # 真实日期,照旧可以走(见 `discovery.fetch`)。
+        # 显式日期范围那一轮只禁**估算**那条路;带登录态逐条解析那条拿的是真实日期,
+        # 照旧可以走(见 `discovery.fetch`)。
         # **每个频道一份自己的 `notes`**:那是「列了几条之后中断」的说明,共写一份的话
         # 就说不出是哪个频道没列完。
         told = []
         try:
             with heeded(summary, [source['id']]):
                 source = sync_window.prepare(source, scope, when=ranking.stamp(started), settings=settings)
+                if not scope.ranged and not source.get('discovery_after'):
+                    # 普通一轮里 `prepare` 不给窗口起点只有一种原因:订阅在开查之前已经被
+                    # 改走、停用或删掉了。列了也会在 `commit_listing` 那儿整份作废,不发请求。
+                    summary['repointed'] += 1
+                    continue
                 if source.get('initial_fetch_at'):
                     summary['initial_fetch_at'][str(source['id'])] = source['initial_fetch_at']
-                listed = discovery.fetch(source, settings, per_source, not scope.ranged, told)
-                entries = sync_window.recent(source, listed, scope)
-                summary['outside_initial_window'] += len(listed) - len(entries)
+                entries = discovery.fetch(source, settings, per_source, not scope.ranged, told)
             if not commit_listing(source):
                 summary['repointed'] += 1
                 continue
             storage.discover(source, entries)
             if unavailable := source.get('discovery_unavailable'):
                 notice = f'{len(unavailable)} 条视频无法读取'
-                if undated := sum(item.get('code') == 'undated' for item in unavailable):
-                    notice += f'，其中 {undated} 条缺少可靠发布日期'
                 if entries:
                     notice += '，已返回的其他条目继续处理'
                 summary['notices'].append({'source_id': source['id'], 'title': source['name'], 'reason': notice,
@@ -478,7 +480,7 @@ def _round(scope):
                 summary['deferred'] += 1
             else:
                 wall(summary, [source['id']], error)
-                save_failure(source, _Told(error), summary)
+                save_failure(source, error, summary)
                 throttle.caught(error)
         summary['checked'] += 1
         _stage('crawl', 'running', f"YouTube · 频道列表 {summary['checked']}/{len(sources)} 个频道")

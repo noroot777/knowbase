@@ -288,14 +288,17 @@ class ConcurrentReindexTests(NoBodyBase, unittest.TestCase):
         self.assertEqual([], self.pending())
 
     def test_the_version_and_the_body_come_from_one_snapshot(self):
+        """三条提取路取输入的唯一入口(`extract.model_input`):版本号和正文同属一版。"""
         path = self.write("poster", IMG_ONLY + REAL)
         self.index()
-        version, body = store.doc_body_version(self.conn, path)
-        self.assertEqual(version, self.conn.execute(
+        snap = extract.model_input(self.conn, path)
+        self.assertEqual(snap["version"], self.conn.execute(
             "SELECT content_hash FROM documents WHERE path=?", (path,)
         ).fetchone()["content_hash"])
-        self.assertEqual(store.doc_body(self.conn, path), body)
-        self.assertEqual(("", ""), store.doc_body_version(self.conn, "source/dr-gzh/nope.md"))
+        self.assertEqual(store.doc_body(self.conn, path), snap["body"])
+        # 不在库里的那一篇给全空快照 —— `body_gap` 按「正文空」那一档办,不另造一条路。
+        gone = extract.model_input(self.conn, "source/dr-gzh/nope.md")
+        self.assertEqual(("", ""), (gone["version"], gone["body"]))
 
 
 class EmptyStubTests(NoBodyBase, unittest.TestCase):

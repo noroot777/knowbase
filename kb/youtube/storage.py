@@ -136,13 +136,13 @@ def discover(source, entries):
             if permanently_excluded({'entry': entry}, connection):
                 continue
             entry = snapshot(entry)
-            # **估算数据不许覆盖已有的精确数据。** 发现有两条路:RSS 带真实发布时间和播放量,
-            # yt-dlp 的后路只有列表顺序估出来的时间和 views=0(见 `discovery.approximate`)。
+            # **估算数据不许覆盖已有的精确数据。** 指定日期那一轮和元数据核实带回真实发布时间
+            # 和播放量,普通一轮的 flat 列表只有粗日期和 views=0(见 `windowed_discovery.lightweight`)。
             # 判据待在这条语句自己的 CASE 里 —— 先 SELECT 一次再决定要不要写,中间那一下
             # 没有锁,而写错的后果是一条已经排好名的候选被降级成「没有播放量」,下一轮
             # 候选榜上就找不到它了。反过来钉一边:精确数据照旧覆盖估算数据。
             # **播放量按「这一份是不是估算来源」判,不按正负判**:0 既可能是「不知道」
-            # (后路一律给 0)也可能是「确实没人看」(刚发布的视频),按正负判就让后者
+            # (flat 列表一律给 0)也可能是「确实没人看」(刚发布的视频),按正负判就让后者
             # 永远盖不住一个过时的正数 —— 判据跟 entry 那一行同源,口径只有一份。
             connection.execute('''INSERT INTO youtube_videos
                 (video_id,entry,views,updated_at) VALUES(?,?,?,?)
@@ -316,7 +316,7 @@ def listing(source_id=None, limit=100):
         result.append({key: row[key] for key in ('video_id', 'source_id', 'channel', 'views',
                       'score', 'score_rank', 'state', 'reason', 'duration')}
                       | {key: entry.get(key, '') for key in ('title', 'url', 'published')}
-                      # **估出来的那条要带上这面旗。** 后路发现时 `views` 一律写 0
+                      # **估出来的那条要带上这面旗。** flat 列表发现时 `views` 一律写 0
                       # (列表页读不到播放量),面板不知道这回事就会把「没数据」显示成
                       # 「0 次观看」—— 那是在替 YouTube 说一句它没说过的话。
                       | {'approximate': bool(entry.get('approximate'))})

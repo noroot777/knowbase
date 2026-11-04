@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from kb.collectors import FetchScope
 from kb.feeds import registry as reg
-from kb.youtube import candidate_metadata, discovery, media, notes, ranking, storage, sync_window, throttle
+from kb.youtube import candidate_metadata, discovery, discovery_pages, media, ranking, storage, sync_window, throttle
 from tests.youtube_fixture import YouTubeFixture
 
 
@@ -49,7 +49,10 @@ class YouTubeSyncRepair(YouTubeFixture):
         self.assertTrue(all(entry['channel_id'] for entry in entries))
         probe.assert_not_called()
         self.assertIn('--flat-playlist', self.calls[0])
-        self.assertNotIn('--playlist-end', self.calls[0])
+        # 首批只读最新那一小批(`discovery_pages.FIRST_BATCH`);少于上限又列尽了,就不再往下翻。
+        self.assertEqual(str(discovery_pages.FIRST_BATCH),
+                         self.calls[0][self.calls[0].index('--playlist-end') + 1])
+        self.assertEqual(1, len(self.calls))
         self.assertNotIn('--break-match-filters', self.calls[0])
         self.assertFalse(self.prepared['discovery_unavailable'])
 
@@ -112,13 +115,6 @@ class YouTubeSyncRepair(YouTubeFixture):
         storage.refresh_metadata(row, entry)
         rows = ranking.score(storage.rows(), self.settings()['youtube'], self.scope)
         self.assertEqual([other['id']], rows[0]['eligible_sources'])
-
-    def test_long_but_usable_chinese_facts_are_not_a_false_compression_failure(self):
-        value = '这段内容介绍智能体的实现步骤和适用限制。' * 100
-        self.assertGreater(len(value), 1000)
-        self.assertEqual(value, notes.summary_output(value, '字幕中文资料。', chinese_source=True))
-        with self.assertRaisesRegex(RuntimeError, '压缩'):
-            notes.summary_output('中' * (notes.CONTEXT_LIMIT + 1), chinese_source=True)
 
     def test_old_owner_schema_is_migrated_without_loosening_existing_links(self):
         with reg.db() as connection:

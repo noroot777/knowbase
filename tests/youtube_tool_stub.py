@@ -1,7 +1,7 @@
 """假 yt-dlp 和「跑一整轮」那套夹具:**两份用例文件共用这一份,不许各抄一遍。**
 
 拆成两份是 700 行上限逼出来的(`test_youtube_throttle` 验熔断与拒绝,
-`test_youtube_diagnostics` 验诊断的运输与归并)。夹具抄两份之后,其中一份会跟着
+`test_youtube_diagnosis` 验诊断的运输与归并)。夹具抄两份之后,其中一份会跟着
 代码慢慢走偏,而红只在另一份上出现 —— 搬出来这一份就是为了让两边验的是同一个工具。
 """
 import json
@@ -50,7 +50,11 @@ def video_id():
 def listed():
     body = {'id': video_id(), 'title': 'AI agent coding tutorial', 'duration': 600,
             'channel_id': identity(), 'description': 'Practical AI workflow for engineers'}
-    if '--flat-playlist' not in ARGS:
+    if '--flat-playlist' in ARGS:
+        # 真 yt-dlp 的 flat 条目:`_type: url`,`youtubetab:approximate_date` 给的粗日期在
+        # `timestamp` 上。少了这两样,轻量发现一条都认不出来,整轮「颗粒无收」看着像限流没认出来。
+        body.update(_type='url', timestamp=@NOW@)
+    else:
         body.update(upload_date='@TODAY@', view_count=1000)
     return json.dumps(body)
 
@@ -114,6 +118,9 @@ if '--write-subs' in ARGS or '--write-auto-subs' in ARGS:
             encoding='utf-8')
     sys.exit(0)
 sys.stdout.write(listed() + '\\n')
+if '--flat-playlist' in ARGS:
+    # 列尽的凭据:一条条目、比 `--playlist-end` 少,再加这一行,轻量发现才算确认了窗口覆盖。
+    sys.stdout.write('[download] Finished downloading playlist: fixture\\n')
 sys.exit(0)
 '''
 
@@ -121,7 +128,7 @@ sys.exit(0)
 class FakeToolCase(YouTubeFixture):
     """从真子进程跑起的那一半:**断言的是「这次调用压根没发生」。**
 
-    打桩在 `discovery.fetch` / `media.probe` 之上验不了这几条 —— 后路、部分成功、
+    打桩在 `discovery.fetch` / `media.probe` 之上验不了这几条 —— 列表那一层的分档、部分成功、
     发现到处理的阶段切换全在被绕过的那一段里。**这个类自己不带用例**,只带工具和夹具。
     """
 
@@ -142,7 +149,8 @@ class FakeToolCase(YouTubeFixture):
         # **发布日期按当天算,不写死。** 写死的那一版在 7 天窗口外就什么都排不进来,
         # 而红出来的形态是「一条候选都没有」—— 看着像排名坏了。
         script.write_text(FAKE_TOOL.replace('@CALLS@', str(self.calls)).replace('@PLAN@', str(self.plan))
-                          .replace('@TODAY@', datetime.now(media.TZ).strftime('%Y%m%d')),
+                          .replace('@TODAY@', datetime.now(media.TZ).strftime('%Y%m%d'))
+                          .replace('@NOW@', str(int(datetime.now(media.TZ).timestamp()))),
                           encoding='utf-8')
         return patch.object(toolchain, 'command', return_value=[sys.executable, str(script)])
 

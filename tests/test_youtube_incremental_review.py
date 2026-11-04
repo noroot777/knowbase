@@ -29,7 +29,8 @@ class MetadataSnapshots(IncrementalFixture):
         asked.assert_not_called()
         self.assertEqual(0, result['stats']['pending'])
         self.assertEqual(set(), result['pending_sources'])
-        self.assertEqual([1, 2], [row['score_rank'] for row in storage.rows()])
+        # 已完成的不带名次(`storage` 的 `youtube_ready_unranked`);已排除的那条原样留着。
+        self.assertEqual([0, 2], [row['score_rank'] for row in storage.rows()])
 
     def test_bulk_deferral_preserves_protected_ranks_and_existing_cause(self):
         states = ('ready', 'excluded', 'failed', 'deferred')
@@ -41,7 +42,8 @@ class MetadataSnapshots(IncrementalFixture):
         self.set_state(5, 'candidate', score_rank=5)
         storage.defer_metadata([(row, candidates.PENDING, 456) for row in storage.rows()])
         rows = storage.rows()
-        self.assertEqual([1, 2, 3, 0, 0], [row['score_rank'] for row in rows])
+        # 第一条是 ready:名次在落成 ready 那一刻就清零了,跟挂起元数据无关;其余受保护的原样留着。
+        self.assertEqual([0, 2, 3, 0, 0], [row['score_rank'] for row in rows])
         self.assertTrue(all(row['reason'] == '本轮数量预算已用完，留待下轮' for row in rows[:4]))
         self.assertEqual(candidates.PENDING, rows[-1]['reason'])
         # 处理预算的延后不归元数据管:挂起元数据不许改写它的冷却(只释放 `metadata_deferral()`

@@ -190,8 +190,17 @@ class CompletionIntegrity(IncrementalFixture):
                 for key in ('last_success', 'last_error', 'failures', 'retry_at')}
 
     def assert_preserved(self, before, source=None):
+        """成功水位不前移;**连接账照现行口径已经清了**。
+
+        列表请求正常返回(零新增也算)就在认领写事务里清掉旧连接失败和订阅退避
+        (`collector.commit_listing`,`docs/decisions/youtube-intake.md`「列表请求正常返回后…」);
+        视频失败、内容未完成、取消、本机保存故障都只扣留 `last_success`,不再借订阅连接账来扣。
+        所以这里钉的是两件事:水位还在原处,连接账确实是干净的(而不是两边都没动)。
+        """
         after = self.standing(source)
-        self.assertEqual(before, {key: after[key] for key in before})
+        self.assertEqual(before['last_success'], after['last_success'], '没完成的一轮推进了成功水位')
+        self.assertEqual(('', 0, 0), (after['last_error'], after['failures'], after['retry_at']),
+                         '列表已经正常返回,旧连接失败和退避却还挂着')
 
     def collect(self, listing=None, probe=None, metadata_seconds=120):
         def metadata(row, *arguments, **kwargs):
@@ -380,22 +389,21 @@ class CompletionIntegrity(IncrementalFixture):
         self.assertIn('下一轮重算', self.stages.call_args.args[2])
         for source, before in previous:
             self.assert_preserved(before, source)
-            after = self.standing(source)
-            self.assertEqual('上轮提醒', after['last_notice'])
+            # 提醒按本轮、按频道写在写库边界上(`commit_notes`):这两个频道这一轮没有跳过或警告,
+            # 上一轮那句不许挂到这一轮来;本机保存故障只进本轮告警(`local_error`),不写进频道提醒。
+            self.assertEqual('', self.standing(source)['last_notice'])
 
     def test_success_lock_failure_is_local_and_does_not_penalize_sources(self):
         previous = self.prepared_sources()
-        original = collector.maintenance_lock
-        acquisitions = 0
+        original = collector.commit_successes
 
-        def lock():
-            nonlocal acquisitions
-            acquisitions += 1
-            if acquisitions == len(previous) + 1:
-                raise maintenance.LockBusy('索引正在跑')
-            return original()
+        def commit(sources, summary):
+            # 只让**成功落库那一次**取锁失败。按取锁次数数第几次的那一版,列表回执
+            # (`commit_listing`)也要取锁之后就注错了地方。
+            with patch.object(collector, 'maintenance_lock', side_effect=maintenance.LockBusy('索引正在跑')):
+                return original(sources, summary)
 
-        with patch.object(collector, 'maintenance_lock', side_effect=lock), \
+        with patch.object(collector, 'commit_successes', side_effect=commit), \
                 patch.object(collector, 'note_retry_targets') as retry:
             result, _ = self.collect()
         self.assert_finalization_failure(result, previous)
@@ -446,7 +454,7 @@ class CompletionIntegrity(IncrementalFixture):
         self.assertEqual(len(previous), result['deferred'])
         for source, before in previous:
             self.assert_preserved(before, source)
-            self.assertEqual('上轮提醒', self.standing(source)['last_notice'])
+            self.assertEqual('', self.standing(source)['last_notice'])
 
     def test_clean_cold_start_displays_unselected_videos_as_candidates(self):
         for number in range(2, 7):
@@ -464,4 +472,9 @@ class CompletionIntegrity(IncrementalFixture):
         response = self.client.get('/api/intake/youtube/ranking')
         self.assertEqual(200, response.status_code)
         self.assertEqual({'ready': 3, 'candidate': 45}, response.json()['counts'])
-        self.assertTrue(all(row['score_rank'] > 0 for row in response.json()['items']))
+        # 没选中的候选都带着名次;做完的那 3 条按现行口径不占名次(落成 ready 那一刻清零)。
+        # 逐条比,不按状态汇总:汇总成字典时同一状态只剩最后一条,前面那些名次错了也照样绿。
+        items = response.json()['items']
+        self.assertEqual(48, len(items))
+        self.assertEqual([], [row['video_id'] for row in items
+                              if (row['score_rank'] > 0) != (row['state'] == 'candidate')])

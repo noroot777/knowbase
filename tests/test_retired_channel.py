@@ -71,7 +71,6 @@ class RegistryTests(_Sandbox):
         # 毫无关系(口径同面板那句静态说明不许写死通道条数)。
         self.assertEqual([LIVE, *feed_types()], offered)
         self.assertEqual(LIVE, collectors.active_collector().name)
-        self.assertEqual(LIVE, collectors.wechat_channel())
         self.assertNotIn(RETIRED, collectors._REGISTRY)
 
     def test_the_retired_name_resolves_instead_of_raising(self):

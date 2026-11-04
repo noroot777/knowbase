@@ -7,7 +7,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import Mock, call, patch
 
-from src.crawler.local_wechat import LocalReader, LocalReaderError, parse_push, resolve_accounts
+from src.crawler.local_wechat import LocalReader, LocalReaderError, parse_push, session_biz
 from src.db import connection as conn_mod
 from src.utils.article_identity import article_identity, stable_article_id
 from tests.local_collect_case import LocalCollectCase, push
@@ -87,47 +87,30 @@ class PushTests(unittest.TestCase):
         self.assertEqual(2, len(articles))
         self.assertEqual(500, reader.messages.call_args.kwargs["offset"])
 
-    def test_mapping_uses_biz_even_when_names_collide_or_change(self):
-        reader = LocalReader()
-        reader.accounts = Mock(return_value=[{"username": "gh_wrong", "display_name": "档案名"},
-                                            {"username": "gh_right", "display_name": "改名后的号"}])
-        reader.messages = Mock(side_effect=lambda u, **kw: [push(biz="other" if u == "gh_wrong" else "biz-a")])
-        result = resolve_accounts(reader, [{"name": "档案名", "fakeid": "biz-a"}], {})
-        self.assertEqual({"biz-a": "gh_right"}, result)
+    def test_session_identity_finds_older_push_across_message_and_page_boundaries(self):
+        """「这个会话是哪个号」往历史里翻页找首篇图文(`session_biz`,`local_accounts` 在用)。
 
-    def test_mapping_finds_older_push_across_message_and_page_boundaries(self):
+        原先经由按名字找号的那份映射来钉;那份映射 4de9b84 起不再用于同步(随后删了),
+        同名取舍、发现缓存这些随它退役,翻页找首篇这一步还活着。
+        """
         for recent_count in (20, 499, 500, 1000):
             with self.subTest(recent_count=recent_count):
                 reader = LocalReader()
-                reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
                 history = [{"text": "服务通知"}] * recent_count + [push()]
-                # 匹配后还有整页历史；所有目标已找到时不应继续读取。
+                # 找到后还有整页历史；确认身份只要首篇，不应继续读取。
                 history += [{"text": "服务通知"}] * 1000
                 reader.messages = Mock(side_effect=lambda u, limit=500, offset=0: history[offset:offset + limit])
-                found = resolve_accounts(reader, [{"name": "档案名", "fakeid": "biz-a"}], {})
-                self.assertEqual({"biz-a": "gh_test"}, found)
+                self.assertEqual("biz-a", session_biz(reader, "gh_test"))
                 self.assertEqual([call("gh_test", offset=offset)
                                   for offset in range(0, recent_count + 1, 500)],
                                  reader.messages.call_args_list)
 
-    def test_mapping_exhausts_history_before_reporting_no_match(self):
+    def test_session_identity_exhausts_history_before_reporting_none(self):
         reader = LocalReader()
-        reader.accounts = Mock(return_value=[{"username": "gh_test", "display_name": "档案名"}])
         reader.messages = Mock(side_effect=[[{"text": "服务通知"}] * 500, []])
-        found = resolve_accounts(reader, [{"name": "档案名", "fakeid": "biz-a"}], {})
-        self.assertEqual({}, found)
+        self.assertIsNone(session_biz(reader, "gh_test"))
         self.assertEqual([call("gh_test", offset=0), call("gh_test", offset=500)],
                          reader.messages.call_args_list)
-
-    def test_one_unreadable_account_does_not_block_other_matches(self):
-        reader = LocalReader()
-        reader.accounts = Mock(return_value=[{"username": "gh_bad"}, {"username": "gh_ok"}])
-        reader.messages = Mock(side_effect=[[{"text": "服务通知"}] * 500,
-                                           LocalReaderError("读取失败"), [push()]])
-        errors = []
-        found = resolve_accounts(reader, [{"name": "档案名", "fakeid": "biz-a"}], {}, on_error=errors.append)
-        self.assertEqual({"biz-a": "gh_ok"}, found)
-        self.assertEqual(1, len(errors))
 
     def test_checksum_reaches_the_body_request(self):
         from src.utils.wechat_body import fetch_article_body_full
@@ -141,37 +124,6 @@ class PushTests(unittest.TestCase):
         self.assertEqual(["正文内容"], text)
         self.assertIn("正文内容", html)
         self.assertEqual(1, request.call_count)
-
-    def test_discovery_stops_after_identifying_unrelated_session(self):
-        reader = LocalReader()
-        reader.accounts = Mock(return_value=[{"username": "gh_known"}, {"username": "gh_other"}])
-        reader.messages = Mock(return_value=[push(biz="other")] * 500)
-        accounts = [{"name": "已找到", "fakeid": "biz-a"}, {"name": "未订阅", "fakeid": "missing"}]
-        found = resolve_accounts(reader, accounts, {"biz-a": "gh_known"})
-        self.assertEqual({"biz-a": "gh_known"}, found)
-        reader.messages.assert_called_once_with("gh_other", offset=0)
-
-    def test_discovery_caches_absence_and_invalidates_on_new_push_or_expiry(self):
-        for changed_timestamp in (True, False):
-            with self.subTest(changed_timestamp=changed_timestamp):
-                reader = LocalReader()
-                sessions = [{"username": "gh_other", "last_timestamp": 1},
-                            {"username": "gh_empty", "last_timestamp": 1}]
-                reader.accounts = Mock(return_value=sessions)
-                reader.messages = Mock(side_effect=lambda u, **kw: [push(biz="other")] if u == "gh_other" else [])
-                discovery = {}
-                accounts = [{"name": "目标", "fakeid": "biz-a"}]
-                with patch("src.crawler.local_wechat.time.time", return_value=1000):
-                    self.assertEqual({}, resolve_accounts(reader, accounts, {}, discovery=discovery))
-                    self.assertEqual({}, resolve_accounts(reader, accounts, {}, discovery=discovery))
-                self.assertEqual(2, reader.messages.call_count)
-                sessions[1]["last_timestamp"] = 2 if changed_timestamp else 1
-                reader.messages.return_value = [push()]
-                reader.messages.side_effect = None
-                with patch("src.crawler.local_wechat.time.time", return_value=1001 if changed_timestamp else 1301):
-                    self.assertEqual({"biz-a": "gh_empty"},
-                                     resolve_accounts(reader, accounts, {}, discovery=discovery))
-                self.assertEqual(3, reader.messages.call_count)
 
     def test_bad_push_does_not_block_later_history_and_is_reported(self):
         reader = LocalReader()

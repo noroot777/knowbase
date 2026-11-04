@@ -1,15 +1,13 @@
 import hashlib
-import json
 import time
 
 from kb import llm, llm_stages
-from kb.youtube import fulltext, json_output, media, model_response, transcripts, translation, translation_cache, translation_language, translation_pool
+from kb.youtube import fulltext, media, model_response, transcripts, translation, translation_cache, translation_language, translation_pool
 from kb.youtube.faults import local_fault
 
 
 VERSION = 'youtube-notes-v3'
 TITLE_STAGE = 'translate-title-v1'
-CONTEXT_LIMIT = 14000
 ORIGINS = {'local_cache': '已有本地原文转录', 'uploaded_captions': '作者提供的字幕',
            'automatic_captions': 'YouTube 自动字幕', 'local_asr': '本地语音转录'}
 
@@ -34,29 +32,9 @@ def call(prompt, selected, deadline, stopped):
     return request(prompt, selected, deadline, stopped)
 
 
-def cached(directory, cache, key, create, validate):
-    if key in cache:
-        try:
-            return validate(cache[key])
-        except (RuntimeError, ValueError, TypeError):
-            cache.pop(key)
-            if directory is not None:
-                media.save_json(directory / 'notes-cache.json', cache)
-    output = create()
-    result = validate(output)
-    cache[key] = output
-    if directory is not None:
-        media.save_json(directory / 'notes-cache.json', cache)
-    return result
-
-
 def signature(stage, selected, text):
     value = '\n'.join((VERSION, stage, selected.provider, selected.model_id, text))
     return hashlib.sha256(value.encode()).hexdigest()
-
-
-def translate(text, selected, deadline, stopped):
-    return translated_output(text, translation_request(text, selected, deadline, stopped))
 
 
 def native_chinese(text):
@@ -68,28 +46,6 @@ def original_comparison(blocks):
     if any(not native_chinese(block) for block in blocks):
         return '\n\n## 原文对照（未改写）\n\n' + '\n\n'.join(blocks)
     return ''
-
-
-def translation_request(text, selected, deadline, stopped, directory=None, cache=None):
-    if native_chinese(text):
-        return text
-    output = call(translation.prompt(text), selected, deadline, stopped)
-    try:
-        translation.render(text, output)
-    except RuntimeError:
-        translated = []
-        for position, unit in enumerate(translation.units(text)):
-            block = unit['text']
-            create = lambda block=block: call(translation.prompt(block), selected, deadline, stopped)
-            validate = lambda output, position=position: translation.unit_output(text, position, output)
-            if cache is not None:
-                key = signature('translate-unit-v1', selected, block)
-                translated.append(cached(directory, cache, key, create, validate))
-            else:
-                translated.append(validate(create()))
-        output = json.dumps({'translations': translated}, ensure_ascii=False)
-        translation.render(text, output)
-    return output
 
 
 def translated_output(text, output):
@@ -111,45 +67,6 @@ def cached_title(title, selected, cache):
         except (KeyError, RuntimeError, ValueError, TypeError):
             continue
     return None
-
-
-def translate_title(title, selected, deadline, stopped, cache):
-    try:
-        output = call(translation.prompt(title), selected, deadline, stopped)
-    except model_response.OutputError:
-        return title
-    try:
-        value = translated_output(title, output)
-    except (RuntimeError, ValueError, TypeError):
-        return title
-    cache[signature(TITLE_STAGE, selected, title)] = output
-    return value
-
-
-def summary_output(output, source=None, quotes=(), chinese_source=False):
-    """兼容历史摘要缓存的校验，不参与新的字幕翻译流程。"""
-    if not isinstance(output, str) or not output.strip():
-        raise RuntimeError('视频分段要点不是有效中文，原文和译文已缓存')
-    if not translation_language.chinese_output(output, source or '', quotes, chinese_source=chinese_source):
-        raise translation.LanguageError('视频分段要点不是有效中文，原文和译文已缓存', 'summary')
-    if len(output) > CONTEXT_LIMIT:
-        raise RuntimeError('分段要点未能压缩到可处理范围，原文和译文已缓存')
-    return output
-
-
-def note_payload(output, prompt='', source='', quotes=(), chinese_source=False):
-    """兼容历史结构化成稿的校验，不参与新的字幕翻译流程。"""
-    try:
-        payload = json_output.object_payload(output, prompt, required_fields=('title', 'summary', 'body'))
-    except (ValueError, TypeError, AttributeError):
-        raise RuntimeError('视频笔记返回格式无效，原文与译文已缓存') from None
-    if (not isinstance(payload, dict) or any(not isinstance(payload.get(field), str) or
-            not payload[field].strip() for field in ('title', 'summary', 'body'))):
-        raise RuntimeError('视频笔记不是完整中文成品，未入库')
-    if any(not translation_language.chinese_output(payload[field], source, quotes, chinese_source=chinese_source)
-           for field in ('title', 'summary', 'body')):
-        raise translation.LanguageError('视频笔记不是完整中文成品，未入库', 'note')
-    return payload
 
 
 def build(row, transcript, deadline, stopped):

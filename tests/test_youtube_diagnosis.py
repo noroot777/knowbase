@@ -24,7 +24,6 @@
 升级成「登录态无效」(人刚刚明明取到了元数据);命中缓存那一次没起过进程,不许拿上一轮的
 警告冒充这一轮的事实。
 """
-import json
 import sys
 import time
 from unittest.mock import patch
@@ -218,32 +217,18 @@ class DiagnosticsTravel(FakeToolCase):
     共用一份);熔断与拒绝那一半在 `tests/test_youtube_throttle.py`。
     """
 
-    def test_a_long_diagnostic_keeps_its_verdict_through_the_fallback_merge(self):
-        """两条发现路合并成一条失败时,**分档要跟着走**,不许让上层回去猜。
+    def test_a_long_diagnostic_keeps_its_verdict_through_the_channel_wrap(self):
+        """列表失败被包成频道那一条失败时,**分档要跟着走**,不许让上层回去猜。
 
         真机形态:YouTube 先回 429,yt-dlp 换 player 客户端重试一长串,最后印出机器人验证。
-        合并后那条 `FeedError` 只剩文字,而文字为了给人看已经两头裁过 —— 中段那一行 429
-        正好在被省略的那一段里,于是归并那句话说成「机器人验证」,照它的提示去重新登录
-        完全没用(用户本来就带着 cookie)。
+        包上路名之后那条 `FeedError`(`discovery._combined`)只剩文字,而文字为了给人看已经
+        两头裁过 —— 中段那一行 429 正好在被省略的那一段里,于是那句话说成「机器人验证」,
+        照它的提示去重新登录完全没用(用户本来就带着 cookie)。
         """
         summary = self.sync([('--dump-json', 'long')], channels=1)
         self.assertEqual(['rate_limited'], list(summary['walls']), summary['message'])
         self.assertIn('429', summary['message'])
         self.assertNotIn('机器人', summary['message'])
-    def test_the_merge_picks_the_stronger_evidence_not_the_first_one(self):
-        """两条发现路各报一档时,**按证据强度挑,不按到达先后**。
-
-        真机形态:逐条解析先报机器人验证,后路 flat 随后报 429。按先后挑的那一版对外说
-        「带上登录态通常能过这一道」,而用户本来就带着登录态 —— 这一轮是因为 429 停的,
-        而那句话让他去重新登录,一点用都没有。**停止原因、`walls` 分档、给的下一步必须
-        是同一件事。**
-        """
-        # 清单**按自己的顺序**匹配,而后路那次 argv 里两个标记都在(`--flat-playlist`
-        # 和 `--dump-json`)—— flat 要写在前面,否则后路也走成了逐条解析那一档。
-        summary = self.sync([('--flat-playlist', 'limit'), ('--dump-json', 'bot')], channels=1)
-        self.assertEqual(['rate_limited'], list(summary['walls']), summary['message'])
-        self.assertIn('429', summary['message'])
-        self.assertNotIn('带上登录态通常能过', summary['message'], 'bot 那一档的下一步盖掉了限流')
     def test_every_call_hands_its_diagnostic_to_the_open_ledger(self):
         """**每一次调用在完成边界交一次账**:退 0、退非 0、本机工具,都交。
 
@@ -329,13 +314,15 @@ class DiagnosticsTravel(FakeToolCase):
     def test_a_local_tool_failure_is_not_read_as_a_youtube_wall(self):
         """反过来钉一边:本机工具(ffmpeg、whisper-cli)的报错不许进 YouTube 那套判据。
 
-        `permission denied` 在 `login._COOKIE` 里 —— 按文本一判,一次 ffmpeg 权限错误就
-        成了「读不出 chrome 的 cookie」,面板让人去钥匙串放行,而问题在磁盘上。
-        **两份实现各有自己的红**:同一条命令不标上游时照旧判成 cookie 那一档。
+        `permission denied` 同一行带着 cookie 语境时归 cookie 那一档(`login._COOKIE_CONTEXTUAL`)
+        —— 按文本一判,一次本机工具的权限错误就成了「读不出 chrome 的 cookie」,面板让人去
+        钥匙串放行,而问题在磁盘上。**两份实现各有自己的红**:同一条命令按 YouTube 算时照旧
+        判成 cookie 那一档。(光秃秃一句 `permission denied` 如今在哪个上游都不算 cookie,
+        那样的输出两边都是 `unknown`,这条用例就分不出上游门控有没有起作用。)
         """
         script = self.root / 'noisy.py'
-        script.write_text('import sys\nsys.stdout.write("ERROR: permission denied\\n")\nsys.exit(1)\n',
-                          encoding='utf-8')
+        script.write_text('import sys\nsys.stdout.write("ERROR: could not copy cookies file: permission denied\\n")\n'
+                          'sys.exit(1)\n', encoding='utf-8')
         command = [sys.executable, str(script)]
         for origin, expected in ((LOCAL, 'unknown'), ('youtube', 'cookie_unreadable')):
             with self.subTest(origin=origin):
@@ -388,8 +375,9 @@ class DiagnosticsTravel(FakeToolCase):
     def test_a_merge_with_no_youtube_verdict_never_guesses_one(self):
         """几条失败里**一条可用的 YouTube 分档都没有**时,结论是「判不出来」,不是去猜。
 
-        触发例:详细读取那一路是本机写盘失败(`permission denied`,`LOCAL`),后路 flat
-        恢复之后遇到普通网络超时(YouTube,`unknown`)。两条都排不上名次,原先 `carrier`
+        触发例(当年在两条发现路之间,如今在字幕几种语言之间:`media` 里那几处 `login.merge`):
+        一条是本机写盘失败(`permission denied`,`LOCAL`),另一条是普通网络超时
+        (YouTube,`unknown`)。两条都排不上名次,原先 `carrier`
         既不标分档也不标来源 —— 于是 `coded` 拿**拼起来的那段文本**重判一次,本机那句
         `permission denied` 又被说成「读不出 cookie」,面板让人去钥匙串放行。
 
