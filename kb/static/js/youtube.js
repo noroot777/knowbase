@@ -87,8 +87,7 @@ function youtubeMaySay(token, region) {
 let youtubeBrowserDraft = false;
 const youtubePoolLabels = {creator_core:'核心创作者', interview_pool:'AI 访谈池',
   creator_watchlist:'观察名单（不自动排名）', quarantine:'隔离名单（不自动排名）'};
-const youtubeNumberFields = {max_videos:['每轮最多处理视频数',1,20], max_minutes:['每轮累计时长（分钟）',1,240],
-  max_video_minutes:['单条时长上限（分钟）',1,180], window_days:['候选回看天数',1,30],
+const youtubeNumberFields = {max_video_minutes:['单条时长上限（分钟）',1,180], window_days:['候选回看天数',1,30],
   rank_limit:['候选榜准入名次',1,50],
   run_seconds:['每轮处理时间上限（秒）',60,3600], asr_threads:['本地语音识别线程数',1,8]};
 

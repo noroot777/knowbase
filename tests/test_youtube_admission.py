@@ -201,11 +201,14 @@ class SingleRanking(YouTubeFixture):
             connection.execute("INSERT INTO feed_settings(kind,value) VALUES('youtube',?) "
                                "ON CONFLICT(kind) DO UPDATE SET value=excluded.value",
                                (json.dumps({'youtube': {'heat_limit': 12, 'value_limit': 25,
-                                                        'max_videos': 4}}),))
+                                                        'max_video_minutes': 40, 'max_videos': 4,
+                                                        'max_minutes': 120}}),))
         policy = of(reg.get_settings('youtube'))
         self.assertEqual(25, policy['rank_limit'])
-        self.assertEqual(4, policy['max_videos'], '同一份设置里别的字段不许被顺带丢掉')
+        self.assertEqual(40, policy['max_video_minutes'], '同一份设置里别的字段不许被顺带丢掉')
         self.assertNotIn('heat_limit', policy)
+        # 拆掉的那两道预算照样认、认了就丢(`settings.RETIRED`)。
+        self.assertFalse({'max_videos', 'max_minutes'} & policy.keys())
         # 显式给了新键就以新键为准;越界的旧值夹进范围,不悄悄换成默认的 10。
         self.assertEqual(7, of({'youtube': {'heat_limit': 12, 'rank_limit': 7}})['rank_limit'])
         self.assertEqual(1, of({'youtube': {'heat_limit': 0}})['rank_limit'])

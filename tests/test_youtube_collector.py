@@ -22,7 +22,7 @@ class YouTubeCollector(YouTubeFixture):
         def probe(row, *rest):
             self.calls.append(row['video_id'])
             self.assertEqual(5, len(storage.rows()))
-            self.assertTrue(all(row['score_rank'] for row in storage.rows()))
+            self.assertTrue(all(row['score_rank'] for row in storage.rows() if row['state'] != 'ready'))
             return {'duration': 600, 'language': 'en'}
 
         with patch.object(discovery, 'fetch', return_value=self.fetched), \
@@ -32,25 +32,58 @@ class YouTubeCollector(YouTubeFixture):
                 patch.object(collector.notes, 'build', side_effect=self.note):
             return collector.collect(FetchScope())
 
-    def test_rank_before_media_and_count_budget_then_dedup(self):
-        result = self.collect(max_videos=2)
+    def test_rank_before_media_then_finished_videos_yield_their_ranks(self):
+        result = self.collect(rank_limit=2)
         self.assertEqual(2, result['processed'])
         self.assertEqual(2, result['added'])
         self.assertEqual(2, len(self.calls))
         self.assertEqual(2, len([row for row in storage.rows() if row['committed']]))
         previous = set(self.calls)
         self.calls.clear()
-        result = self.collect(max_videos=2)
+        # 已入库的先拿掉再排名:第二轮的前 2 名是还没做的那两条,不是空转。
+        result = self.collect(rank_limit=2)
         self.assertEqual(2, result['added'])
+        self.assertEqual(2, len(self.calls))
         self.assertFalse(previous.intersection(self.calls))
+        # 刚做完的这一轮也不许挂着名次:面板读的是库里那一份,不等下一轮排名。
+        rows = storage.rows()
+        self.assertEqual({0}, {row['score_rank'] for row in rows if row['state'] == 'ready'})
+        self.assertEqual([3], [row['score_rank'] for row in rows if row['state'] != 'ready'])
+        listed = self.client.get('/api/intake/youtube/ranking').json()['items']
+        self.assertEqual({0}, {row['score_rank'] for row in listed if row['state'] == 'ready'})
 
-    def test_total_minutes_prevents_download_and_translation(self):
-        result = self.collect(max_videos=3, max_minutes=15)
-        self.assertEqual(1, result['processed'])
-        self.assertEqual(10, result['video_minutes'])
-        self.assertTrue(any('累计' in row['reason'] for row in storage.rows()))
+    def ranks(self, connection):
+        return dict(connection.execute('SELECT video_id,score_rank FROM youtube_videos').fetchall())
+
+    def test_any_writer_that_finishes_a_video_drops_its_rank_at_once(self):
+        storage.discover(self.source, self.fetched[:2])
+        first, second = (entry['video_id'] for entry in self.fetched[:2])
+        with reg.db() as connection:
+            connection.execute('UPDATE youtube_videos SET score_rank=1 WHERE video_id=?', (first,))
+            connection.execute('UPDATE youtube_videos SET score_rank=2 WHERE video_id=?', (second,))
+            connection.execute("UPDATE youtube_videos SET state='ready' WHERE video_id=?", (first,))
+            # 同一个连接里读:不经过下一次打开时的存量清理,只看写入那一刻。
+            self.assertEqual({first: 0, second: 2}, self.ranks(connection))
+
+    def test_stored_finished_video_with_a_stale_rank_is_cleared_on_open(self):
+        storage.discover(self.source, self.fetched[:2])
+        first, second = (entry['video_id'] for entry in self.fetched[:2])
+        with reg.db() as connection:
+            connection.execute('DROP TRIGGER youtube_ready_unranked')
+            connection.execute("UPDATE youtube_videos SET state='ready',score_rank=1 WHERE video_id=?", (first,))
+            connection.execute('UPDATE youtube_videos SET score_rank=2 WHERE video_id=?', (second,))
+            self.assertEqual({first: 1, second: 2}, self.ranks(connection))
+        with reg.db() as connection:
+            self.assertEqual({first: 0, second: 2}, self.ranks(connection))
+
+    def test_whole_admitted_rank_is_processed_without_count_or_minutes_budget(self):
+        result = self.collect(rank_limit=5)
+        self.assertEqual(5, result['processed'])
+        self.assertEqual(5, result['added'])
+        self.assertEqual(50, result['video_minutes'])
 
     def test_failed_video_preserves_good_notes_and_retry_backoff(self):
+        self.settings(rank_limit=3)
         with patch.object(discovery, 'fetch', return_value=self.fetched), \
                 patch.object(collector.notes, 'available', return_value=(True, '')), \
                 patch.object(collector.media, 'probe', return_value={'duration': 600}), \
@@ -107,7 +140,7 @@ class YouTubeCollector(YouTubeFixture):
         self.assertEqual(self.fetched[0]['video_id'], current[0]['video_id'])
 
     def test_chinese_notes_export_through_existing_pipeline(self):
-        self.collect(max_videos=1)
+        self.collect(rank_limit=1)
         with patch('kb.feeds.translate.available', return_value=False):
             result = collector.YouTubeCollector('youtube').materialize()
         self.assertEqual(1, len(result))

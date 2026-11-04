@@ -3,13 +3,18 @@ import shutil
 from pathlib import Path
 
 
-DEFAULTS = {'max_videos': 3, 'max_minutes': 60, 'max_video_minutes': 45,
+DEFAULTS = {'max_video_minutes': 45,
             'window_days': 7, 'rank_limit': 10,
             'run_seconds': 900, 'asr_enabled': True, 'asr_threads': 2,
             'whisper_model': '', 'ai_only': True, 'cookies_browser': 'chrome'}
-RANGES = {'max_videos': (1, 20), 'max_minutes': (1, 240), 'max_video_minutes': (1, 180),
+RANGES = {'max_video_minutes': (1, 180),
           'window_days': (1, 30), 'rank_limit': (1, 50),
           'run_seconds': (60, 3600), 'asr_threads': (1, 8)}
+#: 每轮条数和累计时长那两道预算已经拆掉(仓库主人拍板):一轮做多少只由候选榜准入名次
+#: (`rank_limit`,已入库的不占名次)和处理时间上限(`run_seconds`)决定。**键照旧要认**
+#: —— 存量设置里就有,`validate` 对不认识的键是整个抛,而它同时管读(`of`),
+#: 不认的话这一块面板连同登录态配置一起读不出来。认了就丢,不再生效。
+RETIRED = ('max_videos', 'max_minutes')
 #: 热度榜和价值榜合成一张榜之前的那两个上限。**仍然要认,一个都不许删** ——
 #: `validate` 对不认识的键是整个抛,而它同时管**读**存量设置(`of`)和保存;只认新键
 #: 的话,库里存着 `heat_limit` 的人一打开「我的订阅 → YouTube」整块面板就读不出来,
@@ -32,8 +37,9 @@ def fold_legacy(values):
 
 
 def validate(values):
-    if not isinstance(values, dict) or set(values) - DEFAULTS.keys() - set(LEGACY_LIMITS):
+    if not isinstance(values, dict) or set(values) - DEFAULTS.keys() - set(LEGACY_LIMITS) - set(RETIRED):
         raise ValueError('YouTube 设置字段不正确')
+    values = {key: item for key, item in values.items() if key not in RETIRED}
     merged = {**DEFAULTS, **fold_legacy(values)}
     for key, (low, high) in RANGES.items():
         if type(merged[key]) is not int or not low <= merged[key] <= high:

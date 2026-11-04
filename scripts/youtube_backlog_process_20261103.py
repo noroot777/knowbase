@@ -59,6 +59,11 @@ def degraded(row):
                 json.loads(row['note']).get('body_provenance', '').endswith('-fallback'))
 
 
+#: 一批交给 `collector.process` 几条。设置里原先那个 `max_videos` 已经拆掉
+#: (`settings.RETIRED`),这里沿用它当时的默认值,批次大小不变。
+BATCH = 3
+
+
 def process(budget, max_attempts):
     manifest, dates = load('manifest.json'), load('dates.json')
     results = load('processing.json') if (AUDIT / 'processing.json').exists() else {}
@@ -72,7 +77,7 @@ def process(budget, max_attempts):
     notice = ''
     with throttle.opened():
         while queue and deadline - time.monotonic() >= 30 and not throttle.notice():
-            selected, queue = queue[:policy['max_videos']], queue[policy['max_videos']:]
+            selected, queue = queue[:BATCH], queue[BATCH:]
             work = []
             for video_id in selected:
                 previous = results.get(video_id, {})

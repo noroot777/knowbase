@@ -94,7 +94,11 @@ def install():
 
     discovery.fetch = fetch
     collector.DISCOVERY_SPACING = 0
-    media.probe = lambda *arguments, **keywords: {'duration': 600, 'language': 'en'}
+    # 第 2 条报首映未开始:准入那一道把它延后重查,AI Search 因此留着一条真实的处理积压
+    # (条数预算拆掉之后,「本轮做不完的队尾」得靠这类延后来造)。
+    media.probe = lambda row, *arguments, **keywords: {
+        'duration': 600, 'language': 'en',
+        **({'live_status': 'is_upcoming'} if row['video_id'] == entries[1]['video_id'] else {})}
     narrative = ('The AI agent generates code. Test every change. ' * 6 +
                  'Verify the result rather than trusting model claims. The API budget is 64.')
     commands = '. '.join(['npm install --save-dev vitest && npx vitest run --coverage'] * 12)

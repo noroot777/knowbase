@@ -489,11 +489,11 @@ class YouTubeIntegrity(YouTubeFixture):
         with patch.object(collector, 'collect', return_value=summary):
             self.assertFalse(collector.YouTubeCollector('youtube').fetch(FetchScope()).whole)
 
-    def test_failed_source_not_cleared_when_other_source_spends_count_budget(self):
+    def test_failed_source_not_cleared_when_other_source_takes_the_only_rank(self):
         self.fail_source()
         other = self.channel(2)
         storage.discover(other, [self.entry(2, views=1000000)])
-        self.settings(max_videos=1)
+        self.settings(rank_limit=1)
         with patch.object(discovery, 'fetch', return_value=[]), patch.object(notes, 'available', return_value=(True, '')), \
                 patch.object(media, 'probe', return_value=self.metadata) as probe, \
                 patch.object(media, 'obtain', return_value=self.complete_transcript()), patch.object(notes, 'build', side_effect=self.note):
@@ -566,10 +566,10 @@ class YouTubeIntegrity(YouTubeFixture):
         self.assertFalse(audio.exists())
 
     def test_partial_settings_preserve_other_budgets(self):
-        self.settings(max_minutes=120, run_seconds=180, asr_threads=4)
-        self.client.put('/api/intake/youtube/settings', json={'youtube': {'max_videos': 1}})
+        self.settings(max_video_minutes=120, run_seconds=180, asr_threads=4)
+        self.client.put('/api/intake/youtube/settings', json={'youtube': {'rank_limit': 1}})
         values = reg.get_settings('youtube')['youtube']
-        self.assertEqual((1, 120, 180, 4), tuple(values[key] for key in ('max_videos', 'max_minutes', 'run_seconds', 'asr_threads')))
+        self.assertEqual((1, 120, 180, 4), tuple(values[key] for key in ('rank_limit', 'max_video_minutes', 'run_seconds', 'asr_threads')))
 
     def test_excluded_video_does_not_occupy_rank_admission(self):
         storage.discover(self.source, [self.entry_value, self.entry(2, views=1)])

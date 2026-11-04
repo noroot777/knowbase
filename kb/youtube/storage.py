@@ -83,6 +83,14 @@ def initialize(connection):
     sync_window.initialize(connection)
     connection.execute("UPDATE youtube_videos SET state='deferred',gate_code='legacy',retry_at=0 "
                        "WHERE state='excluded' AND gate_code=''")
+    # **已完成的不带名次**(`ranking.score` 先把它们拿掉再排)。守在库这一层:落成 ready 那一刻
+    # 就清零,不等下一轮排名 —— 否则这一轮刚做完的那几条在面板上一直挂着「第 1 名」直到再同步
+    # 一轮(审查实测)。触发器管住每一个写入方(包括还没重启的旧进程、一次性脚本);
+    # 下面那句只清它建起来之前就落下的存量。
+    connection.execute('''CREATE TRIGGER IF NOT EXISTS youtube_ready_unranked
+        AFTER UPDATE ON youtube_videos WHEN NEW.state='ready' AND NEW.score_rank<>0
+        BEGIN UPDATE youtube_videos SET score_rank=0 WHERE video_id=NEW.video_id; END''')
+    connection.execute("UPDATE youtube_videos SET score_rank=0 WHERE state='ready' AND score_rank<>0")
     connection.execute('''CREATE TRIGGER IF NOT EXISTS youtube_subscription_reset
         AFTER UPDATE OF url,feed_url,mode ON subscriptions
         WHEN OLD.kind='youtube' AND (NEW.url<>OLD.url OR NEW.feed_url<>OLD.feed_url OR NEW.mode<>OLD.mode)

@@ -172,7 +172,6 @@ def process(rows, settings, scope, summary, deadline):
     failures = {}
     spent = 0
     attempts = 0
-    probes = 0
     for position, row in enumerate(chosen):
         affected = row.get('eligible_sources', [row['source_id']])
         if any(str(source_id) in summary.get('local_ids', []) for source_id in affected):
@@ -195,11 +194,12 @@ def process(rows, settings, scope, summary, deadline):
             for pending in chosen[position:]:
                 storage.update(pending['video_id'], state='deferred', reason=notice)
             break
-        if not ready or attempts >= policy['max_videos'] or probes >= policy['max_videos'] * 3:
-            storage.update(row['video_id'], state='deferred', reason=why or '本轮数量预算已用完，留待下轮')
+        # 一轮做多少只由准入名次(`rank_limit`)和处理时间(`deadline`)决定 —— 条数和累计
+        # 时长那两道预算已经拆掉(仓库主人拍板,见 `settings.RETIRED`)。
+        if not ready:
+            storage.update(row['video_id'], state='deferred', reason=why)
             continue
         try:
-            probes += 1
             # 取成功时工具报的那一句也要收上来(账本,见 `caution`)——「元数据取到了」和
             # 「这一轮可能没带上登录态」可以同时成立。**一步一本账、出了这一步就交账**
             # (`heeded` 的 `finally`):一本账跨两步的话同一条警告会被后面那一步再记一遍
@@ -208,8 +208,11 @@ def process(rows, settings, scope, summary, deadline):
                 metadata = row.get('_metadata') or media.probe(
                     row, settings, deadline, stopped, scope.force or row['gate_code'] in TEMPORARY)
             if decision := gate(metadata, policy, row):
+                # 超长那一档把时长记下来:下一轮排名据此直接判掉它(`ranking.rejection`),
+                # 不再每轮占一个名额、再探一次。
+                measured = {'duration': float(metadata['duration'])} if decision.code == 'duration_budget' else {}
                 storage.update(row['video_id'], state=decision.state, reason=decision.reason,
-                               gate_code=decision.code, retry_at=time.time() + decision.retry_seconds)
+                               gate_code=decision.code, retry_at=time.time() + decision.retry_seconds, **measured)
                 continue
             # ── 事实日期一到手就闭环:换掉估算值,再用**同一个** `rejection` 重判资格 ──
             # 排名那一轮是拿估出来的日子排的(后路只有频道页的列表顺序),所以指定日期
@@ -246,13 +249,10 @@ def process(rows, settings, scope, summary, deadline):
             storage.update(row['video_id'], duration=duration)
             if storage.permanently_excluded(row):
                 continue
-            if spent + duration > policy['max_minutes'] * 60:
-                storage.update(row['video_id'], state='deferred', reason='超过本轮累计视频时长预算')
-                continue
             spent += duration
             attempts += 1
             storage.update(row['video_id'], state='processing', gate_code='', reason='正在读取字幕或音频，随后翻译为中文')
-            _stage('crawl', 'running', f"YouTube · 处理 {attempts}/{policy['max_videos']} · {row['entry']['title']}")
+            _stage('crawl', 'running', f"YouTube · 处理 {attempts}/{len(chosen)} · {row['entry']['title']}")
             # 字幕和音频**才真正用得上登录态**,所以这两步报的警告也要收上来(见 `caution`)。
             with heeded(summary, row.get('eligible_sources', [row['source_id']])):
                 transcript = media.obtain(row, metadata, settings, deadline, stopped)

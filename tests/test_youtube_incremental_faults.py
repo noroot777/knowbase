@@ -125,14 +125,14 @@ class LocalFaultRound(IncrementalFixture):
         source = reg.subscription('youtube', self.source['id'])
         self.before = {key: source[key] for key in ('last_success', 'last_error', 'failures', 'retry_at')}
 
-    def collect(self, listing=None):
+    def collect(self, listing=None, probe=None):
         with ExitStack() as stack:
             stack.enter_context(patch.object(login, 'readiness', return_value={
                 'ready': True, 'message': '', 'browser': 'chrome'}))
             stack.enter_context(patch.object(collector, 'DISCOVERY_SPACING', 0))
             stack.enter_context(patch.object(discovery, 'fetch', side_effect=listing or (lambda *arguments: [])))
-            stack.enter_context(patch.object(media, 'probe', side_effect=lambda row, *arguments, **kwargs:
-                                            self.metadata(row['entry'])))
+            stack.enter_context(patch.object(media, 'probe', side_effect=probe or (
+                lambda row, *arguments, **kwargs: self.metadata(row['entry']))))
             stack.enter_context(patch.object(notes, 'available', return_value=(True, '')))
             stack.enter_context(patch.object(notes, 'build', side_effect=self.note))
             stack.enter_context(patch.object(media, 'obtain', return_value=self.complete_transcript()))
@@ -234,9 +234,15 @@ class LocalFaultRound(IncrementalFixture):
             result = self.collect()
         self.assert_local_only(result)
 
-    def test_budget_state_write_busy_still_uses_local_fault_boundary(self):
-        self.settings(rank_limit=2, max_videos=1)
+    def test_deferred_state_write_busy_still_uses_local_fault_boundary(self):
+        self.settings(rank_limit=2)
         storage.discover(self.source, [self.entry(1), self.entry(2)])
+
+        def probe(row, *arguments, **kwargs):
+            # 第二条超过单条时长上限:准入那一道把它写成 deferred,正好撞上库忙。
+            long = row['video_id'] == self.entry(2)['video_id']
+            return {**self.metadata(row['entry']), 'duration': 3600 if long else 600}
+
         original = storage.update
 
         def update(video_id, **values):
@@ -245,7 +251,7 @@ class LocalFaultRound(IncrementalFixture):
             return original(video_id, **values)
 
         with patch.object(storage, 'update', side_effect=update):
-            result = self.collect()
+            result = self.collect(probe=probe)
         self.assert_local_only(result)
         self.assertEqual(1, result['processed'])
 
