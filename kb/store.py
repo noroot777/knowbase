@@ -225,7 +225,14 @@ def db_uri(db_path: Path) -> str:
     return Path(db_path).absolute().as_uri()
 
 
-def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
+def connect(db_path: Path = DB_PATH, *,
+            check_same_thread: bool = True) -> sqlite3.Connection:
+    """开一条 kb.db 连接。
+
+    `check_same_thread=False` 只给「一条连接被同一个逻辑任务**串行**地跨线程用」
+    的场合(流式响应的同步生成器,见 `kb/web/chat_api.py` 的 `api_ask_stream`);
+    会被并发使用的连接不许关这道检查。
+    """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     # **`uri=True` 不是为了主库,是为了这条连接上后来的 ATTACH**
     # (`extract_optin.attached_feeds` 要以只读挂 feeds.db)。ATTACH 认不认
@@ -237,7 +244,8 @@ def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
     # 也跟着不处理)。所以显式开,不押在构建选项上。
     # 开了之后主库路径自己也必须是规范 URI,否则含 `#`/`?` 的数据目录会被
     # 当成 query/fragment 截断 —— 那是同一枚硬币的另一面,见 `db_uri`。
-    conn = sqlite3.connect(db_uri(db_path), uri=True, timeout=30)
+    conn = sqlite3.connect(db_uri(db_path), uri=True, timeout=30,
+                           check_same_thread=check_same_thread)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = WAL")
