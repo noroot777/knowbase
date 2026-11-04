@@ -6,7 +6,8 @@
 - 独立 profile 的 cookie 库里**真有 X 的会话 cookie** 才算登录过;只起过一次 Chrome(文件在、一条
   cookie 都没有)、只开过登录窗口没登成的,落到不登录;
 - 判出来就**存进设置**:之后 profile 里的东西来了又走,通道都不变;
-- cookie 库读不了就不固化,这一次照旧按独立 profile 读,下一次再判;
+- cookie 库读不了、上级目录进不去、写入方正写到一半(读不到一致快照)都不固化,这一次照旧按独立
+  profile 读,下一次再判;
 - 存过的值照存着的读,不看 profile 脸色。
 
 cookie 库照 Chromium 的真实表结构摆(`cookies` 表、`host_key`/`name` 两列,值是加密的、这里不碰),
@@ -15,6 +16,7 @@ cookie 库照 Chromium 的真实表结构摆(`cookies` 表、`host_key`/`name` �
 跑:  python -m unittest tests.test_x_channel_default -v
 """
 import json
+import os
 import sqlite3
 import sys
 import unittest
@@ -107,6 +109,39 @@ class UnsavedChannelTests(ChannelBase):
         path.unlink()
         self.assertEqual(x_channels.GUEST, reg.get_settings('social')['x_channel'])
         self.assertEqual(x_channels.GUEST, self.stored())
+
+    @unittest.skipIf(os.geteuid() == 0, 'root 不受目录权限约束')
+    def test_a_store_behind_a_locked_directory_is_not_settled(self):
+        """上级目录进不去:库在不在答不出来,不是「没有」。权限回来之后照真实内容判、再存。"""
+        cookie_store(self.profile, [('.x.com', 'auth_token')])
+        locked = self.profile / 'Default'
+        locked.chmod(0)
+        try:
+            self.assertEqual(x_channels.BROWSER, reg.get_settings('social')['x_channel'])
+            self.assertIsNone(self.stored())
+        finally:
+            locked.chmod(0o755)
+        self.assertEqual(x_channels.BROWSER, reg.get_settings('social')['x_channel'])
+        self.assertEqual(x_channels.BROWSER, self.stored())
+
+    def test_a_store_mid_write_is_not_settled(self):
+        """写入方(Chrome)删了会话 cookie 还没提交:那一刻读不到一致快照,不许当成「没有」存下来。
+        删除要真溢出到库文件里(缓存压到一页、再改一批行),不然绕开锁直读文件也碰巧读到旧行。"""
+        path = cookie_store(self.profile, [('.x.com', 'auth_token')]
+                            + [('.example.org', f'pad{i}') for i in range(2000)])
+        writer = sqlite3.connect(path, isolation_level=None)
+        writer.execute('PRAGMA cache_size=1')
+        writer.execute('BEGIN EXCLUSIVE')
+        writer.execute("DELETE FROM cookies WHERE name='auth_token'")
+        writer.execute("UPDATE cookies SET path='/spill' WHERE host_key='.example.org'")
+        try:
+            self.assertEqual(x_channels.BROWSER, reg.get_settings('social')['x_channel'])
+            self.assertIsNone(self.stored())
+        finally:
+            writer.execute('ROLLBACK')
+            writer.close()
+        self.assertEqual(x_channels.BROWSER, reg.get_settings('social')['x_channel'])
+        self.assertEqual(x_channels.BROWSER, self.stored())
 
     def test_a_saved_channel_is_read_as_saved_whatever_the_profile_holds(self):
         """反过来钉一边:存过 browser 的没登录也是 browser(那就是「待配置」,不许替他换成能跑的那档),

@@ -392,11 +392,15 @@
   `Default/Network/Cookies`、`Default/Cookies`,只读名字和域名),**不是 `has_login_footprint` 那个文件在不在**:
   实测无头 Chrome 只开一次 about:blank 就建出 `Default/Cookies`,里面一条 cookie 都没有,只开过登录窗口没登成
   的同理。**判出来就存进设置**(`registry._settle_x_channel`,判据待在两条写自己的 WHERE 里,不盖掉另一个请求
-  刚存的值),之后照存着的读,不随 profile 里的文件来去变档;cookie 库读不了就**不固化**,这一次按 `browser`
-  读、下一次再判。存过的值一律照存着的读;退役名 `bridge` 照旧落 `browser`,不跟着默认走。**测试夹具和隔离服务要「没配好」那
+  刚存的值),之后照存着的读,不随 profile 里的文件来去变档;**拿不准就不固化**,这一次按 `browser`
+  读、下一次再判 —— `has_x_session` 只在每份候选库都**确认不存在**(`os.stat` 报 `FileNotFoundError`/`NotADirectoryError`)或**读到一致
+  快照、里面没有**时才答 False,别的一律 None:库读不了、上级目录进不去(`os.path.isfile` 会把这种答成 False,别用它筛)、
+  写入方正持着锁(Chrome 开着那份 profile 时就是这样)。**不许用 `immutable=1` 打开** —— 它绕开锁直读文件,读得到写入方
+  没提交、已溢出到库文件里的删除,答出一个假的「没有」并永久存成 `guest`。存过的值一律照存着的读;退役名 `bridge` 照旧落 `browser`,不跟着默认走。**测试夹具和隔离服务要「没配好」那
   一侧的,显式存一档 `browser`**(`tests/serve_sources.py`、`serve_reader_membership.py`、`intake_diag_fixture`)
   —— 不存的话新库那 51 个默认账号当场就绪,一点同步就真去问 FxTwitter / x.com。回归 `tests/test_x_channels.py`
-  的 `ChannelChoiceTests`、`tests/test_x_channel_default.py`(cookie 库照 Chromium 真实表结构摆,不 touch 空文件)。
+  的 `ChannelChoiceTests`、`tests/test_x_channel_default.py`(cookie 库照 Chromium 真实表结构摆,不 touch 空文件;锁住上级目录、写到一半没提交
+  各一条)。
 - **`guest` 不许依赖任何登录态,也不许在失败时退到要登录的路上**(用户的 X 号被冻结过,这一档就是为那种
   时候准备的)。它不起浏览器、不读 profile、不碰 cookie;长文同样走 `x_article.fill(session=None)`,没有浏览器后路。
   就绪判断只问接口地址是不是空的。

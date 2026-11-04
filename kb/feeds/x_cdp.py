@@ -43,6 +43,7 @@ import os
 import select
 import shutil
 import sqlite3
+import stat
 import subprocess
 import time
 from urllib.parse import quote
@@ -462,16 +463,31 @@ def has_x_session(profile) -> bool | None:
 
     **不能拿 `has_login_footprint` 当这件事的证据**:Chrome 只要在这个 profile 里起过一次(哪怕只开了
     空白页、登录窗口开了没登就关)就会建出那个文件,里面一条 cookie 都没有。只读名字和域名两列,
-    不碰加密的值。`immutable=1` 打开:Chrome 开着时也读得了,不跟它抢锁。
+    不碰加密的值。
 
-    返回 True / False;**读不了(库坏了、表结构不认识、权限)是 None** —— 拿不准,调用方别据此下定论。
+    返回 True / False / None。**False 只在每一份候选库都「确认不存在」或「读到一致快照、里面没有」时给**,
+    别的一律 None(拿不准,调用方别据此下定论 —— 迁移层会把 False 永久存成不登录):
+    - 存不存在用 `os.stat` 问,只有 `FileNotFoundError` / `NotADirectoryError` 算不存在。**不用
+      `os.path.isfile`**:它把「上级目录进不去」(`PermissionError`)也答成 False,库就这样被筛掉了;
+      在、但不是普通文件的,也算拿不准。
+    - **不用 `immutable=1`**:那是叫 SQLite 别加锁、当文件不会变,读得到写入方还没提交、已经溢出到库
+      文件里的删除。照常取共享锁读:单条 SELECT 就是一个读事务、一份一致快照;写入方正持着锁
+      (Chrome 开着、正在写)就等一小会儿,还忙就是 None,下一次再判。
     """
-    stores = [os.path.join(str(profile), *parts) for parts in _COOKIE_STORES]
-    stores = [path for path in stores if os.path.isfile(path)]
     unsure = False
-    for path in stores:
+    for parts in _COOKIE_STORES:
+        path = os.path.join(str(profile), *parts)
         try:
-            conn = sqlite3.connect(f'file:{quote(os.path.abspath(path))}?mode=ro&immutable=1', uri=True)
+            if not stat.S_ISREG(os.stat(path).st_mode):
+                unsure = True
+                continue
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        except OSError:
+            unsure = True
+            continue
+        try:
+            conn = sqlite3.connect(f'file:{quote(os.path.abspath(path))}?mode=ro', uri=True, timeout=0.5)
             try:
                 if conn.execute(_X_SESSION).fetchone():
                     return True
