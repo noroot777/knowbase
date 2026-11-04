@@ -77,7 +77,7 @@ try {
   await wait(`sourceKind === 'youtube' && sourceData?.sources?.length === 52`);
   check('52 个频道出现在订阅管理', true);
   await click('#source-view-manage');
-  await wait(`!!document.querySelector('#youtube-ranking') && !!document.querySelector('#youtube-rank_limit')`);
+  await wait(`!$('youtube-rank-open').hidden && !!document.querySelector('#youtube-rank_limit')`);
 
   // ── 登录态与工具那一块 ───────────────────────────────────────────────────
   await wait(`$('youtube-login').textContent.includes('已配置从')`);
@@ -174,6 +174,12 @@ try {
   await evaluate(`window.__restoreFetch(); true`);
   await wait(`!$('youtube-login-check').disabled`);
   await settled();
+  // 候选榜收在「候选排名」那颗按钮后面:订阅清单里一条都不许夹着它,点开才取、才显示。
+  check('订阅清单里不夹着候选榜', await evaluate(`
+    !$('source-list').querySelector('.youtube-rank-item') && $('youtube-rank-modal').style.display === 'none' &&
+    document.querySelectorAll('.source-subscription').length === 52`));
+  await click('#youtube-rank-open');
+  await wait(`$('youtube-rank-modal').style.display !== 'none' && document.querySelectorAll('.youtube-rank-item').length === 4`);
   check('候选榜显示且非 AI 视频被过滤', await evaluate(`
     document.querySelectorAll('.youtube-rank-item').length === 4 &&
     $('youtube-ranking').textContent.includes('轻量过滤')`));
@@ -188,6 +194,22 @@ try {
       cards[0].textContent.includes('第 1 名 / ') && cards[0].textContent.includes(' 分 · ') &&
       ranks.length === 4 && new Set(ranks).size === 4 && ranks[0] === '1';
   })()`), await evaluate(`document.querySelector('.youtube-rank-item')?.textContent`));
+  check('候选榜页头一行报总数和每轮准入名次', await evaluate(`
+    $('youtube-rank-count').textContent.startsWith('4 条') && $('youtube-rank-count').textContent.includes('每轮准入前 ')`),
+    await evaluate(`$('youtube-rank-count').textContent`));
+  await screenshot('ranking-desktop');
+  await fill('#youtube-rank-q', '不会有这个标题zz');
+  await wait(`$('youtube-ranking').textContent.includes('没有匹配的候选')`);
+  check('候选榜搜索筛掉不匹配的条目', await evaluate(`document.querySelectorAll('.youtube-rank-item').length === 0`));
+  await fill('#youtube-rank-q', '');
+  await send('Input.dispatchKeyEvent', {type:'keyDown', key:'Backspace', code:'Backspace', windowsVirtualKeyCode:8});
+  await send('Input.dispatchKeyEvent', {type:'keyUp', key:'Backspace', code:'Backspace', windowsVirtualKeyCode:8});
+  await wait(`document.querySelectorAll('.youtube-rank-item').length === 4`);
+  check('清空搜索后候选榜原样回来', true);
+  await send('Input.dispatchKeyEvent', {type:'keyDown', key:'Escape', code:'Escape', windowsVirtualKeyCode:27});
+  await send('Input.dispatchKeyEvent', {type:'keyUp', key:'Escape', code:'Escape', windowsVirtualKeyCode:27});
+  await wait(`$('youtube-rank-modal').style.display === 'none'`);
+  check('Esc 关掉候选榜并把焦点还给入口按钮', await evaluate(`document.activeElement === $('youtube-rank-open')`));
   check('设置里只剩一个准入名次，说明文字也不再提两榜', await evaluate(`
     !!$('youtube-rank_limit') && !document.querySelector('#youtube-heat_limit')
     && !document.querySelector('#youtube-value_limit')
@@ -438,7 +460,7 @@ try {
   await wait(`sourceData?.sources?.length === 53`);
   check('频道权重与订阅保存', await evaluate(`
     sourceData.sources.some(source=>source.name==='隔离验证频道' && JSON.parse(source.config).score_multiplier===1.5)`));
-  await evaluate(`$('source-list-pane').scrollTop=0; $('youtube-ranking').scrollIntoView({block:'start',behavior:'instant'}); true`);
+  await evaluate(`$('source-list-pane').scrollTop=0; true`);
   await screenshot('subscriptions-desktop');
   await click('#source-sync');
   await wait(`!!document.querySelector('#pipe-stage-list input[data-stage="extract"]') && !$('pipe-start').disabled`);
@@ -552,7 +574,9 @@ try {
   await screenshot('chinese-reader-desktop');
   await click('#subs-switch-rss');
   await wait(`sourceKind === 'rss' && $('source-title').textContent === 'RSS' && !$('source-add').disabled`);
-  check('切换 RSS 不遗留 YouTube 排名', await evaluate(`!document.querySelector('#youtube-ranking')`));
+  check('切换 RSS 不遗留 YouTube 排名', await evaluate(`
+    $('youtube-rank-open').hidden && $('youtube-rank-modal').style.display === 'none' &&
+    !$('source-list').querySelector('.youtube-rank-item')`));
   await click('#source-add');
   await wait(`$('source-editor').style.display !== 'none'`);
   check('切换 RSS 后恢复通用输入框', await evaluate(`!$('source-edit-feed').hidden && ! $('source-edit-fulltext').hidden && $('youtube-channel-fields').hidden`));
@@ -561,9 +585,17 @@ try {
   await click('#subs-switch-youtube');
   await wait(`sourceKind === 'youtube'`);
   await click('#source-view-manage');
-  await wait(`!!document.querySelector('#youtube-ranking')`);
+  await wait(`!$('youtube-rank-open').hidden`);
   check('窄屏无页面横向溢出', await evaluate(`document.documentElement.scrollWidth <= innerWidth + 1`));
   await screenshot('subscriptions-mobile');
+  await click('#youtube-rank-open');
+  await wait(`document.querySelectorAll('.youtube-rank-item').length > 0`);
+  check('窄屏候选榜弹窗不溢出', await evaluate(`(() => {
+    const box = document.querySelector('.youtube-rank-modal').getBoundingClientRect();
+    return box.left >= 0 && box.right <= innerWidth + 1 && document.documentElement.scrollWidth <= innerWidth + 1;
+  })()`));
+  await screenshot('ranking-mobile');
+  await evaluate(`closeYouTubeRanking(); true`);
   check('没有浏览器脚本异常', errors.length === 0, errors.join('\n'));
   writeFileSync(`${output}/checks.json`, JSON.stringify(results, null, 2));
   console.log(JSON.stringify(results));

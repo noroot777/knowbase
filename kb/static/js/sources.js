@@ -371,7 +371,7 @@ function sourceFilterChanged() {
   sourceSearchTimer = setTimeout(() => renderSourceView(true).catch(e => sourceError(e.message)), 220);
 }
 async function renderSourceView(reset = false, visibleCount = 0) {
-  if (typeof renderYouTubeRanking === 'function') renderYouTubeRanking();
+  if (typeof updateYouTubeRankingEntry === 'function') updateYouTubeRankingEntry();
   if (!sourceData) return;
   const kind = sourceKind, version = ++sourceItemsVersion;
   $('source-more').hidden = true;

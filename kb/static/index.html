@@ -339,7 +339,7 @@
   <div id="source-workbench" class="source-workbench">
     <section class="source-stream" aria-label="订阅内容与来源">
       <div class="source-filters"><input id="source-q" type="search" placeholder="搜索已收录的内容…" aria-label="搜索来源内容" oninput="sourceFilterChanged()"><select id="source-filter" aria-label="筛选订阅来源" onchange="sourceFilterChanged()"><option value="">全部订阅</option></select></div>
-      <div class="source-list-heading"><span id="source-items-count" role="status"></span><div class="source-list-tools"><button id="source-filter-reset" class="text-button" onclick="clearSourceFilters()" hidden>清除筛选</button><button id="source-list-expand" class="text-button" onclick="expandSourceList()" aria-pressed="false">只看列表</button></div></div>
+      <div class="source-list-heading"><span id="source-items-count" role="status"></span><div class="source-list-tools"><button id="source-filter-reset" class="text-button" onclick="clearSourceFilters()" hidden>清除筛选</button><button id="source-list-expand" class="text-button" onclick="expandSourceList()" aria-pressed="false">只看列表</button><button id="youtube-rank-open" class="text-button" hidden onclick="openYouTubeRanking()">候选排名</button></div></div>
       <div id="source-list-pane" tabindex="0" aria-label="订阅内容列表"><div id="source-list" aria-live="polite"></div><button id="source-more" class="ghost" hidden onclick="moreSourceItems()">加载更多</button></div>
     </section>
     <section id="source-reader" class="source-reader" aria-label="订阅内容阅读" tabindex="-1">
@@ -410,6 +410,12 @@
   <label><input id="source-edit-extract" type="checkbox"> 提取知识标签</label><p class="hint"><b>不开也能被全文和语义检索搜到</b>，只是没有标签。时间线、快讯这类看过就算的订阅不建议开，它们会把标签稀释掉。</p>
   <div id="source-edit-error" class="field-err" role="alert"></div><div class="source-form-actions"><button type="button" class="ghost" onclick="closeSourceEditor()">取消</button><button type="submit" id="source-edit-save">保存订阅</button></div>
   </form></div></div>
+
+<div id="youtube-rank-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closeYouTubeRanking()"><div class="modal youtube-rank-modal">
+  <header class="youtube-rank-heading"><h2 id="youtube-rank-title">候选排名</h2><span id="youtube-rank-count" role="status"></span><button class="icon-button" onclick="closeYouTubeRanking()" aria-label="关闭候选排名">×</button></header>
+  <input id="youtube-rank-q" type="search" placeholder="搜索标题或频道…" aria-label="搜索候选视频" oninput="filterYouTubeRanking()">
+  <div id="youtube-ranking" class="youtube-ranking" aria-live="polite"></div>
+</div></div>
 
 <div id="pipe-modal" class="modal-mask" style="display:none" onclick="if(event.target===this)closePipeModal()">
   <div class="modal pipe-setup">

@@ -209,35 +209,73 @@ function youtubeSettingsPayload() {
   return result;
 }
 
-async function renderYouTubeRanking() {
+// ── 候选排名 ──────────────────────────────────────────────────────────────
+//
+// 候选榜单独开一个弹窗,不压在订阅清单顶上:订阅管理那一栏只放订阅,榜单要看才点开。
+// 入口只在 YouTube 的订阅管理里露出,数据在**打开那一刻**才取 —— 关着的时候不为它
+// 发请求。代次 `youtubeRankGeneration` 只管这一个资源:关掉、重开、点重试都推一格,
+// 迟到的回包一个字都不许写进弹窗。
+let youtubeRankItems = [];
+const youtubeRankStates = {candidate:'候选待处理', deferred:'留待下轮', filtered:'轻量过滤', excluded:'不自动处理',
+  processing:'正在处理', ready:'中文笔记已完成', failed:'处理失败，待重试'};
+
+function updateYouTubeRankingEntry() {
+  const button = $('youtube-rank-open');
+  if (button) button.hidden = !(sourceKind === 'youtube' && sourceView === 'manage');
+}
+
+function openYouTubeRanking() {
+  $('youtube-rank-q').value = '';
+  $('youtube-rank-modal').style.display = '';
+  // 先同步登记一次弹窗,让它记下「关掉时把焦点还给谁」是这颗入口按钮,再把焦点挪到搜索框
+  // —— 等 MutationObserver 异步登记的话,它记下的就是已经挪进弹窗的那个搜索框。
+  syncOverlays();
+  $('youtube-rank-q').focus();
+  loadYouTubeRanking();
+}
+
+function closeYouTubeRanking() {
+  ++youtubeRankGeneration;
+  $('youtube-rank-modal').style.display = 'none';
+}
+
+async function loadYouTubeRanking() {
   const generation = ++youtubeRankGeneration;
-  if (sourceKind !== 'youtube' || sourceView !== 'manage' || !sourceActive()) return;
-  const selected = $('source-filter').value, query = $('source-q').value.trim().toLowerCase();
+  youtubeRankItems = [];
+  $('youtube-rank-count').textContent = '';
+  $('youtube-ranking').innerHTML = '<p class="hint">正在读取…</p>';
   try {
-    const result = await pipeJson('/api/intake/youtube/ranking' + (selected ? '?source_id=' + encodeURIComponent(selected) : ''));
-    if (generation !== youtubeRankGeneration || sourceKind !== 'youtube' || sourceView !== 'manage' || !sourceActive()) return;
-    $('youtube-ranking')?.remove();
-    const panel = document.createElement('section'); panel.id = 'youtube-ranking'; panel.className = 'youtube-ranking';
-    const items = result.items.filter(item => (item.title + ' ' + item.channel).toLowerCase().includes(query));
-    const states = {candidate:'候选待处理', deferred:'留待下轮', filtered:'轻量过滤', excluded:'不自动处理',
-      processing:'正在处理', ready:'中文笔记已完成', failed:'处理失败，待重试'};
-    // **只有一张榜**(仓库主人拍板:不再区分热度和价值),所以这里没有排序下拉 ——
-    // 一张榜只有一个顺序,给它配个「排序」反而让人以为还有另一种排法。
-    panel.innerHTML = `<h3>候选排名 · ${result.total} 条</h3><p class="hint">未入选的不下载、不转录；下面只列前 100 条。</p>
-      <div id="youtube-rank-items"></div>${result.total ? '' : '<p class="hint">点一次「同步全部」先取轻量候选，不会直接处理全部视频。</p>'}`;
-    $('source-list').prepend(panel);
-    $('youtube-rank-items').innerHTML = [...items].sort((left,right) => (left.score_rank || 100000) - (right.score_rank || 100000))
-      .map(item => `<article class="youtube-rank-item"><a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a>
-        <p class="hint">${esc(item.channel)} · 第 ${item.score_rank || '—'} 名 / ${item.score} 分 · ${item.approximate ? '播放量未知' : item.views + ' 次观看'}</p>
-        <p class="hint">${esc(states[item.state] || item.state)}${item.reason ? '：' + esc(item.reason) : ''}</p></article>`).join('') || '<p class="hint">没有匹配的候选。</p>';
+    const result = await pipeJson('/api/intake/youtube/ranking');
+    if (generation !== youtubeRankGeneration) return;
+    youtubeRankItems = [...result.items].sort((left,right) => (left.score_rank || 100000) - (right.score_rank || 100000));
+    // 页头那一行只放事实:总条数、一轮准入几名(「分批处理」就是这个数说的)、列表截在哪。
+    const limit = sourceData?.settings?.youtube?.rank_limit;
+    $('youtube-rank-count').textContent = [`${result.total} 条`, limit ? `每轮准入前 ${limit} 名` : '',
+      result.total > result.items.length ? `列出前 ${result.items.length} 条` : ''].filter(Boolean).join(' · ');
+    filterYouTubeRanking();
   } catch (error) {
-    if (generation !== youtubeRankGeneration || sourceKind !== 'youtube' || sourceView !== 'manage') return;
-    $('youtube-ranking')?.remove();
-    const panel = document.createElement('section'); panel.id = 'youtube-ranking'; panel.className = 'youtube-ranking';
+    if (generation !== youtubeRankGeneration) return;
     const message = document.createElement('p'); message.setAttribute('role','alert'); message.textContent = '候选排名读取失败：' + error.message;
-    const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'ghost'; retry.textContent = '重试排名'; retry.onclick = renderYouTubeRanking;
-    panel.append(message, retry); $('source-list').prepend(panel);
+    const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'ghost'; retry.textContent = '重试'; retry.onclick = loadYouTubeRanking;
+    $('youtube-ranking').replaceChildren(message, retry);
   }
+}
+
+function filterYouTubeRanking() {
+  const box = $('youtube-ranking');
+  if (box.querySelector('[role=alert]')) return;
+  if (!youtubeRankItems.length) {
+    box.innerHTML = '<p class="hint">还没有候选。点一次「同步全部」先取轻量候选，不会直接处理全部视频。</p>';
+    return;
+  }
+  const query = $('youtube-rank-q').value.trim().toLowerCase();
+  const items = youtubeRankItems.filter(item => (item.title + ' ' + item.channel).toLowerCase().includes(query));
+  // **只有一张榜**(仓库主人拍板:不再区分热度和价值),所以这里没有排序下拉 ——
+  // 一张榜只有一个顺序,给它配个「排序」反而让人以为还有另一种排法。
+  box.innerHTML = items.map(item => `<article class="youtube-rank-item"><a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a>
+      <p class="hint">${esc(item.channel)} · 第 ${item.score_rank || '—'} 名 / ${item.score} 分 · ${item.approximate ? '播放量未知' : item.views + ' 次观看'}</p>
+      <p class="hint">${esc(youtubeRankStates[item.state] || item.state)}${item.reason ? '：' + esc(item.reason) : ''}</p></article>`).join('')
+    || '<p class="hint">没有匹配的候选。</p>';
 }
 
 // ── 登录态与 yt-dlp ────────────────────────────────────────────────────────
