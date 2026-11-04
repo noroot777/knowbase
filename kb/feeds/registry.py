@@ -11,6 +11,7 @@ import ipaddress
 import json
 import re
 import sqlite3
+import time
 from contextlib import contextmanager, suppress
 # 直接按名字拿:`sqlite3` 这个模块名在测试里会被换成一个只有 connect/Row 的替身,
 # 而异常类不随连接工厂变 —— 走 `sqlite3.OperationalError` 会在那种替身下 AttributeError。
@@ -21,6 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
+from kb.feeds import read_ready
 from kb.feeds.exclusion import item_key
 # 库结构整组搬去了 `kb/feeds/schema.py`(这边到了 700 行上限):建表语句、后加的
 # 那些列、以及老库的补列。这里**原地再导出**:`reg.SCHEMA` / `reg._migrate` 那些
@@ -184,27 +186,20 @@ def _seed_defaults(conn) -> None:
     conn.execute("INSERT OR REPLACE INTO feed_meta VALUES('defaults-rev',?)", (str(DEFAULTS_REV),))
 
 
-#: 这个进程已经替哪几个库跑过一遍 `db()` 的建表补列(`(路径, inode)`)。
-_READ_READY: set[tuple[str, int]] = set()
+def _upgrade(conn) -> None:
+    """补列、种默认值、YouTube 那几张表。调用方必须已经持有写锁(见 `db()`)。
+
+    `read_ready` 拿它在内存库上从零建一遍,当作「当前代码要的样子」—— 两边走同一份,
+    改了迁移那一侧的比对标准自动跟上。"""
+    _migrate(conn)
+    _seed_defaults(conn)
+    from kb.youtube.storage import initialize
+    initialize(conn)
 
 
-def _schema_ready() -> None:
-    """只读连接之前,这个进程替这个库跑过一遍 `db()` 没有。
-
-    只读连接不建表也不补列,所以升级后的第一问若是它,就撞上 `no such column`。
-    只判「库文件在不在」不够:存量库一直都在,缺的是新代码要的那几列。每个进程
-    每个库跑一次就够 —— 补列只增不减,跑过之后对这个进程永远成立。认 inode 是因为
-    测试会在同一个路径上删掉重建一个库。
-    """
-    try:
-        stat = DB_PATH.stat()
-    except FileNotFoundError:
-        stat = None
-    if stat and (str(DB_PATH.resolve()), stat.st_ino) in _READ_READY:
-        return
-    with db():
-        pass
-    _READ_READY.add((str(DB_PATH.resolve()), DB_PATH.stat().st_ino))
+def _build(conn) -> None:
+    conn.executescript(SCHEMA)
+    _upgrade(conn)
 
 
 @contextmanager
@@ -216,8 +211,15 @@ def read_db(timeout=30):
     多久,这一问就卡多久(实测握 3 秒,「问题与待办」的概览和列表各卡 3 秒)。WAL
     下只读连接不跟写入方抢,读到的是开始那一刻提交过的快照。
     """
-    _schema_ready()
-    conn = sqlite3.connect(DB_PATH.resolve().as_uri() + '?mode=ro', uri=True, timeout=timeout)
+    deadline = time.monotonic() + timeout
+
+    def migrate(left):
+        with db(timeout=left):
+            pass
+    # 库已经是当前样子就不碰写锁;真要迁也只等 `timeout` 里剩下的那点(`read_ready`)。
+    read_ready.ensure(DB_PATH, _build, migrate, deadline)
+    conn = sqlite3.connect(DB_PATH.resolve().as_uri() + '?mode=ro', uri=True,
+                           timeout=max(0.0, deadline - time.monotonic()))
     conn.row_factory = sqlite3.Row
     try:
         conn.execute('PRAGMA query_only=ON')
@@ -245,11 +247,9 @@ def db(timeout=30):
         # 补列也在这把写锁里:它先读列集合再 ALTER,锁外跑的话两个首访连接会
         # 读到同一份旧列集合,后一个 ALTER 报 duplicate column(见 `_migrate`)。
         conn.execute('BEGIN IMMEDIATE')
-        _migrate(conn)
-        _seed_defaults(conn)
-        from kb.youtube.storage import initialize
-        initialize(conn)
+        _upgrade(conn)
         conn.commit()
+        read_ready.mark(DB_PATH)
         yield conn
         conn.commit()
     except Exception:
