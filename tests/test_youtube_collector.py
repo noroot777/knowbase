@@ -45,9 +45,36 @@ class YouTubeCollector(YouTubeFixture):
         self.assertEqual(2, result['added'])
         self.assertEqual(2, len(self.calls))
         self.assertFalse(previous.intersection(self.calls))
-        ranks = {row['video_id']: row['score_rank'] for row in storage.rows()}
-        self.assertEqual({0}, {ranks[video_id] for video_id in previous})
-        self.assertEqual([1, 2], sorted(ranks[video_id] for video_id in self.calls))
+        # 刚做完的这一轮也不许挂着名次:面板读的是库里那一份,不等下一轮排名。
+        rows = storage.rows()
+        self.assertEqual({0}, {row['score_rank'] for row in rows if row['state'] == 'ready'})
+        self.assertEqual([3], [row['score_rank'] for row in rows if row['state'] != 'ready'])
+        listed = self.client.get('/api/intake/youtube/ranking').json()['items']
+        self.assertEqual({0}, {row['score_rank'] for row in listed if row['state'] == 'ready'})
+
+    def ranks(self, connection):
+        return dict(connection.execute('SELECT video_id,score_rank FROM youtube_videos').fetchall())
+
+    def test_any_writer_that_finishes_a_video_drops_its_rank_at_once(self):
+        storage.discover(self.source, self.fetched[:2])
+        first, second = (entry['video_id'] for entry in self.fetched[:2])
+        with reg.db() as connection:
+            connection.execute('UPDATE youtube_videos SET score_rank=1 WHERE video_id=?', (first,))
+            connection.execute('UPDATE youtube_videos SET score_rank=2 WHERE video_id=?', (second,))
+            connection.execute("UPDATE youtube_videos SET state='ready' WHERE video_id=?", (first,))
+            # 同一个连接里读:不经过下一次打开时的存量清理,只看写入那一刻。
+            self.assertEqual({first: 0, second: 2}, self.ranks(connection))
+
+    def test_stored_finished_video_with_a_stale_rank_is_cleared_on_open(self):
+        storage.discover(self.source, self.fetched[:2])
+        first, second = (entry['video_id'] for entry in self.fetched[:2])
+        with reg.db() as connection:
+            connection.execute('DROP TRIGGER youtube_ready_unranked')
+            connection.execute("UPDATE youtube_videos SET state='ready',score_rank=1 WHERE video_id=?", (first,))
+            connection.execute('UPDATE youtube_videos SET score_rank=2 WHERE video_id=?', (second,))
+            self.assertEqual({first: 1, second: 2}, self.ranks(connection))
+        with reg.db() as connection:
+            self.assertEqual({first: 0, second: 2}, self.ranks(connection))
 
     def test_whole_admitted_rank_is_processed_without_count_or_minutes_budget(self):
         result = self.collect(rank_limit=5)

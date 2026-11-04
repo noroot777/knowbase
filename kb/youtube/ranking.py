@@ -65,26 +65,34 @@ def rejection(row, settings, scope, now, floor):
         return row['reason'] or '已确认不可自动处理', True
     if not published:
         return '缺少可靠的发布时间', True
+    verdicts = []
     if scope.ranged and not scope.since <= published.astimezone(TZ).date().isoformat() <= scope.until:
-        return '不在本次指定日期范围', not estimated
+        verdicts.append(('不在本次指定日期范围', not estimated))
     discovered_after = stamp(row.get('discovery_after'))
     if not scope.ranged and discovered_after is not None and published < discovered_after:
-        return '早于本次频道发现窗口', not estimated
+        verdicts.append(('早于本次频道发现窗口', not estimated))
     if not scope.ranged and not row['repair_pending'] and (published < floor or
             (history is not None and published < history)):
-        return '早于本轮窗口或订阅历史下界', not estimated
+        verdicts.append(('早于本轮窗口或订阅历史下界', not estimated))
     if published > now + timedelta(minutes=5):
-        return '尚未发布', not estimated
+        verdicts.append(('尚未发布', not estimated))
     if settings['ai_only'] and not AI.search(entry['title'] + ' ' + entry.get('description', '')):
-        return '标题与简介未发现明确的 AI 相关信息', not estimated
+        verdicts.append(('标题与简介未发现明确的 AI 相关信息', not estimated))
     # **探到过、确实超过单条时长上限的,不再占准入名次。** 只留 `deferred` 的话它每轮都排回
     # 前几名、每轮再探一次、再被 `admission.gate` 拒一次 —— 名额被它永久占着,后面的普通
     # 视频永远轮不到(实测前 10 名里两条长视频连占三天)。判据是**当前**上限:用户调高之后
     # 下一轮这里放行,它照常回榜。已完成的不受影响(它们根本不排名,见 `score`)。
     limit = settings['max_video_minutes']
     if row['state'] not in ('ready', 'processing') and row['duration'] > limit * 60:
-        return f"超过单条视频时长预算（{row['duration'] / 60:.0f} 分钟，上限 {limit} 分钟）", True
-    return '', True
+        verdicts.append((f"超过单条视频时长预算（{row['duration'] / 60:.0f} 分钟，上限 {limit} 分钟）", True))
+    # **判得准的拒绝胜过任何一道「还判不了」,不论排在哪一道。** 逐道早退的话,估算日期或
+    # 空简介那几道会抢在后面的事实之前返回「判不了」:探到超长的估算条目就这样照旧拿到
+    # 第 1 名、每轮被选中(审查冒烟实测)。全是事实值的条目只会落进判得准那一支,
+    # 结论和逐道早退一模一样。
+    for reason, verified in verdicts:
+        if verified:
+            return reason, True
+    return verdicts[0] if verdicts else ('', True)
 
 
 def qualify(row, settings, scope, now, floor):
@@ -139,9 +147,8 @@ def score(rows, settings, scope, now=None):
         # 视频。留着名次的话,窗口里靠前的陆续入库之后前 N 名大半是已完成的,一轮只剩
         # 一两条可做(实测前 10 名里 7 条已入库)。频道基线照旧把它们算进去 —— 那是
         # 「这个频道平时多少播放」,跟谁还没做无关。
+        # 名次在它变成 ready 那一刻就清零了(`storage` 的 `youtube_ready_unranked`),这里只管不给它排。
         if row['state'] == 'ready':
-            if row['score_rank']:
-                storage.update(row['video_id'], score_rank=0)
             continue
         representative, reasons, unknown = qualify(row, settings, scope, now, floor)
         if representative is None:

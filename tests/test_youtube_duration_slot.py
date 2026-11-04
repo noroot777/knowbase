@@ -80,6 +80,28 @@ class DurationSlot(YouTubeFixture):
         self.assertEqual(('ready', '中文内容笔记已完成'), (self.row(self.long)['state'], self.row(self.long)['reason']))
         self.assertEqual(1, reg.items('youtube')['total'])
 
+    def test_confirmed_over_long_beats_an_estimated_unknown(self):
+        """估算条目(日期估的、简介空、标题没提 AI)探到超长:判得准的那一道要赢过「还判不了」。"""
+        estimated = {**self.long, 'title': 'A practical workflow', 'description': '', 'views': 0,
+                     'approximate': True}
+        storage.discover(self.source, [estimated, self.short])
+        storage.update(estimated['video_id'], state='deferred', duration=3600,
+                       gate_code='duration_budget', reason='超过单条视频时长预算')
+        policy = reg.get_settings('youtube')['youtube']
+        ranked = ranking.score(storage.rows(), policy, FetchScope())
+        self.assertEqual([self.short['video_id']], [row['video_id'] for row in ranking.select(ranked, policy)])
+        long = self.row(estimated)
+        self.assertEqual(('filtered', 0), (long['state'], long['score_rank']))
+        self.assertIn('60 分钟，上限 45 分钟', long['reason'])
+
+    def test_estimated_unknown_without_a_known_duration_still_waits_for_verification(self):
+        estimated = {**self.long, 'title': 'A practical workflow', 'description': '', 'views': 0,
+                     'approximate': True}
+        storage.discover(self.source, [estimated])
+        ranked = ranking.score(storage.rows(), reg.get_settings('youtube')['youtube'], FetchScope())
+        self.assertEqual([1], [row['score_rank'] for row in ranked])
+        self.assertEqual(ranking.UNKNOWN, self.row(estimated)['reason'])
+
     def test_unknown_duration_still_competes(self):
         storage.discover(self.source, [self.long])
         storage.update(self.long['video_id'], state='deferred', reason='超过单条视频时长预算',
