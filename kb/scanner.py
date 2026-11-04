@@ -39,6 +39,20 @@ class Doc:
 
 _FM_RE = re.compile(r"\A---\n(.*?)\n---\n?", re.S)
 
+# **frontmatter 的 YAML 只有这一种读法**,全仓库读 frontmatter 都过下面两处
+# (`parse_frontmatter` 和 `_doc_from_file` 那道校验)。用 libyaml 那一版:纯 Python 的
+# SafeLoader 读一遍全库(近三万篇)要 8 秒多,libyaml 1 秒;同步中心的待处理数每次
+# 要扫两遍全库,纯 Python 版加上原来一篇解析三遍,一次查询就超过 60 秒、页面永远
+# 读不到(`pipe_fresh.js` 那条「读取失败：连接超时」)。在真实库上逐篇比过,两版
+# 读出的结果一致;已知的差别只有 `键:<Tab>值` 这种写法 libyaml 读得出、纯 Python 版
+# 报错。没装 libyaml 的环境退回纯 Python 版,同一台机器上仍然只有一种读法。
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def load_frontmatter_yaml(block: str):
+    """读 frontmatter 那一段 YAML。出错照常抛 `yaml.YAMLError`,吞不吞由调用方定。"""
+    return yaml.load(block, Loader=_YAML_LOADER)
+
 # wiki 双链与图谱尾区只是阅读层装饰(linkify 后处理产物),索引/向量必须
 # 看到与 linkify 前完全一致的正文:[[页|原文]]→原文,[[页]]→页,
 # <!-- kb-graph --> 之后整段丢弃。这保证 linkify 不改变 chunk 与 embedding。
@@ -58,7 +72,7 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     if not m:
         return {}, text
     try:
-        fm = yaml.safe_load(m.group(1)) or {}
+        fm = load_frontmatter_yaml(m.group(1)) or {}
         if not isinstance(fm, dict):
             fm = {}
     except yaml.YAMLError:
@@ -155,7 +169,8 @@ def frontmatter_input(fm: dict, md_path: Path) -> tuple[str, str]:
 
 
 def doc_from_text(text: str, md_path: Path, src: Source,
-                  rel_path: str | None = None) -> Doc:
+                  rel_path: str | None = None, *,
+                  parsed: tuple[dict, str] | None = None) -> Doc:
     """一份 md 文本在**索引眼里**的那篇 Doc —— upsert 进库的每一样都出自这里。
 
     从 `_doc_from_file` 原样抽出来(它现在只管读文件)。抽的理由:登记「这份
@@ -171,8 +186,11 @@ def doc_from_text(text: str, md_path: Path, src: Source,
     让这个函数去比两个模块级常量,等于把判据押在「这两处在每个夹具里都一起被
     打桩」上,而失配时它抛的是 `ValueError: not in the subpath`:登记那一步整个
     炸掉,看上去像是回写坏了。调用方手里本来就有那个相对路径。
+
+    `parsed` 是调用方已经拆好的 `parse_frontmatter(text)`(`_doc_from_file` 校验时
+    解析过一遍),给了就不再解析 —— 每篇只解析一次,扫全库的开销才不翻倍。
     """
-    fm, body = parse_frontmatter(text)
+    fm, body = parsed if parsed is not None else parse_frontmatter(text)
 
     tags = frontmatter_tags(fm)
 
@@ -194,7 +212,8 @@ def doc_from_text(text: str, md_path: Path, src: Source,
         body=normalize_body(body),
         content_hash=file_hash(text),
         meta=fm,
-        body_version=body_version(text),
+        # 就是 `body_version(text)`:那个函数拆出来的正文正是这里的 `body`
+        body_version=body_version_of(body),
     )
 
 
@@ -206,16 +225,20 @@ def _doc_from_file(md_path: Path, src: Source) -> Doc:
         raise ValueError("扫描期间文件发生变化")
     if not text.strip():
         raise ValueError("文件为空,可能尚未写完")
+    # 严格版的 `parse_frontmatter`:读坏了抛(由 `scan_all` 记成读失败),读好了就是
+    # 它会给出的那一对,交给 `doc_from_text` 不再解析第二遍。
+    parsed = ({}, text)
     if text.startswith('---\n'):
         match = _FM_RE.match(text)
         if match is None:
             raise ValueError("frontmatter 尚未写完")
-        metadata = yaml.safe_load(match.group(1))
+        metadata = load_frontmatter_yaml(match.group(1))
         if metadata is not None and not isinstance(metadata, dict):
             raise ValueError("frontmatter 不是映射")
+        parsed = (metadata or {}, text[match.end():])
     if lineage != capture(md_path, src.root, VAULT_ROOT):
         raise ValueError('读取原文期间目录身份发生变化')
-    doc = doc_from_text(text, md_path, src)
+    doc = doc_from_text(text, md_path, src, parsed=parsed)
     doc.scan_evidence = DocumentEvidence(
         doc.path, doc.source, doc.content_hash, *lineage)
     return doc
