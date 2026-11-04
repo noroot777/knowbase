@@ -71,14 +71,14 @@ class DurationSlot(YouTubeFixture):
         self.assertEqual('ready', self.row(self.long)['state'])
         self.assertEqual(2, reg.items('youtube')['total'])
 
-    def test_finished_long_video_keeps_its_rank_after_the_limit_is_lowered(self):
+    def test_finished_long_video_stays_finished_after_the_limit_is_lowered(self):
         self.settings(max_video_minutes=90)
         self.collect()
         self.assertEqual('ready', self.row(self.long)['state'])
         self.settings(max_video_minutes=45)
-        ranked = ranking.score(storage.rows(), reg.get_settings('youtube')['youtube'], FetchScope())
-        self.assertEqual(1, next(row['score_rank'] for row in ranked
-                                 if row['video_id'] == self.long['video_id']))
+        ranking.score(storage.rows(), reg.get_settings('youtube')['youtube'], FetchScope())
+        self.assertEqual(('ready', '中文内容笔记已完成'), (self.row(self.long)['state'], self.row(self.long)['reason']))
+        self.assertEqual(1, reg.items('youtube')['total'])
 
     def test_unknown_duration_still_competes(self):
         storage.discover(self.source, [self.long])

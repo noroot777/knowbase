@@ -1,4 +1,7 @@
+import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from kb.collectors import FetchScope
@@ -21,6 +24,24 @@ class YouTubeSourceStatus(YouTubeFixture):
                 patch.object(discovery, 'fetch', side_effect=fetch), \
                 patch.object(notes, 'available', return_value=(False, '本测试不调用模型')):
             return collector.collect(FetchScope())
+
+    @contextmanager
+    def budget_runs_out_after_each_note(self):
+        """每出一条成品,处理时间预算就当场用尽(`collector.process` 的 deadline 那一道)。
+
+        这一轮剩下的候选因此落成 `deferred`、留待下轮 —— 条数预算拆掉之后,「本轮做不完的
+        队尾」只剩这一种来路。只换 `collector` 自己看到的钟,别的模块照旧用真钟。
+        """
+        clock = {'offset': 0.0}
+        shim = SimpleNamespace(time=time.time, sleep=time.sleep,
+                               monotonic=lambda: time.monotonic() + clock['offset'])
+
+        def note(row, *arguments):
+            clock['offset'] += 10 ** 6
+            return self.note(row, *arguments)
+
+        with patch.object(collector, 'time', shim):
+            yield note
 
     def summary(self, **values):
         return {'added': 0, 'stopped': False, 'message': '全局汇总中其他频道的错误不能落到本订阅',
@@ -283,7 +304,7 @@ class YouTubeSourceStatus(YouTubeFixture):
         self.assertIn('failed 的旧登录错误', notice)
         for state in states[1:]:
             self.assertNotIn(state + ' 的旧登录错误', notice)
-        storage.update(entries[0]['video_id'], state='deferred', reason='本轮数量预算已用完，留待下轮')
+        storage.update(entries[0]['video_id'], state='deferred', reason='视频处理已停止或时间预算用尽，未完成的内容留待下轮')
         self.assertTrue(collector.commit_notes(source, [], self.summary(), pending_failure=True))
         notice = reg.subscription('youtube', source['id'])['last_notice']
         self.assertNotIn('旧登录错误', notice)
@@ -295,19 +316,18 @@ class YouTubeSourceStatus(YouTubeFixture):
         source = self.sources[0]
         entries = [self.entry(number) for number in (940, 941, 942)]
         message = 'Sign in to confirm you are not a bot'
-        self.settings(max_videos=3)
         with patch.object(discovery, 'fetch', side_effect=lambda selected, *arguments:
                           entries if selected['id'] == source['id'] else []), \
                 patch.object(collector.login, 'readiness', return_value={'ready': True, 'browser': 'firefox'}), \
                 patch.object(collector, 'DISCOVERY_SPACING', 0), patch.object(notes, 'available', return_value=(True, '')), \
                 patch.object(media, 'probe', return_value={'duration': 600}), \
                 patch.object(media, 'obtain', side_effect=media.ToolFailure(message, message, 'bot_wall')) as obtain, \
-                patch.object(notes, 'build', side_effect=self.note):
+                self.budget_runs_out_after_each_note() as note, \
+                patch.object(notes, 'build', side_effect=note):
             collector.collect(FetchScope(force=True))
             rows = storage.rows([source['id']])
             self.assertEqual(['failed'] * 3, [row['state'] for row in rows])
             self.assertIn(message, reg.subscription('youtube', source['id'])['last_notice'])
-            self.settings(max_videos=1)
             obtain.side_effect = None
             obtain.return_value = self.complete_transcript()
             for round_number in range(2):
@@ -321,7 +341,7 @@ class YouTubeSourceStatus(YouTubeFixture):
                     self.assertEqual(2 - round_number, len(waiting))
                     self.assertTrue(all(row['state'] == 'deferred' for row in waiting))
                     self.assertTrue(all(message in row['last_error'] for row in waiting))
-                    self.assertTrue(all('本轮数量预算已用完' in row['reason'] for row in waiting))
+                    self.assertTrue(all('时间预算用尽' in row['reason'] for row in waiting))
                     stored = reg.subscription('youtube', source['id'])
                     self.assertNotIn(message, stored['last_notice'])
                     self.assertIn('未完成处理', stored['last_notice'])
@@ -347,13 +367,12 @@ class YouTubeSourceStatus(YouTubeFixture):
         self.assertIn(str(source['id']), result['failed_ids'])
         self.assertNotIn(str(source['id']), result['succeeded_ids'])
 
-    def test_complete_listing_with_count_budget_tail_clears_old_connection_failure(self):
+    def test_complete_listing_with_budget_tail_clears_old_connection_failure(self):
         source = self.sources[0]
         previous = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
         with reg.db() as connection:
             connection.execute("UPDATE subscriptions SET last_success=?,last_error='上一轮连接失败：HTTP Error 429',"
                                'failures=3,retry_at=1 WHERE id=?', (previous, source['id']))
-        self.settings(max_videos=1)
         entries = [self.entry(number) for number in (971, 972)]
 
         def fetch(selected, *arguments):
@@ -368,7 +387,8 @@ class YouTubeSourceStatus(YouTubeFixture):
                 patch.object(notes, 'available', return_value=(True, '')), \
                 patch.object(media, 'probe', return_value={'duration': 600}), \
                 patch.object(media, 'obtain', return_value=self.complete_transcript()), \
-                patch.object(notes, 'build', side_effect=self.note):
+                self.budget_runs_out_after_each_note() as note, \
+                patch.object(notes, 'build', side_effect=note):
             result = collector.collect(FetchScope(force=True))
         stored = reg.subscription('youtube', source['id'])
         self.assertEqual(['deferred', 'ready'], sorted(row['state'] for row in storage.rows([source['id']])))

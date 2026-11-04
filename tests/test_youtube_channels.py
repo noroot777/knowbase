@@ -61,10 +61,14 @@ class YouTubeChannels(YouTubeFixture):
 
     def test_settings_validation_and_status(self):
         self.assertEqual(2, reg.get_settings('youtube')['youtube']['asr_threads'])
-        response = self.client.put('/api/intake/youtube/settings', json={'youtube': {'max_videos': 1}})
+        response = self.client.put('/api/intake/youtube/settings', json={'youtube': {'rank_limit': 1}})
         self.assertEqual(200, response.status_code)
-        self.assertEqual(1, response.json()['youtube']['max_videos'])
-        for values in ({'max_videos': 0}, {'asr_threads': 9}, {'max_videos': True},
+        self.assertEqual(1, response.json()['youtube']['rank_limit'])
+        # 拆掉的两道预算:旧页面还会把它们发上来,照收不报错,但不再落库。
+        response = self.client.put('/api/intake/youtube/settings', json={'youtube': {'max_videos': 1, 'max_minutes': 60}})
+        self.assertEqual(200, response.status_code)
+        self.assertFalse({'max_videos', 'max_minutes'} & response.json()['youtube'].keys())
+        for values in ({'rank_limit': 0}, {'asr_threads': 9}, {'rank_limit': True},
                        {'cookies_from_browser': 'chrome'}, {'asr_enabled': 'yes'}):
             self.assertEqual(400, self.client.put('/api/intake/youtube/settings', json={'youtube': values}).status_code)
         with patch('kb.youtube.notes.available', return_value=(False, '请配置模型')):

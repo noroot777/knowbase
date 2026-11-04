@@ -80,7 +80,7 @@ def rejection(row, settings, scope, now, floor):
     # **探到过、确实超过单条时长上限的,不再占准入名次。** 只留 `deferred` 的话它每轮都排回
     # 前几名、每轮再探一次、再被 `admission.gate` 拒一次 —— 名额被它永久占着,后面的普通
     # 视频永远轮不到(实测前 10 名里两条长视频连占三天)。判据是**当前**上限:用户调高之后
-    # 下一轮这里放行,它照常回榜。已完成的不受影响(「已完成的仍保留名次」)。
+    # 下一轮这里放行,它照常回榜。已完成的不受影响(它们根本不排名,见 `score`)。
     limit = settings['max_video_minutes']
     if row['state'] not in ('ready', 'processing') and row['duration'] > limit * 60:
         return f"超过单条视频时长预算（{row['duration'] / 60:.0f} 分钟，上限 {limit} 分钟）", True
@@ -135,6 +135,14 @@ def score(rows, settings, scope, now=None):
             baselines.setdefault(owner['source_id'], []).append(row['views'])
     ranked = []
     for row in rows:
+        # **已入库的先拿掉再排名**(口径同 daily-report 剔除历史榜单):名次只给还没做的
+        # 视频。留着名次的话,窗口里靠前的陆续入库之后前 N 名大半是已完成的,一轮只剩
+        # 一两条可做(实测前 10 名里 7 条已入库)。频道基线照旧把它们算进去 —— 那是
+        # 「这个频道平时多少播放」,跟谁还没做无关。
+        if row['state'] == 'ready':
+            if row['score_rank']:
+                storage.update(row['video_id'], score_rank=0)
+            continue
         representative, reasons, unknown = qualify(row, settings, scope, now, floor)
         if representative is None:
             storage.update(row['video_id'], score_rank=0)

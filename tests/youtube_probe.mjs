@@ -77,7 +77,7 @@ try {
   await wait(`sourceKind === 'youtube' && sourceData?.sources?.length === 52`);
   check('52 个频道出现在订阅管理', true);
   await click('#source-view-manage');
-  await wait(`!!document.querySelector('#youtube-ranking') && !!document.querySelector('#youtube-max_videos')`);
+  await wait(`!!document.querySelector('#youtube-ranking') && !!document.querySelector('#youtube-rank_limit')`);
 
   // ── 登录态与工具那一块 ───────────────────────────────────────────────────
   await wait(`$('youtube-login').textContent.includes('已配置从')`);
@@ -194,11 +194,13 @@ try {
     && !$('youtube-settings-fields').textContent.includes('热度')
     && !$('youtube-settings-fields').textContent.includes('价值榜')`),
     await evaluate(`$('youtube-settings-fields')?.textContent.slice(0, 160)`));
-  await fill('#youtube-max_videos', '1');
+  check('每轮条数和累计时长两道预算已经拆掉', await evaluate(`
+    !document.querySelector('#youtube-max_videos') && !document.querySelector('#youtube-max_minutes')`));
+  await fill('#youtube-rank_limit', '2');
   await click('#source-settings-save');
-  await wait(`fetch('/api/intake/youtube').then(response=>response.json()).then(value=>value.settings.youtube.max_videos===1)`);
+  await wait(`fetch('/api/intake/youtube').then(response=>response.json()).then(value=>value.settings.youtube.rank_limit===2)`);
   await settled();
-  check('处理数量预算保存到服务端', true);
+  check('准入名次保存到服务端', true);
   check('只改预算不会把登录态选择顶回默认', await evaluate(`
     fetch('/api/intake/youtube').then(r=>r.json()).then(v=>v.settings.youtube.cookies_browser==='firefox')`));
   // ── 浏览器用户资料那一格 ────────────────────────────────────────────────
@@ -486,7 +488,7 @@ try {
   check('内容积压不伪装成频道覆盖失败', backlogCard.state === '待首次同步' &&
     backlogCard.notice.includes('未完成处理') && !backlogCard.text.includes('部分同步') &&
     !backlogCard.text.includes('从上次的位置'), JSON.stringify(backlogCard));
-  check('数量预算留尾清旧失败且显示本轮跳过说明', backlogCard.state === '待首次同步' &&
+  check('处理留尾清旧失败且显示本轮跳过说明', backlogCard.state === '待首次同步' &&
     backlogCard.notice.includes('2 条视频无法读取') && backlogCard.notice.includes('未完成处理') &&
     !backlogCard.text.includes('上一轮连接失败') && !backlogCard.text.includes('查看失败原因') &&
     backlogCard.text.includes('尚未成功同步'), JSON.stringify(backlogCard));
