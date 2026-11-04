@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 from kb.youtube.channels import config
 from kb.youtube import storage
+from kb.youtube.settings import video_minutes
 
 
 AI = re.compile(r'\b(?:ai|agi|llm|gpt\w*|claude|gemini|openai|anthropic|deepseek|qwen|'
@@ -34,7 +35,7 @@ def stamp(value):
 UNKNOWN = '发布时间与简介仍是估算值，排到就先核实一次元数据'
 
 
-def rejection(row, settings, scope, now, floor):
+def rejection(row, settings, scope, now, floor, length=True):
     """返回 `(理由, 判得准)`。理由为空就是合格;**`判得准=False` 不是拒绝,是「还判不了」**。
 
     flat 列表(`windowed_discovery.lightweight`)的条目日期是粗估的、简介是空的 —— 拿它去
@@ -82,8 +83,9 @@ def rejection(row, settings, scope, now, floor):
     # 前几名、每轮再探一次、再被 `admission.gate` 拒一次 —— 名额被它永久占着,后面的普通
     # 视频永远轮不到(实测前 10 名里两条长视频连占三天)。判据是**当前**上限:用户调高之后
     # 下一轮这里放行,它照常回榜。已完成的不受影响(它们根本不排名,见 `score`)。
-    limit = settings['max_video_minutes']
-    if row['state'] not in ('ready', 'processing') and row['duration'] > limit * 60:
+    # 上限按**这个归属**的频道算(`video_minutes`):频道自己可以设得比全局宽或窄。
+    limit = video_minutes(settings, policy)
+    if length and row['state'] not in ('ready', 'processing') and row['duration'] > limit * 60:
         verdicts.append((f"超过单条视频时长预算（{row['duration'] / 60:.0f} 分钟，上限 {limit} 分钟）", True))
     # **判得准的拒绝胜过任何一道「还判不了」,不论排在哪一道。** 逐道早退的话,估算日期或
     # 空简介那几道会抢在后面的事实之前返回「判不了」:探到超长的估算条目就这样照旧拿到
@@ -95,7 +97,7 @@ def rejection(row, settings, scope, now, floor):
     return verdicts[0] if verdicts else ('', True)
 
 
-def qualify(row, settings, scope, now, floor):
+def qualify(row, settings, scope, now, floor, length=True):
     """逐个**有效归属**判资格,返回 `(代表, 拒绝理由列表)`;一个归属都不合格时代表为 None。
 
     **一条视频属于多条订阅时,一个归属失格不等于这条视频失格。** 同一个视频可以同时挂在
@@ -116,7 +118,7 @@ def qualify(row, settings, scope, now, floor):
     eligible, unsure, reasons, unknown = [], [], [], []
     for owner in row['owners']:
         member = {**row, **owner}
-        reason, verified = rejection(member, settings, scope, now, floor)
+        reason, verified = rejection(member, settings, scope, now, floor, length)
         if not reason:
             eligible.append(member)
         elif verified:
@@ -138,18 +140,18 @@ def over_length(rows, settings, scope, now=None):
     它们在窗口里、其余资格全过得去,只是按**当前**设置不做 —— 同步结果里得点名说出来。
     一个字不提的话,面板上只有「排名 0 条、入库 0 条」,人只会以为频道没更新(真机形态:
     AI Search 三天前那期 54 分钟的周报,上限 45 分钟)。判据跟 `rejection` 是同一份:
-    把上限拿掉再 `qualify` 一次,不另写一套「在不在窗口里」。
+    带上限和不带上限各 `qualify` 一次,前者一个归属都不收、后者收得下,就是只差这一道。
+    返回的 `eligible_sources` 是不带上限时收得下的那几个归属。
     """
     now = now or datetime.now(timezone.utc)
     floor = now - timedelta(days=settings['window_days'])
-    unlimited = {**settings, 'max_video_minutes': math.inf}
     found = []
     for row in rows:
-        if row['state'] in ('ready', 'processing') or not row['duration'] > settings['max_video_minutes'] * 60:
+        if row['state'] in ('ready', 'processing') or not row['duration']:
             continue
-        representative, _, _ = qualify(row, unlimited, scope, now, floor)
-        if representative is not None and not representative['unverified']:
-            found.append(representative)
+        free, _, _ = qualify(row, settings, scope, now, floor, length=False)
+        if free is not None and not free['unverified'] and qualify(row, settings, scope, now, floor)[0] is None:
+            found.append(free)
     return found
 
 

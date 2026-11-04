@@ -16,7 +16,7 @@ from kb.youtube import (candidate_metadata, diagnosis, discovery, login, media, 
 from kb.youtube.admission import TEMPORARY, UNDATED, calibrate, gate
 from kb.youtube.channels import config
 from kb.youtube.faults import local_fault, record_local
-from kb.youtube.settings import of
+from kb.youtube.settings import of, video_minutes
 
 
 def stopped():
@@ -534,7 +534,7 @@ def _round(scope):
             if source['id'] in lengthy:
                 summary['notices'].append({'source_id': source['id'], 'title': source['name'],
                                            'reason': source_status.over_length(
-                                               lengthy[source['id']], of(settings)['max_video_minutes'])})
+                                               lengthy[source['id']], video_minutes(of(settings), config(source)))})
     except Exception as error:
         if not local_fault(error):
             raise

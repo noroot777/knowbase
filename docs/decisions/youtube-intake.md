@@ -800,6 +800,10 @@ RSS 取不到时改用 yt-dlp 列频道（当时的 `discovery.approximate`，�
 回归 `tests/test_youtube_over_length_notice.py`。
 
 默认准入：最近 7 天，候选榜前 10（`rank_limit`），单条不超过 45 分钟。
+**频道可以单独设单条时长上限**（频道编辑里那一格，存在订阅 `config.max_video_minutes`，空着跟全局；AI Search 的
+周报常年 40–55 分钟）。判据只有 `settings.video_minutes` 一份：排名逐归属按各自频道判，第一次探到时长时的准入
+（`admission.gate`）取合格归属里最宽的那个 —— 只看代表归属的话，同权取较小 ID 会让没设上限的那个频道把它拦一轮。
+回归 `tests/test_youtube_channel_length.py`。
 **一轮做多少只由准入名次和处理时间上限决定**：每轮条数（`max_videos`）和累计视频时长（`max_minutes`）两道预算
 已经拆掉（仓库主人拍板）。两个键在 `settings.RETIRED` 里照样认、认了就丢 —— 存量设置里就有，`validate`
 对不认识的键整个抛，不认的话这一块面板连同登录态配置一起读不出来。

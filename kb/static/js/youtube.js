@@ -98,6 +98,7 @@ function youtubeEditor(source, kind) {
     fields.innerHTML = `<legend>YouTube 排名规则</legend><label for="youtube-pool">频道分组</label>
       <select id="youtube-pool">${Object.entries(youtubePoolLabels).map(([key,label]) => `<option value="${key}">${label}</option>`).join('')}</select>
       <label for="youtube-weight">排名权重（0.1–3）</label><input id="youtube-weight" type="number" min="0.1" max="3" step="0.05">
+      <label for="youtube-minutes">单条时长上限（分钟）</label><input id="youtube-minutes" type="number" min="1" max="180" step="1" placeholder="跟随全局">
       <p class="hint">权重乘在候选分上。启用订阅不等于批准下载全部视频。</p>`;
     $('source-edit-error').before(fields);
   }
@@ -106,6 +107,7 @@ function youtubeEditor(source, kind) {
   try { policy = JSON.parse(source?.config || '{}'); } catch {}
   $('youtube-pool').value = policy.pool || 'creator_core';
   $('youtube-weight').value = policy.score_multiplier ?? 1;
+  $('youtube-minutes').value = policy.max_video_minutes ?? '';
   for (const id of ['source-edit-feed', 'source-edit-fulltext']) {
     const input = $(id), label = input.closest('label') || document.querySelector(`label[for="${id}"]`);
     input.hidden = kind === 'youtube'; input.disabled = kind === 'youtube';
@@ -116,7 +118,9 @@ function youtubeEditor(source, kind) {
 }
 
 function youtubeChannelPayload() {
-  return {pool:$('youtube-pool').value, score_multiplier:Number($('youtube-weight').value)};
+  const minutes = $('youtube-minutes').value.trim();
+  return {pool:$('youtube-pool').value, score_multiplier:Number($('youtube-weight').value),
+    max_video_minutes:minutes ? Number(minutes) : null};
 }
 
 function fillYouTubeSettings(settings, sent) {

@@ -18,6 +18,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from kb.youtube.channels import config
+from kb.youtube.settings import video_minutes
+
 TZ = ZoneInfo('Asia/Shanghai')
 
 TEMPORARY = {'duration', 'upcoming', 'live', 'legacy', 'window'}
@@ -96,7 +99,11 @@ def gate(metadata, settings, row=None):
     media_type = str(metadata.get('media_type', '')).strip().lower()
     if '/shorts/' in str(metadata.get('webpage_url', '')) or media_type in ('short', 'shorts'):
         return Decision('shorts', 'excluded', 'Shorts 不进入自动处理')
-    if duration > settings['max_video_minutes'] * 60:
+    # 上限取这条视频合格归属里最宽的那个(频道可以单独设,见 `settings.video_minutes`)。
+    owners = (row or {}).get('owners', ())
+    eligible = (row or {}).get('eligible_sources')
+    policies = [config(owner) for owner in owners if eligible is None or owner['source_id'] in eligible]
+    if duration > video_minutes(settings, *policies) * 60:
         return Decision('duration_budget', 'deferred', '超过单条视频时长预算')
     # 估算日期那一档的日期资格**不在这里判**:调用方先 `calibrate()` 换成事实日期,
     # 再过一次 `ranking.rejection`(窗口、指定范围、历史下界、未来时间都在那一份里)。

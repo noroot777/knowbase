@@ -4,6 +4,8 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+from kb.youtube.settings import RANGES
+
 
 CHANNEL_ID = re.compile(r'UC[A-Za-z0-9_-]{22}')
 VIDEO_ID = re.compile(r'[A-Za-z0-9_-]{11}')
@@ -44,9 +46,16 @@ def subscription_values(kind, data, old, reset):
     values = {} if reset else config(old)
     patch = data.get('youtube')
     if patch is not None:
-        if not isinstance(patch, dict) or set(patch) - {'pool', 'score_multiplier'}:
+        if not isinstance(patch, dict) or set(patch) - {'pool', 'score_multiplier', 'max_video_minutes'}:
             raise ValueError('YouTube 频道设置不正确')
         values.update(patch)
+    # 频道自己的单条时长上限:空着(None)就跟全局,所以存成「没有这个键」而不是 0。
+    if values.get('max_video_minutes') is None:
+        values.pop('max_video_minutes', None)
+    else:
+        low, high = RANGES['max_video_minutes']
+        if type(values['max_video_minutes']) is not int or not low <= values['max_video_minutes'] <= high:
+            raise ValueError(f'频道单条时长上限必须是 {low}–{high} 之间的整数，留空跟随全局')
     pool = values.get('pool', 'creator_core')
     weight = values.get('score_multiplier', 1.0)
     if pool not in POOLS or isinstance(weight, bool) or not isinstance(weight, (int, float)) or not 0.1 <= weight <= 3:

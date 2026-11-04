@@ -57,6 +57,15 @@ def validate(values):
     return merged
 
 
+def video_minutes(settings, *policies):
+    """单条时长上限(分钟)。频道自己设了 `max_video_minutes` 就用频道的,没设跟全局。
+
+    一条视频挂在几个频道下时取各归属里最宽的那个 —— 有一个归属放行,它就该做。
+    """
+    default = settings['max_video_minutes']
+    return max((policy.get('max_video_minutes') or default for policy in policies), default=default)
+
+
 def of(settings):
     return validate(settings.get('youtube') or {})
 
