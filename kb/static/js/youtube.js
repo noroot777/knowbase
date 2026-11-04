@@ -222,7 +222,11 @@ function youtubeSettingsPayload() {
 //
 // 弹窗标记在这儿现建、关了就删,不写进 index.html(那份已经顶着 700 行上限),口径同
 // `egress.js` 顶上那段:现建的弹窗 MutationObserver 只看得见它的建和删。
-let youtubeRankItems = [];
+let youtubeRankItems = [], youtubeRankResult = null;
+// 人点开/收起过哪几格(按格的键记)。搜索时每敲一个字都要重画,不记的话他刚收起的那期
+// 下一个字就又展开了。
+const youtubeRankOpen = new Map();
+const youtubeRankShelves = {waiting:'暂未排名', ready:'已完成', skipped:'不处理'};
 // 榜单这一份数据现在是什么状态。**「还在读」和「读到了、是空的」不许共用一个空数组**:
 // 读取途中在搜索框敲一个字,空数组会被当成「还没有候选」,叫人去点同步。
 let youtubeRankState = 'loading';
@@ -250,6 +254,14 @@ function openYouTubeRanking() {
   mask.addEventListener('click', event => { if (event.target === mask) closeYouTubeRanking(); });
   mask.querySelector('.icon-button').onclick = closeYouTubeRanking;
   mask.querySelector('#youtube-rank-q').oninput = filterYouTubeRanking;
+  // **只记人自己点的那一下,不听 `toggle`。** `toggle` 是异步派发的,而且带着 `open` 被
+  // 画出来的那几格也会派一次:每敲一个字重画一遍,上一版那几格的事件晚到,就把「搜索时临时
+  // 全展开」记成了他的选择(实测:收起的那一期清空搜索后又展开了)。点击在切换之前同步到达,
+  // 所以记的是切换之后的那个状态 `!group.open`。
+  mask.querySelector('#youtube-ranking').addEventListener('click', event => {
+    const group = event.target.closest('.youtube-rank-group > summary')?.parentElement;
+    if (group && !$('youtube-rank-q').value.trim()) youtubeRankOpen.set(group.dataset.group, !group.open);
+  });
   document.body.append(mask);
   overlayClosers['youtube-rank-modal'] = closeYouTubeRanking;
   // 先同步登记一次弹窗,让它记下「关掉时把焦点还给谁」是这颗入口按钮,再把焦点挪到搜索框
@@ -272,12 +284,9 @@ async function loadYouTubeRanking() {
   try {
     const result = await pipeJson('/api/intake/youtube/ranking');
     if (generation !== youtubeRankGeneration) return;
-    youtubeRankItems = [...result.items].sort((left,right) => (left.score_rank || 100000) - (right.score_rank || 100000));
+    youtubeRankItems = result.items; youtubeRankResult = result;
     youtubeRankState = 'ready';
-    // 页头那一行只放事实:总条数、一轮准入几名(「分批处理」就是这个数说的)、列表截在哪。
-    const limit = sourceData?.settings?.youtube?.rank_limit;
-    $('youtube-rank-count').textContent = [`${result.total} 条`, limit ? `每轮准入前 ${limit} 名` : '',
-      result.total > result.items.length ? `列出前 ${result.items.length} 条` : ''].filter(Boolean).join(' · ');
+    $('youtube-rank-count').textContent = `${result.total} 条 · 每期 ${result.rank_limit} 名`;
     filterYouTubeRanking();
   } catch (error) {
     if (generation !== youtubeRankGeneration) return;
@@ -298,11 +307,50 @@ function filterYouTubeRanking() {
   const query = $('youtube-rank-q').value.trim().toLowerCase();
   const items = youtubeRankItems.filter(item => (item.title + ' ' + item.channel).toLowerCase().includes(query));
   // **只有一张榜**(仓库主人拍板:不再区分热度和价值),所以这里没有排序下拉 ——
-  // 一张榜只有一个顺序,给它配个「排序」反而让人以为还有另一种排法。
-  box.innerHTML = items.map(item => `<article class="youtube-rank-item"><a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a>
-      <p class="hint">${esc(item.channel)} · 第 ${item.score_rank || '—'} 名 / ${item.score} 分 · ${item.approximate ? '播放量未知' : item.views + ' 次观看'}</p>
-      <p class="hint">${esc(youtubeRankStates[item.state] || item.state)}${item.reason ? '：' + esc(item.reason) : ''}</p></article>`).join('')
-    || '<p class="hint">没有匹配的候选。</p>';
+  // 一张榜只有一个顺序,分期只是把这一个顺序按准入名次切开。
+  box.innerHTML = youtubeRankGroups(items).map(group => {
+    const open = query ? true : youtubeRankOpen.get(group.key) ?? group.open;
+    return `<details class="youtube-rank-group" data-group="${group.key}"${open ? ' open' : ''}>
+      <summary><b>${group.title}</b><span>${group.meta}</span>${arrow('caretDown')}</summary>${group.items.map(youtubeRankItem).join('')}</details>`;
+  }).join('') || '<p class="hint">没有匹配的候选。</p>';
+}
+
+/** 把榜单切成一格一格:排上名的按名次每 `rank_limit` 个一期(就是 `ranking.select` 每轮
+ * 准入的那一刀,第 1 期是下一轮要做的),后面跟着没排上名的三格。格归属由后端判
+ * (`storage.shelf`),这里只按它分,不自己再判一遍。 */
+function youtubeRankGroups(items) {
+  const limit = youtubeRankResult.rank_limit, groups = new Map();
+  const ranked = items.filter(item => item.shelf === 'ranked').sort((left, right) => left.score_rank - right.score_rank);
+  for (const item of ranked) {
+    const period = Math.ceil(item.score_rank / limit);
+    if (!groups.has('p' + period)) {
+      groups.set('p' + period, {key:'p' + period, title:`第 ${period} 期`, open:true, items:[],
+        meta:`第 ${(period - 1) * limit + 1}–${period * limit} 名`});
+    }
+    groups.get('p' + period).items.push(item);
+  }
+  for (const [shelf, title] of Object.entries(youtubeRankShelves)) {
+    const members = items.filter(item => item.shelf === shelf)
+      .sort((left, right) => String(right.published).localeCompare(String(left.published)));
+    if (!members.length) continue;
+    const total = youtubeRankResult.shelves?.[shelf] || members.length;
+    const listed = youtubeRankItems.filter(item => item.shelf === shelf).length;
+    groups.set(shelf, {key:shelf, title, open:false, items:members,
+      meta:`${total} 条${listed < total ? ` · 列出最近 ${listed} 条` : ''}`});
+  }
+  return [...groups.values()];
+}
+
+function youtubeRankItem(item) {
+  const facts = [esc(item.channel)];
+  if (item.shelf === 'ranked') facts.push(`第 ${item.score_rank} 名 / ${item.score} 分`);
+  else if (item.published) facts.push(esc(sourceTime(item.published)));
+  facts.push(item.approximate ? '播放量未知' : item.views + ' 次观看');
+  // 已完成那一格的状态就是格名本身,再写一遍「中文笔记已完成」是同一句话说两次。
+  const state = item.state === 'ready' ? '' :
+    esc(youtubeRankStates[item.state] || item.state) + (item.reason ? '：' + esc(item.reason) : '');
+  return `<article class="youtube-rank-item"><a href="${esc(item.url)}" target="_blank" rel="noopener noreferrer">${esc(item.title)}</a>
+    <p class="hint">${facts.join(' · ')}</p>${state ? `<p class="hint">${state}</p>` : ''}</article>`;
 }
 
 // ── 登录态与 yt-dlp ────────────────────────────────────────────────────────

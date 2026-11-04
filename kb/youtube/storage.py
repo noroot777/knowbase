@@ -304,14 +304,40 @@ def ready(source):
             and not row['committed'] and not row['excluded'] and row['source_url'] == source['url'] and valid(row)]
 
 
+def shelf(row):
+    """候选榜上这一条归哪一格。面板按它分组,口径只有这一份。
+
+    `ranked` 是排上名、还在等处理的 —— 面板再按名次每 `rank_limit` 个切成一期,那正是
+    `ranking.select` 每轮准入的那一刀。没排上名的分三格:已完成、不处理(过滤或用户移除)、
+    暂未排名(候选身份还在、名次被清掉了,比如元数据挂起等核实,下一轮排名时回榜)。
+    """
+    if row['score_rank']:
+        return 'ranked'
+    if row['state'] == 'ready':
+        return 'ready'
+    if row['state'] in ('filtered', 'excluded') or row.get('excluded'):
+        return 'skipped'
+    return 'waiting'
+
+
 def listing(source_id=None, limit=100):
+    """**排上名的一条都不截**:面板按名次切成一期一期,截在第 100 条就是把后几期整期丢掉,
+    人只会以为后面没东西了。没排上名的那三格各留最近 `limit` 条,总数在 `shelves` 里照报
+    —— 已完成那一格只增不减,不截的话这一包会跟着历史无限长下去。"""
     candidates = rows([source_id] if source_id is not None else None)
-    candidates.sort(key=lambda row: (row['score_rank'] or 100000, -row['score']))
-    counts = {}
+    counts, shelves, kept = {}, {}, {}
     for row in candidates:
         counts[row['state']] = counts.get(row['state'], 0) + 1
+        group = shelf(row)
+        shelves[group] = shelves.get(group, 0) + 1
+        kept.setdefault(group, []).append(row)
+    shown = kept.pop('ranked', [])
+    for members in kept.values():
+        members.sort(key=lambda row: row['entry'].get('published', ''), reverse=True)
+        shown.extend(members[:limit])
+    shown.sort(key=lambda row: (row['score_rank'] or 100000, -row['score']))
     result = []
-    for row in candidates[:limit]:
+    for row in shown:
         entry = row['entry']
         result.append({key: row[key] for key in ('video_id', 'source_id', 'channel', 'views',
                       'score', 'score_rank', 'state', 'reason', 'duration')}
@@ -319,5 +345,5 @@ def listing(source_id=None, limit=100):
                       # **估出来的那条要带上这面旗。** flat 列表发现时 `views` 一律写 0
                       # (列表页读不到播放量),面板不知道这回事就会把「没数据」显示成
                       # 「0 次观看」—— 那是在替 YouTube 说一句它没说过的话。
-                      | {'approximate': bool(entry.get('approximate'))})
-    return {'items': result, 'total': len(candidates), 'counts': counts}
+                      | {'approximate': bool(entry.get('approximate')), 'shelf': shelf(row)})
+    return {'items': result, 'total': len(candidates), 'counts': counts, 'shelves': shelves}

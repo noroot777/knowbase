@@ -187,16 +187,27 @@ try {
   // 这段刻意不用正则 —— 它住在模板字面量里，`\d`、`\/` 这类转义会先被字面量吃掉。
   check('一张榜一个名次，没有排序下拉也没有两榜字样', await evaluate(`(() => {
     const text = $('youtube-ranking').textContent;
-    const cards = [...document.querySelectorAll('.youtube-rank-item')];
+    const cards = [...document.querySelectorAll('[data-group="p1"] .youtube-rank-item')];
     const ranks = cards.map(node => (node.textContent.split('第 ')[1] || '').split(' 名')[0]);
     return !document.querySelector('#youtube-rank-order') &&
       !text.includes('热度') && !text.includes('价值') &&
       cards[0].textContent.includes('第 1 名 / ') && cards[0].textContent.includes(' 分 · ') &&
-      ranks.length === 4 && new Set(ranks).size === 4 && ranks[0] === '1';
+      ranks.join() === '1,2,3';
   })()`), await evaluate(`document.querySelector('.youtube-rank-item')?.textContent`));
-  check('候选榜页头一行报总数和每轮准入名次', await evaluate(`
-    $('youtube-rank-count').textContent.startsWith('4 条') && $('youtube-rank-count').textContent.includes('每轮准入前 ')`),
+  check('候选榜页头一行报总数和每期几名', await evaluate(`
+    $('youtube-rank-count').textContent === '4 条 · 每期 10 名'`),
     await evaluate(`$('youtube-rank-count').textContent`));
+  // 排上名的按准入名次切期、默认展开;没排上名的另起一格、默认收起,不跟待处理的混在一起。
+  check('排上名的分期展开，过滤的另起一格收起', await evaluate(`(() => {
+    const groups = [...document.querySelectorAll('.youtube-rank-group')];
+    const skipped = groups.find(node => node.dataset.group === 'skipped');
+    return groups.map(node => node.dataset.group).join() === 'p1,skipped' &&
+      groups[0].open && groups[0].querySelector('summary').textContent.includes('第 1 期') &&
+      groups[0].querySelector('summary').textContent.includes('第 1–10 名') &&
+      !skipped.open && skipped.querySelector('summary').textContent.includes('不处理') &&
+      skipped.querySelector('summary').textContent.includes('1 条') &&
+      skipped.textContent.includes('轻量过滤');
+  })()`), await evaluate(`[...document.querySelectorAll('.youtube-rank-group summary')].map(node => node.textContent).join(' | ')`));
   await screenshot('ranking-desktop');
   await fill('#youtube-rank-q', '不会有这个标题zz');
   await wait(`$('youtube-ranking').textContent.includes('没有匹配的候选')`);
@@ -243,6 +254,30 @@ try {
   await wait(`fetch('/api/intake/youtube').then(response=>response.json()).then(value=>value.settings.youtube.rank_limit===2)`);
   await settled();
   check('准入名次保存到服务端', true);
+  // 准入名次就是每期的大小:改成 2 之后,第 3 名落到第 2 期。
+  await click('#youtube-rank-open');
+  await wait(`document.querySelectorAll('.youtube-rank-group').length > 0`);
+  check('改了准入名次就按新名次切期', await evaluate(`(() => {
+    const groups = [...document.querySelectorAll('.youtube-rank-group')];
+    const ranks = key => [...document.querySelectorAll('[data-group="' + key + '"] .youtube-rank-item')]
+      .map(node => (node.textContent.split('第 ')[1] || '').split(' 名')[0]).join();
+    return $('youtube-rank-count').textContent.endsWith('每期 2 名') &&
+      groups.map(node => node.dataset.group).join() === 'p1,p2,skipped' &&
+      ranks('p1') === '1,2' && ranks('p2') === '3' &&
+      groups[1].querySelector('summary').textContent.includes('第 3–4 名');
+  })()`), await evaluate(`[...document.querySelectorAll('.youtube-rank-group summary')].map(node => node.textContent).join(' | ')`));
+  // 人收起的那一期,搜索时临时全展开,清空搜索后还得是收起的。
+  await click('[data-group="p1"] > summary');
+  await wait(`!document.querySelector('[data-group="p1"]').open`);
+  await fill('#youtube-rank-q', 'agent');
+  await wait(`document.querySelector('[data-group="p1"]')?.open`);
+  await fill('#youtube-rank-q', '');
+  await send('Input.dispatchKeyEvent', {type:'keyDown', key:'Backspace', code:'Backspace', windowsVirtualKeyCode:8});
+  await send('Input.dispatchKeyEvent', {type:'keyUp', key:'Backspace', code:'Backspace', windowsVirtualKeyCode:8});
+  await wait(`document.querySelectorAll('.youtube-rank-item').length === 4`);
+  check('搜索之后人收起的那一期仍是收起的', await evaluate(`
+    !document.querySelector('[data-group="p1"]').open && document.querySelector('[data-group="p2"]').open`));
+  await evaluate(`closeYouTubeRanking(); true`);
   check('只改预算不会把登录态选择顶回默认', await evaluate(`
     fetch('/api/intake/youtube').then(r=>r.json()).then(v=>v.settings.youtube.cookies_browser==='firefox')`));
   // ── 浏览器用户资料那一格 ────────────────────────────────────────────────
