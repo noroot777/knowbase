@@ -387,8 +387,14 @@ def _index_pass() -> None:
     try:
         now = _now()
         report = ScanReport()
-        new = 0
+        new = scanned = 0
+        # **逐段报进度,每一句都进日志带时间戳。** 原来从「扫描 vault」到收尾一声不出:
+        # 一轮 0 条的索引走了 2 分多钟(平时同样 0 条只要几秒),面板一直停在那一句,
+        # 事后也分不出时间耗在比对、核对删除还是编码上。
         for doc in scan_all(report=report):
+            scanned += 1
+            if scanned % 5000 == 0:
+                _stage("index", "running", f"已比对 {scanned} 篇")
             if store.observed_document_is_current(conn, doc):
                 continue
             store.upsert_document(conn, doc, split_chunks(doc.body), now)
@@ -399,6 +405,7 @@ def _index_pass() -> None:
             if new % 25 == 0:
                 conn.commit()
                 _stage("index", "running", f"已索引 {new} 篇")
+        _stage("index", "running", f"比对完 {scanned} 篇,核对已删除的文档")
         removed = store.remove_missing_documents(conn, report)
         conn.commit()
         # **这里不替抓取记账。**「今天抓了多少」是物化那一步的产出,记在
