@@ -385,13 +385,18 @@
   一份 X cookie 调 X 自己的接口(子进程调用用户装好的 CLI)、`browser` 复用**独立 profile** 里的登录态
   (我们起的无头 Chrome,CDP over 管道)、`attach` 直连用户**已经开着**的日常浏览器(CDP over WebSocket)、
   `guest` **完全不登录**(`x_guest`,FxTwitter 公开接口 + X 自己的未登录页面,每一步挑合适的那件)。**口径只有 `x_channels` 一份。**
-- **默认是 `guest`(装好就能跑),但存量库不许被静默换档**:设置里没存过 `x_channel` 的,独立 profile 里有登录
-  痕迹就照旧是 `browser`(`x_channels.unsaved_default`,`registry.get_settings` 补缺省值只走它)。默认还是
+- **默认是 `guest`(装好就能跑),但存量库不许被静默换档**:设置里没存过 `x_channel` 的,独立 profile 里**真登录
+  成功过 X** 就照旧是 `browser`(`x_channels.unsaved_default`,`registry.get_settings` 补缺省值只走它)。默认还是
   `browser` 那时,面板上「登录 X」「从日常浏览器导入」在下拉没改过时不写设置,登录过却从没存过通道的库是常态。
-  存过的值一律照存着的读;退役名 `bridge` 照旧落 `browser`,不跟着默认走。**测试夹具和隔离服务要「没配好」那
+  **判据是 cookie 库里有 X 的会话 cookie**(`x_cdp.has_x_session`,`auth_token`@x.com/twitter.com,两种布局
+  `Default/Network/Cookies`、`Default/Cookies`,只读名字和域名),**不是 `has_login_footprint` 那个文件在不在**:
+  实测无头 Chrome 只开一次 about:blank 就建出 `Default/Cookies`,里面一条 cookie 都没有,只开过登录窗口没登成
+  的同理。**判出来就存进设置**(`registry._settle_x_channel`,判据待在两条写自己的 WHERE 里,不盖掉另一个请求
+  刚存的值),之后照存着的读,不随 profile 里的文件来去变档;cookie 库读不了就**不固化**,这一次按 `browser`
+  读、下一次再判。存过的值一律照存着的读;退役名 `bridge` 照旧落 `browser`,不跟着默认走。**测试夹具和隔离服务要「没配好」那
   一侧的,显式存一档 `browser`**(`tests/serve_sources.py`、`serve_reader_membership.py`、`intake_diag_fixture`)
   —— 不存的话新库那 51 个默认账号当场就绪,一点同步就真去问 FxTwitter / x.com。回归 `tests/test_x_channels.py`
-  的 `ChannelChoiceTests`。
+  的 `ChannelChoiceTests`、`tests/test_x_channel_default.py`(cookie 库照 Chromium 真实表结构摆,不 touch 空文件)。
 - **`guest` 不许依赖任何登录态,也不许在失败时退到要登录的路上**(用户的 X 号被冻结过,这一档就是为那种
   时候准备的)。它不起浏览器、不读 profile、不碰 cookie;长文同样走 `x_article.fill(session=None)`,没有浏览器后路。
   就绪判断只问接口地址是不是空的。

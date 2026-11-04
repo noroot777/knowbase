@@ -42,8 +42,10 @@ import json
 import os
 import select
 import shutil
+import sqlite3
 import subprocess
 import time
+from urllib.parse import quote
 
 # **这条通道整条是 POSIX 专有的**,不只是 fcntl 这一处:`os.pipe` + `pass_fds`
 # 把 fd 搬到 3/4 要借 `/bin/sh`,收包那头 `select` 在 Windows 上也不认管道。
@@ -447,6 +449,37 @@ class Chrome(Session):
 def has_login_footprint(profile: str) -> bool:
     """Whether this standalone profile has the local footprint used by readiness."""
     return os.path.exists(os.path.join(profile, 'Default', 'Cookies'))
+
+
+#: 独立 profile 里 cookie 主库的两种布局(新版 Chromium 挪进了 `Network/`)。
+_COOKIE_STORES = (('Default', 'Network', 'Cookies'), ('Default', 'Cookies'))
+_X_SESSION = ("SELECT 1 FROM cookies WHERE name='auth_token' AND (host_key IN ('x.com','.x.com','twitter.com',"
+              "'.twitter.com') OR host_key LIKE '%.x.com' OR host_key LIKE '%.twitter.com') LIMIT 1")
+
+
+def has_x_session(profile) -> bool | None:
+    """这个 profile 里**登录成功过 X** 没有:cookie 库里有没有 X 的会话 cookie(`auth_token`)。
+
+    **不能拿 `has_login_footprint` 当这件事的证据**:Chrome 只要在这个 profile 里起过一次(哪怕只开了
+    空白页、登录窗口开了没登就关)就会建出那个文件,里面一条 cookie 都没有。只读名字和域名两列,
+    不碰加密的值。`immutable=1` 打开:Chrome 开着时也读得了,不跟它抢锁。
+
+    返回 True / False;**读不了(库坏了、表结构不认识、权限)是 None** —— 拿不准,调用方别据此下定论。
+    """
+    stores = [os.path.join(str(profile), *parts) for parts in _COOKIE_STORES]
+    stores = [path for path in stores if os.path.isfile(path)]
+    unsure = False
+    for path in stores:
+        try:
+            conn = sqlite3.connect(f'file:{quote(os.path.abspath(path))}?mode=ro&immutable=1', uri=True)
+            try:
+                if conn.execute(_X_SESSION).fetchone():
+                    return True
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            unsure = True
+    return None if unsure else False
 
 
 def profile_busy(profile: str) -> bool:

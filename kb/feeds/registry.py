@@ -279,11 +279,10 @@ def get_settings(kind: str) -> dict:
         from kb.youtube.settings import DEFAULTS
         default['youtube'] = dict(DEFAULTS)
     if feed_types()[kind].adapter == 'social':
-        # X 的取法是个设置 —— 存量库里这一段压根没有这个键,读出来必须和升级前同义:
-        # 默认换成不登录之后,登录过独立 profile 却没存过通道的照旧是 browser(`unsaved_default`)。
         from kb.feeds import x_channels
-        default |= {'x_channel': x_channels.unsaved_default(), 'x_feedgrab_bin': '',
-                    'x_chrome_path': ''}
+        default |= {'x_channel': x_channels.DEFAULT, 'x_feedgrab_bin': '', 'x_chrome_path': ''}
+        if 'x_channel' not in (json.loads(row['value']) if row else {}):
+            row = _settle_x_channel(kind)
     settings = {**default, **(json.loads(row['value']) if row else {})}
     if 'x_channel' in settings:
         from kb.feeds import x_channels
@@ -295,6 +294,28 @@ def get_settings(kind: str) -> dict:
         # 面板这边判"对得上"、检查也说就绪,而同步执行的是另一个可执行文件。
         settings |= x_channels.config_of(settings)
     return _upgrade_settings(kind, settings)
+
+
+def _settle_x_channel(kind: str):
+    """X 的取法存量库里压根没有这个键:**判一次、存下来**,返回存过之后的那一行(可能是 None)。
+
+    读出来必须和升级前同义 —— 默认换成不登录之后,独立 profile 里真登录过 X 却没存过通道的照旧是
+    browser(判据和理由在 `x_channels.unsaved_default`)。**存下来**是为了这个结论不再随 profile 里的
+    文件来去变档;判不准就不存,这一次按它给的读。两条写都把判据放在自己的 WHERE 里(另一个请求
+    刚存了别的值,这里就是 0 行,不盖掉它),写完再读一次那一行。
+    """
+    from kb.feeds import x_channels
+    channel, certain = x_channels.unsaved_default()
+    with db() as c:
+        if certain:
+            c.execute('INSERT OR IGNORE INTO feed_settings VALUES(?,?)',
+                      (kind, json.dumps({'x_channel': channel})))
+            c.execute("UPDATE feed_settings SET value=json_set(value,'$.x_channel',?) "
+                      "WHERE kind=? AND json_extract(value,'$.x_channel') IS NULL", (channel, kind))
+        row = c.execute('SELECT value FROM feed_settings WHERE kind=?', (kind,)).fetchone()
+    if row is None or 'x_channel' not in json.loads(row['value']):
+        return {'value': json.dumps({**(json.loads(row['value']) if row else {}), 'x_channel': channel})}
+    return row
 
 
 def save_settings(kind: str, values: dict) -> dict:

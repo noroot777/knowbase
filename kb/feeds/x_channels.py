@@ -19,8 +19,8 @@
 存量设置里写着 `bridge` 的,解析成独立 profile 那一档(它删掉那时的默认档)。
 
 **默认是 `guest`**:装好就能跑,不用任何账号。但**存量库里没存过这个键、而独立 profile 里
-登录过的,照旧是 `browser`**(`unsaved_default`)—— 默认还是 `browser` 那时,登录一次并不会
-把通道写进设置,那些人一直靠「没存 = browser」在跑,升级之后不许被静默换档。
+真登录成功过 X 的,照旧是 `browser`**(`unsaved_default`)—— 默认还是 `browser` 那时,登录一次并不会
+把通道写进设置,那些人一直靠「没存 = browser」在跑,升级之后不许被静默换档。判出来就存进设置。
 
 **`browser` 和 `attach` 的差别是「谁的浏览器」**:`browser` 我们自己起一个独立 profile 的无头
 Chrome(所以要在那里面单独登录一次,但不依赖用户在不在);`attach` 直连用户
@@ -50,7 +50,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from kb.config import DATA_DIR
-from kb.feeds.x_cdp import has_login_footprint
+from kb.feeds.x_cdp import has_login_footprint, has_x_session
 from kb.source_types import feed_types
 
 FEEDGRAB, BROWSER, ATTACH, GUEST = 'feedgrab', 'browser', 'attach', 'guest'
@@ -107,16 +107,24 @@ def resolve(name: str) -> str:
     return value if value in CHANNELS else DEFAULT
 
 
-def unsaved_default() -> str:
-    """设置里**没存过** `x_channel` 时用哪一档(`registry.get_settings` 补缺省值只走这里)。
+def unsaved_default() -> tuple[str, bool]:
+    """设置里**没存过** `x_channel` 时落哪一档,和这个结论**能不能存下来**(`registry.get_settings` 只走这里)。
 
     默认原来是 `browser`,而面板上「登录 X」「从日常浏览器导入」那两颗按钮在下拉没改过时不写设置
     (草稿等于存着的那一份,见 `x_channel.js` 的 `xChanEnsureSaved`)—— 所以**登录过、却从没存过通道**
-    的存量库是常态,它们一直靠这个缺省值跑在 `browser` 上。判据是独立 profile 里有没有登录痕迹
-    (口径同 `readiness`):有,照旧 `browser`;没有,那一档本来就是「待配置」、一条都没抓过,落到
-    装好就能跑的 `guest`。存过的值一律照存着的读,不经这里。
+    的存量库是常态,它们一直靠这个缺省值跑在 `browser` 上。判据是独立 profile 里**真有 X 的会话
+    cookie**(`x_cdp.has_x_session`),不是 Cookies 文件在不在:只开过登录窗口没登成的、只起过一次
+    空白页的,文件都在、一条 cookie 都没有,那一档本来就是「待配置」、一条都没抓过,落到装好就能跑
+    的 `guest`。
+
+    第二项是「结论确定」:确定的由调用方**存进设置**,之后照存着的读,不再随 profile 里的文件来去
+    变档;cookie 库读不了(None)就**不固化**,这一次照旧按 `browser` 读(升级前的口径),下一次再判。
+    存过的值一律照存着的读,不经这里。
     """
-    return BROWSER if has_login_footprint(BROWSER_PROFILE) else DEFAULT
+    session = has_x_session(BROWSER_PROFILE)
+    if session is None:
+        return BROWSER, False
+    return (BROWSER if session else DEFAULT), True
 
 
 def label(name: str) -> str:
