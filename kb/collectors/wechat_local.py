@@ -454,7 +454,7 @@ class WeChatLocalCollector:
         try:
             import sqlite3
 
-            from kb.scanner import scan_all
+            from kb.vault_census import census
 
             wdb = sqlite3.connect(BACKEND_DIR / "data" / "wechatoa.db")
             try:
@@ -464,7 +464,8 @@ class WeChatLocalCollector:
                 ).fetchone()[0]
             finally:
                 wdb.close()
-            exported = sum(1 for d in scan_all() if d.source in VAULT_SOURCES)
+            # 和 `pipeline.pending_counts` 的索引那一项共用一份清点,不再各扫一遍全库
+            exported = sum(1 for d in census() if d.source in VAULT_SOURCES)
             return max(0, total - exported)
         except Exception:
             return None

@@ -104,7 +104,7 @@ def remove_writeback_tag(doc_path: str, tag: str) -> str | None:
 
     **值带不带引号都要摘到。** 我们自己写进去的是 `  - flag/软广`,但同一份
     frontmatter 被别的工具或人重排成 `- "flag/软广"` 是合法 YAML,索引照旧
-    读得出这个 tag(`scanner.frontmatter_tags` 走的是 yaml.safe_load)。按行删
+    读得出这个 tag(`scanner.frontmatter_tags` 读的是 YAML 解析结果)。按行删
     的这条正则覆盖不到的写法还有 flow-style(`tags: [flag/软广]`)——**那一档
     不在这里修,由回读确认兜住**:摘不掉就抛,留下待办、如实记一次没完成的
     交付,而不是返回一个「本来就没有」。
