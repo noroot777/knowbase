@@ -179,7 +179,7 @@ class SupersedeTests(DriftBase):
         fuller = SHORT.replace('https://', 'https://www.')
         self.expired_before_the_sweep(SHORT, fuller)
 
-        self.assertEqual(1, supersede.run([self.source]))
+        self.assertEqual(1, supersede.run([self.source], self.now + timedelta(days=6)))
 
         self.assertEqual(self.feed_row()['body'], fuller)
         self.assertEqual(self.candidate()['state'], 'ready')
@@ -196,7 +196,7 @@ class SupersedeTests(DriftBase):
         with reg.db() as conn:
             conn.execute('UPDATE feed_items SET x_post_meta=?', (article[x_post_meta.FIELD],))
 
-        self.assertEqual(0, supersede.run([self.source]))
+        self.assertEqual(0, supersede.run([self.source], self.now + timedelta(days=6)))
 
         self.assertEqual(self.feed_row()['body'], stored['body'])
         self.assertEqual((self.candidate()['state'], self.alarm_rows()), ('expired', 1))

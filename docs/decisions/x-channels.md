@@ -79,16 +79,23 @@
   还留在 `repair` 的只有三种：只多了链接（下一条覆盖）、库里那份证不了自己（升级前入库，等版本化回填）、
   帖子与长文对不上。`stage` / `finish` 当场按它判。
   **超窗记账之前先收敛（`x_intake_store.settle`，`prepare` 里排在 `retention.expire` 前面；收尾的
-  `x_intake_supersede.run` 也先调它）**：超窗报警是从候选状态派生的（`expire` 连 `expired` 也计），光删报警
-  下一轮就重建；只在收尾清 `repair` 又晚一步 —— `prepare` 先把跨过窗口的那几条转成 `expired`，从此没人核对。
-  窗口内只收 `repair`；**窗口外** `pending`/`repair`/`expired` 都核对（`collected`）。这次那份完整时问的仍是 `kept`
-  （比库里全的不认，留给覆盖）；这次那份不完整、又已滑出窗口的，再没有哪一轮会来补它，库里那行能自证完整就是
-  成品，除非候选等的是长文而库里那行不是长文。认下的那一条这个账号直接记成已确认、已交付，名下那条超窗记录
-  一并删掉。永久排除的不碰。**覆盖也不限 `repair`**：在 `repair` 里没等到收尾就跨窗转成 `expired` 的那几条，新版
-  就在手里、不用联网，照样覆盖；放行时删掉它的超窗记录，再按剩下的记录重写进度行上的计数和那句提示
-  （`note_expiry`，跟 `prepare` 同一个口径 —— 收尾时那句提示会进订阅的 `last_notice`）。回归
-  `tests/test_x_intake_kept.py` 的 `ExpiryTests` 与 `tests/test_x_intake_supersede.py`（判据是窗口过去之后、
-  再准备一轮，报警还在不在）。
+  `x_intake_supersede.run` 覆盖完之后再逐账号调一遍）**：超窗报警是从候选状态派生的（`expire` 连 `expired` 也计），
+  光删报警下一轮就重建；只在收尾清 `repair` 又晚一步 —— `prepare` 先把跨过窗口的那几条转成 `expired`，从此没人
+  核对。窗口内只收 `repair`；**窗口外** `pending`/`repair`/`expired`/`ready` 都核对（`collected`）。这次那份完整时问的
+  仍是 `kept`（比库里全的不认，留给覆盖）；这次那份不完整、又已滑出窗口的，再没有哪一轮会来补它，库里那行能
+  自证完整就是成品，除非候选等的是长文而库里那行不是长文。认下的那一条这个账号直接记成已确认、已交付，名下
+  那条超窗记录一并删掉。永久排除的不碰。
+  **按每个账号自己那条关联判，不按共享候选的档位判**：候选按 `post_id` 全库一行，确认、交付、超窗却逐账号。同一条
+  推文挂在两个账号底下，一个账号先把共享候选收敛回 `ready` 之后，另一个账号那条未确认的关联照样被 `expire` 记超窗
+  （`ready` 且 `confirmed=0` 也计）—— 只认 `pending`/`repair`/`expired` 的话它从此没人核对、删了也重建。所以窗口外的
+  `ready` 也要核对（只看这个账号还没交付的）；其余三档不看交付标记，它们挂着的「正文待补」跟这个账号早先交付过
+  没有关系。
+  **覆盖也不限 `repair`**：在 `repair` 里没等到收尾就跨窗转成 `expired` 的那几条，新版就在手里、不用联网，照样覆盖。
+  **报警只在 `adopt` 一处撤**：`run` 先把所有该覆盖的写完，再逐账号 `settle` 一遍 —— 覆盖完库里那条就是这一版的
+  成品，每个账号那条关联都在这一遍里认下、撤掉自己的超窗，认旧正文和覆盖新版两条路收在同一个出口；然后按剩下的
+  记录重写进度行上的计数和那句提示（`note_expiry`，跟 `prepare` 同一个口径 —— 收尾时那句提示会进订阅的
+  `last_notice`）。回归 `tests/test_x_intake_kept.py` 的 `ExpiryTests`、`SharedPostTests` 与
+  `tests/test_x_intake_supersede.py`（判据是窗口过去之后、再准备一轮，每个账号的报警还在不在）。
   **只多了链接的那一版按更完整的那份覆盖**（仓库主人拍板；`x_post_meta.supersedes` + `kb/feeds/x_intake_supersede.py`，
   挂在每轮 `package` 确认之后、打包之前）。两条通道抄链接不一样：页面上是缩短的显示地址（`youtube.com/…`），
   不登录通道是真实地址（`www.youtube.com/…`）；末尾被渲染成卡片的那条链接页面正文里没有。判据：去掉链接后

@@ -1,6 +1,7 @@
 """清 `repair`:「只比库里多了链接 / 只多了完整证明」的新版覆盖库里那一条;库里那条已是成品的
 (`x_intake_store.kept`)直接认它、放行候选 —— 后者就是 `store.settle`,跟 `prepare` 里超窗记账前
-那一遍同一个函数。`stage` / `finish` 当场就按 `kept` 判,这里兜的是一轮之内又停进 `repair` 的那几条。
+那一遍同一个函数,逐账号判。`stage` / `finish` 当场就按 `kept` 判,这里兜的是一轮之内又停进
+`repair` 的那几条。
 
 **硬约束在 `docs/decisions/x-channels.md` 第一节。** 两条通道抄同一条推文的链接不一样
 (判据在 `x_post_meta.supersedes`),于是库里那一份和这次看到的那一份正文对不上,候选停在
@@ -31,15 +32,17 @@ class _Lost(Exception):
     """库里那一条在这一笔里没写成:连同候选放行一起回滚。"""
 
 
-def run(sources) -> int:
-    """覆盖或认库里那条、放行了几条(`repair`,以及没等到覆盖就跨窗转成 `expired` 的)。
-    读写失败照抛,由调用方按本机故障处理(那几条留在原档)。"""
-    released = 0
+def run(sources, now=None) -> int:
+    """覆盖或认库里那条、放行了几条推文(`repair`,以及没等到覆盖就跨窗转成 `expired` 的;
+    同一条挂在几个账号底下也只算一条)。读写失败照抛,由调用方按本机故障处理(那几条留在原档)。
+
+    **先把所有该覆盖的写完,再逐账号收敛一遍**(`store.settle`)。覆盖改的是全库一行的候选和库里
+    那条,确认、交付、超窗却是逐账号的:覆盖完之后库里那条就是这一版的成品,每个账号自己那条关联
+    (包括别的账号先放行、自己还没确认的)都由收敛那一遍认下、撤掉自己的超窗 —— 认旧正文和覆盖
+    新版两条路收在同一个出口,不各删各的报警。`now` 是判窗口的那一刻,缺省此刻(跟同一轮
+    `prepare` 用的是同一个时钟)。"""
+    released = set()
     for source in sources:
-        before = released
-        with store._lock(), store.db() as conn:
-            if store.current(conn, source):
-                released += store.settle(conn, source, datetime.now(timezone.utc))
         with store.read_db() as conn:
             rows = conn.execute('''SELECT DISTINCT p.post_id,p.entry,p.state FROM x_intake_candidates p
                 JOIN x_intake_links l USING(post_id)
@@ -51,20 +54,24 @@ def run(sources) -> int:
                 (reg.item_key('social', json.loads(row['entry'])['url']),)).fetchone()]
         for row in rows:
             try:
-                released += _supersede(source, row['post_id'], row['entry'], row['state'])
+                if _supersede(source, row['post_id'], row['entry'], row['state']):
+                    released.add(row['post_id'])
             except _Lost:
                 pass
-        if released > before:          # 放行时删过它名下的超窗记录:进度行上那句提示跟着改
-            with store._lock(), store.db() as conn:
-                if store.current(conn, source):
-                    store.note_expiry(conn, source['id'], store.identity(source), datetime.now(timezone.utc))
-    return released
+    now = now or datetime.now(timezone.utc)
+    for source in sources:
+        with store._lock(), store.db() as conn:
+            if store.current(conn, source):
+                released |= store.settle(conn, source, now)
+                store.note_expiry(conn, source['id'], store.identity(source), now)
+    return len(released)
 
 
 def _supersede(source, post_id, entry_json, state='repair') -> int:
     """`state` 是取样时它在哪一档:`repair`,或者在 `repair` 里没等到这一步就跨过窗口、被转成了
     `expired` 的那几条 —— 新版就在手里、不用联网,跨没跨窗口都覆盖得了;只认 `repair` 的话它们从此
-    没人核对,超窗报警每轮从 `expired` 重建。放行时它名下那条超窗记录一并删掉。"""
+    没人核对,超窗报警每轮从 `expired` 重建。超窗记录不在这里删:覆盖完库里那条就是成品,
+    由 `run` 收尾那一遍逐账号收敛时撤。"""
     entry = json.loads(entry_json)
     if not store.complete(entry):
         return 0
@@ -80,8 +87,6 @@ def _supersede(source, post_id, entry_json, state='repair') -> int:
                     WHERE post_id=? AND source_id=? AND identity=?)''',
                 (post_id, state, entry_json, post_id, source['id'], store.identity(source))).rowcount:
             return 0
-        conn.execute('DELETE FROM x_intake_expirations WHERE source_id=? AND identity=? AND post_id=?',
-                     (source['id'], store.identity(source), post_id))
         if not seen or not x_post_meta.supersedes(dict(seen), entry) or not _write(conn, dict(seen), entry):
             raise _Lost
         return 1

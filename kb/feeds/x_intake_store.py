@@ -323,27 +323,33 @@ def note_expiry(conn, source_id, ident, now):
                      (expired, retention.notice(utc(row['floor']), expired), source_id, ident))
 
 
-def settle(conn, source, now) -> int:
+def settle(conn, source, now) -> set:
     """**超窗记账之前**,把这个账号名下库里其实已有成品的候选收敛成已收(`collected`)。
 
     超窗报警从候选状态派生(`retention.expire` 连 `expired` 也计),所以光删报警下一轮就会重建;
     只在收尾时清 `repair` 又晚了一步 —— `prepare` 先把跨过窗口的那几条转成 `expired`,从此再没人
-    核对它。窗口内只收 `repair`(正文待补那几条归正文阶段);窗口外 `pending`/`repair`/`expired`
-    都核对;永久排除的不碰。返回收敛了几条。"""
+    核对它。窗口内只收 `repair`(正文待补那几条归正文阶段,`ready` 归交付);窗口外连 `ready` 在内
+    都核对。**按这个账号自己那条关联判,不按共享候选的档位判**:候选按 `post_id` 全库一行,确认、
+    交付、超窗却是逐账号的 —— 别的账号先把它收敛成 `ready` 之后,这个账号那条未确认的关联照样会
+    被 `expire` 记超窗,只认 `pending`/`repair`/`expired` 的话它从此没人核对。`ready` 只看这个账号
+    还没交付的(交付过的就是收下了);其余三档不看交付标记 —— 它们挂着「正文待补」或超窗,跟这个账号
+    早先交付过没有关系。永久排除的不碰。
+    返回收敛了哪几条(`post_id`)。"""
     ident, outside_before = identity(source), (now - capacity.WINDOW).isoformat()
     rows = conn.execute('''SELECT p.post_id,p.entry,p.state,p.published FROM x_intake_candidates p
-        JOIN x_intake_links l USING(post_id) WHERE l.source_id=? AND l.identity=? AND l.delivered=0
-        AND p.state IN ('pending','repair','expired')''', (source['id'], ident)).fetchall()
-    settled = 0
+        JOIN x_intake_links l USING(post_id) WHERE l.source_id=? AND l.identity=?
+        AND (p.state IN ('pending','repair','expired') OR p.state='ready' AND l.delivered=0)''',
+        (source['id'], ident)).fetchall()
+    settled = set()
     for candidate in rows:
         entry, outside = json.loads(candidate['entry']), candidate['published'] < outside_before
         if (not outside and candidate['state'] != 'repair') or excluded(conn, entry):
             continue
         row = conn.execute("SELECT * FROM feed_items WHERE kind='social' AND key=?",
                            (reg.item_key('social', entry['url']),)).fetchone()
-        if row and collected(dict(row), entry, outside):
-            settled += adopt(conn, source['id'], ident, candidate['post_id'], candidate['entry'],
-                             candidate['state'], dict(row), outside)
+        if row and collected(dict(row), entry, outside) and adopt(
+                conn, source['id'], ident, candidate['post_id'], candidate['entry'], candidate['state'], dict(row), outside):
+            settled.add(candidate['post_id'])
     return settled
 
 
