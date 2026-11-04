@@ -135,13 +135,14 @@ def qualify(row, settings, scope, now, floor, length=True):
 
 
 def over_length(rows, settings, scope, now=None):
-    """只差单条时长上限这一道才没做的视频(返回代表归属,带 `eligible_sources`)。
+    """只差单条时长上限这一道才没做的视频,`eligible_sources` 是卡在时长上的那几个归属。
 
     它们在窗口里、其余资格全过得去,只是按**当前**设置不做 —— 同步结果里得点名说出来。
     一个字不提的话,面板上只有「排名 0 条、入库 0 条」,人只会以为频道没更新(真机形态:
-    AI Search 三天前那期 54 分钟的周报,上限 45 分钟)。判据跟 `rejection` 是同一份:
-    带上限和不带上限各 `qualify` 一次,前者一个归属都不收、后者收得下,就是只差这一道。
-    返回的 `eligible_sources` 是不带上限时收得下的那几个归属。
+    AI Search 三天前那期 54 分钟的周报,上限 45 分钟)。判据跟 `rejection` 是同一份,而且
+    **逐归属判**:同一条视频挂在 45 分钟和 60 分钟两个订阅下时,前者自己的说明不能因为后者
+    放行就没了 —— 后者可能还没轮到处理,前者那边看到的仍是零新增。某个归属不带上限合格、
+    带上限被拒,就是那个归属只差这一道(两次的唯一差别就是时长那一道)。
     """
     now = now or datetime.now(timezone.utc)
     floor = now - timedelta(days=settings['window_days'])
@@ -149,9 +150,11 @@ def over_length(rows, settings, scope, now=None):
     for row in rows:
         if row['state'] in ('ready', 'processing') or not row['duration']:
             continue
-        free, _, _ = qualify(row, settings, scope, now, floor, length=False)
-        if free is not None and not free['unverified'] and qualify(row, settings, scope, now, floor)[0] is None:
-            found.append(free)
+        owners = [owner['source_id'] for owner in row['owners']
+                  if not rejection({**row, **owner}, settings, scope, now, floor, length=False)[0]
+                  and rejection({**row, **owner}, settings, scope, now, floor)[0]]
+        if owners:
+            found.append({**row, 'eligible_sources': owners})
     return found
 
 

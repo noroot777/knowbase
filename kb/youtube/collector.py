@@ -232,7 +232,11 @@ def process(rows, settings, scope, summary, deadline):
                 # **重判要对每个归属都来一次**,而且走 `ranking.qualify` 那一份口径 ——
                 # 只重判代表那一个归属的话,新订阅的历史下界会把这条视频对老订阅也一起
                 # 判死(审查实测:老订阅单独判是合格的,结果全局 excluded、下一轮入选 0)。
-                calibrated_row = {**row, 'entry': calibrated}
+                # **探到的时长一起带进重判。** 上面那道 `gate` 是按估算日期下的合格归属放行时长的,
+                # 事实日期可能把放得宽的那个归属剔掉(审查实测:60 分钟那个订阅的历史下界拦住了
+                # 真实日期,只剩 45 分钟那个,54 分钟的视频照样被下载入库)。逐归属判时长之后,
+                # 留下来的每个归属都放得下它 —— 下载之前这条不变量由同一个 `rejection` 保证。
+                calibrated_row = {**row, 'entry': calibrated, 'duration': float(metadata['duration'])}
                 representative, reasons, unknown = ranking.qualify(calibrated_row, policy, scope, now, floor)
                 if representative is None:
                     # **日期这类判据是「这一轮不要」,不是「永久不要」。** 写成 `excluded`
@@ -243,7 +247,8 @@ def process(rows, settings, scope, summary, deadline):
                     # 校准之后 `approximate` 已经摘了,所以这里的拒绝一律判得准、
                     # `unknown` 必然是空的 —— 两个都取只是不留 IndexError 的口子。
                     storage.update(row['video_id'], state='filtered', gate_code='window',
-                                   reason=(reasons or unknown)[0], score_rank=0)
+                                   reason=(reasons or unknown)[0], score_rank=0,
+                                   duration=calibrated_row['duration'])
                     continue
                 row = representative
             duration = float(metadata['duration'])
