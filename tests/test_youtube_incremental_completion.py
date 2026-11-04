@@ -473,5 +473,8 @@ class CompletionIntegrity(IncrementalFixture):
         self.assertEqual(200, response.status_code)
         self.assertEqual({'ready': 3, 'candidate': 45}, response.json()['counts'])
         # 没选中的候选都带着名次;做完的那 3 条按现行口径不占名次(落成 ready 那一刻清零)。
-        self.assertEqual({'candidate': True, 'ready': False},
-                         {row['state']: row['score_rank'] > 0 for row in response.json()['items']})
+        # 逐条比,不按状态汇总:汇总成字典时同一状态只剩最后一条,前面那些名次错了也照样绿。
+        items = response.json()['items']
+        self.assertEqual(48, len(items))
+        self.assertEqual([], [row['video_id'] for row in items
+                              if (row['score_rank'] > 0) != (row['state'] == 'candidate')])

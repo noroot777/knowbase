@@ -94,7 +94,9 @@ print('[download] Finished downloading playlist: fixture')
 
     def listing(self, payloads, clock, seconds_per_item=4.3, empty_seconds=0):
         def listed(arguments, path, deadline, stopped, **options):
-            self.budgets.append(deadline - clock.monotonic())
+            # 时钟从真实的 monotonic 起跳,量级每次不同,相减的末位舍入跟着变(基线上就随机
+            # 差出 1e-13)。比到微秒足够说清「拿到的是不是那一整段预算」。
+            self.budgets.append(round(deadline - clock.monotonic(), 6))
             if '--playlist-end' in arguments:
                 payloads_now = payloads[:int(arguments[arguments.index('--playlist-end') + 1])]
             else:

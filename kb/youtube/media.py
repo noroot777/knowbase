@@ -253,7 +253,7 @@ def _collect_listing(arguments, path, spec, deadline, stopped, parse, url, notes
     except PartialOutput as broken:
         output, reason, cause = broken.path, broken.reason, broken.cause
         if (completed is not None and isinstance(cause, ToolFailure) and
-                cause.returncode in (1, 101) and cause.origin == YOUTUBE and completed(output, cause.returncode)):
+                cause.returncode == 1 and cause.origin == YOUTUBE and completed(output)):
             reason, cause = '', None
     # 这一份原文还要再分一次档给下面那几抛用。**记那一笔罚不靠这儿** —— 正路是
     # `run` 的完成边界(成功、半截、失败都过),这儿只是冗余带:`trip` 第一笔说了算,
@@ -297,7 +297,7 @@ def channel_videos(source, settings, deadline, stopped, limit=20, notes=None):
     (连 `youtubetab:approximate_date` 也不给),非 flat 每条约 4.3 秒(20 条 78 秒,早先记的
     「25 秒 0 条」是当时只给了 25 秒预算被超时掐掉,不是 bot 墙,已更正)。它原先排在
     `detailed_videos` 之后兜底;普通一轮改走 `windowed_discovery` 之后(ccb4851),生产里
-    只剩登录检查(`login_check`,`limit=1`)和 `discovery.approximate` 两个调用方。
+    只剩登录检查(`login_check`,`limit=1`)一个调用方。
 
     **列不出东西一律抛**:真空频道和列举失败在这条路上分不开,而抛的代价只是按 URL 去重地
     重列一次,漏报则是这个频道从此「今天没有新内容」。**但「列了几条之后失败」不算列不出**
@@ -334,8 +334,8 @@ def detailed_videos(source, settings, deadline, stopped, limit=10, notes=None):
                             of(settings)['cookies_browser'], deadline, stopped, _detailed, url, notes)
 
 
-def _detailed(output, url, allow_empty=False, undated=None):
-    """只取真实日期；空集是否有完整覆盖证据由调用方决定。"""
+def _detailed(output, url):
+    """只取真实日期;读不出日期的那条不收,一条都没有就抛。"""
     entries, seen = [], set()
     text = output.read_text(encoding='utf-8', errors='replace')
     for line in text.splitlines():
@@ -360,8 +360,6 @@ def _detailed(output, url, allow_empty=False, undated=None):
         except (OverflowError, OSError, ValueError):
             published = None
         if published is None:
-            if undated is not None:
-                undated.append({'video_id': video_id, 'reason': '无法读取发布日期', 'code': 'undated'})
             continue
         seen.add(video_id)
         views = payload.get('view_count')
@@ -373,7 +371,7 @@ def _detailed(output, url, allow_empty=False, undated=None):
                         'description': str(payload.get('description') or '')[:4000],
                         'duration': duration if isinstance(duration, (int, float)) else None,
                         'url': 'https://www.youtube.com/watch?v=' + video_id})
-    if not entries and not allow_empty:
+    if not entries:
         noise = diagnostics(output)
         dropped(text, noise)
         raise ToolFailure(f'yt-dlp 没有从 {url} 解析出带发布时间的视频', noise,

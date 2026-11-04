@@ -68,4 +68,3 @@ def render(text, output):
            for value, context, block, quoted in zip(translated, literals, blocks, quotes)):
         raise LanguageError(INVALID)
     return translation_language.joined(text, blocks, translated)
-
