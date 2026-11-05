@@ -121,12 +121,17 @@ await sleep(200);
 // ── 2. 失败明细只有一份:只在那一步的行里,概况卡别处不再抄一遍 ──────────────
 await setup("再翻到上午那一轮", clickAt(ROW2));
 await setup("整屏又换过去了", until(`$('pipe-stage-export').dataset.status === 'error'`));
-const dedup = await evalJs(`({
-  card: $('pipe-overview').textContent,
-  stageDetail: $('pipe-stage-export').querySelector('.pipe-stage-detail').textContent })`);
+// 类型行和步骤行(都在 `#pipe-flow` 里)各念一次是那块自己的设计;流程区之外的
+// 概况卡(标题、提示、底栏)不许再抄一遍。
+const dedup = await evalJs(`(() => {
+  const card = $('pipe-overview').cloneNode(true);
+  card.querySelector('#pipe-flow').remove();
+  return { outside: card.textContent,
+           stageDetail: $('pipe-stage-export').querySelector('.pipe-stage-detail').textContent };
+})()`);
 check("那一步的原因在它自己那一行里读得到", dedup.stageDetail.includes('503'), dedup.stageDetail);
-check("整张概况卡里那条原因只出现一次",
-      dedup.card.split(dedup.stageDetail).length === 2, dedup.stageDetail);
+check("流程区之外的概况卡不再抄那条原因",
+      !dedup.outside.includes('503'), dedup.outside.replace(/\s+/g, ' ').trim().slice(0, 120));
 
 // ── 3. 保留口径由后端给,面板照它念 ───────────────────────────────────────────
 check("面板按后端报的天数念「保留最近 3 天」",
