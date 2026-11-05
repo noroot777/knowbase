@@ -209,6 +209,20 @@ def _stamp(value: str):
     return (moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)).timestamp()
 
 
+def recent(rows: list[dict], since: str) -> list[dict]:
+    """面板回看窗口里的那几条(`since` 是 `lanes.window_cutoff()`,和文章那几组同一个下界)。
+
+    **只给屏幕那一份用**(列表、页签、页头那个数),`problems` 那份事实层不过它 ——
+    重试凭证、`/run` 现查的都是事实层,窗口外的订阅照旧能被点名同步。
+    新旧按每条事实**自己**的 `at` 判(口径同 `latest`),不借订阅共用的 `last_attempt`。
+    **记不出时间的那几条照旧列着**:它们不是「已知很旧」,而是此刻现算出来、本来就没有
+    发生时刻的事实(X 只因容量不够才报的历史风险),或者存量库里那两列还是空串、之后
+    一直没再同步过的订阅。说不出旧的就不当旧的扔掉。
+    """
+    floor = datetime.fromisoformat(since).timestamp()
+    return [row for row in rows if row.get('at') is None or row['at'] >= floor]
+
+
 def latest(rows: list[dict]) -> list[dict]:
     """**列表上一个账号只占一行,列的是最后发生的那一条。**
 

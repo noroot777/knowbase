@@ -122,6 +122,54 @@ class ShelvedWindowTests(WindowCase):
         self.assertEqual(1, lanes.shelved('rss', '被暂缓')['total'])
 
 
+class SourceWindowTests(WindowCase):
+    """来源连接问题同一个窗口:按那条事实**自己**的时刻(这里是 `error_at`)。
+
+    样例里那条连不上的 RSS 订阅只写了 `last_error`、`error_at` 是空串 —— 正是
+    「记不出时间」那一种,所以每条用例先给它补上时刻。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.dead = next(s for s in reg.subscriptions('rss') if s['last_error'])
+
+    def failed(self, days: float | None) -> None:
+        with reg.db() as c:
+            c.execute('UPDATE subscriptions SET error_at=? WHERE id=?',
+                      ('' if days is None else days_ago(days), self.dead['id']))
+
+    def shown(self) -> dict:
+        data = api.overview('rss')
+        return {'rows': [row['source_id'] for row in data['source_rows']],
+                'accounts': data['source_accounts'], 'problems': data['source_problems'],
+                'facts': [row['source_id'] for row in data['sources']]}
+
+    def test_a_failure_before_the_window_leaves_the_list_and_the_counts(self):
+        self.failed(lanes.WINDOW_DAYS + 1)
+        self.assertEqual({'rows': [], 'accounts': 0, 'problems': 0,
+                          'facts': [self.dead['id']]}, self.shown())
+
+    def test_a_failure_inside_the_window_is_still_listed(self):
+        """反过来钉一边。"""
+        self.failed(lanes.WINDOW_DAYS - 1)
+        self.assertEqual({'rows': [self.dead['id']], 'accounts': 1, 'problems': 1,
+                          'facts': [self.dead['id']]}, self.shown())
+
+    def test_a_problem_without_its_own_time_is_still_listed(self):
+        """说不出旧的不当旧的扔掉 —— 也不借订阅共用的 `last_attempt` 去判。"""
+        self.failed(None)
+        with reg.db() as c:
+            c.execute('UPDATE subscriptions SET last_attempt=? WHERE id=?',
+                      (days_ago(lanes.WINDOW_DAYS + 30), self.dead['id']))
+        self.assertEqual([self.dead['id']], self.shown()['rows'])
+
+    def test_the_action_layer_still_finds_a_problem_outside_the_window(self):
+        """窗口只管屏幕:`/run` 现查的事实层照旧认得它。"""
+        self.failed(lanes.WINDOW_DAYS + 1)
+        problem_id = next(row['id'] for row in api.overview('rss')['sources'])
+        self.assertEqual(self.dead['id'], api._problem_of('rss', problem_id)['source_id'])
+
+
 class NoteTests(WindowCase):
     def test_the_header_says_the_page_only_looks_at_the_window(self):
         data = api.overview()

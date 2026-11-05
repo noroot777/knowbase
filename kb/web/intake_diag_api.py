@@ -128,14 +128,17 @@ def overview(kind: str = ''):
     for lane in lanes.LANES:
         groups[lane.group] += totals[lane.id]
     problem_rows = [p for k in wanted for p in sources.problems(k)]
+    # 屏幕上只列回看窗口里的(`sources.recent`,和文章那几组同一个下界);
+    # `sources` 照旧交完整的事实层。
+    shown = sources.recent(problem_rows, lanes.window_cutoff())
     # **来源级问题不计进这几组的「条」数**(审查第 1 轮 B08):`groups` 的量词是
     # 「条内容」,而一条来源问题不是一篇文章 —— 同一条订阅还可能同时有
     # `last_error` 和 `last_note`,贡献**两条**来源问题。它单独报一个数,页签上
     # 「待决定」显示两者之和但在页头分开说。
-    source_problems = len(problem_rows)
+    source_problems = len(shown)
     # 屏幕上那一节一个账号一行(`sources.latest`),页头和页签的数跟着它数;
     # `sources` 照旧是完整的事实清单。
-    source_rows = sources.latest(problem_rows)
+    source_rows = sources.latest(shown)
     # 搁置那一组的总数走它自己那条取数(同一个 WHERE),不另写一条 count。
     groups[lanes.ARCHIVED] = lanes.shelved(kind, '', 0, 1)['total']
     return {
