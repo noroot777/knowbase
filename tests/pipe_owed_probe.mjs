@@ -12,18 +12,18 @@
 // ③ 这一轮自己报了红、今天欠的也是它 → **不许数两遍**(上面那句话已经念过它了);
 // ④ 这一轮自己报了红、今天另外还欠着别的 → 两句话各说各的,按钮当然在。
 // ⑤ **这一轮红过、而今天已经没有可补的了**(今天先抓成后来又失败、失败之后被停用或
-//    删掉)→ 整个「需处理」区和那颗按钮都不许在,收尾那句话也不许推荐重试。这一档
+//    删掉)→ 那颗按钮不许在,收尾那句话也不许推荐重试。这一档
 //    原来是拿「这一轮红不红」跟后端那份待补做 OR 的,于是页面说「1 个步骤需处理」、
 //    点下去回一句「没有要补的」、刷新还是那样:一个点不动也消不掉的死局(第 2 轮审查
 //    实页实测)。**空集是答案,不是「没答」。**
 // ⑥ **旧服务那一档是显式降级**:回包里压根没有这个字段时退回这一轮自己的红(`kb/static`
 //    每次请求从磁盘读、而 Python 模块要重启才换,所以「新页面 + 旧进程」真会出现)。
 //
-// **判据是「真的看得见、点得到」,不是它自己那一格 `hidden`。** 那颗按钮在
-// `#pipe-issues` **里面**,而那个区原来只按最近一轮的红和提取积压决定藏不藏 ——
-// 于是 `pipe-retry.hidden=false`、`pipe-issues.hidden=true`、按钮高度 0:页面明说
-// 「今天早些时候还有 1 个步骤没补上」,却没有任何可点的东西(第 2 轮审查实页实测)。
-// 所以这里量的是整条祖先链 + 外接矩形 + 命中测试(`elementFromPoint`)。
+// **判据是「真的看得见、点得到」,不是它自己那一格 `hidden`。** 那颗按钮原来在一个
+// 「需处理」区**里面**,那个区按另一套判据藏不藏 —— 于是 `pipe-retry.hidden=false`、
+// 祖先藏着、按钮高度 0:页面明说「今天早些时候还有 1 个步骤没补上」,却没有任何可点
+// 的东西。那个区后来整块删了(按钮挪到概况卡底栏),这道量法照旧留着:可操作性取决于
+// 整条祖先链,所以量的是祖先链 + 外接矩形 + 命中测试(`elementFromPoint`)。
 //
 // 自带只读 mock 后端,CDP 直连缓存里的 chrome-headless-shell(不装 playwright、不连网、
 // 始终无头、临时 profile)。摆盘共用 `pipe_history_fixture.mjs` 那几轮。
@@ -92,7 +92,7 @@ const reload = async () => {
 // 「真的点得到」:自己没藏、祖先链上一个藏着的都没有、占着一块地方、而且那一点
 // 上命中的就是它自己(被别的东西盖住也算点不到)。
 const now = () => evalJs(`(() => {
-  const btn = $('pipe-retry'), issues = $('pipe-issues');
+  const btn = $('pipe-retry');
   let blockedBy = '';
   for (let el = btn; el && el !== document.documentElement; el = el.parentElement) {
     const cs = getComputedStyle(el);
@@ -106,10 +106,7 @@ const now = () => evalJs(`(() => {
   return { hidden: btn.hidden, blockedBy, height: Math.round(box.height),
            clickable: !blockedBy && box.height > 0 && hit === btn,
            hitId: hit ? (hit.id || hit.tagName) : '',
-           issuesHidden: issues.hidden, title: $('pipe-issues-title').textContent,
            stateTitle: $('pipe-state-title').textContent,
-           where: $('pipe-issues-list').textContent,
-           jumpHidden: $('pipe-issues-jump').hidden,
            hint: $('pipe-state-hint').textContent };
 })()`);
 
@@ -127,7 +124,8 @@ if (!await until(
 // ② 先钉反面:这一轮全绿、今天什么都不欠
 let seen = await now();
 check("今天什么都不欠时按钮真的不在", seen.hidden && !seen.clickable, JSON.stringify(seen));
-check("那整个「需处理」区也不在", seen.issuesHidden, JSON.stringify(seen));
+// 那个「需处理」报警框整块删掉了,任何一档都不许再长回来
+check("页面上没有「需处理」报警框", await evalJs(`!document.getElementById('pipe-issues')`));
 check("那句话也不提「今天早些时候」", !/今天早些时候/.test(seen.hint), seen.hint);
 
 // ① 这一轮全绿、今天早些时候那条抓取还欠着
@@ -136,12 +134,9 @@ await reload();
 seen = await now();
 check("这一轮全绿、今天还欠着时那颗按钮真的点得到",
       seen.clickable, JSON.stringify(seen));
-check("它那个区跟着露出来了", !seen.issuesHidden, JSON.stringify(seen));
-check("区里的标题和说明也按当日待补说话",
-      /今天还有 1 个步骤/.test(seen.title) && /抓取/.test(seen.where)
-      && !/明细在下面/.test(seen.where), JSON.stringify(seen));
-check("「看第一个」照旧不在:这一轮一个红都没有,下面没有可跳的卡片",
-      seen.jumpHidden, JSON.stringify(seen));
+// 欠的那几步在屏幕上没有自己的卡片(下面那几张讲的是这一轮),那句话得点名
+check("那句话点名了欠的是哪一步,而且不指去「下面那一步」",
+      /（抓取内容）/.test(seen.hint) && !/明细在下面/.test(seen.hint), seen.hint);
 check("那句话说清了它为什么在",
       /今天早些时候/.test(seen.hint) && /1 个步骤/.test(seen.hint), seen.hint);
 
@@ -149,12 +144,12 @@ check("那句话说清了它为什么在",
 owedBy = { crawl: ["rss"] };
 await reload();
 seen = await now();
-check("早些时候欠下的那一步念出了是哪个来源", /订阅源 抓取/.test(seen.where), seen.where);
+check("早些时候欠下的那一步念出了是哪个来源", /（订阅源 抓取内容）/.test(seen.hint), seen.hint);
 // 反过来钉一边:不挂在具名来源上的那一格(空串)不编一个来源名
 owedBy = { crawl: [""] };
 await reload();
 seen = await now();
-check("说不出来源时只念步骤名", /抓取/.test(seen.where) && !/订阅源/.test(seen.where), seen.where);
+check("说不出来源时只念步骤名", /（抓取内容）/.test(seen.hint) && !/订阅源/.test(seen.hint), seen.hint);
 owedBy = null;
 
 // ③ 这一轮自己报了红、今天欠的就是它 —— 不许数两遍
@@ -165,21 +160,17 @@ seen = await now();
 check("这一轮自己报的那条不再数一遍",
       /上次有 1 个步骤失败/.test(seen.hint) && !/今天早些时候/.test(seen.hint), seen.hint);
 check("按钮当然点得到", seen.clickable, JSON.stringify(seen));
-check("这一轮自己有红时,区里念的还是这一轮那几步",
-      /1 个步骤需处理/.test(seen.title) && /明细在下面/.test(seen.where),
-      JSON.stringify(seen));
+check("收尾那句话照实说这一轮红了 1 步", /1 个步骤失败/.test(seen.stateTitle), seen.stateTitle);
 
 // ④ 这一轮红的是导出,今天另外还欠着抓取
 owed = ["export", "crawl"];
 await reload();
 seen = await now();
-check("这一轮之外那几步照旧要说出来",
-      /上次有 1 个步骤失败/.test(seen.hint), seen.hint);
+check("这一轮之外那几步照旧要说出来,而且只念这一轮之外的那几步",
+      /上次有 1 个步骤失败/.test(seen.hint) && /另有 抓取内容 没补上/.test(seen.hint)
+      && !/导出文章/.test(seen.hint), seen.hint);
 check("按钮照旧点得到", seen.clickable, JSON.stringify(seen));
-// 这一轮红了 1 步、今天欠着 2 步。「需处理」只许有一处念,不然同一屏上两个数字
-// 配同一句话:收尾那句说 1、那个区说 2(第 1 轮自由审查 N1)。
-check("那个区按当日待补念 2 步", /2 个步骤需处理/.test(seen.title),
-      JSON.stringify(seen));
+// 这一轮红了 1 步、今天欠着 2 步:收尾那句只讲这一轮,欠账归下面那句话。
 check("收尾那句话只讲这一轮,不许也写「需处理」",
       !/需处理/.test(seen.stateTitle) && /1 个步骤失败/.test(seen.stateTitle),
       seen.stateTitle);
@@ -190,7 +181,6 @@ await reload();
 seen = await now();
 check("今天没有可补的了,那颗按钮就不许在", !seen.clickable && seen.hidden,
       JSON.stringify(seen));
-check("那整个「需处理」区也不许在", seen.issuesHidden, JSON.stringify(seen));
 check("收尾那句话不许写「需处理」",
       !/需处理/.test(seen.stateTitle) && /1 个步骤失败/.test(seen.stateTitle),
       seen.stateTitle);
@@ -202,9 +192,6 @@ owedField = false;
 await reload();
 seen = await now();
 check("旧服务那一档照旧按这一轮的红放行", seen.clickable, JSON.stringify(seen));
-check("旧服务那一档区里念的也还是这一轮那几步",
-      /1 个步骤需处理/.test(seen.title) && /明细在下面/.test(seen.where),
-      JSON.stringify(seen));
 owedField = true;
 
 // ⑦ 翻历史时整段都是只读的:那颗按钮不许点得到(它重试的是最新那一轮)。
@@ -216,12 +203,10 @@ if (!await evalJs(`!$('pipe-viewing').hidden`)) fails.push("摆局没成:没翻�
 await sleep(250);
 seen = await now();
 check("翻历史时按钮点不到", !seen.clickable, JSON.stringify(seen));
-// **反过来钉一边**:只读不等于什么都不显示 —— 翻到一轮红的记录,那一轮自己那几步
-// 照旧要念得出来、「看第一个」照旧跳得过去(那颗按钮另有自己的 viewing 守卫)。
-// 把这个区一并按「现在还补得到什么」来判的话,翻历史就看不到那一轮红在哪一步了。
+// **反过来钉一边**:只读不等于什么都不显示 —— 翻到一轮红的记录,那一轮自己的红
+// 照旧要念得出来。
 check("翻历史时那一轮自己的红照旧念得出来",
-      !seen.issuesHidden && /1 个步骤需处理/.test(seen.title) && !seen.jumpHidden,
-      JSON.stringify(seen));
+      /这一轮有 1 个步骤失败/.test(seen.hint), seen.hint);
 // 翻历史时 `owed` 是被主动置空的(它说的是此刻这一天,而屏幕上是上午那一轮)——
 // 拿它去念「已不用补」就是在一份没有今天信息的视图里替今天下结论,而那一轮今天
 // 很可能还欠着(第 1 轮自由审查 N1 的另一半)。

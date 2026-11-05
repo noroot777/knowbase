@@ -235,16 +235,6 @@ function pipeFlowDot(node, i) {
   return String(i + 1);
 }
 
-/** 「看第一个」那颗按钮:把选中挪到这一步所在的那一类(问题最先出现的那一类)。 */
-function pipeFlowSelectStage(stage) {
-  const model = pipeFlowModelNow;
-  const hit = model?.nodes.find(n => n.steps.includes(stage) && n.state.issues)
-    || model?.nodes.find(n => n.steps.includes(stage));
-  if (!hit) return;
-  pipeFlowSel = hit.key;
-  renderPipeState(pipeSnapshot || { running: false });
-}
-
 function pipeFlowCuttable(model, node) {
   if (node.kind === 'daily') return false;
   // 来源那一路手上没有步骤 = 抓取做完了、导出排在全库那几步之后(没等它的那一路):

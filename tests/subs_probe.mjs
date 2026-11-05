@@ -203,18 +203,14 @@ await evalJs(`document.getElementById('subs-switch-wechat').click()`);
 await until(`!document.getElementById('subs-wechat').hidden`);
 check("切回公众号视图撤掉视口锁(它是自然流的长列表)", await evalJs(`!document.body.classList.contains('subs-reading')`));
 
-// 4. 同步中心:跑完失败的那轮在总览里点名 + 原因在那一步行里 + 重试按钮
+// 4. 同步中心:跑完失败的那轮原因在那一步行里 + 重试按钮;没有「需处理」报警框
 await evalJs(`switchTab('pipe')`);
 await sleep(300);
 check("离开订阅页撤掉视口锁", await evalJs(`!document.body.classList.contains('subs-reading')`));
 check("同步中心没有连接卡和定时设置", await evalJs(`!document.querySelector('#pipepanel .pipe-source')
       && !document.querySelector('#pipepanel #sched-fields, #pipepanel .sched-modal')
       && !document.getElementById('sched-modal')`));
-// 沙箱里有未提取的存量积压:问题块如实显示待提取(和旧版重试按钮同一口径)
-check("空闲时问题块只报真实积压", await evalJs(
-  `document.getElementById('pipe-issues').hidden
-   || document.getElementById('pipe-issues-title').textContent.includes('待提取')`),
-  await evalJs(`document.getElementById('pipe-issues-title').textContent`));
+check("没有「需处理」报警框", await evalJs(`!document.getElementById('pipe-issues')`));
 // 喂一份「跑完、导出失败」的快照
 await evalJs(`renderPipeState({ running:false, stages:{}, log:[], last_run: {
   run_kind:'sync', planned_stages:['crawl','export','index'], finished_at:'2026-10-08 09:00:00',
@@ -222,31 +218,21 @@ await evalJs(`renderPipeState({ running:false, stages:{}, log:[], last_run: {
   stages:{ crawl:{status:'ok',detail:'完成'},
            export:{status:'error',detail:'4 条译文暂缺:模型服务 503'},
            index:{status:'ok',detail:'完成'} }, log:[] } }); true`);
-check("总览问题块点名失败的那一步",
-      await evalJs(`!document.getElementById('pipe-issues').hidden
-        && document.getElementById('pipe-issues-title').textContent === '1 个步骤需处理'
-        && document.getElementById('pipe-issues-list').textContent.includes('导出文章')`),
-      await evalJs(`document.getElementById('pipe-issues-title').textContent`));
-// **原因不在总览里抄第二遍,要在那一步自己那行里读得到**(反过来钉一边:总览只点名)
-check("失败原因在那一步自己那行里,总览不重复",
-      await evalJs(`document.querySelector('#pipe-stage-export .pipe-stage-detail')
-          .textContent.includes('503')
-        && !document.getElementById('pipe-issues-list').textContent.includes('503')`),
-      await evalJs(`document.querySelector('#pipe-stage-export .pipe-stage-detail').textContent
-        + ' || ' + document.getElementById('pipe-issues-list').textContent`));
-check("总览给得出「去哪看」", await evalJs(
-  `document.getElementById('pipe-issues-list').textContent.includes('下面那一步')
-   && !document.getElementById('pipe-issues-jump').hidden`),
-  await evalJs(`document.getElementById('pipe-issues-list').textContent`));
-check("问题块里有重试按钮", await evalJs(`!document.getElementById('pipe-retry').hidden`));
-// 运行中不弹问题块(失败不阻止本轮继续,收尾统一说)
+check("收尾那句话照实说这一轮失败了几步",
+      await evalJs(`document.getElementById('pipe-state-title').textContent.includes('1 个步骤失败')`),
+      await evalJs(`document.getElementById('pipe-state-title').textContent`));
+check("失败原因在那一步自己那行里",
+      await evalJs(`document.querySelector('#pipe-stage-export .pipe-stage-detail').textContent.includes('503')`),
+      await evalJs(`document.querySelector('#pipe-stage-export .pipe-stage-detail').textContent`));
+check("底栏有重试按钮", await evalJs(`!document.getElementById('pipe-retry').hidden`));
+// 运行中不给重试(失败不阻止本轮继续,收尾统一说)
 await evalJs(`renderPipeState({ running:true, current_stage:'index', stop_supported:true,
   planned_stages:['crawl','export','index'], started_at:'2026-10-08 08:00:00',
   crawl_filter:{channel:'wechat_local',accounts:[]},
   stages:{ crawl:{status:'ok',detail:'完成'},
            export:{status:'error',detail:'失败 4'},
            index:{status:'running',detail:'建立索引'} }, log:[] }); true`);
-check("运行中问题块不出现(最后统一处理)", await evalJs(`document.getElementById('pipe-issues').hidden`));
+check("运行中重试按钮不出现(最后统一处理)", await evalJs(`document.getElementById('pipe-retry').hidden`));
 
 check("整轮没有 JS 错误", pageErrors.length === 0, pageErrors.join(" | ").slice(0, 300));
 const out = [...oks.map(n => `  ok ${n}`), ...fails.map(n => `  FAIL ${n}`)].join("\n");

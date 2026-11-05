@@ -55,15 +55,22 @@ function pipeStateHint(s, result, failed, skipped, progress, owed = 0) {
     return `本轮${progress.label}尚未结束，暂不能新建同步。`;
   }
   if (progress.generating) return '同步部分已经做完，正在生成日报；这一段停不下来，生成完这里会自动更新。';
+  // 提取积压也是那颗重试按钮露脸的理由之一,按钮冒出来就要有一句话说清它为什么在
+  const backlog = progress.pending ? `还有 ${progress.pending} 项内容待提取，可重试失败项。` : '';
+  return pipeSettledHint(result, failed, skipped, progress, owed) + backlog;
+}
+function pipeSettledHint(result, failed, skipped, progress, owed) {
   // **这一轮红过、而今天已经没有可补的了**:那句「或按上次抓取范围重试失败项」
   // 指的是一个按下去必定被拒绝的动作(今天先抓成后来又失败的那条订阅、失败之后
   // 被停用或删掉的那几条,后端已经把它们从待补里摘掉了)。这一轮的红照旧说出来,
-  // 顺手指一句去哪看 —— 那个区这时是藏着的(它只讲现在要做的事)。
+  // 顺手指一句去哪看。
   // 「生成日报」红了不归那颗重试按钮管(它只补管道那几步),所以「已经不用补」「重试失败项」
   // 两句都不许拿来说它
   if (progress.genFailed) return '日报这一轮没有生成出来，原因在「生成日报」那一类里；同步到的内容都已入库，可以到日报页再生成一次。';
   if (failed && !owed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，但今天这几步已经不用补了（后来抓成了，或者那几条订阅已停用、删除）。明细在下面那一步里。`;
-  if (failed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，不影响新建同步。`;
+  // 今天另外还欠着的那几步屏幕上没有自己的卡片(下面那几张讲的是这一轮),只能在这里念
+  if (failed) return `${result.stopped ? '本轮已停止，结果已保留。' : ''}上次有 ${failed} 个步骤失败，不影响新建同步。`
+    + (progress.earlier ? `今天早些时候另有 ${progress.earlier} 没补上。` : '');
   // **这一轮全绿不等于今天没欠账。** 一天里会跑好几轮,而上面那句话只念得出最后
   // 一轮:今天早些时候失败的那几步在一轮全绿收尾之后就不在它里面了,而「重试失败
   // 项」补的正是它们(后端口径 `pipeline_retry.today_failed`)。不说的话按钮冒出来
@@ -71,7 +78,7 @@ function pipeStateHint(s, result, failed, skipped, progress, owed = 0) {
   // **排在上面那句之后**:这一轮自己报了红时念的是它自己那几步(屏幕上的卡片正指着
   // 它们),反过来就是把用户的注意力从眼前这一轮引开。于是这句话只在「这一轮一个红
   // 都没有」时出现 —— 两句话数的是同一批步骤也不会念两遍。
-  if (owed) return `${pipeRoundSoFar(result, skipped, progress)}今天早些时候还有 ${owed} 个步骤没补上，可按它们各自的范围重试失败项。`;
+  if (owed) return `${pipeRoundSoFar(result, skipped, progress)}今天早些时候还有 ${owed} 个步骤没补上${progress.earlier ? `（${progress.earlier}）` : ''}，可按它们各自的范围重试失败项。`;
   if (result.stopped) return '已完成结果已保留。可重新配置同步，已有内容会按现有规则去重。';
   if (skipped) return `${skipped} 个步骤被跳过，具体原因见下方。`;
   if (result.finished_at && progress.total && progress.completed === progress.total) return `本次${progress.label}计划的 ${progress.total} 个步骤均已完成。`;
@@ -211,8 +218,8 @@ function renderPipeState(s) {
   const round = pipeRoundSteps(result, pipeFlowModelNow?.plan, !!pipeFlowModelNow?.live), generating = !viewing && round.generating;
   const genFailed = pipeHasFailure(round.stages.generate);
   const values = round.planned.map(k => round.stages[k] || {}), failed = values.filter(pipeHasFailure).length;
-  // **这一轮自己那几个红**:整张卡转不转红、「看第一个」往哪跳、问题区写不写
-  // 「明细在下面」都按它算 —— 它讲的是**这一轮发生了什么**。
+  // **这一轮自己那几个红**:今天欠的里面哪几步屏幕上已有自己的红卡片、提示里不用
+  // 再点名,按它算 —— 它讲的是**这一轮发生了什么**。
   const failedStages = planned.filter(k => pipeHasFailure(stages[k]));
   // **「现在还补得到哪几步」只认后端那一份**(`today_failed`,和真正起跑那一侧
   // 同一个派生 `pipeline_retry.owed_now`)。**不许再和这一轮的红做 OR** —— 今天
@@ -241,11 +248,8 @@ function renderPipeState(s) {
   if (s.running) title = s.stop_requested ? '正在收尾，随后停止' : active.length ? (label === '重试' ? '正在重试：' : '') + active.join(' + ') : `${label}正在启动`;
   else if (generating) title = '正在生成日报';
   else if (result.stopped || round.stages.generate?.status === 'stopped') title = `${label}已停止`;
-  // **这一句只讲这一轮**(「N 个步骤失败」),「需处理」那句催人动手的话归那个区
-  // 自己念(`pipe-issues-title`,按 `shown` 算)。两处都写「需处理」的后果是同一屏
-  // 上两个数字配同一句话:这一轮红了 1 步、今天另外还欠着抓取时,这里写「1 个步骤
-  // 需处理」而那个区写「2 个步骤需处理」(第 1 轮自由审查 N1)。**「需处理」这个词
-  // 只许有一处**,而它要跟那颗按钮对齐到「现在真补得到」。
+  // **这一句只讲这一轮**(「N 个步骤失败」);今天另外还欠什么由下面那句提示说
+  // (`pipeStateHint`),两件事分开表达。
   // **「已不用补」只在真答得出来的时候说。** 翻历史时 `owed` 是被主动置空的(它说
   // 的是此刻这一天,而屏幕上是上午那一轮),拿它去念「已不用补」就是在一份没有今天
   // 信息的视图里替今天下结论 —— 而那一轮今天很可能还欠着。
@@ -297,60 +301,17 @@ function renderPipeState(s) {
   $('pipe-elapsed').textContent = duration ? `${busy ? '已运行' : '耗时'} ${duration}` : '';
   // Use the same successful-step count as the label; unexecuted work never fills the bar.
   $('pipe-progress-fill').style.width = (total ? Math.round(completed / total * 100) : 0) + '%';
-  // 需处理的问题在整轮结束后统一收进总览卡片:哪几步、各自卡在什么,配一颗重试按钮,
-  // 不用去每个步骤卡片里找「需处理」。运行中不出现(失败项不阻止本轮继续)。
-  // **这个区念的是哪几步**:平时就是「现在还补得到的」那一份(和那颗按钮、和真正
-  // 起跑的那一侧同一份);**翻历史时念屏幕上那一轮自己的红** —— 那时它是一块只读的
-  // 导航(按钮另有自己的 `viewing` 守卫),不然翻到一轮红的记录连「看第一个」都没了。
-  const shownStages = viewing ? failedStages : owedStages;
-  const shown = shownStages.length;
-  // 其中**这一轮自己也红着的**那几步在屏幕上有自己的卡片(所以写「明细在下面」、
-  // 「看第一个」跳得过去);其余是今天早些时候欠下的,屏幕上压根没有卡片。
-  const shownHere = shownStages.filter(k => failedStages.includes(k));
-  const shownEarlier = shownStages.filter(k => !failedStages.includes(k));
-  $('pipe-state-hint').textContent = pipeStateHint(s, result, failed, skipped, { label, completed, total, generating, genFailed }, owed);
-  const backlog = !s.running && !viewing && pipePending.extract > 0;
-  const issues = $('pipe-issues');
-  // **三样(标题、说明、重试按钮)共用这一份判据。** 按钮自己解除隐藏是不够的:
-  // 它在这个区**里面**(`index.html` 的 `#pipe-issues`),祖先藏着的话它的
-  // `hidden` 是 false、高度却是 0 —— 页面上明说「今天早些时候还有 1 个步骤没补
-  // 上」,而那颗按钮一个像素都没有(第 2 轮审查实页实测)。可操作性取决于整条
-  // 祖先链,不是控件自己那一格属性。
-  issues.hidden = s.running || generating || !(shown || backlog);
-  if (!issues.hidden) {
-    $('pipe-issues-title').textContent = shownHere.length
-      ? `${shown} 个步骤需处理`
-      : shown
-      ? `今天还有 ${shown} 个步骤没补上`
-      : `还有 ${pipePending.extract} 项内容待提取`;
-    // **只写哪几步,不抄它们的 detail。** 同一个字符串在下面那几行步骤的
-    // `.pipe-stage-detail` 里已经有一份(存量实测有 200 字的),一屏上出现两遍 ——
-    // 同元规则「口径只有一份」。这里的职责收敛成「哪几步 + 去哪看」。
-    const names = keys => keys.map(k => `<b>${esc(STAGE_META[k]?.name || k)}</b>`).join('、');
-    // **早些时候欠下的那几步挂上来源名**(`today_owed`,和 `today_failed` 同一次派生):
-    // 这一轮的卡片底下只写「抓取内容」,人只会当成刚跑完的那个来源欠的。说不出来源
-    // (旧服务、降级)就只念步骤名,不编一个。
-    const owedBy = (!viewing && s.today_owed) || {};
-    const earlier = keys => keys.map(k => {
-      const where = (owedBy[k] || []).filter(Boolean).map(channelLabel);
-      return `<b>${esc((where.length ? where.join('、') + ' ' : '') + (STAGE_META[k]?.name || k))}</b>`;
-    }).join('、');
-    // 这一轮全绿、今天还欠着那一档:**哪几步要写出来,而且不许说「明细在下面」**
-    // —— 下面那几张卡片讲的是这一轮(它们全是绿的),欠的那几步在屏幕上压根没有
-    // 自己的卡片。
-    $('pipe-issues-list').innerHTML = shownHere.length
-      ? `${names(shownHere)} · 各自的明细在下面那一步里`
-        + (shownEarlier.length ? `；${earlier(shownEarlier)} 是今天早些时候没补上的` : '')
-        + (backlog ? `；另有 ${pipePending.extract} 项内容待提取` : '')
-      : shown
-      ? `${earlier(shownStages)} · 今天早些时候没做完，可按它们各自的范围重试`
-        + (backlog ? `；另有 ${pipePending.extract} 项内容待提取` : '')
-      : '在下面的「提取知识」里重试，或新建一次同步。';
-  }
-  // 「看第一个」:把屏幕带到第一个红的那一步并展开它的明细。**翻历史时照旧给** ——
-  // 它只是滚动和展开,不动任何东西(那颗重试按钮才是「会动」的,它另有两道守卫)。
-  $('pipe-issues-jump').hidden = issues.hidden || !shownHere.length;
-  pipeFirstIssue = shownHere[0] || '';
+  // **今天早些时候欠下的那几步挂上来源名**(`today_owed`,和 `today_failed` 同一次派生):
+  // 这一轮的卡片底下只写「抓取内容」,人只会当成刚跑完的那个来源欠的。说不出来源
+  // (旧服务、降级)就只念步骤名,不编一个。**这一轮自己也红着的**那几步不在里面 ——
+  // 它们在屏幕上有自己的红卡片,再念一遍就是同一件事说两遍。
+  const owedBy = s.today_owed || {};
+  const earlier = owedStages.filter(k => !failedStages.includes(k)).map(k => {
+    const where = (owedBy[k] || []).filter(Boolean).map(channelLabel);
+    return (where.length ? where.join('、') + ' ' : '') + (STAGE_META[k]?.name || k);
+  }).join('、');
+  const pending = !s.running && !viewing ? pipePending.extract : 0;
+  $('pipe-state-hint').textContent = pipeStateHint(s, result, failed, skipped, { label, completed, total, generating, genFailed, earlier, pending }, owed);
   // **翻历史时这颗按钮一律藏掉。** 它重试的永远是**最后一轮**的范围
   // (`pipeline_retry.retry_crawl_scopes` 读的是 `load_last_run()`),而屏幕上显示
   // 的是上午那一轮 —— 「看到的那一轮」和「按下去会动的那一轮」必须是同一轮。
@@ -362,7 +323,8 @@ function renderPipeState(s) {
   // 账本空着时它退回最近一次运行,所以只会多显示、不会少显示)。
   // **「这一轮红没红」在这儿不作数**:它是历史,而这颗按钮是现在的动作。拿它兜底
   // 的后果就是上面那段注释里的死局 —— 按钮露着、点下去永远被拒绝。
-  $('pipe-retry').hidden = s.running || !!viewing
+  // 日报还在生成时同样不给:这一轮还没收尾,「欠什么」要等它落定才说得准
+  $('pipe-retry').hidden = s.running || generating || !!viewing
     || !(owed || pipePending.extract > 0);
   renderPipeLog((s.log?.length ? s.log : result.log) || [], result.finished_at);
   syncPipeLogPanel(s.running && !viewing, pipeVersion(s));
@@ -370,20 +332,6 @@ function renderPipeState(s) {
   if (typeof syncPipeHistoryLive === 'function') syncPipeHistoryLive();
   renderPipeHeadFacts();
   renderPipeButtons();
-}
-
-// 第一个需处理的步骤,「看第一个」按它跳。空串 = 这一屏没有红。
-let pipeFirstIssue = '';
-
-function jumpToFirstIssue() {
-  // 那一步可能不在眼下选中的这一类里:先把选中挪过去,行才露得出来
-  if (pipeFirstIssue) pipeFlowSelectStage(pipeFirstIssue);
-  const row = pipeFirstIssue && $('pipe-stage-' + pipeFirstIssue);
-  if (!row || row.hidden) return;
-  // 明细本来就是折叠的,跳过去还要再点一下才看得见原因 —— 那正是来这一趟要看的东西
-  const details = row.querySelector('details');
-  if (details && !details.hidden) details.open = true;
-  row.scrollIntoView({ block: 'center', behavior: 'smooth' });
 }
 
 // 「这一轮跑起来了」才自动展开日志,**只在翻上来那一下展开,之后不再管**:每次轮询都

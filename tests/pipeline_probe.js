@@ -300,16 +300,11 @@ async page => {
     await page.screenshot({path:'output/playwright/sync-failure-still-running.png'});
     state={running:false,stop_supported:true,stages:{},log:[],last_run:copy(failedRun)};await refresh();
     check('已结束的失败记录明确不阻止新建同步',await page.locator('#pipe-run').isEnabled() && (await page.locator('#pipe-state-hint').textContent()).includes('不影响新建同步'));
-    await page.locator('#pipe-retry-help summary').click();
-    check('可展开查看新建范围与自动重试边界',(await page.locator('#pipe-retry-help').textContent()).includes('下次完整同步再次尝试') && (await page.locator('#pipe-retry-help').textContent()).includes('上次的通道和范围'));
-    await refresh();
-    check('轮询保留重试说明展开状态',await page.locator('#pipe-retry-help').evaluate(el=>el.open));
     await page.screenshot({path:'output/playwright/sync-failure-guidance.png'});
     await page.setViewportSize({width:375,height:812});await settlePaint();
-    check('手机失败提示与重试说明无横向溢出',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    check('手机失败提示无横向溢出',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
     await page.screenshot({path:'output/playwright/sync-failure-guidance-mobile.png',fullPage:true});
     await page.setViewportSize({width:1440,height:1100});
-    await page.locator('#pipe-retry-help summary').click();
     await page.locator('#pipe-run').click();await page.locator('input[data-acct]').first().waitFor();
     check('上次失败后仍可正常配置并开始同步',await page.locator('#pipe-start').isEnabled());
     holdStart=false;const afterFailureStarts=countWrites('/api/pipeline/run');
