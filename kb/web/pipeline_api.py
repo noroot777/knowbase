@@ -121,6 +121,13 @@ def pipeline_status(pending: bool = False, source: bool = True, channel: str | N
     # **回包拼完了才过滤**:上面那份实时结果账是后挂上去的,先过滤再挂的话,刚处理
     # 掉的那几条在「点开这一类」时原样回来(结果账里那一格没过过这道滤)。
     pl.strip_failure_state(state)
+    # 「从浏览器采集」按条目此刻的状态标(见 `kb.pipeline_capture`)。**排在过滤之后**:
+    # 删掉的那几条不必再问。旁路,读不出来就不标,不为它把状态接口带挂。
+    try:
+        from kb import pipeline_capture
+        pipeline_capture.mark_state(state)
+    except Exception:                                  # noqa: BLE001 - 见上
+        pass
     return state
 
 
@@ -178,6 +185,11 @@ def pipeline_runs():
     # 口径同状态端点:处理掉的那几条在**任何一轮**里都不再出现 —— 用户要的正是
     # 「以后别让我再看见它」,而翻历史时那颗移除按钮本来就按不下去(前端那道)。
     pl.strip_failure_runs(runs)
+    try:
+        from kb import pipeline_capture
+        pipeline_capture.mark_runs(runs)
+    except Exception:                                  # noqa: BLE001 - 口径同状态端点
+        pass
     # `keep_days`:**保留口径由后端说**,前端不自己写死一个「3 天」。两处各写一份的
     # 话,改了这边而面板照旧念旧数字 —— 而那句话正是用户判断「我还查不查得到前天那一
     # 轮」的唯一依据。
