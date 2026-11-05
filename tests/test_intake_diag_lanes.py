@@ -250,7 +250,7 @@ class ResolvedWindowTests(DiagCase):
         `datetime('now','-7 day')` 那种没有 `T`、没有偏移的形状去比,会在日界上
         判反(`'T' > ' '`)—— 而这一列上没有可用的日期函数索引可言。
         """
-        cutoff, stamp = lanes.resolved_cutoff(), reg.now()
+        cutoff, stamp = lanes.window_cutoff(), reg.now()
         self.assertTrue(datetime.fromisoformat(cutoff).tzinfo)
         self.assertTrue(datetime.fromisoformat(stamp).tzinfo)
         self.assertIn('T', cutoff)
@@ -260,7 +260,7 @@ class ResolvedWindowTests(DiagCase):
     def test_only_what_was_finished_inside_the_window_is_listed(self):
         ids = self.seed()
         agg = reg.subscription('rss', ids['agg'])
-        old = (datetime.now(timezone.utc) - timedelta(days=lanes.RESOLVED_DAYS + 3))
+        old = (datetime.now(timezone.utc) - timedelta(days=lanes.WINDOW_DAYS + 3))
         stale = self.put(agg, 'https://news.example.org/long-done', body=FULL,
                          title='七天以前就补好的一条',
                          fulltext_at=old.isoformat(timespec='seconds'),

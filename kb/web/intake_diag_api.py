@@ -3,7 +3,7 @@
 
 **硬约束在 `docs/decisions/intake-diagnostics.md` 第一节 —— 改这块之前先读那一份。**
 
-这一份答的是「**全库**还有多少**条内容**卡住」,同步中心那个「需处理」区答的是
+这一份答的是「**近几天**(`lanes.WINDOW_DAYS`)还有多少**条内容**卡住」,同步中心那个「需处理」区答的是
 「**这一轮/今天**那几**步**欠不欠账」(`kb.pipeline_retry`)。两个数字天生不一样,
 所以屏幕上**不共用那个词**,页头那行明说另一份在哪 —— 口径只有一份,见
 `kb.intake_diag.lanes` 的模块说明。
@@ -128,14 +128,17 @@ def overview(kind: str = ''):
     for lane in lanes.LANES:
         groups[lane.group] += totals[lane.id]
     problem_rows = [p for k in wanted for p in sources.problems(k)]
+    # 屏幕上只列回看窗口里的(`sources.recent`,和文章那几组同一个下界);
+    # `sources` 照旧交完整的事实层。
+    shown = sources.recent(problem_rows, lanes.window_cutoff())
     # **来源级问题不计进这几组的「条」数**(审查第 1 轮 B08):`groups` 的量词是
     # 「条内容」,而一条来源问题不是一篇文章 —— 同一条订阅还可能同时有
     # `last_error` 和 `last_note`,贡献**两条**来源问题。它单独报一个数,页签上
     # 「待决定」显示两者之和但在页头分开说。
-    source_problems = len(problem_rows)
+    source_problems = len(shown)
     # 屏幕上那一节一个账号一行(`sources.latest`),页头和页签的数跟着它数;
     # `sources` 照旧是完整的事实清单。
-    source_rows = sources.latest(problem_rows)
+    source_rows = sources.latest(shown)
     # 搁置那一组的总数走它自己那条取数(同一个 WHERE),不另写一条 count。
     groups[lanes.ARCHIVED] = lanes.shelved(kind, '', 0, 1)['total']
     return {
@@ -153,13 +156,13 @@ def overview(kind: str = ''):
         'source_rows': source_rows,
         'source_accounts': len(source_rows),
         'running': running.snapshot(kind),
-        'resolved_days': lanes.RESOLVED_DAYS,
+        'window_days': lanes.WINDOW_DAYS,
         'min_body_chars': readable.MIN_CHARS,
         'page': lanes.PAGE,
         # 一个写请求最多带几条。前端全选之后按它分批,不另抄一份数字。
         'batch_max': MAX_KEYS,
         # 这一句在页头上原样显示,**它就是「两屏不打架」那条约束的落点**。
-        'note': ('这里数的是全库还有多少**条内容**没走完收录；同步中心那个'
+        'note': (f'这里只看近 {lanes.WINDOW_DAYS} 天，数的是还有多少**条内容**没走完收录；同步中心那个'
                  '「需处理」数的是这一轮/今天欠了哪几**步**，两个数字本来就不一样。'
                  '来源连接问题数的是**订阅**，不是文章。'),
     }

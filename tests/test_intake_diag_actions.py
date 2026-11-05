@@ -397,7 +397,7 @@ class CareLogTests(DiagCase):
     def test_the_cutoff_has_the_same_shape_as_the_stored_timestamps(self):
         """`at` 存的是 `reg.now()` 的 UTC ISO 带偏移。拿 `datetime('now','-30 day')`
         那种没有 `T`、没有偏移的形状去比,会在日界上判反(`'T' > ' '`)——
-        和 `lanes.resolved_cutoff` 同一个坑。
+        和 `lanes.window_cutoff` 同一个坑。
         """
         cutoff, stamp = ledger._cutoff(), reg.now()
         self.assertTrue(datetime.fromisoformat(cutoff).tzinfo)

@@ -73,7 +73,7 @@ def _cutoff() -> str:
 
     `at` 列存的是 `reg.now()` 的 UTC ISO 带偏移,所以这里也得折回 UTC 再
     `isoformat` —— 拿 `datetime('now','-30 day')` 那种没有 `T`、没有偏移的
-    形状去比会在日界上判反(`'T' > ' '`),和 `lanes.resolved_cutoff` 同一个坑。
+    形状去比会在日界上判反(`'T' > ' '`),和 `lanes.window_cutoff` 同一个坑。
     """
     at = datetime.now(timezone.utc) - timedelta(days=KEEP_DAYS)
     return at.isoformat(timespec='seconds')

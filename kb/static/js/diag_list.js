@@ -40,7 +40,8 @@ function careRenderList() {
     const empty = document.createElement('div');
     empty.className = 'care-empty';
     empty.textContent = CARE.q ? '这个搜索词在这一组里没有命中。'
-      : CARE.group === 'archived' ? '还没有搁置过任何内容。'
+      : CARE.group === 'archived' && CARE.overview
+        ? `近 ${CARE.overview.window_days} 天没有搁置过内容。`
         : '这一组现在是空的。';
     host.appendChild(empty);
     careRenderBatch();

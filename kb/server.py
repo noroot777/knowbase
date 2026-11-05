@@ -15,7 +15,7 @@
     settings_api   /api/models*、/api/stages、/api/keys、/api/mcp/*
     pipeline_api   /api/pipeline/*
     daily_api      /api/daily/*  每日日报:定时、立即生成、历史日报
-    intake_diag_api /api/intake-care/*  问题与待办:全库还有多少条内容没走完收录
+    intake_diag_api /api/intake-care/*  问题与待办:近 7 天还有多少条内容没走完收录
 """
 
 from __future__ import annotations
