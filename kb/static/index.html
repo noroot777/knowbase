@@ -247,19 +247,7 @@
          抓取」都还挂在那几行上)始终在文档里,只挪到被点开那一行后面。 -->
     <div id="pipe-flow" class="pipe-flow" hidden><div class="pipe-flow-rows" id="pipe-flow-rail" aria-label="本轮要跑的类型">
       <div class="pipe-flow-detail" id="pipe-flow-detail" hidden><div class="pipe-flow-dhead" id="pipe-flow-dhead"></div><p class="pipe-flow-why" id="pipe-flow-why" hidden></p><div id="pipe-stages" aria-label="同步阶段"></div><div id="pipe-flow-extra"></div></div></div></div>
-    <div class="pipe-overview-footer"><span id="pipe-state-hint"></span><button class="ghost" id="pipe-stop" onclick="stopPipe()" hidden>本阶段结束后停止</button></div>
-    <div id="pipe-issues" class="pipe-issues" hidden role="status">
-      <div class="pipe-issues-head"><b id="pipe-issues-title"></b><span class="pipe-issues-act"><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-retry-help" hidden>重试失败项</button><button class="text-button" id="pipe-issues-jump" onclick="jumpToFirstIssue()" hidden>看第一个<i data-arrow="down"></i></button></span></div>
-      <p id="pipe-issues-list" class="pipe-issues-where"></p>
-      <!-- 折叠着的:这颗按钮的射程(抓哪些、重跑哪几步)是 retry-scope.md 整篇在讲的
-           事,版面上说不清、也不该常驻。按需展开才是它的位置。 -->
-      <details id="pipe-retry-help" class="pipe-retry-help">
-        <summary>新建同步和重试失败项有什么区别？</summary>
-        <p><strong>新建同步：</strong>按本次通道、订阅和日期抓取。提取失败且仍在待处理列表中的文档，会在下次完整同步再次尝试；其他步骤仍受各自处理范围、去重和重试间隔限制。</p>
-        <p><strong>重试失败项：</strong>抓取沿用上次的通道和范围，重跑失败阶段及必要的后续步骤；“正文为空”的提取问题在配了回填脚本时会先尝试回填。</p>
-        <p>凭证失效、模型配置或服务故障需先处理。重试不保证成功，也不代表强制重跑全部历史失败。</p>
-      </details>
-    </div>
+    <div class="pipe-overview-footer"><span id="pipe-state-hint"></span><span class="pipe-overview-acts"><button class="ghost" id="pipe-retry" onclick="retryFailed()" aria-describedby="pipe-state-hint" hidden>重试失败项</button><button class="ghost" id="pipe-stop" onclick="stopPipe()" hidden>本阶段结束后停止</button></span></div>
   </section>
   <!-- 历史运行:一行一轮,列就是上面那排类型(`pipe_matrix.js`),同一列往下看就知道
        这一类是不是天天出问题。点一行,上面那张卡按那一轮重渲染。

@@ -118,26 +118,20 @@ check("标题本来就在眼前时点下去页面一动不动",
 await evalJs(`scrollTo(0, 0); exitPipeHistory(); true`);
 await sleep(200);
 
-// ── 2. 失败明细只有一份:概况卡只说哪几步,不抄它们的 detail ──────────────────
+// ── 2. 失败明细只有一份:只在那一步的行里,概况卡别处不再抄一遍 ──────────────
 await setup("再翻到上午那一轮", clickAt(ROW2));
 await setup("整屏又换过去了", until(`$('pipe-stage-export').dataset.status === 'error'`));
-const dedup = await evalJs(`({
-  summary: $('pipe-issues-list').textContent.replace(/\\s+/g, ' ').trim(),
-  stageDetail: $('pipe-stage-export').querySelector('.pipe-stage-detail').textContent,
-  jumpShown: !$('pipe-issues-jump').hidden })`);
-check("概况卡点名了是哪一步", /导出文章/.test(dedup.summary), dedup.summary);
-check("但没把那一步的 detail 再抄一遍",
-      !dedup.summary.includes('503') && dedup.stageDetail.includes('503'),
-      `${dedup.summary} || ${dedup.stageDetail}`);
-check("翻历史时「看第一个」照旧给(它只滚动和展开)", dedup.jumpShown);
-await evalJs(`$('pipe-issues-jump').click(); true`);
-await sleep(700);
-const jumped = await evalJs(`(() => {
-  const row = $('pipe-stage-export'), b = row.getBoundingClientRect();
-  return { inView: b.top >= 0 && b.bottom <= innerHeight, open: row.querySelector('details').open };
+// 类型行和步骤行(都在 `#pipe-flow` 里)各念一次是那块自己的设计;流程区之外的
+// 概况卡(标题、提示、底栏)不许再抄一遍。
+const dedup = await evalJs(`(() => {
+  const card = $('pipe-overview').cloneNode(true);
+  card.querySelector('#pipe-flow').remove();
+  return { outside: card.textContent,
+           stageDetail: $('pipe-stage-export').querySelector('.pipe-stage-detail').textContent };
 })()`);
-check("「看第一个」把那一步带进视口并展开它的明细",
-      jumped.inView && jumped.open, JSON.stringify(jumped));
+check("那一步的原因在它自己那一行里读得到", dedup.stageDetail.includes('503'), dedup.stageDetail);
+check("流程区之外的概况卡不再抄那条原因",
+      !dedup.outside.includes('503'), dedup.outside.replace(/\s+/g, ' ').trim().slice(0, 120));
 
 // ── 3. 保留口径由后端给,面板照它念 ───────────────────────────────────────────
 check("面板按后端报的天数念「保留最近 3 天」",

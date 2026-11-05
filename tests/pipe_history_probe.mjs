@@ -511,8 +511,8 @@ check("旧那份待处理数不许被应用上去",
       await evalJs(`JSON.stringify({ pending: pipePending, applied: PIPE_FRESH.pending.applied,
                                      desired: PIPE_FRESH.pending.desired })`));
 check("面板上那行字也跟着归零了",
-      !/待处理 1 项/.test(await evalJs(`$('pipe-issues')?.textContent || ''`)),
-      await evalJs(`($('pipe-issues')?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 60)`));
+      !/1 项内容待提取/.test(await evalJs(`$('pipe-state-hint').textContent`)),
+      await evalJs(`$('pipe-state-hint').textContent`));
 check("追平之后 applied 是这一轮的身份、不是旧回包那一轮",
       await evalJs(`PIPE_FRESH.pending.applied === 'run-later'
                     && PIPE_FRESH.pending.applied === PIPE_FRESH.pending.desired`),
