@@ -96,9 +96,10 @@ function initPipeStageRows() {
    两件事只在**来源给得出身份**时才有:①标题点得开(`url`,去原文核对是不是真的
    没内容了);②那颗「不再抓取」(`drop`,原样回传给后端,怎么删只有采集器知道)。
    来源给不出身份时两样都不出现 —— 指着另一篇文章让人删是不可恢复的。
-   「从浏览器采集」只跟着后端给的 `capture`(那一条真实的 `feed_items.key`)走:
-   只有正文补抓的失败才带它,翻译、导出失败缺的不是正文。排在「不再抓取」前面 ——
-   能补回来的先补,删是认了没有正文之后的事。                                  */
+   「从浏览器采集」只跟着后端给的 `capture`(那一条真实的 `feed_items.key`)走。
+   它是接口出口按条目**此刻**所在的那一档标的(`kb/pipeline_capture.py`,和「问题与
+   待办」同一份判据),不是那一轮记下的:旧记录里的也认得出,补成之后自己消失。
+   排在「不再抓取」前面 —— 能补回来的先补,删是认了没有正文之后的事。         */
 function pipeFailureRow(f) {
   const title = esc(f.title || '未命名内容');
   const head = f.url
@@ -120,12 +121,17 @@ $('pipe-stages').addEventListener('click', e => {
   const btn = e.target.closest('.pipe-failure-drop');
   if (btn) dropPipeFailure(btn);
   const capture = e.target.closest('.pipe-failure-capture');
-  // 采集发生在扩展弹窗里,这块面板收不到回包:抽屉一关就重读一遍状态和待处理数
-  // (口径同「问题与待办」那一侧的 `careOpenCapture`)。这一轮的明细是已经发生的
-  // 事实,补成了也不改写它 —— 下一轮同步不再报它就是结果。
+  // 采集发生在扩展弹窗里,这块面板收不到回包:抽屉一关就重读状态、待处理数和历史
+  // (口径同「问题与待办」那一侧的 `careOpenCapture`)。那一条的明细照旧在(那是
+  // 那一轮的事实),补成之后它旁边这颗按钮由后端摘掉。
   if (capture) {
     openCaptureDrawer(capture.dataset.captureItem, {
-      onClose: () => { invalidatePipePending(); refreshPipe(true); },
+      onClose: () => {
+        invalidatePipeStatus();
+        invalidatePipePending();
+        refreshPipe(true);
+        if (typeof loadPipeHistory === 'function') loadPipeHistory();
+      },
       onSettled: note => toast(note, { type: 'ok' }),
     });
   }

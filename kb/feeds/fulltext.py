@@ -426,7 +426,7 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None,
                     if held_say:
                         summary['held'] += 1
                     summary['failed_keys'].append(item['key'])
-                    summary['errors'].append(failure(item, error, kind, capture=True))
+                    summary['errors'].append(failure(item, error, kind))
             elif body is _SHELVED:
                 # 人在这一轮中途把它暂缓 / 不再收录了:**一次请求都没发**,额度和
                 # 待办一个字没动,恢复之后它回到队列照旧被取。不混进 `stale`
@@ -455,7 +455,7 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None,
                 else:
                     summary['empty'] += 1
                     summary['failed_keys'].append(item['key'])
-                    summary['errors'].append(failure(item, said, kind, capture=True))
+                    summary['errors'].append(failure(item, said, kind))
             if progress:
                 # 作废那几条也算「处理过了」:不算的话进度条到不了头(面板上那一行
                 # 会永远停在 N-1/N)。

@@ -347,6 +347,37 @@ def identities(keys) -> dict[str, tuple[str, int]]:
     return {row['key']: (row['life'], row['content_rev']) for row in rows}
 
 
+def capturable(refs) -> set[tuple[str, str]]:
+    """这几条 `(kind, key)` 里**此刻**还能「从浏览器采集」的那几条(原样的 `(kind, key)`)。
+
+    判据就是这几档自己的出口表(`exits` 里带 `capture` 的那几档,按 `exclusive_where`
+    独占取,搁置着的自然不算)—— 同步面板失败明细上那颗按钮和「问题与待办」里那颗
+    看的是同一份,不另写一条 WHERE。**问的是此刻,不是那一轮**:正文后来补上了、
+    条目被搁置或不再收录,按钮就跟着消失;一轮旧记录里的失败照样认得出来。
+
+    `kind` 一起比:失败明细里的身份是 `(channel, id)`,别的来源的档案 ID 不许
+    凑巧撞上一条订阅内容的 key 就长出按钮。纯读,走 `read_db`(状态接口每次轮询
+    都过这里,不该排队抢写锁)。
+    """
+    wanted = {(kind, key) for kind, key in refs if kind and key}
+    if not wanted:
+        return set()
+    keys = sorted({key for _kind, key in wanted})
+    slots = ','.join('?' for _ in keys)
+    out: set[tuple[str, str]] = set()
+    with reg.read_db() as c:
+        for lane in LANES:
+            if 'capture' not in lane.exits:
+                continue
+            cond, cargs = exclusive_where(lane.id)
+            rows = c.execute(
+                f'SELECT feed_items.key, feed_items.kind FROM feed_items'
+                f' WHERE feed_items.key IN ({slots}) AND ({cond})',
+                (*keys, *cargs)).fetchall()
+            out.update(ref for row in rows if (ref := (row[1], row[0])) in wanted)
+    return out
+
+
 def split(keys, kind: str = '') -> dict[str, list[str]]:
     """把这几个 key 按**此刻真正所在的那一档**分桶。空串那一桶 = 已经不在积压里。
 
