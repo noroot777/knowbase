@@ -162,7 +162,7 @@ _ADDED_COLUMNS = {
         # (见 `translate.requeue_failed`)。`_save` 译成之后清掉。
         ('translate_manual', 'INTEGER NOT NULL DEFAULT 0'),
         # 正文补抓的三列。老库里的条目补成空串 = 还没抓过:订阅开了补抓开关
-        # 之后它们会自动排进队列,一轮 MAX_ITEMS 条慢慢补齐 —— 那正是打开这个
+        # 之后它们会自动排进队列,每轮在墙钟预算内慢慢补齐 —— 那正是打开这个
         # 开关的人想要的(存量那几百条壳才是他点开面板时看见的东西)。
         ('fulltext_at', "TEXT NOT NULL DEFAULT ''"),
         ('fulltext_error', "TEXT NOT NULL DEFAULT ''"),

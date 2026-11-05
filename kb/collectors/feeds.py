@@ -224,7 +224,7 @@ class FeedCollector:
             # 两步都在这里,理由见 `_body_retry`;插队的理由见
             # `fulltext.fetch_pending` 的 `keys`(放回队列把额度清成 0,而取数是
             # 「失败过的优先」—— 不插队的话它们排到队尾,几百条积压下一条都轮不
-            # 到)。这一轮的范围照旧是整类来源、照旧最多 `MAX_ITEMS` 条 ——
+            # 到)。这一轮的范围照旧是整类来源、照旧由墙钟预算封顶 ——
             # 确认框里写的就是这个。
             body_retry = self._body_retry()
             named = [str(one) for one in (body_retry or {}).get('keys') or []]

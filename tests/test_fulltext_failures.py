@@ -492,7 +492,7 @@ class FetchFailureStageTests(FullTextCase):
         """本轮还没轮到的那些只是积压:不判红、不说成故障。"""
         for i in range(3):
             self.put(url=f'https://e.org/p{i}', title=f'Post {i}')
-        with patch.object(fulltext, 'MAX_ITEMS', 1):
+        with patch.object(fulltext, 'ROUND_SECONDS', 0):
             status, note, failures = self._materialize(result=page(PAGE))
         self.assertEqual('ok', status)
         self.assertIn('待补抓原文正文', note)
@@ -504,9 +504,8 @@ class FetchFailureStageTests(FullTextCase):
         old = self.put(url='https://e.org/old', title='Old')
         self._mark(old, fulltext_error='HTTP 500', fulltext_tries=1)
         self.put(url='https://e.org/new', title='New')
-        # 失败过的优先,所以要把预算卡在 1 条之外才能造出「这一轮没碰它」。
-        with patch.object(fulltext, 'MAX_ITEMS', 1), \
-                patch.object(fulltext, 'ROUND_SECONDS', 0):
+        # 失败过的优先,所以要把墙钟预算卡成 0 才能造出「这一轮没碰它」。
+        with patch.object(fulltext, 'ROUND_SECONDS', 0):
             status, note, failures = self._materialize(result=page(PAGE))
         self.assertEqual('ok', status)
         self.assertIn('此前原文抓取失败', note)
@@ -544,8 +543,7 @@ class FetchFailureStageTests(FullTextCase):
         self._mark(old, fulltext_error='HTTP 500', fulltext_tries=1,
                    exported_hash=self.row(old)['content_hash'])
         self.put(url='https://e.org/new', title='New')
-        with patch.object(fulltext, 'MAX_ITEMS', 1), \
-                patch.object(fulltext, 'ROUND_SECONDS', 0):
+        with patch.object(fulltext, 'ROUND_SECONDS', 0):
             status, note, _ = self._materialize(result=page(PAGE))
         self.assertEqual('ok', status)
         self.assertIn('此前原文抓取失败', note)

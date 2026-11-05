@@ -9,8 +9,8 @@
 
 **名字一律由 `fulltext` 原样再导出**,调用点和直测入口一个字都不用改 ——
 `fulltext.queued_sql()` / `fulltext.MAX_TRIES` / `fulltext.work_version(row)`
-照旧成立。`MAX_TRIES` 跟着判据走(它是判据的一部分);`MAX_ITEMS` 留在那边
-(它管一轮抓几条,而且有回归在打桩)。
+照旧成立。`MAX_TRIES` 跟着判据走(它是判据的一部分);`ROUND_SECONDS` 留在那边
+(它管一轮抓多久,而且有回归在打桩)。
 
 **硬约束见 `docs/decisions/fulltext.md`;搁置那一道见
 `docs/decisions/intake-diagnostics.md`。**

@@ -20,7 +20,10 @@ BEGIN SELECT RAISE(IGNORE); END;
 '''
 
 
-def failure(item, reason, kind: str | None = None) -> dict:
+def failure(item, reason, kind: str | None = None, capture: bool = False) -> dict:
+    """失败明细的一条。`capture` 只由正文补抓那一侧传:缺的是正文时,明细上那颗
+    「从浏览器采集」按 `feed_items.key` 打开采集抽屉(准入仍是抽屉那条路自己判,
+    见 `browser_capture.target`);翻译、导出失败缺的不是正文,不带。"""
     item = dict(item)
     result = {'title': str(item.get('title') or '未命名内容')[:120],
               'reason': str(reason)[:300]}
@@ -29,6 +32,8 @@ def failure(item, reason, kind: str | None = None) -> dict:
         result['url'] = url
     channel = kind or item.get('kind')
     key = item.get('key')
+    if capture and key:
+        result['capture'] = key
     if channel and key and url and item_key(channel, url) == key:
         result['drop'] = {'channel': channel, 'id': key, 'link': url}
     return result

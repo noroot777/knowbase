@@ -95,32 +95,49 @@ function initPipeStageRows() {
 /* ── 失败明细的一行(硬约束在 docs/decisions/failure-drop.md 第一节)────────
    两件事只在**来源给得出身份**时才有:①标题点得开(`url`,去原文核对是不是真的
    没内容了);②那颗「不再抓取」(`drop`,原样回传给后端,怎么删只有采集器知道)。
-   来源给不出身份时两样都不出现 —— 指着另一篇文章让人删是不可恢复的。        */
+   来源给不出身份时两样都不出现 —— 指着另一篇文章让人删是不可恢复的。
+   「从浏览器采集」只跟着后端给的 `capture`(那一条真实的 `feed_items.key`)走:
+   只有正文补抓的失败才带它,翻译、导出失败缺的不是正文。排在「不再抓取」前面 ——
+   能补回来的先补,删是认了没有正文之后的事。                                  */
 function pipeFailureRow(f) {
   const title = esc(f.title || '未命名内容');
   const head = f.url
     ? `<a href="${esc(safeUrl(f.url))}" target="_blank" rel="noopener noreferrer">${title}${arrow('ext')}</a>`
     : title;
+  const capture = f.capture
+    ? `<button class="text-button pipe-failure-capture" data-capture-item="${esc(f.capture)}">从浏览器采集</button>`
+    : '';
   const drop = f.drop && f.drop.channel && f.drop.id
     ? `<button class="text-button pipe-failure-drop" data-drop="${esc(JSON.stringify(f.drop))}">不再抓取</button>`
     : '';
-  return `<p><span class="pipe-failure-head">${head}${drop}</span><span>${esc(f.reason || '')}</span></p>`;
+  const acts = capture || drop ? `<span class="pipe-failure-acts">${capture}${drop}</span>` : '';
+  return `<p><span class="pipe-failure-head"><span class="pipe-failure-title">${head}</span>${acts}</span>`
+    + `<span>${esc(f.reason || '')}</span></p>`;
 }
 // 事件委托挂在稳定的容器上:明细那几段 innerHTML 每轮轮询都可能重建,
 // 逐个按钮绑定会在重建的那一下全部丢掉。
 $('pipe-stages').addEventListener('click', e => {
   const btn = e.target.closest('.pipe-failure-drop');
   if (btn) dropPipeFailure(btn);
+  const capture = e.target.closest('.pipe-failure-capture');
+  // 采集发生在扩展弹窗里,这块面板收不到回包:抽屉一关就重读一遍状态和待处理数
+  // (口径同「问题与待办」那一侧的 `careOpenCapture`)。这一轮的明细是已经发生的
+  // 事实,补成了也不改写它 —— 下一轮同步不再报它就是结果。
+  if (capture) {
+    openCaptureDrawer(capture.dataset.captureItem, {
+      onClose: () => { invalidatePipePending(); refreshPipe(true); },
+      onSettled: note => toast(note, { type: 'ok' }),
+    });
+  }
 });
 async function dropPipeFailure(btn) {
   let ref = null;
   try { ref = JSON.parse(btn.dataset.drop || ''); } catch {}
   if (!ref || !ref.channel || !ref.id) return toast('这一条没有可用的标识，无法移除');
-  // 标题要把按钮自己的字摘掉 —— `.textContent` 会把「不再抓取」一起念进来,
+  // 只念标题那一段 —— 整行的 `.textContent` 会把右边那几颗按钮的字一起念进来,
   // 于是确认框里写着「某个号 · 某篇不再抓取。将把它…」。
-  const head = btn.closest('p')?.querySelector('.pipe-failure-head');
-  const name = (head ? [...head.childNodes].filter(n => n !== btn)
-    .map(n => n.textContent).join('') : '').trim() || '这一条';
+  const head = btn.closest('p')?.querySelector('.pipe-failure-title');
+  const name = (head ? head.textContent : '').trim() || '这一条';
   if (!await confirmBox({
     title: '以后不再抓取这一条？',
     body: `${name}。将把它从采集范围里永久移除：删除已采集的内容，再次发现同一篇也不再收录。确认原文确实没有正文再操作，此操作不可撤销。`,

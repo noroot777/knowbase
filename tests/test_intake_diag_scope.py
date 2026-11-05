@@ -140,7 +140,7 @@ class BodyScopeTests(DiagCase):
         self.assertEqual(['export', 'index'], scope['stages'])
         self.assertEqual(1, scope['picked'])
         detail = scope['detail']
-        for said in ('范围是整类', '不只是你点的 1 条', str(fulltext.MAX_ITEMS),
+        for said in ('范围是整类', '不只是你点的 1 条', f'本轮最长 {fulltext.ROUND_SECONDS / 60:g} 分钟',
                      '会联网', '要花钱', '条目化提取不在这一步',
                      '索引会检查整个知识库'):
             with self.subTest(said=said):

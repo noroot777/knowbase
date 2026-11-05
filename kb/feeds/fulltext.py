@@ -57,11 +57,13 @@ from kb.intake_diag import shelf
 from kb.pipeline_state import _state
 from kb.source_types import link_body_sql
 
-# 一轮补抓多少条。存量几百条壳的话一次全抓会把一次同步拖很久,而且每抓一条就
-# 多一条待翻译 —— 分批消化,每轮啃一截。
-MAX_ITEMS = int(os.environ.get('KB_FULLTEXT_MAX_ITEMS', '20'))
-# 整轮的墙钟预算。单条由 `fetching.request` 自己的 SOURCE_SECONDS 兜底,这一道
-# 管的是"20 条都慢"那种情况:materialize 后面还排着翻译、导出、索引。
+# 整轮的墙钟预算 —— **一轮补抓只由它封顶,不设条数上限**。原来还有一道「一轮
+# 最多 20 条」,而聚合订阅一天进来四五十条壳:实测一轮 20 条半分钟就抓完、预算
+# 还剩九成,余下二十多条一次都没试过就挂成「待补抓」,等下一次同步(翻译那边的
+# 条数上限早已因同一个理由取消,见 `translate.translate_pending`)。「存量几百条
+# 一次全抓会把同步拖很久」由这一道兜住:到点没轮到的留给下一轮,不算失败。
+# 单条由 `fetching.request` 自己的 SOURCE_SECONDS 兜底;materialize 后面还排着
+# 翻译、导出、索引。
 ROUND_SECONDS = float(os.environ.get('KB_FULLTEXT_SECONDS', '300'))
 WORKERS = 3
 
@@ -334,14 +336,15 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None,
     **`keys` = 这一轮**排在队首**的那几条**(「问题与待办」那颗「立即执行」把人
     选的那几条带进来,见 `kb/collectors/feeds.py` 的 `materialize`)。
     **非得插队不可**:放回队列那一下把 `fulltext_tries` 清成 0,而取数是「失败过
-    的优先」—— 刚放回去的那几条于是排到**队尾**,212 条积压、一轮 20 条的情况下
+    的优先」—— 刚放回去的那几条于是排到**队尾**,212 条积压、一轮预算抓不完的情况下
     人等完一整轮同步也碰不到它们一条(翻译那条路上实测过同一形态,见
     `translate_scope.requeue_failed` 的 ② 「排序」)。
 
     **插队不是放行、也不是扩容。** 它只改 `ORDER BY`:`queued_sql` 一个字不改,
     所以挂着的、额度用完的、被搁置的照旧取不到(放回队列那一步在
-    `reopen` 里,判据待在它自己的 WHERE 里);`limit` 也照旧封顶 —— 点名 50 条
-    仍然是这一轮最多 `MAX_ITEMS` 条,确认框里如实写着。**一轮只跑一次取数**,
+    `reopen` 里,判据待在它自己的 WHERE 里);墙钟预算也照旧封顶 —— 到点没轮到
+    的留给下一轮,确认框里如实写着。`limit` 只给显式限量的调用方,常规同步不传。
+    **一轮只跑一次取数**,
     不为点名那几条另跑一轮:另跑一轮会让失败后仍留在队列里的那几条在同一轮被抓
     两次(两次联网、两次扣额度)。
     """
@@ -374,8 +377,10 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None,
             " CASE WHEN fulltext_url<>'' THEN fulltext_url ELSE url END AS fetch_url"
             ' FROM feed_items'
             f' WHERE kind=? AND ({cond})'
-            f' ORDER BY {first}fulltext_tries DESC, fetched_at DESC, key LIMIT ?',
-            (kind, *cargs, *picked, max(1, limit or MAX_ITEMS))).fetchall()]
+            f' ORDER BY {first}fulltext_tries DESC, fetched_at DESC, key'
+            + (' LIMIT ?' if limit is not None else ''),
+            (kind, *cargs, *picked,
+             *(() if limit is None else (max(1, limit),)))).fetchall()]
     summary['left'] = max(0, pending(kind) - len(rows))
     if not rows:
         return summary
@@ -421,7 +426,7 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None,
                     if held_say:
                         summary['held'] += 1
                     summary['failed_keys'].append(item['key'])
-                    summary['errors'].append(failure(item, error, kind))
+                    summary['errors'].append(failure(item, error, kind, capture=True))
             elif body is _SHELVED:
                 # 人在这一轮中途把它暂缓 / 不再收录了:**一次请求都没发**,额度和
                 # 待办一个字没动,恢复之后它回到队列照旧被取。不混进 `stale`
@@ -450,7 +455,7 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None,
                 else:
                     summary['empty'] += 1
                     summary['failed_keys'].append(item['key'])
-                    summary['errors'].append(failure(item, said, kind))
+                    summary['errors'].append(failure(item, said, kind, capture=True))
             if progress:
                 # 作废那几条也算「处理过了」:不算的话进度条到不了头(面板上那一行
                 # 会永远停在 N-1/N)。

@@ -32,10 +32,11 @@ const ref = (index, account) => ({ channel: CHANNEL, id: IDS[index], link: URLS[
   ...(FEED ? {} : { account }) });
 
 // 三条明细,刚好是三种形态:带身份的两条(点得开、删得掉)、来源给不出身份的一条
-// (降级那一档,两样都不该有)。
+// (降级那一档,两样都不该有)。订阅类来源的第一条是正文补抓失败,后端另带
+// `capture`(那一条的 `feed_items.key`),多一颗「从浏览器采集」;第二条不带。
 const ITEMS = () => [
   { title: "某个号 · 缺正文的一篇", reason: "缺少正文，暂未导出", pending: true,
-    url: LINK, drop: ref(0, "某个号") },
+    url: LINK, drop: ref(0, "某个号"), ...(FEED ? { capture: IDS[0] } : {}) },
   { title: "另一个号 · 又一篇", reason: "缺少正文，暂未导出", pending: true,
     url: LINK + "&n=2", drop: ref(1, "另一个号") },
   { title: "没有身份的一条", reason: "缺少正文，暂未导出", pending: true },
@@ -134,7 +135,12 @@ const rows = () => evalJs(
                   href: p.querySelector('a')?.getAttribute('href') || '',
                   target: p.querySelector('a')?.getAttribute('target') || '',
                   arrow: !!p.querySelector('a svg.ia-ext'),
-                  drop: !!p.querySelector('.pipe-failure-drop') }))`);
+                  drop: !!p.querySelector('.pipe-failure-drop'),
+                  capture: !!p.querySelector('.pipe-failure-capture'),
+                  captureFirst: !!p.querySelector('.pipe-failure-capture')
+                    && !!(p.querySelector('.pipe-failure-capture')
+                      .compareDocumentPosition(p.querySelector('.pipe-failure-drop'))
+                      & Node.DOCUMENT_POSITION_FOLLOWING) }))`);
 
 await send("Runtime.enable");
 await send("Page.enable");
@@ -171,6 +177,26 @@ check("带身份的两条各有一颗「不再抓取」",
 check("来源给不出身份的那一条:点不开、也删不掉",
       !listed[2].href && !listed[2].drop, JSON.stringify(listed[2]));
 check("原因那一句照旧写着", /缺少正文/.test(listed[2].text), listed[2].text);
+if (FEED) {
+  check("后端给了 capture 的那一条有「从浏览器采集」,排在「不再抓取」前面",
+        listed[0].capture && listed[0].captureFirst, JSON.stringify(listed[0]));
+  check("没给 capture 的不长出这颗按钮", !listed[1].capture && !listed[2].capture);
+  // 抽屉本身有它自己的探针(`tests/capture_drawer_shell.mjs`),这里只钉交接:点下去
+  // 打开的是**这一条**的抽屉,而且挂了关掉之后重读面板的口子。
+  await evalJs(`window.__captured = [];
+    window.__realOpenCapture = openCaptureDrawer;
+    window.openCaptureDrawer = (key, hooks) => __captured.push(
+      { key, onClose: typeof hooks?.onClose === 'function' }); true`);
+  await setup("点中了「从浏览器采集」",
+              clickAt("#pipe-stage-export .pipe-failures p:nth-child(1) .pipe-failure-capture"));
+  const opened = await evalJs(`JSON.stringify(__captured)`);
+  check("打开的是这一条的采集抽屉,关掉时会重读面板",
+        opened === JSON.stringify([{ key: IDS[0], onClose: true }]), opened);
+  check("点它不弹删除确认框、不发删除请求",
+        await evalJs(`document.querySelectorAll('.confirm-mask').length === 0`)
+        && drops.length === 0, JSON.stringify(drops));
+  await evalJs(`window.openCaptureDrawer = __realOpenCapture; true`);
+}
 
 // ── 2. 点按钮先弹自绘确认框,取消什么都不发 ───────────────────────────────────
 await setup("点中了第一条的「不再抓取」",
@@ -180,7 +206,8 @@ check("弹的是自绘确认框,不是原生 confirm",
 const asked = await evalJs(`document.querySelector('.confirm-body')?.textContent || ''`);
 check("确认框里写明这是不可撤销的", /不可撤销/.test(asked), asked);
 check("确认框念的是标题,没把按钮自己那几个字念进去",
-      /缺正文的一篇。/.test(asked) && !/一篇不再抓取/.test(asked), asked);
+      /缺正文的一篇。/.test(asked) && !/一篇不再抓取/.test(asked)
+      && !/从浏览器采集/.test(asked), asked);
 await setup("点了取消", clickAt(".confirm-mask [data-act=cancel]"));
 check("取消之后一个请求都没发", drops.length === 0, JSON.stringify(drops));
 check("取消之后那一条还在",
