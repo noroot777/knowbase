@@ -9,13 +9,17 @@
 (`lanes.capturable`)。反过来钉住:补成之后、搁置之后、翻译失败、别的来源的身份、
 没身份的那条,一律不带;冻在旧记录里的字段也要被摘掉。
 
+第二件事(`HandFilledTests`):**那一轮结束之后有人亲手补过正文的,那一条从明细里拿掉。**
+实测形态:采集抽屉补完 OpenAI 那篇,按钮消失了、整行还在,旁边只剩一颗「不再抓取」——
+指着一篇刚补好正文的文章让人永久删掉。判据落在**回包里还有没有那一行、明细总数**。
+
 脚手架复用 `tests/test_feed_fulltext.py` 的 `FullTextCase`(临时 registry)。
 """
 import copy
 import unittest
 from unittest.mock import Mock, patch
 
-from kb import pipeline_capture, pipeline_state
+from kb import browser_capture, pipeline_capture, pipeline_state
 from kb.feeds import fulltext, registry as reg
 from kb.feeds.exclusion import failure
 from kb.feeds.fetching import FeedError
@@ -28,6 +32,11 @@ def run_of(failures):
     return {'stages': {'export': {'status': 'error', 'failures': copy.deepcopy(failures)}},
             'results': {'export': {'rss': {'status': 'error',
                                            'failures': copy.deepcopy(failures)}}}}
+
+
+def titles(run):
+    return ([f['title'] for f in run['stages']['export']['failures']],
+            [f['title'] for f in run['results']['export']['rss']['failures']])
 
 
 def marks(run):
@@ -103,6 +112,76 @@ class CaptureMarkTests(FullTextCase):
         run = run_of([other, bare, errors[0]])
         pipeline_capture.mark_runs([run])
         self.assertEqual(([None, None, key], [None, None, key]), marks(run))
+
+
+class HandFilledTests(FullTextCase):
+    """直接继承脚手架,不继承 `CaptureMarkTests` —— 那样会把它的用例在这里再收一遍。"""
+
+    def setUp(self):
+        super().setUp()
+        self.key = self.put()
+        self.other = self.put(url='https://e.org/other', title='Other')
+        with patch.object(fulltext, 'request',
+                          Mock(side_effect=FeedError('这一页要求先完成验证或登录'))), \
+                patch.dict(pipeline_state._state, stop_requested=False):
+            self.errors = fulltext.fetch_pending('rss')['errors']
+        self.assertEqual(2, len(self.errors))
+
+    def _fill_by_hand(self):
+        browser_capture.save_pasted(self.key, '这是人工粘进来的一整段正文。' * 40)
+
+    def _run(self, finished):
+        run = run_of(self.errors)
+        if finished is not None:
+            run['finished_at'] = finished
+        return run
+
+    def test_filled_after_the_round_drops_the_row(self):
+        run = self._run('2000-01-01 08:00:00')
+        self._fill_by_hand()
+        pipeline_capture.mark_runs([run])
+        self.assertEqual((['Other'], ['Other']), titles(run))
+        # 剩下那一条照旧还能从浏览器补 —— 拿掉的只有补好的那一条。
+        self.assertEqual(([self.other], [self.other]), marks(run))
+
+    def test_the_truncated_total_follows(self):
+        run = self._run('2000-01-01 08:00:00')
+        run['stages']['export']['failures_total'] = 60
+        self._fill_by_hand()
+        pipeline_capture.mark_runs([run])
+        self.assertEqual(59, run['stages']['export']['failures_total'])
+
+    def test_state_and_last_run_both_lose_it(self):
+        state = {**self._run('2000-01-01 08:00:00'),
+                 'last_run': self._run('2000-01-01 08:00:00')}
+        self._fill_by_hand()
+        pipeline_capture.mark_state(state)
+        self.assertEqual((['Other'], ['Other']), titles(state))
+        self.assertEqual((['Other'], ['Other']), titles(state['last_run']))
+
+    def test_a_round_still_running_keeps_it(self):
+        """反过来钉一边:还在跑的那一轮没有收尾时刻,拿不准就照旧显示。"""
+        run = self._run(None)
+        self._fill_by_hand()
+        pipeline_capture.mark_runs([run])
+        self.assertEqual((['Yes, and', 'Other'], ['Yes, and', 'Other']), titles(run))
+
+    def test_filled_before_the_round_ended_keeps_it(self):
+        """正文补在那一轮收尾之前:那一轮的失败说的可能正是这份新正文,不拿掉。"""
+        self._fill_by_hand()
+        run = self._run('2999-01-01 08:00:00')
+        pipeline_capture.mark_runs([run])
+        self.assertEqual((['Yes, and', 'Other'], ['Yes, and', 'Other']), titles(run))
+
+    def test_an_automatic_fetch_is_not_by_hand(self):
+        """自动补抓补上的不算「人办完了」:行照旧在(只是不再带按钮)。"""
+        run = self._run('2000-01-01 08:00:00')
+        with patch.object(fulltext, 'request', Mock(return_value=page(PAGE))), \
+                patch.dict(pipeline_state._state, stop_requested=False):
+            fulltext.fetch_pending('rss')
+        pipeline_capture.mark_runs([run])
+        self.assertEqual((['Yes, and', 'Other'], ['Yes, and', 'Other']), titles(run))
+        self.assertEqual(([None, None], [None, None]), marks(run))
 
 
 if __name__ == '__main__':

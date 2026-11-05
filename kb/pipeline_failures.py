@@ -291,10 +291,19 @@ def strip(run, keys: set[str] | None = None) -> int:
 
 
 def _strip_entry(stage: dict, keys: set[str]) -> int:
+    return remove_where(stage, lambda f: not _item_keys(f).isdisjoint(keys))
+
+
+def remove_where(stage: dict, gone) -> int:
+    """把这一格明细里 `gone(f)` 为真的那几条剔掉(**就地改**),返回剔了几条。
+
+    出口处按条目现状隐藏明细的另一处(`kb.pipeline_capture`)也走这里 —— 「剔掉之后
+    `failures_total` 怎么跟着减」只有这一份。
+    """
     items = stage.get("failures")
     if not isinstance(items, list):
         return 0
-    kept = [f for f in items if _item_keys(f).isdisjoint(keys)]
+    kept = [f for f in items if not gone(f)]
     n = len(items) - len(kept)
     if not n:
         return 0
