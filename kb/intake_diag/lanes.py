@@ -6,7 +6,7 @@
 这一份回答的问题和同步中心那个「需处理」区**不是同一个**:
 - 同步中心答「**这一轮 / 今天**那几**步**(crawl / export / index / extract)欠不欠账」
   (`kb.pipeline_retry.today_failed` / `owed_now`,屏幕上的量词是**步骤**);
-- 这一份答「**全库**还有多少**条内容**卡在哪一环、为什么」(量词是**条**)。
+- 这一份答「**近几天(`WINDOW_DAYS`)收进来的**内容还有多少**条**卡在哪一环、为什么」(量词是**条**)。
 
 两者的数字天生不一样,所以**不许在屏幕上共用「需处理」这个词**(CLAUDE.md:那个词
 只许一处念,而且要和重试那颗按钮同一个数字)。这个面板的那一组叫「待决定」,页头
@@ -34,10 +34,17 @@ from kb.intake_diag import shelf
 #: 「今天」「最近几天」按项目时区算(CLAUDE.md),不按宿主机。
 TZ = ZoneInfo('Asia/Shanghai')
 
-#: 「已完成」那一组回看几天。**这一组必须有窗口**:库里 5000 多条内容绝大多数
-#: 本来就一路顺利,把它们全列进「已完成」等于把这一屏变成一份全库清单,而人要
-#: 看的是「我处理过的那几条后来怎么了」。
-RESOLVED_DAYS = 7
+#: **这块面板只看最近几天。** 每一组都按它自己那件事发生的时刻回看这么多天:
+#: 待决定 / 待执行按**收进来**的时刻(`fetched_at`),已完成按**成功**的时刻,
+#: 已搁置按**做决定**的时刻。窗口外的那几条从面板上整个消失,不计数、不列出 ——
+#: 不设窗口的话,每天新卡住的、新搁置的只增不减,这一屏迟早变成一份全库清单,
+#: 而人要看的是「最近这几天的收录出了什么事」。
+#: **窗口只收窄显示,不改任何一条内容的状态**:管道照旧按它自己的队列处理窗口外
+#: 的条目(`fulltext.queued_sql` 等判据一个字不动),搁置着的照旧搁置着 —— 删掉
+#: 搁置记录等于把人说过「不要了」的内容放回队列。分档(`split`)、「从浏览器采集」
+#: 的准入(`capturable`)和详情(`one`)也都不看窗口:它们答的是「这一条此刻在
+#: 哪一档」,不是「面板上列不列它」。
+WINDOW_DAYS = 7
 
 #: 收录这条链上的四个环节,**和详情里那四步进度一一对应**。
 BODY, TRANSLATE, INGEST, SOURCE = '正文抓取', '翻译', '入库处理', '来源连接'
@@ -105,16 +112,17 @@ GROUPS = (ATTENTION, QUEUED, RUNNING, RESOLVED, ARCHIVED)
 STAGES = (BODY, TRANSLATE, INGEST, SOURCE)
 
 
-def resolved_cutoff(now: datetime | None = None) -> str:
-    """「已完成」窗口的下界,写成和 `reg.now()` **同一种形状**的字符串。
+def window_cutoff(now: datetime | None = None) -> str:
+    """面板回看窗口的下界,写成和 `reg.now()` **同一种形状**的字符串。
 
-    **非得自己算不可**:库里 `fulltext_at` / `translated_at` 存的是
+    **非得自己算不可**:库里 `fetched_at` / `fulltext_at` / `translated_at` /
+    搁置的 `created_at` 存的都是
     `reg.now()` 的 UTC ISO 带偏移(`2026-10-09T07:56:11+00:00`),而
     `datetime('now','-7 day')` 给的是 `2026-10-19 10:52:45` —— 没有 `T`、
     没有偏移。两者做字符串比较时在日界上判反(`'T' > ' '`),而这一列上
     **没有**可用的日期函数索引可言。窗口按项目时区回看,再折回 UTC 比较。
     """
-    at = (now or datetime.now(TZ)).astimezone(TZ) - timedelta(days=RESOLVED_DAYS)
+    at = (now or datetime.now(TZ)).astimezone(TZ) - timedelta(days=WINDOW_DAYS)
     return at.astimezone(timezone.utc).isoformat(timespec='seconds')
 
 
@@ -168,10 +176,10 @@ def where(lane_id: str) -> tuple[str, list]:
     # 判不准宁可多报,漏报是静默丢数据)。
     if lane_id == 'body_recent':
         return ("fulltext_at<>'' AND fulltext_at>=?"
-                f" AND exported_hash=content_hash AND {shelf.free_sql()}"), [resolved_cutoff()]
+                f" AND exported_hash=content_hash AND {shelf.free_sql()}"), [window_cutoff()]
     if lane_id == 'translate_recent':
         return ("translated_at<>'' AND translated_at>=?"
-                f" AND exported_hash=content_hash AND {shelf.free_sql()}"), [resolved_cutoff()]
+                f" AND exported_hash=content_hash AND {shelf.free_sql()}"), [window_cutoff()]
     if lane_id == 'ingest_recent':
         # **判据是交付本身**(`exported_at` 由交付确认那一句和回执同一笔写下),
         # 不是上游哪一环完成了 —— 这一档底下躺的恰恰是「上游两环都没发生过」的
@@ -179,7 +187,7 @@ def where(lane_id: str) -> tuple[str, list]:
         # 是最近一次交付的时刻,而内容在那之后又更新过时它该回到待办里。
         # 老库那几千行补的是空串,所以它们一条都不在这个窗口里(行为逐字不变)。
         return ("exported_at<>'' AND exported_at>=?"
-                f" AND exported_hash=content_hash AND {shelf.free_sql()}"), [resolved_cutoff()]
+                f" AND exported_hash=content_hash AND {shelf.free_sql()}"), [window_cutoff()]
     raise ValueError('未知的积压档位')
 
 
@@ -228,6 +236,19 @@ def _earlier_args(lane_id: str) -> list:
     return out
 
 
+def shown_where(lane_id: str) -> tuple[str, list]:
+    """这一档**在面板上列出来**的那一份:独占判据,再收进回看窗口(`WINDOW_DAYS`)。
+
+    「已完成」那三档的判据里本来就带着按成功时刻的窗口,这里不再叠一道;其余几档
+    按**收进来**的时刻收:一条八天前收进来、至今没走完的内容,面板上就不再出现。
+    **计数和列表都过这一份**,顶上的数和点进去列出来的条数才对得上。
+    """
+    cond, args = exclusive_where(lane_id)
+    if BY_ID[lane_id].group == RESOLVED:
+        return cond, args
+    return f'{cond} AND feed_items.fetched_at>=?', [*args, window_cutoff()]
+
+
 def counts(kinds=None) -> dict[str, dict[str, int]]:
     """`{kind: {lane_id: 条数}}`。**从库里查,不从展示文案反推**(元规则)。
 
@@ -235,13 +256,13 @@ def counts(kinds=None) -> dict[str, dict[str, int]]:
     「这一条属不属于某条开着补抓的订阅」那一问对每一行各查一次,发六遍就是六倍。
 
     用的是**独占**判据(`exclusive_where`),所以各档相加**等于**顶上那个总数 ——
-    原始判据之间是会重叠的,理由见 `probes`。
+    原始判据之间是会重叠的,理由见 `probes`。只数回看窗口里的(`shown_where`)。
     """
     wanted = list(kinds or reg.KINDS)
     out: dict[str, dict[str, int]] = {kind: {} for kind in wanted}
     with reg.read_db() as c:
         for lane in LANES:
-            cond, args = exclusive_where(lane.id)
+            cond, args = shown_where(lane.id)
             rows = c.execute(f'SELECT kind,count(*) FROM feed_items WHERE {cond}'
                              ' GROUP BY kind', args).fetchall()
             tally = {row[0]: row[1] for row in rows}
@@ -295,7 +316,7 @@ _SEARCH = ('title', 'title_zh', 'url', 'fulltext_error', 'fulltext_hold', 'trans
 def rows(lane_id: str, kind: str = '', query: str = '',
          offset: int = 0, limit: int = PAGE) -> dict:
     """这一档的条目(带总数)。总数按**同一个 WHERE** 查,不按返回的行数推。"""
-    cond, args = exclusive_where(lane_id)
+    cond, args = shown_where(lane_id)
     extra, more = _narrow(kind, query, _SEARCH)
     sql_where = f'{cond}{extra}'
     params = [*args, *more]
@@ -308,16 +329,21 @@ def rows(lane_id: str, kind: str = '', query: str = '',
 
 
 def shelved(kind: str = '', query: str = '', offset: int = 0, limit: int = PAGE) -> dict:
-    """已搁置那一组。**暂缓和不再收录分别带回去,绝不合并**(状态契约)。"""
+    """已搁置那一组。**暂缓和不再收录分别带回去,绝不合并**(状态契约)。
+
+    只列回看窗口里**做的决定**(`shelf.since_sql`)。更早搁置的那几条照旧搁置着,
+    只是不再列出来 —— 搁置记录一行都不删,删了就等于把它们放回队列。
+    """
     extra, more = _narrow(kind, query, ('title', 'title_zh', 'url'))
-    sql_where = f'{shelf.live_sql()}{extra}'
+    sql_where = f'{shelf.since_sql()}{extra}'
+    params = [window_cutoff(), *more]
     with reg.read_db() as c:
         total = c.execute(f'SELECT count(*) FROM feed_items WHERE {sql_where}',
-                          more).fetchone()[0]
+                          params).fetchone()[0]
         found = c.execute(
             f'{_COLUMNS}{_SHELF_COLUMNS} FROM feed_items WHERE {sql_where}'
             ' ORDER BY published DESC, fetched_at DESC, feed_items.key LIMIT ? OFFSET ?',
-            (*more, max(1, limit), max(0, offset))).fetchall()
+            (*params, max(1, limit), max(0, offset))).fetchall()
     return {'total': total, 'items': [dict(row) for row in found]}
 
 

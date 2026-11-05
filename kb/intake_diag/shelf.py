@@ -74,6 +74,16 @@ def live_sql(alias: str = 'feed_items') -> str:
     return f'EXISTS(SELECT 1 FROM feed_item_shelf sh WHERE {_match(alias)})'
 
 
+def since_sql(alias: str = 'feed_items') -> str:
+    """「这一条此刻搁置着,而且那次决定是在 `?` 之后做的」(面板的回看窗口用)。
+
+    同一世认法照旧过 `_match`。原地改写会刷新 `created_at`,所以它比的是**最近
+    一次**决定的时刻。
+    """
+    return ('EXISTS(SELECT 1 FROM feed_item_shelf sh'
+            f' WHERE {_match(alias)} AND sh.created_at>=?)')
+
+
 def free_sql(alias: str = 'feed_items') -> str:
     """「这一条没有被搁置」。补抓、翻译、待办、**以及导出**四族判据都要 AND 上它。
 
