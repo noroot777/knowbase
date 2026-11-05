@@ -9,9 +9,12 @@
 (`lanes.capturable`)。反过来钉住:补成之后、搁置之后、翻译失败、别的来源的身份、
 没身份的那条,一律不带;冻在旧记录里的字段也要被摘掉。
 
-第二件事(`HandFilledTests`):**那一轮结束之后有人亲手补过正文的,那一条从明细里拿掉。**
-实测形态:采集抽屉补完 OpenAI 那篇,按钮消失了、整行还在,旁边只剩一颗「不再抓取」——
-指着一篇刚补好正文的文章让人永久删掉。判据落在**回包里还有没有那一行、明细总数**。
+第二件事(`HandFilledTests`):**补抓失败说的那一版正文、后来被人亲手补的正文取代了,那一条
+从明细里拿掉。** 实测形态:采集抽屉补完 OpenAI 那篇,按钮消失了、整行还在,旁边只剩一颗
+「不再抓取」—— 指着一篇刚补好正文的文章让人永久删掉。判据落在**回包里还有没有那一行、明细
+总数、那一行还带不带 `drop`**。判据是版本不是时刻:同步还在跑时补好的、收尾同一秒补好的
+一样拿掉。反过来钉住:导出 / 翻译那几类失败补正文不替它们办完,行和原因照旧在(只摘掉
+「不再抓取」);升级之前没记版本的旧记录同样;自动补抓补上的不算人办完,行和按钮都不动。
 
 脚手架复用 `tests/test_feed_fulltext.py` 的 `FullTextCase`(临时 registry)。
 """
@@ -126,62 +129,102 @@ class HandFilledTests(FullTextCase):
                 patch.dict(pipeline_state._state, stop_requested=False):
             self.errors = fulltext.fetch_pending('rss')['errors']
         self.assertEqual(2, len(self.errors))
+        self.mine = next(f for f in self.errors if f['drop']['id'] == self.key)
 
     def _fill_by_hand(self):
         browser_capture.save_pasted(self.key, '这是人工粘进来的一整段正文。' * 40)
 
-    def _run(self, finished):
-        run = run_of(self.errors)
+    def _run(self, failures=None, finished='2026-11-05 10:23:14'):
+        run = run_of(self.errors if failures is None else failures)
         if finished is not None:
             run['finished_at'] = finished
         return run
 
-    def test_filled_after_the_round_drops_the_row(self):
-        run = self._run('2000-01-01 08:00:00')
+    def drops(self, run):
+        return ([bool(f.get('drop')) for f in run['stages']['export']['failures']],
+                [bool(f.get('drop')) for f in run['results']['export']['rss']['failures']])
+
+    def test_the_failure_records_which_version_it_was_about(self):
+        self.assertEqual(self.row(self.key)['content_rev'], self.mine['body_rev'])
+
+    def test_filled_by_hand_drops_the_row(self):
+        run = self._run()
         self._fill_by_hand()
         pipeline_capture.mark_runs([run])
         self.assertEqual((['Other'], ['Other']), titles(run))
-        # 剩下那一条照旧还能从浏览器补 —— 拿掉的只有补好的那一条。
+        # 剩下那一条照旧还能从浏览器补、照旧能不再抓取 —— 拿掉的只有补好的那一条。
         self.assertEqual(([self.other], [self.other]), marks(run))
+        self.assertEqual(([True], [True]), self.drops(run))
 
     def test_the_truncated_total_follows(self):
-        run = self._run('2000-01-01 08:00:00')
+        run = self._run()
         run['stages']['export']['failures_total'] = 60
         self._fill_by_hand()
         pipeline_capture.mark_runs([run])
         self.assertEqual(59, run['stages']['export']['failures_total'])
 
     def test_state_and_last_run_both_lose_it(self):
-        state = {**self._run('2000-01-01 08:00:00'),
-                 'last_run': self._run('2000-01-01 08:00:00')}
+        state = {**self._run(), 'last_run': self._run()}
         self._fill_by_hand()
         pipeline_capture.mark_state(state)
         self.assertEqual((['Other'], ['Other']), titles(state))
         self.assertEqual((['Other'], ['Other']), titles(state['last_run']))
 
-    def test_a_round_still_running_keeps_it(self):
-        """反过来钉一边:还在跑的那一轮没有收尾时刻,拿不准就照旧显示。"""
-        run = self._run(None)
+    def test_filled_while_the_round_is_still_running(self):
+        """同步还在跑后面几步时补好的:那一轮还没有收尾时刻,照样拿掉。"""
+        run = self._run(finished=None)
         self._fill_by_hand()
         pipeline_capture.mark_runs([run])
-        self.assertEqual((['Yes, and', 'Other'], ['Yes, and', 'Other']), titles(run))
+        self.assertEqual((['Other'], ['Other']), titles(run))
 
-    def test_filled_before_the_round_ended_keeps_it(self):
-        """正文补在那一轮收尾之前:那一轮的失败说的可能正是这份新正文,不拿掉。"""
+    def test_the_round_finishing_after_the_fill_does_not_matter(self):
+        """补在收尾之前(含同一秒):判据是版本,不是那一轮什么时候收的尾。"""
         self._fill_by_hand()
-        run = self._run('2999-01-01 08:00:00')
+        run = self._run(finished='2999-01-01 08:00:00')
         pipeline_capture.mark_runs([run])
-        self.assertEqual((['Yes, and', 'Other'], ['Yes, and', 'Other']), titles(run))
+        self.assertEqual((['Other'], ['Other']), titles(run))
+
+    def test_an_export_failure_is_not_solved_by_a_new_body(self):
+        """导出写不进 vault 补正文办不完:行和原因照旧在,只是不给「不再抓取」。"""
+        disk = failure({'key': self.key, 'url': self.mine['url'], 'title': 'Yes, and'},
+                       '磁盘已满，Markdown 导出失败', 'rss')
+        self.assertNotIn('body_rev', disk)
+        run = self._run([disk, self.mine])
+        self._fill_by_hand()
+        pipeline_capture.mark_runs([run])
+        self.assertEqual((['Yes, and'], ['Yes, and']), titles(run))
+        reasons = [f['reason'] for f in run['stages']['export']['failures']]
+        self.assertEqual(['磁盘已满，Markdown 导出失败'], reasons)
+        self.assertEqual(([False], [False]), self.drops(run))
+
+    def test_an_old_record_without_a_version_stays_without_drop(self):
+        """升级之前的旧记录没记版本:拿不准就照旧显示,只摘掉「不再抓取」。"""
+        legacy = {k: v for k, v in self.mine.items() if k != 'body_rev'}
+        run = self._run([legacy])
+        self._fill_by_hand()
+        pipeline_capture.mark_runs([run])
+        self.assertEqual((['Yes, and'], ['Yes, and']), titles(run))
+        self.assertEqual(([False], [False]), self.drops(run))
+
+    def test_a_failure_about_the_hand_filled_version_stays(self):
+        """失败说的就是人补进来的那一版(版本不比它旧):不算被取代。"""
+        self._fill_by_hand()
+        later = {**self.mine, 'body_rev': self.row(self.key)['content_rev']}
+        run = self._run([later])
+        pipeline_capture.mark_runs([run])
+        self.assertEqual((['Yes, and'], ['Yes, and']), titles(run))
+        self.assertEqual(([False], [False]), self.drops(run))
 
     def test_an_automatic_fetch_is_not_by_hand(self):
-        """自动补抓补上的不算「人办完了」:行照旧在(只是不再带按钮)。"""
-        run = self._run('2000-01-01 08:00:00')
+        """自动补抓补上的不算「人办完了」:行和「不再抓取」照旧在(只是不再带按钮)。"""
+        run = self._run()
         with patch.object(fulltext, 'request', Mock(return_value=page(PAGE))), \
                 patch.dict(pipeline_state._state, stop_requested=False):
             fulltext.fetch_pending('rss')
         pipeline_capture.mark_runs([run])
         self.assertEqual((['Yes, and', 'Other'], ['Yes, and', 'Other']), titles(run))
         self.assertEqual(([None, None], [None, None]), marks(run))
+        self.assertEqual(([True, True], [True, True]), self.drops(run))
 
 
 if __name__ == '__main__':

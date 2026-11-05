@@ -16,11 +16,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
-#: 运行记录里的时刻按项目时区写、不带偏移(CLAUDE.md:时间一律按 Asia/Shanghai)。
-TZ = ZoneInfo("Asia/Shanghai")
 
 
 def _entries(run):
@@ -57,70 +52,66 @@ def _ref(item) -> tuple[str, str] | None:
     return None
 
 
-def _finished(run) -> datetime | None:
-    """这一轮的收尾时刻(项目时区写的本地时间)。还在跑、或者读不出来就是 None。"""
-    stamp = run.get("finished_at") if isinstance(run, dict) else None
-    if not isinstance(stamp, str) or not stamp:
-        return None
-    try:
-        return datetime.fromisoformat(stamp).replace(tzinfo=TZ)
-    except ValueError:
-        return None
-
-
 #: 「这份正文是人补进来的」那几条路写进 `body_provenance` 的 `method`:采集抽屉
 #: (`browser_capture.save` 记 `browser_<取法>`)、收录时改用这一页的正文
 #: (`grab` 记 `browser_grab`)、手动粘贴(`browser_capture.save_pasted`)。
-def _by_hand(provenance: str) -> datetime | None:
+def _by_hand(provenance: str) -> bool:
     try:
-        said = json.loads(provenance or "")
-        method = said.get("method") or ""
-        if method != "manual_paste" and not method.startswith("browser_"):
-            return None
-        return datetime.fromisoformat(said["captured_at"])
-    except (ValueError, TypeError, KeyError, AttributeError):
-        return None
+        method = json.loads(provenance or "").get("method") or ""
+    except (ValueError, TypeError, AttributeError):
+        return False
+    return isinstance(method, str) and (method == "manual_paste"
+                                        or method.startswith("browser_"))
 
 
-def _hand_filled(refs) -> dict[tuple[str, str], datetime]:
-    """这几条里**此刻那份正文是人补进来的**那几条,各自补进来的时刻。纯读。"""
+def _hand_filled(refs) -> dict[tuple[str, str], int]:
+    """这几条里**此刻那份正文是人补进来的**那几条,各自此刻的 `content_rev`。纯读。"""
     keys = sorted({key for _kind, key in refs})
     if not keys:
         return {}
     from kb.feeds import registry as reg
     slots = ",".join("?" for _ in keys)
     with reg.read_db() as c:
-        rows = c.execute(f"SELECT key, kind, body_provenance FROM feed_items"
+        rows = c.execute(f"SELECT key, kind, content_rev, body_provenance FROM feed_items"
                          f" WHERE key IN ({slots})", keys).fetchall()
-    out = {}
-    for row in rows:
-        ref = (row["kind"], row["key"])
-        if ref in refs and (at := _by_hand(row["body_provenance"])):
-            out[ref] = at
-    return out
+    return {(row["kind"], row["key"]): int(row["content_rev"] or 0) for row in rows
+            if (row["kind"], row["key"]) in refs and _by_hand(row["body_provenance"])}
+
+
+def _superseded(item, hand) -> bool:
+    """这条**正文补抓失败**说的那一版,后来被人亲手补的正文换掉了。
+
+    只认补抓那一步记下的 `body_rev`(`fulltext._failure`):翻译、导出那几类失败
+    没有这一项,补正文不替它们把事办完;升级之前的旧记录也没有,拿不准就不拿掉。
+    """
+    rev = item.get("body_rev")
+    ref = _ref(item)
+    return (ref in hand and isinstance(rev, int) and not isinstance(rev, bool)
+            and hand[ref] > rev)
 
 
 def mark(runs) -> None:
     """按条目现状改写这几份运行结果里的明细(**就地改**)。**库各只问一次。**
 
-    ①**那一轮结束之后有人亲手补过正文的,那一条从明细里拿掉。** 它在那一轮确实
-    失败过,可那件事人已经办完了 —— 留着它,旁边就只剩一颗「不再抓取」,指着一篇
-    刚补好正文的文章让人永久删掉(实测:采集抽屉补完 OpenAI 那篇,按钮消失、整行
-    还在)。判据是「补进来的时刻晚于那一轮收尾」:还在跑的那一轮、补正文早于收尾
-    的(那一轮之后的失败说的就是这份新正文)一律不拿掉 —— 拿不准就照旧显示。
+    ①**补抓失败说的那一版正文、后来被人亲手补的正文取代了的,那一条从明细里拿掉。**
+    它在那一轮确实失败过,可那件事人已经办完了 —— 留着它,旁边就只剩一颗「不再
+    抓取」,指着一篇刚补好正文的文章让人永久删掉(实测:采集抽屉补完 OpenAI 那篇,
+    按钮消失、整行还在)。判据是版本(`content_rev` 比失败时记下的新),不是时刻:
+    同步还在跑后面几步时补好的、和收尾落在同一秒补好的,一样算办完了。
     阶段的结论和那句「本轮 N 条失败」是那一轮的事实,不改。
     ②剩下的按 `lanes.capturable` 标上 / 摘掉 `capture`。
+    ③**此刻正文是人补的,剩下那几条(导出、翻译失败,旧记录)照旧显示、原因照旧在,
+    只是不给「不再抓取」**(摘掉 `drop`)—— 人刚在这篇上花了力气,旁边不该摆一颗
+    永久删除它的按钮。
     """
     runs = [run for run in runs if isinstance(run, dict)]
     refs = {ref for item in _failures(runs) if (ref := _ref(item))}
     hand = _hand_filled(refs) if refs else {}
-    from kb.pipeline_failures import remove_where
-    for run in runs:
-        done = _finished(run)
-        if not done or not hand:
-            continue
-        for entry in _entries(run):
-            remove_where(entry, lambda f: (ref := _ref(f)) in hand and hand[ref] > done)
+    if hand:
+        from kb.pipeline_failures import remove_where
+        for run in runs:
+            for entry in _entries(run):
+                remove_where(entry, lambda f: _superseded(f, hand))
     items = list(_failures(runs))
     refs = {ref for item in items if (ref := _ref(item))}
     if refs:
@@ -135,6 +126,8 @@ def mark(runs) -> None:
             item["capture"] = ref[1]
         else:
             item.pop("capture", None)
+        if ref and ref in hand:
+            item.pop("drop", None)
 
 
 def mark_state(state) -> None:

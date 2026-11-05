@@ -323,6 +323,16 @@ def _fail(key: str, error: Exception | str, seen: tuple[str, int, str, str, int]
 from kb.feeds.fulltext_manual import held, release, reopen   # noqa: F401,E402 - 再导出
 
 
+def _failure(item, reason, kind: str) -> dict:
+    """一条补抓失败的明细,带上它说的是**哪一版内容缺正文**(`body_rev`)。
+
+    同步面板拿它判「这条失败人后来亲手办完了没有」(`kb/pipeline_capture.py`):
+    此刻那份正文是人补的、而且版本比这里记的新,才算这一条被取代了。别的环节
+    (翻译、导出)的失败不带这一项 —— 补正文不会替它们把事办完。
+    """
+    return {**failure(item, reason, kind), 'body_rev': int(item['content_rev'])}
+
+
 def fetch_pending(kind: str, limit: int | None = None, progress=None,
                   keys=()) -> dict:
     """把这个来源里待补抓的条目逐个去原文链接取正文。返回摘要给调用方汇报。
@@ -426,7 +436,7 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None,
                     if held_say:
                         summary['held'] += 1
                     summary['failed_keys'].append(item['key'])
-                    summary['errors'].append(failure(item, error, kind))
+                    summary['errors'].append(_failure(item, error, kind))
             elif body is _SHELVED:
                 # 人在这一轮中途把它暂缓 / 不再收录了:**一次请求都没发**,额度和
                 # 待办一个字没动,恢复之后它回到队列照旧被取。不混进 `stale`
@@ -455,7 +465,7 @@ def fetch_pending(kind: str, limit: int | None = None, progress=None,
                 else:
                     summary['empty'] += 1
                     summary['failed_keys'].append(item['key'])
-                    summary['errors'].append(failure(item, said, kind))
+                    summary['errors'].append(_failure(item, said, kind))
             if progress:
                 # 作废那几条也算「处理过了」:不算的话进度条到不了头(面板上那一行
                 # 会永远停在 N-1/N)。
