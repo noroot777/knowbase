@@ -16,8 +16,11 @@
 - **HTML 块**(一行以块级标签或独占一行的完整标签开头,规范里的 7 种起手式)是 HTML,
   交给 `fetching.plain` 这个真解析器取字 —— 和 GitHub 把 README 渲染出来给人看的是
   同一份文字。块里的写法照 HTML 的规矩解释:`<b && y>` 在 HTML 块里就是一个 `<b>`
-  开始标签,浏览器和 GitHub 也都这么显示。HTML 块里夹着的 md 徽章(`![x](…)`)是
-  README 的惯常写法,取出来的字再按下面段落那一套过一遍。
+  开始标签,浏览器和 GitHub 也都这么显示。**取出来的字就是最终文字,不许再当 Markdown
+  解析一遍**:`<pre><code>std::vector&lt;unsigned int&gt;</code></pre>` 解出来的
+  `std::vector<unsigned int>`、代码里写给人看的 `![badge](x.svg)`,再过一遍就会被当成
+  标签和图片删掉(审查实测)。规范里 HTML 块的内容本来就不按 Markdown 处理,块里夹的 md
+  徽章 GitHub 也是原样显示的,这里同样原样留着。
 - **段落里的字原样保留**:行内代码去掉反引号、内容一个字不动,强调的 `**` / `__` 照原样
   留着(`__init__` 不会被改成 `init`)。只拿掉图片(徽章)和链接的地址,链接文字留着。
   行内的 `<...>` 只有**解析器认得出是标签、而且带着属性**的才拿掉(`<a href="…">`、
@@ -89,8 +92,7 @@ def clean(markdown: str) -> str:
     parts = []
     for token in _MD.parse(markdown):
         if token.type == 'html_block':
-            text = plain(token.content)
-            parts.extend(_inline(t) for t in _MD.parseInline(text) if text.strip())
+            parts.append(plain(token.content))
         elif token.type == 'inline':
             parts.append(_inline(token))
         elif token.type in ('fence', 'code_block'):

@@ -122,7 +122,8 @@ class ListedDateTests(unittest.TestCase):
                          digest.issues(body, 'https://tldr.example/feed.xml'))
 
 
-# vault 里一篇 README 正文开头的真实形态(md + 内嵌 HTML,标签完整)。
+# vault 里一篇 README 正文开头的真实形态(md + 内嵌 HTML,标签完整)。md 徽章前后空一行 ——
+# 不空的话它算 HTML 块里的字,GitHub 上就原样显示成一串 `[![…](…)]`,作者都会空这一行。
 README = """---
 source: rss
 title: a/b
@@ -137,8 +138,10 @@ title: a/b
 <h1>kimi-k3-in-c</h1>
 <p><strong>享受新闻本身。</strong>其他的交给 Horizon</p>
 <a href="https://trendshift.io/r/1?utm=badge&amp;x=1" target="_blank"><img src="https://trendshift.io/api/badge/1" alt="a | Trendshift" width="250"/></a>
+<p><b>2.78T</b> 参数,0 <sub>GPU</sub></p>
+
 [![许可证](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) ![GPT](https://img.shields.io/badge/GPT-10A37F?logo=data:image/svg%2bxml;base64,PHN2ZyByb2xlPSJpbWci)
-<b>2.78T</b> 参数,0 <sub>GPU</sub>
+
 </div>
 
 用 std::vector<int> 存权重,std::vector<string> 存词表;x <bits 时直接失败,见 [文档](https://e.org/d)。
@@ -149,7 +152,7 @@ title: a/b
 README_TEXT = ('kimi-k3-in-c 享受新闻本身。其他的交给 Horizon 2.78T 参数,0 GPU 用 std::vector<int> 存权重,'
                'std::vector<string> 存词表;x <bits 时直接失败,见 文档。 类型参数 Box<U>、Box<I>、Box<B>、'
                'Box<S> 都保留,只有 x <b && y>c 时才删;实现 __init__、__enter__ 和 **粗体**。 '
-               '调用 __builtin_popcount。')
+               '调用 `__builtin_popcount`。')    # HTML 块里的反引号是字面字符,GitHub 也原样显示
 
 
 class ExcerptTests(unittest.TestCase):
@@ -194,10 +197,21 @@ class ExcerptTests(unittest.TestCase):
 
     def test_html_block_follows_html_rules(self):
         """HTML 块里的字照 HTML 的规矩解释,和 GitHub 显示给人看的那一份相同:`<b && y>` 在那儿
-        就是一个 `<b>` 开始标签;块里反引号是字面字符,块里的 md 徽章照样拿掉。"""
+        就是一个 `<b>` 开始标签;块里反引号是字面字符。"""
         self.assertEqual('只有 x c 时', daily_excerpt.clean('<div>只有 x <b && y>c 时</div>\n'))
-        self.assertEqual('调用 __init__ 文字', daily_excerpt.clean(
-            '<p align="center">\n调用 `__init__`\n![b](https://x/y.svg) 文字\n</p>\n'))
+        self.assertEqual('调用 `__init__` 文字', daily_excerpt.clean(
+            '<p align="center">\n调用 `__init__`\n文字\n</p>\n'))
+
+    def test_html_display_text_is_never_reinterpreted(self):
+        """HTML 解出来的字就是最终文字:实体转义的代码、写给人看的 `![badge](…)`,不许被再当一遍
+        Markdown 解析成标签和图片删掉(同一段换成 md 代码块本来就完整,两条路要一致)。"""
+        code = 'std::vector<unsigned int> values; 只有 x <b && y>c 时; literal ![badge](image.svg)'
+        html = ('<div>\n<p>Example tool</p>\n<pre><code>std::vector&lt;unsigned int&gt; values; '
+                '只有 x &lt;b &amp;&amp; y&gt;c 时; literal ![badge](image.svg)</code></pre>\n</div>\n')
+        self.assertEqual('Example tool ' + code, daily_excerpt.clean(html))
+        self.assertEqual(code, daily_excerpt.clean(f'```\n{code}\n```\n'))
+        self.assertEqual('行内 Vec<U> 和 __init__',
+                         daily_excerpt.clean('<p>行内 <code>Vec&lt;U&gt;</code> 和 __init__</p>\n'))
 
     def test_inline_tags_need_attributes_to_count(self):
         """段落里的 `<...>` 只有带属性的(和它的闭合标签)才拿掉;`<b>`、`<U>` 这种没证据的留着。"""
