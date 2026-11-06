@@ -439,7 +439,7 @@ class BrowserCaptureTests(CaptureCase):
         self.assertEqual(200, archive.status_code)
         with zipfile.ZipFile(io.BytesIO(archive.content)) as bundle:
             self.assertEqual(shipped, sorted(name.split('/')[-1] for name in bundle.namelist()))
-        # 补抓页退役之后只剩这一个页面(采集那一块搬进了它的左侧抽屉)。
+        # 补抓页退役之后只剩这一个页面(采集那一块搬进了它的右侧抽屉)。
         page = 'kb/static/index.html'
         text = (browser_capture_api.ROOT / page).read_text(encoding='utf-8')
         self.assertLess(text.index('knowbase-capture/api.js'), text.index('/static/js/ui.js'), page)

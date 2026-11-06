@@ -1,4 +1,4 @@
-/* 从浏览器采集 · 左侧抽屉
+/* 从浏览器采集 · 右侧抽屉
    色值一律走 base.css 的 token;扩展那份 popup.css 另抄一份色板(它装在浏览器里,
    取不到这边的文件),改 :root 要连它一起改。
 
@@ -8,14 +8,14 @@
    的同名标签。作用域在这里不是洁癖,是搬家本身的前置条件。 */
 #cap-mask { position: fixed; inset: 0; background: rgba(20, 32, 43, .32); z-index: 32; backdrop-filter: blur(3px); animation: capfade .24s ease-out; }
 #cap-drawer {
-  position: fixed; top: 0; left: 0; bottom: 0; width: min(560px, 96vw); z-index: 33;
-  background: var(--paper); box-shadow: 14px 0 44px rgba(20, 32, 43, .2);
+  position: fixed; top: 0; right: 0; bottom: 0; width: min(560px, 96vw); z-index: 33;
+  background: var(--paper); box-shadow: -14px 0 44px rgba(20, 32, 43, .2);
   display: flex; flex-direction: column; animation: capslide .24s cubic-bezier(.2, .8, .2, 1);
 }
-/* 从左边缘整幅拉出来,不淡入。原先是「挪 48px + 透明度从 0 起」,一屏宽的面板这样
+/* 从右边缘整幅拉出来,不淡入。原先是「挪 48px + 透明度从 0 起」,一屏宽的面板这样
    开看着是原地浮现,看不出它从哪一边来;整幅位移 + 实色,边缘本身就说明了方向。
    位移方向跟着抽屉贴的那一边走,否则开合看着像从错误的一侧弹回去。 */
-@keyframes capslide { from { transform: translateX(-100%); } }
+@keyframes capslide { from { transform: translateX(100%); } }
 @keyframes capfade { from { opacity: 0; } }
 @media (max-width: 580px) { #cap-drawer { width: 100vw; } }
 
