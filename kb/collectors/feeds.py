@@ -117,7 +117,7 @@ class FeedCollector:
                     identity + identity).fetchone()
             key = item['key'] if item else ''
         snapshot = document | {'key': key}
-        return failure(snapshot, reason, self.name)
+        return failure(snapshot, reason, self.name, 'document')
 
     def _manual_retry(self):
         """这一轮是不是用户点的「重新翻译」,以及他点的是哪一条订阅的范围。

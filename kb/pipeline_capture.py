@@ -16,6 +16,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
+from typing import NamedTuple
+from zoneinfo import ZoneInfo
 
 
 def _entries(run):
@@ -52,42 +55,80 @@ def _ref(item) -> tuple[str, str] | None:
     return None
 
 
+#: 运行记录里的时刻按项目时区写、不带偏移(CLAUDE.md:时间一律按 Asia/Shanghai)。
+TZ = ZoneInfo("Asia/Shanghai")
+
+
+class _Hand(NamedTuple):
+    """此刻那份正文是人补进来的:补完之后的版本、补进来的时刻、补抓失败过没有。"""
+    rev: int
+    at: datetime | None
+    tried: bool
+
+
 #: 「这份正文是人补进来的」那几条路写进 `body_provenance` 的 `method`:采集抽屉
 #: (`browser_capture.save` 记 `browser_<取法>`)、收录时改用这一页的正文
 #: (`grab` 记 `browser_grab`)、手动粘贴(`browser_capture.save_pasted`)。
-def _by_hand(provenance: str) -> bool:
+def _by_hand(provenance: str) -> dict | None:
     try:
-        method = json.loads(provenance or "").get("method") or ""
+        said = json.loads(provenance or "")
+        method = said.get("method") or ""
     except (ValueError, TypeError, AttributeError):
-        return False
-    return isinstance(method, str) and (method == "manual_paste"
-                                        or method.startswith("browser_"))
+        return None
+    if isinstance(method, str) and (method == "manual_paste" or method.startswith("browser_")):
+        return said
+    return None
 
 
-def _hand_filled(refs) -> dict[tuple[str, str], int]:
-    """这几条里**此刻那份正文是人补进来的**那几条,各自此刻的 `content_rev`。纯读。"""
+def _moment(stamp) -> datetime | None:
+    """带偏移的照原样,不带的按项目时区补齐;读不出来就是 None。"""
+    if not isinstance(stamp, str) or not stamp:
+        return None
+    try:
+        at = datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=TZ)
+
+
+def _hand_filled(refs) -> dict[tuple[str, str], _Hand]:
+    """这几条里**此刻那份正文是人补进来的**那几条。纯读。"""
     keys = sorted({key for _kind, key in refs})
     if not keys:
         return {}
     from kb.feeds import registry as reg
     slots = ",".join("?" for _ in keys)
     with reg.read_db() as c:
-        rows = c.execute(f"SELECT key, kind, content_rev, body_provenance FROM feed_items"
-                         f" WHERE key IN ({slots})", keys).fetchall()
-    return {(row["kind"], row["key"]): int(row["content_rev"] or 0) for row in rows
-            if (row["kind"], row["key"]) in refs and _by_hand(row["body_provenance"])}
+        rows = c.execute(f"SELECT key, kind, content_rev, fulltext_tries, body_provenance"
+                         f" FROM feed_items WHERE key IN ({slots})", keys).fetchall()
+    out = {}
+    for row in rows:
+        ref = (row["kind"], row["key"])
+        if ref in refs and (said := _by_hand(row["body_provenance"])) is not None:
+            out[ref] = _Hand(int(row["content_rev"] or 0), _moment(said.get("captured_at")),
+                             int(row["fulltext_tries"] or 0) > 0)
+    return out
 
 
-def _superseded(item, hand) -> bool:
+def _superseded(item, hand, finished) -> bool:
     """这条**正文补抓失败**说的那一版,后来被人亲手补的正文换掉了。
 
-    只认补抓那一步记下的 `body_rev`(`fulltext._failure`):翻译、导出那几类失败
-    没有这一项,补正文不替它们把事办完;升级之前的旧记录也没有,拿不准就不拿掉。
+    带 `body_rev` 的(补抓那一步记下的,`fulltext._failure`):版本比它新就算。
+    带 `step` 而没有 `body_rev` 的(翻译、导出那几类):补正文不替它们把事办完,不算。
+    **两样都没有的是升级之前那几轮的旧记录**,分不出是哪一步、也没记版本,退回旧口径:
+    这一条补抓确实失败过(`fulltext_tries` > 0),而且补正文晚于那一轮收尾 —— 那一轮
+    里的失败说的只能是补之前那一版。还在跑的那一轮、补在收尾之前的拿不准,不拿掉。
     """
-    rev = item.get("body_rev")
     ref = _ref(item)
-    return (ref in hand and isinstance(rev, int) and not isinstance(rev, bool)
-            and hand[ref] > rev)
+    if ref not in hand:
+        return False
+    filled = hand[ref]
+    rev = item.get("body_rev")
+    if "body_rev" in item:
+        return isinstance(rev, int) and not isinstance(rev, bool) and filled.rev > rev
+    if "step" in item:
+        return False
+    return bool(filled.tried and filled.at and finished and filled.at > finished)
 
 
 def mark(runs) -> None:
@@ -97,7 +138,8 @@ def mark(runs) -> None:
     它在那一轮确实失败过,可那件事人已经办完了 —— 留着它,旁边就只剩一颗「不再
     抓取」,指着一篇刚补好正文的文章让人永久删掉(实测:采集抽屉补完 OpenAI 那篇,
     按钮消失、整行还在)。判据是版本(`content_rev` 比失败时记下的新),不是时刻:
-    同步还在跑后面几步时补好的、和收尾落在同一秒补好的,一样算办完了。
+    同步还在跑后面几步时补好的、和收尾落在同一秒补好的,一样算办完了(升级之前没记
+    版本的旧记录退回按收尾时刻判,见 `_superseded`)。
     阶段的结论和那句「本轮 N 条失败」是那一轮的事实,不改。
     ②剩下的按 `lanes.capturable` 标上 / 摘掉 `capture`。
     ③**此刻正文是人补的,剩下那几条(导出、翻译失败,旧记录)照旧显示、原因照旧在,
@@ -110,8 +152,9 @@ def mark(runs) -> None:
     if hand:
         from kb.pipeline_failures import remove_where
         for run in runs:
+            done = _moment(run.get("finished_at"))
             for entry in _entries(run):
-                remove_where(entry, lambda f: _superseded(f, hand))
+                remove_where(entry, lambda f: _superseded(f, hand, done))
     items = list(_failures(runs))
     refs = {ref for item in items if (ref := _ref(item))}
     if refs:

@@ -624,7 +624,7 @@ def _export(kind: str, hold_untranslated: bool = False,
                 # 前面那条同理);确认没成只是说「它已经不是最新那一版了」。
                 done += 1
         except Exception as e:
-            errors.append(failure(item, e, kind))
+            errors.append(failure(item, e, kind, 'export'))
         finally:
             if temp:
                 temp.unlink(missing_ok=True)
