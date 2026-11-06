@@ -423,23 +423,23 @@ def _stamp(value) -> str:
 
 
 def _listed_at(parsed) -> str:
-    """整份 feed 声明的那个时间(`<channel><pubDate>` / Atom 的 `<updated>`),给「仓库」那一类条目用。
+    """整份 feed 声明的那个时间(`<channel><pubDate>` / Atom 的 `<updated>`),只给榜单快照用。
 
-    **只有 GitHub 仓库主页这一类条目拿它当时间**(`_is_repo_root`,判据在条目自己身上,
-    不在订阅上)。仓库没有「发表」这回事,它在名单上出现的那一刻就是它唯一的时间:
-    榜单类订阅(GitHub Trending)每天整份重生成,条目上压根没有 `pubDate`,只有
-    channel 上那一个 —— 意思正是「这份名单截至这一刻」。不拿它顶上,这一类的每一条都是
-    「无发布时间」,日报只能整批塞进补录(`daily` 的硬约束:没有发布时间的走补录),
-    写成一行「(无发布时间)」的归并,没有出处编号、没有链接。
+    **只有确认过是「榜单快照」的订阅源才拿它当条目时间**(`SNAPSHOT_FEEDS`,判据在来源
+    上,由 `RSSAdapter.parse` 按抓取地址认)。榜单(GitHub Trending)每天整份重生成,条目
+    上压根没有 `pubDate`,只有 channel 上那一个 —— 意思正是「这份名单截至这一刻」,而条目
+    进日报要讲的正是「它今天上了榜」。不拿它顶上,这一类的每一条都是「无发布时间」,
+    日报只能整批塞进补录(`daily` 的硬约束:没有发布时间的走补录),写成一行
+    「(无发布时间)」的归并,没有出处编号、没有链接。
 
-    **普通文章不许顶**:channel 时间只是它发表时间的上界,「上界在今天」推不出「今天
-    发表」—— 一个今天更新过、条目都不带日期的博客 feed,2020 年的安装指南会被定成今天
-    发布、混进当天日报的正文(审查实测)。文章没写时间就照旧是「无发布时间」,由补录接住。
+    **别的 feed 一律不顶,也不按条目长什么样去推**:channel 时间只说明整份 feed 什么时候
+    更新过,推不出某一条是什么时候产生的。今天更新过的博客 feed 里那篇 2020 年的旧文、
+    一个「历年项目推荐」存档里 2018 年那条仓库推荐(链接同样是 `github.com/owner/repo`),
+    照单全收都会被定成今天、混进当天日报正文(审查两轮实测),而 `put_items` 是
+    `DO NOTHING`,定错了就改不回来。没写时间就照旧是「无发布时间」,由补录接住。
 
-    **只认新鲜的那一份**:手写的 feed 常把 channel 时间写死成多年前,照单全收的话那一批
-    条目在新订阅上被历史下界整批挡掉、在日报里被回溯上限排除 —— 两处都是静默的。旧过
-    `LISTED_FRESH` 就当没有,退回原来的「无发布时间」(由补录接住,不丢);比抓取
-    时刻还晚的(时区写错)压到抓取时刻。
+    **只认新鲜的那一份**:快照源偶尔停更,旧过 `LISTED_FRESH` 就当没有,退回「无发布
+    时间」(由补录接住,不丢);比抓取时刻还晚的(时区写错)压到抓取时刻。
     """
     feed = parsed.get('feed') or {}
     value = feed.get('published_parsed') or feed.get('updated_parsed')
@@ -455,19 +455,27 @@ def _listed_at(parsed) -> str:
     return _stamp(min(when, now).timetuple())
 
 
-_REPO_ROOT = re.compile(r'https://(?:www\.)?github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?')
+# 确认过是「榜单快照」的订阅源(主机, 路径前缀):整份名单每次重生成,条目只有列榜时间。
+# 加一个之前先确认它真是快照 —— 条目上不带时间、channel 时间随每次重生成更新。
+SNAPSHOT_FEEDS = (
+    ('mshibanami.github.io', '/GitHubTrendingRSS/'),     # GitHub Trending(日/周/月,各语言)
+)
 
 
-def _is_repo_root(link: str) -> bool:
-    """这一条指的是不是一个 GitHub 仓库主页(`owner/repo`,不带更深的路径和查询)。"""
-    return bool(_REPO_ROOT.fullmatch(link))
+def is_snapshot_feed(url: str) -> bool:
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = (parts.hostname or '').lower()
+    return any(host == h and parts.path.startswith(prefix) for h, prefix in SNAPSHOT_FEEDS)
 
 
 def parse_feed(body: bytes, base_url: str, *, social: bool = False,
                listed: bool = False) -> list[dict]:
-    """`listed=True`:仓库主页那一类条目没写时间时拿整份 feed 的时间顶上(`_listed_at`)。
+    """`listed=True`:这是一份榜单快照,条目没写时间时拿整份 feed 的时间顶上(`_listed_at`)。
 
-    只有普通 RSS 订阅打开它。简报(`digest.issues`)没日期时要从期号地址里认一个,
+    只有 `RSSAdapter` 认出快照源时打开它。简报(`digest.issues`)没日期时要从期号地址里认一个,
     那比整份 feed 的时间准,顶上反而把它盖掉;社交那一档的条目本来都带时间。
     """
     parsed = feedparser.parse(body)
@@ -501,7 +509,7 @@ def parse_feed(body: bytes, base_url: str, *, social: bool = False,
         title = (oneline(item.get('title', ''), item.get('title_detail', {}).get('type'))
                  or text.splitlines()[0][:100])
         date = item.get('published_parsed') or item.get('updated_parsed')
-        published = (_stamp(date) if date else '') or (fallback if _is_repo_root(link) else '')
+        published = (_stamp(date) if date else '') or fallback
         entries.append({'url': link, 'title': title[:500], 'body': text,
                         'author': oneline(item.get('author', '')), 'published': published,
                         'content_kind': 'post' if social else ('content' if has_content else 'summary')})
@@ -523,7 +531,7 @@ class RSSAdapter:
         return [source['feed_url'] or source['url']]
 
     def parse(self, body: bytes, url: str) -> list[dict]:
-        return parse_feed(body, url, listed=True)
+        return parse_feed(body, url, listed=is_snapshot_feed(url))
 
 
 class SocialAdapter(RSSAdapter):

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""日报素材没有摘要时,拿正文开头顶上 —— 带着 HTML 的那些先剥成可读文字。
+"""日报素材没有摘要时,拿正文开头顶上 —— 开头是 HTML 块的那些先按 Markdown 结构取字。
 
 `summary` 是提取阶段写的,而大多数订阅条目没开条目化提取(`extract_optin`),送进
 模型的就只剩正文开头。正文开头原来取自 chunk,而 chunk 是给检索切的:
@@ -8,77 +8,120 @@
 (`markdown_source.enrich`)这是常态:实测 GitHub Trending 一条的头一个 chunk 就是
 一行 `<div align="center"`,模型拿到的「摘要」只有这一行,只能凭仓库名猜它是干什么的。
 
-**剥标签不许在 chunk 上做。** 没了 `>` 之后「这是不是标签」已经判不出来:`<h1>kimi`
-成了 `<h1kimi`,而 `std::vector<int>` 也成了 `std::vector<int` —— 想认出前者就得放开
-标签名的边界,放开边界就把 `<int` 当成 `<i` 剥掉(审查实测 `std::vector nt`)。所以
-要剥的那些回到 vault 里的原文去读,那儿标签是完整的:标签名在一份 HTML 名单里、后面
-紧跟边界、**有右尖括号**,三样都对上才算标签。md 语法也不照搬
-`chunker.strip_markup`:它把**所有** `>` 和 `_` 都剥掉(检索不在乎),而摘要要原样
-交给模型 —— 图片和链接借它那两条正则,引用和标题只剥行首的标记,强调只剥成对的符号。
+**哪些字算标记,由 Markdown 的结构说了算,不靠任何「长得像标签」的正则。** 两轮按
+正则猜标签,每一轮都有一类技术正文被当成标记删掉(`std::vector<int>` → `<i`,
+`Box<U>` → 一个完整的 `<U>`,反引号里的 `__init__` 被当成强调)—— 名单和边界再怎么
+收也收不住,因为「`<U>` 是不是标签」在正则那一层本来就没有答案。CommonMark 有答案:
+
+- **HTML 块**(一行以块级标签或独占一行的完整标签开头,规范里的 7 种起手式)是 HTML,
+  交给 `fetching.plain` 这个真解析器取字 —— 和 GitHub 把 README 渲染出来给人看的是
+  同一份文字。块里的写法照 HTML 的规矩解释:`<b && y>` 在 HTML 块里就是一个 `<b>`
+  开始标签,浏览器和 GitHub 也都这么显示。HTML 块里夹着的 md 徽章(`![x](…)`)是
+  README 的惯常写法,取出来的字再按下面段落那一套过一遍。
+- **段落里的字原样保留**:行内代码去掉反引号、内容一个字不动,强调的 `**` / `__` 照原样
+  留着(`__init__` 不会被改成 `init`)。只拿掉图片(徽章)和链接的地址,链接文字留着。
+  行内的 `<...>` 只有**解析器认得出是标签、而且带着属性**的才拿掉(`<a href="…">`、
+  `<img src="…"/>`,外加和它配对的那个闭合标签)和 HTML 注释;不带属性的一律当字面
+  文字 —— `Box<U>` 和 `<u>` 在这一层长得一模一样,没有证据就不删。
+- 代码块原样保留。
+
+**只有原文开头真有 HTML 块的才走这条路**,别的一律原样取头一个 chunk(连换行都不动):
+摘要进素材指纹,把干净的也重排一遍,升级那一刻今天带走的几百条全都换了指纹,面板
+凭空报出一个「再生成能多带进来」的数。
 """
 from __future__ import annotations
 
-import html
 import re
 from pathlib import Path
 
-from kb.chunker import _IMG_RE, _LINK_RE
+from markdown_it import MarkdownIt
+
+from kb.feeds.fetching import plain
 from kb.feeds.translate import NOTE
 from kb.scanner import parse_frontmatter
 
 RAW = 20000         # 最多读原文开头多少字符去凑摘要
-PEEK = 4000         # 判「开头带不带 HTML」只看这么长
+PEEK = 4000         # 判「开头有没有 HTML 块」只看这么长
 
-_TAGS = ('a', 'abbr', 'b', 'big', 'blockquote', 'br', 'center', 'code', 'dd', 'del',
-         'details', 'div', 'dl', 'dt', 'em', 'figcaption', 'figure', 'font', 'h1', 'h2',
-         'h3', 'h4', 'h5', 'h6', 'hr', 'i', 'img', 'ins', 'kbd', 'li', 'ol', 'p', 'picture',
-         'pre', 's', 'small', 'source', 'span', 'strike', 'strong', 'sub', 'summary', 'sup',
-         'svg', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'tt', 'u', 'ul', 'video')
-_TAG = re.compile(r'</?(?:' + '|'.join(_TAGS) + r')(?![A-Za-z0-9-])(?:\s[^<>]*)?/?>', re.I)
-_COMMENT = re.compile(r'<!--.*?-->', re.S)
-_LEAD = re.compile(r'^\s*(?:>\s*)*(?:#{1,6}\s+)?')     # 行首的引用 / 标题标记
-_EMPHASIS = re.compile(r'\*\*|__|`+')
-# 译文开头那一行说明。
+_MD = MarkdownIt('commonmark', {'html': True})
+# 行内标签:解析器已经按规范认定它是一个标签,这里只看它带没带属性 / 是不是闭合标签。
+_ATTRIBUTED = re.compile(r'<([A-Za-z][A-Za-z0-9-]*)\s+\S')
+_CLOSING = re.compile(r'</([A-Za-z][A-Za-z0-9-]*)\s*>')
+# 译文开头那一行说明(是个引用块,取出来的字里不带 `>`)。
 _NOTE = NOTE.lstrip('> ').strip()
 
 
-def noisy(text: str) -> bool:
-    """这一段里有没有完整的 HTML 标签或注释。"""
-    return bool(_COMMENT.search(text) or _TAG.search(text))
+def _inline(token) -> str:
+    """段落/标题里的字:原样留着,只拿掉图片和链接地址。"""
+    out = []
+    dropped = []                      # 拿掉了的开始标签名,等它的闭合标签
+    for child in token.children or ():
+        if child.type == 'html_inline':
+            raw = child.content
+            opened = _ATTRIBUTED.match(raw)
+            closed = _CLOSING.fullmatch(raw)
+            if raw.startswith('<!--'):
+                continue
+            if opened:
+                if not raw.rstrip().endswith('/>'):
+                    dropped.append(opened.group(1).lower())
+                continue
+            if closed and closed.group(1).lower() in dropped:
+                dropped.remove(closed.group(1).lower())
+                continue
+            out.append(raw)
+        elif child.type in ('text', 'code_inline'):
+            out.append(child.content)
+        elif child.type in ('em_open', 'em_close', 'strong_open', 'strong_close'):
+            out.append(child.markup)
+        elif child.type in ('softbreak', 'hardbreak'):
+            out.append('\n')
+        # image 整个跳过(徽章);link_open / link_close 跳过,链接文字是它们中间的 text
+    return ''.join(out)
+
+
+def has_html_block(markdown: str) -> bool:
+    return any(t.type == 'html_block' for t in _MD.parse(markdown))
 
 
 def clean(markdown: str) -> str:
     """一段 vault 原文(md + 内嵌 HTML)→ 一行可读文字。"""
-    text = _TAG.sub(' ', _COMMENT.sub(' ', markdown))
-    text = _EMPHASIS.sub('', _LINK_RE.sub(r'\1', _IMG_RE.sub(' ', text)))
+    parts = []
+    for token in _MD.parse(markdown):
+        if token.type == 'html_block':
+            text = plain(token.content)
+            parts.extend(_inline(t) for t in _MD.parseInline(text) if text.strip())
+        elif token.type == 'inline':
+            parts.append(_inline(token))
+        elif token.type in ('fence', 'code_block'):
+            parts.append(token.content)
     lines = []
-    for line in html.unescape(text).splitlines():
-        line = ' '.join(_LEAD.sub('', line).split())
+    for line in '\n'.join(parts).splitlines():
+        line = ' '.join(line.split())
         if line and line != _NOTE:
             lines.append(line)
     return ' '.join(lines)
 
 
 def _body(root: Path, path: str) -> str | None:
-    """vault 里这一篇的正文开头,去掉 frontmatter 和导出时加的那行 `# 标题`。读不到是 None。"""
+    """vault 里这一篇的正文开头(最多读 `RAW` 个字符),去掉 frontmatter 和导出时加的
+    那行 `# 标题`。读不到是 None。"""
     try:
-        text = (root / path).read_text(encoding='utf-8')
+        with open(root / path, encoding='utf-8') as f:
+            text = f.read(RAW)
     except (OSError, UnicodeDecodeError):
         return None
     body = parse_frontmatter(text)[1].lstrip('\n')
     if body.startswith('# '):
         body = body.split('\n', 1)[1] if '\n' in body else ''
-    return body[:RAW]
+    return body
 
 
 def excerpt(conn, root: Path, path: str, limit: int) -> str:
     """这一篇正文开头的可读文字,最多 `limit` 个字符;一个字都没有就是空串。
 
-    **头一个 chunk 本来就干净的,原样照旧取它**(连换行都不动)。素材的指纹
-    (`daily_gain.material_sig`)覆盖摘要,把干净的那些也重排一遍,升级那一刻今天
-    已经带走的几百条全都换了指纹,面板凭空报出一个「再生成能多带进来」的数 ——
-    而模型拿到的东西实质上没变。只有原文开头真带着 HTML 的那些才换一份输入;chunk
-    里一个 `<` 都没有的连文件都不用读。原文读不到也退回 chunk(旧口径),不编一份。
+    头一个 chunk 里一个 `<` 都没有的连文件都不用读;原文读不到、或者开头没有 HTML
+    块的,原样照旧取头一个 chunk(旧口径),不编一份。
     """
     row = conn.execute('SELECT text FROM chunks WHERE path=? ORDER BY seq LIMIT 1',
                        (path,)).fetchone()
@@ -86,6 +129,6 @@ def excerpt(conn, root: Path, path: str, limit: int) -> str:
     if '<' not in first:
         return first[:limit]
     body = _body(root, path)
-    if body is None or not noisy(body[:PEEK]):
+    if body is None or not has_html_block(body[:PEEK]):
         return first[:limit]
     return clean(body)[:limit]

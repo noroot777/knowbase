@@ -5,11 +5,13 @@
 也就没有链接;而送进模型的摘要是 README 开头那串去掉了 `>` 的 HTML 徽章。
 
 三层各钉一次后果,并各自反过来钉住不该动的那一边:
-- 普通 RSS 里**仓库主页那一类**无日期条目拿到 feed 的时间;普通文章照旧无日期(channel
-  时间只是它的上界,定成今天就混进当天正文);**过期的** feed 时间不认(退回无发布时间,
-  由补录接住、不被回溯上限静默排除);条目自己的时间照旧优先;简报和社交那两条入口不顶。
-- 摘要回 vault 原文剥 HTML(chunk 上没了 `>`,`std::vector<int>` 会被当成 `<i` 剥掉);
-  **干净的**正文原样照旧取 chunk(素材指纹不许被白白换掉)。
+- **确认过的榜单快照源**(`fetching.SNAPSHOT_FEEDS`)的无日期条目拿到 feed 的时间;别的
+  feed 一律照旧无日期,哪怕条目链接同样是 `github.com/owner/repo`(「历年推荐」存档);
+  **过期的** feed 时间不认(退回无发布时间,由补录接住、不被回溯上限静默排除);条目自己
+  的时间照旧优先;简报和社交那两条入口不顶。
+- 摘要只对原文开头真有 HTML 块的那些按 CommonMark 结构取字:HTML 块交给 HTML 解析器,
+  段落里的技术正文(`Box<U>`、`std::vector<int>`、`__init__`、行内代码)一个字不改;
+  **别的**原样照旧取 chunk(素材指纹不许被白白换掉)。
 - 提示词给榜单一个有上下界的席位,补录要求带出处编号。
 """
 import tempfile
@@ -61,23 +63,32 @@ class ListedDateTests(unittest.TestCase):
                           'https://github.com/b/two': stamp(own)}, got,
                          '无日期的顶上 feed 的时间,自己带了时间的照旧用自己的')
 
-    def test_ordinary_articles_stay_undated(self):
-        """channel 时间只是文章发表时间的上界:今天更新过的博客 feed,2020 年那篇不带日期的
-        旧文不许被定成今天(定了就进当天日报正文);只有仓库主页那一类拿列榜时间。"""
+    def test_only_confirmed_snapshot_feeds_take_the_listing_time(self):
+        """channel 时间只说明整份 feed 更新过:今天更新的博客里 2020 年的旧文、「历年项目推荐」
+        存档里 2018 年那条仓库推荐(链接同样是仓库主页),都不许被定成今天 —— 定了就进当天
+        日报正文,而且 `put_items` 是 DO NOTHING、改不回来。判据在来源上,不在条目长相上。"""
         listed = self.now - timedelta(hours=1)
-        got = self.parse(feed(listed, [('https://blog.example/2020/install-guide', None),
-                                       ('https://github.com/a/one/issues/7', None),
-                                       ('https://github.com/a/one', None)]), listed=True)
-        self.assertEqual({'https://blog.example/2020/install-guide': '',
-                          'https://github.com/a/one/issues/7': '',
-                          'https://github.com/a/one': stamp(listed)}, got)
+        body = feed(listed, [('https://blog.example/2020/install-guide', None),
+                             ('https://github.com/old/recommended-2018', None)])
+        rss = fetching.ADAPTERS['rss']
+        archive = rss.parse(body, 'https://picks.example/archive.xml')
+        self.assertEqual(['', ''], [e['published'] for e in archive])
+        trending = rss.parse(body, 'https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml')
+        self.assertEqual([stamp(listed)] * 2, [e['published'] for e in trending])
+        self.assertTrue(fetching.is_snapshot_feed(
+            'https://mshibanami.github.io/GitHubTrendingRSS/weekly/python.xml'))
+        for other in ('https://mshibanami.github.io/other/feed.xml',
+                      'https://evil.example/GitHubTrendingRSS/daily/all.xml',
+                      'https://mshibanami.github.io.evil.example/GitHubTrendingRSS/x.xml'):
+            self.assertFalse(fetching.is_snapshot_feed(other), other)
 
     def test_the_rss_adapter_is_the_one_that_opts_in(self):
         listed = self.now - timedelta(hours=3)
         body = feed(listed, [('https://github.com/a/one', None)])
-        rss = fetching.ADAPTERS['rss'].parse(body, 'https://example.org/trending.xml')
+        url = 'https://mshibanami.github.io/GitHubTrendingRSS/daily/all.xml'
+        rss = fetching.ADAPTERS['rss'].parse(body, url)
         self.assertEqual([stamp(listed)], [e['published'] for e in rss])
-        social = fetching.ADAPTERS['social'].parse(body, 'https://example.org/trending.xml')
+        social = fetching.ADAPTERS['social'].parse(body, url)
         self.assertEqual([''], [e['published'] for e in social], '社交那一档不顶')
 
     def test_stale_channel_date_is_not_trusted(self):
@@ -131,13 +142,18 @@ title: a/b
 </div>
 
 用 std::vector<int> 存权重,std::vector<string> 存词表;x <bits 时直接失败,见 [文档](https://e.org/d)。
+类型参数 Box<U>、Box<I>、Box<B>、Box<S> 都保留,只有 x <b && y>c 时才删;实现 `__init__`、__enter__ 和 **粗体**。
+
+<p>调用 `__builtin_popcount`。</p>
 """
-README_TEXT = ('kimi-k3-in-c 享受新闻本身。 其他的交给 Horizon 2.78T 参数,0 GPU 用 std::vector<int> 存权重,'
-               'std::vector<string> 存词表;x <bits 时直接失败,见 文档。')
+README_TEXT = ('kimi-k3-in-c 享受新闻本身。其他的交给 Horizon 2.78T 参数,0 GPU 用 std::vector<int> 存权重,'
+               'std::vector<string> 存词表;x <bits 时直接失败,见 文档。 类型参数 Box<U>、Box<I>、Box<B>、'
+               'Box<S> 都保留,只有 x <b && y>c 时才删;实现 __init__、__enter__ 和 **粗体**。 '
+               '调用 __builtin_popcount。')
 
 
 class ExcerptTests(unittest.TestCase):
-    """chunk 上没了 `>`,「是不是标签」判不出来;要剥的那些回 vault 原文去读。"""
+    """chunk 上没了 `>`,「是不是标签」判不出来;回 vault 原文,按 CommonMark 的结构取字。"""
 
     def setUp(self):
         temp = tempfile.TemporaryDirectory()
@@ -170,16 +186,28 @@ class ExcerptTests(unittest.TestCase):
         return daily_excerpt.excerpt(self.conn, self.root, path, limit)
 
     def test_html_is_stripped_and_typed_code_survives(self):
-        """标签剥掉;`std::vector<int>`、`<string>`、`x <bits` 一个字都不许少 —— 在 chunk 上
-        猜标签会把它们当成 `<i` / `<s` / `<b` 剥掉。"""
+        """HTML 块和徽章剥掉;段落里的技术正文一个字不改:`std::vector<int>`、`Box<U>`、比较式、
+        `__init__`(行内代码只去反引号)、强调符号。正则猜标签的两版各在其中一类上删过字。"""
         self.write('source/rss/a.md', README)
         self.assertEqual(README_TEXT, self.get('source/rss/a.md'))
         self.assertEqual(README_TEXT[:20], self.get('source/rss/a.md', 20))
 
+    def test_html_block_follows_html_rules(self):
+        """HTML 块里的字照 HTML 的规矩解释,和 GitHub 显示给人看的那一份相同:`<b && y>` 在那儿
+        就是一个 `<b>` 开始标签;块里反引号是字面字符,块里的 md 徽章照样拿掉。"""
+        self.assertEqual('只有 x c 时', daily_excerpt.clean('<div>只有 x <b && y>c 时</div>\n'))
+        self.assertEqual('调用 __init__ 文字', daily_excerpt.clean(
+            '<p align="center">\n调用 `__init__`\n![b](https://x/y.svg) 文字\n</p>\n'))
+
+    def test_inline_tags_need_attributes_to_count(self):
+        """段落里的 `<...>` 只有带属性的(和它的闭合标签)才拿掉;`<b>`、`<U>` 这种没证据的留着。"""
+        self.assertEqual('前 后 <b>主题</b> Box<U> 完', daily_excerpt.clean(
+            '前 <a href="x"><img src="y"/></a> 后 <b>主题</b> Box<U> <!-- c --> 完'))
+
     def test_text_that_only_looks_like_markup_is_left_alone(self):
         text = 'List<T>、Vec<u8>、Map<i, j>、std::vector<int>、x <bits 和 a<b 都不是标签'
         self.assertEqual(text, daily_excerpt.clean(text))
-        self.assertFalse(daily_excerpt.noisy(text))
+        self.assertFalse(daily_excerpt.has_html_block(text))
 
     def test_technical_text_without_html_keeps_the_old_excerpt_verbatim(self):
         """chunk 里有 `<`、原文里却没有完整标签:照旧取头一个 chunk,一个字节不动。"""
