@@ -14,6 +14,14 @@
   304,等源站下次更新时整份 feed 又回来了,那时闸门早撤了。
 - **老库里的订阅补成空串 = 不设下界,行为逐字不变。**
 - **没有发布时间的条目照收**(身上没有任何「很旧」的证据),日报那边按「补录」接住。
+- **普通 RSS 的条目没写时间时,拿整份 feed 声明的时间顶上,但只认新鲜的那一份**(`fetching._listed_at`,
+  `parse_feed(listed=True)` 只由 `RSSAdapter` 打开)。榜单类订阅(GitHub Trending)每天整份重生成,条目上没有
+  `pubDate`、只有 channel 上那一个;不顶的话每一条都是「无发布时间」,日报只能整批塞进补录归并成一行,没有出处
+  编号、没有链接。那个时间是条目发布时间的**上界**,所以这道闸只会因它更宽。**旧过 `LISTED_FRESH`(3 天)就当
+  没有** —— 手写 feed 常把 channel 时间写死成多年前,照单全收会让那批条目被这道闸和日报的回溯上限**静默**挡掉;
+  退回「无发布时间」只是进补录。比抓取时刻还晚的压到抓取时刻。**简报和社交两条入口不顶**:简报没日期时从期号
+  地址里认一个(`digest.issues`),比整份 feed 的时间准。`put_items` 是 `DO NOTHING`,只对新条目生效。回归
+  `tests/test_github_trending_daily.py`。
 - **区间补抓(`scope.ranged`)不受这道闸限制** —— 那是唯一的逃生口。
 - **`_within_history` 只管往后,存量要单独清**(`scripts/feed_trim_history.py`)。清理**同时会钉上 `history_floor`**。
   顺序:备份 → 钉下界 → 删 feeds.db 行 → 删 vault md → `remove_missing_documents`;**feeds.db 要先删**(它是「要不要

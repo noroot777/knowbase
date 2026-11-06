@@ -15,7 +15,7 @@ import socket
 import time
 from dataclasses import dataclass
 from typing import Iterable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -409,13 +409,63 @@ def canonical_url(url: str, social: bool = False) -> str:
     return urlunsplit((p.scheme, p.netloc, p.path, urlencode(query), ''))
 
 
-def parse_feed(body: bytes, base_url: str, *, social: bool = False) -> list[dict]:
+# 整份 feed 声明的时间最多旧到多少还拿来顶条目的发布时间,见 `_listed_at`。
+LISTED_FRESH = timedelta(days=3)
+
+
+def _stamp(value) -> str:
+    """feedparser 的 struct_time(UTC)→ 项目时区的 `YYYY-MM-DD HH:MM`;认不出就是空串。"""
+    try:
+        return datetime.fromtimestamp(calendar.timegm(value), timezone.utc).astimezone(
+            ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M')
+    except (TypeError, ValueError, OverflowError):
+        return ''
+
+
+def _listed_at(parsed) -> str:
+    """条目自己没写时间时,整份 feed 声明的那个时间(`<channel><pubDate>` / Atom 的 `<updated>`)。
+
+    **快照式的 feed 只有这一个时间。** 榜单类订阅(GitHub Trending 那种「今天的热门
+    仓库」)每天整份重生成,条目上压根没有 `pubDate`,只有 channel 上那一个 —— 它的
+    意思正是「这份名单截至这一刻」。不拿它顶上,这类订阅的每一条都是「无发布时间」,
+    日报只能把它们整批塞进补录(`daily` 的硬约束:没有发布时间的走补录),写成一行
+    「(无发布时间)」的归并。
+
+    这个时间是条目发布时间的**上界**(条目先于整份名单存在),所以历史下界那道闸
+    (`history._within_history`)只会因它更宽、不会更严。**只认新鲜的那一份**:
+    手写的 feed 常把 channel 时间写死成多年前,照单全收的话那一批条目在新订阅上被
+    历史下界整批挡掉、在日报里被回溯上限排除 —— 两处都是静默的。旧过
+    `LISTED_FRESH` 就当没有,退回原来的「无发布时间」(由补录接住,不丢);比抓取
+    时刻还晚的(时区写错)压到抓取时刻。
+    """
+    feed = parsed.get('feed') or {}
+    value = feed.get('published_parsed') or feed.get('updated_parsed')
+    if not value:
+        return ''
+    try:
+        when = datetime.fromtimestamp(calendar.timegm(value), timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return ''
+    now = datetime.now(timezone.utc)
+    if now - min(when, now) > LISTED_FRESH:
+        return ''
+    return _stamp(min(when, now).timetuple())
+
+
+def parse_feed(body: bytes, base_url: str, *, social: bool = False,
+               listed: bool = False) -> list[dict]:
+    """`listed=True`:条目没写时间时拿整份 feed 的时间顶上(`_listed_at`)。
+
+    只有普通 RSS 订阅打开它。简报(`digest.issues`)没日期时要从期号地址里认一个,
+    那比整份 feed 的时间准,顶上反而把它盖掉;社交那一档的条目本来都带时间。
+    """
     parsed = feedparser.parse(body)
     if not parsed.get('version'):
         raise FeedError('该链接没有返回 RSS / Atom；可能是登录页或验证页面，请修改订阅链接')
     if parsed.get('bozo') and not parsed.entries:
         raise FeedError('订阅 XML 无法解析，请检查订阅服务')
     entries = []
+    fallback = _listed_at(parsed) if listed else ''
     # Feeds need not be ordered newest-first (some author feeds are ascending).
     def date_key(item):
         value = item.get('published_parsed') or item.get('updated_parsed')
@@ -440,13 +490,7 @@ def parse_feed(body: bytes, base_url: str, *, social: bool = False) -> list[dict
         title = (oneline(item.get('title', ''), item.get('title_detail', {}).get('type'))
                  or text.splitlines()[0][:100])
         date = item.get('published_parsed') or item.get('updated_parsed')
-        published = ''
-        if date:
-            try:
-                published = datetime.fromtimestamp(calendar.timegm(date), timezone.utc).astimezone(
-                    ZoneInfo('Asia/Shanghai')).strftime('%Y-%m-%d %H:%M')
-            except (ValueError, OverflowError):
-                pass
+        published = (_stamp(date) if date else '') or fallback
         entries.append({'url': link, 'title': title[:500], 'body': text,
                         'author': oneline(item.get('author', '')), 'published': published,
                         'content_kind': 'post' if social else ('content' if has_content else 'summary')})
@@ -468,7 +512,7 @@ class RSSAdapter:
         return [source['feed_url'] or source['url']]
 
     def parse(self, body: bytes, url: str) -> list[dict]:
-        return parse_feed(body, url)
+        return parse_feed(body, url, listed=True)
 
 
 class SocialAdapter(RSSAdapter):
