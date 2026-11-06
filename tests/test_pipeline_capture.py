@@ -14,7 +14,9 @@
 「不再抓取」—— 指着一篇刚补好正文的文章让人永久删掉。判据落在**回包里还有没有那一行、明细
 总数、那一行还带不带 `drop`**。判据是版本不是时刻:同步还在跑时补好的、收尾同一秒补好的
 一样拿掉。反过来钉住:导出 / 翻译那几类失败补正文不替它们办完,行和原因照旧在(只摘掉
-「不再抓取」);升级之前没记版本的旧记录同样;自动补抓补上的不算人办完,行和按钮都不动。
+「不再抓取」);自动补抓补上的不算人办完,行和按钮都不动。升级之前那几轮的旧记录(没有
+`step` 也没有版本,实测那条 OpenAI 就是)分不出是哪一步,一律留着、只摘掉「不再抓取」——
+「这篇补抓失败过」「补在收尾之后」都证明不了**这一条**是补抓失败。
 
 脚手架复用 `tests/test_feed_fulltext.py` 的 `FullTextCase`(临时 registry)。
 """
@@ -187,7 +189,7 @@ class HandFilledTests(FullTextCase):
     def test_an_export_failure_is_not_solved_by_a_new_body(self):
         """导出写不进 vault 补正文办不完:行和原因照旧在,只是不给「不再抓取」。"""
         disk = failure({'key': self.key, 'url': self.mine['url'], 'title': 'Yes, and'},
-                       '磁盘已满，Markdown 导出失败', 'rss')
+                       '磁盘已满，Markdown 导出失败', 'rss', 'export')
         self.assertNotIn('body_rev', disk)
         run = self._run([disk, self.mine])
         self._fill_by_hand()
@@ -197,14 +199,45 @@ class HandFilledTests(FullTextCase):
         self.assertEqual(['磁盘已满，Markdown 导出失败'], reasons)
         self.assertEqual(([False], [False]), self.drops(run))
 
-    def test_an_old_record_without_a_version_stays_without_drop(self):
-        """升级之前的旧记录没记版本:拿不准就照旧显示,只摘掉「不再抓取」。"""
-        legacy = {k: v for k, v in self.mine.items() if k != 'body_rev'}
-        run = self._run([legacy])
+    def _legacy(self):
+        """升级之前那几轮写的形状:没有 `step`,也没有 `body_rev`(实测那条 OpenAI 就是)。"""
+        return {k: v for k, v in self.mine.items() if k not in ('body_rev', 'step')}
+
+    def test_an_old_record_stays_without_drop(self):
+        """旧记录分不出是哪一步:不管补在那一轮收尾之前、之后还是那一轮还在跑,行和
+        原因都在,只是不给「不再抓取」。"""
+        self._fill_by_hand()
+        for finished in ('2000-01-01 08:00:00', '2999-01-01 08:00:00', None):
+            with self.subTest(finished=finished):
+                run = self._run([self._legacy()], finished=finished)
+                pipeline_capture.mark_runs([run])
+                self.assertEqual((['Yes, and'], ['Yes, and']), titles(run))
+                self.assertEqual(([False], [False]), self.drops(run))
+
+    def test_an_old_export_failure_on_a_fetch_failed_item_is_not_hidden(self):
+        """审查复现的形状:这一篇补抓失败过、补在收尾之后,而那条旧记录其实是导出失败
+        (还没写进知识库)。条目的事实证明不了**这一条**是补抓失败,原因要留着。"""
+        disk = {k: v for k, v in failure(
+            {'key': self.key, 'url': self.mine['url'], 'title': 'Yes, and'},
+            '[Errno 21] Is a directory', 'rss', 'export').items() if k != 'step'}
+        self.assertGreater(self.row(self.key)['fulltext_tries'], 0)
+        run = self._run([disk], finished='2000-01-01 08:00:00')
         self._fill_by_hand()
         pipeline_capture.mark_runs([run])
-        self.assertEqual((['Yes, and'], ['Yes, and']), titles(run))
+        reasons = [f['reason'] for f in run['stages']['export']['failures']]
+        self.assertEqual(['[Errno 21] Is a directory'], reasons)
         self.assertEqual(([False], [False]), self.drops(run))
+
+    def test_new_records_say_which_step_they_came_from(self):
+        self.assertEqual('fulltext', self.mine['step'])
+        disk = failure({'key': self.key, 'url': self.mine['url'], 'title': 'Yes, and'},
+                       '磁盘已满', 'rss', 'export')
+        self.assertEqual('export', disk['step'])
+        run = self._run([disk], finished='2000-01-01 08:00:00')
+        self._fill_by_hand()
+        pipeline_capture.mark_runs([run])
+        # 新写的导出失败带着 `step`:补在收尾之后也不按旧口径拿掉。
+        self.assertEqual((['Yes, and'], ['Yes, and']), titles(run))
 
     def test_a_failure_about_the_hand_filled_version_stays(self):
         """失败说的就是人补进来的那一版(版本不比它旧):不算被取代。"""

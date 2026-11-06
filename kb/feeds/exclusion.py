@@ -20,10 +20,15 @@ BEGIN SELECT RAISE(IGNORE); END;
 '''
 
 
-def failure(item, reason, kind: str | None = None) -> dict:
+def failure(item, reason, kind: str | None = None, step: str | None = None) -> dict:
+    """一条失败明细。`step` = 它是哪一步的失败(`fulltext` / `translate` / `export` /
+    `document`):同步面板靠它分辨「人补了正文,这一条算不算办完了」(只有补抓那一步
+    算,见 `kb/pipeline_capture.py`)。没带这一项的是升级之前那几轮留下的旧记录。"""
     item = dict(item)
     result = {'title': str(item.get('title') or '未命名内容')[:120],
               'reason': str(reason)[:300]}
+    if step:
+        result['step'] = step
     url = item.get('url') or ''
     if url:
         result['url'] = url

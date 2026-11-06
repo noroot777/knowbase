@@ -330,7 +330,7 @@ def _failure(item, reason, kind: str) -> dict:
     此刻那份正文是人补的、而且版本比这里记的新,才算这一条被取代了。别的环节
     (翻译、导出)的失败不带这一项 —— 补正文不会替它们把事办完。
     """
-    return {**failure(item, reason, kind), 'body_rev': int(item['content_rev'])}
+    return {**failure(item, reason, kind, 'fulltext'), 'body_rev': int(item['content_rev'])}
 
 
 def fetch_pending(kind: str, limit: int | None = None, progress=None,

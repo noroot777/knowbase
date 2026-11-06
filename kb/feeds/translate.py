@@ -476,7 +476,7 @@ def translate_pending(kind: str, limit: int | None = None, progress=None,
                 # key 也记下来:导出那头要靠它把"本轮新失败"和"此前失败、还排着
                 # 队"分开报,拿 failed 这个计数是分不出来的(见 `sync._export`)。
                 summary['failed_keys'].append(item['key'])
-                summary['errors'].append(failure(item, result, kind))
+                summary['errors'].append(failure(item, result, kind, 'translate'))
             elif isinstance(result, Exception):      # 原文已经换过,这次失败不算它的
                 summary['stale'] += 1
             elif result is _SHELVED:
