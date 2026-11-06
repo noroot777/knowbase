@@ -15,8 +15,8 @@
 总数、那一行还带不带 `drop`**。判据是版本不是时刻:同步还在跑时补好的、收尾同一秒补好的
 一样拿掉。反过来钉住:导出 / 翻译那几类失败补正文不替它们办完,行和原因照旧在(只摘掉
 「不再抓取」);自动补抓补上的不算人办完,行和按钮都不动。升级之前那几轮的旧记录(没有
-`step` 也没有版本,实测那条 OpenAI 就是)退回按收尾时刻判:补在收尾之后拿掉,拿不准的
-行留着、只摘掉「不再抓取」。
+`step` 也没有版本,实测那条 OpenAI 就是)分不出是哪一步,一律留着、只摘掉「不再抓取」——
+「这篇补抓失败过」「补在收尾之后」都证明不了**这一条**是补抓失败。
 
 脚手架复用 `tests/test_feed_fulltext.py` 的 `FullTextCase`(临时 registry)。
 """
@@ -203,31 +203,30 @@ class HandFilledTests(FullTextCase):
         """升级之前那几轮写的形状:没有 `step`,也没有 `body_rev`(实测那条 OpenAI 就是)。"""
         return {k: v for k, v in self.mine.items() if k not in ('body_rev', 'step')}
 
-    def test_an_old_record_filled_after_the_round_drops_the_row(self):
-        """旧记录分不出是哪一步:补抓确实失败过、补在那一轮收尾之后,就拿掉。"""
-        run = self._run([self._legacy()], finished='2000-01-01 08:00:00')
+    def test_an_old_record_stays_without_drop(self):
+        """旧记录分不出是哪一步:不管补在那一轮收尾之前、之后还是那一轮还在跑,行和
+        原因都在,只是不给「不再抓取」。"""
         self._fill_by_hand()
-        pipeline_capture.mark_runs([run])
-        self.assertEqual(([], []), titles(run))
-
-    def test_an_old_record_filled_before_the_round_ended_stays_without_drop(self):
-        """反过来钉一边:补在收尾之前、或那一轮还没收尾,拿不准 —— 行在,只是不给删除。"""
-        self._fill_by_hand()
-        for finished in ('2999-01-01 08:00:00', None):
+        for finished in ('2000-01-01 08:00:00', '2999-01-01 08:00:00', None):
             with self.subTest(finished=finished):
                 run = self._run([self._legacy()], finished=finished)
                 pipeline_capture.mark_runs([run])
                 self.assertEqual((['Yes, and'], ['Yes, and']), titles(run))
                 self.assertEqual(([False], [False]), self.drops(run))
 
-    def test_an_old_record_on_an_item_that_never_failed_fetching_stays(self):
-        """旧记录、补抓从没失败过的那一篇:那条失败只能是别的环节的,不拿掉。"""
+    def test_an_old_export_failure_on_a_fetch_failed_item_is_not_hidden(self):
+        """审查复现的形状:这一篇补抓失败过、补在收尾之后,而那条旧记录其实是导出失败
+        (还没写进知识库)。条目的事实证明不了**这一条**是补抓失败,原因要留着。"""
+        disk = {k: v for k, v in failure(
+            {'key': self.key, 'url': self.mine['url'], 'title': 'Yes, and'},
+            '[Errno 21] Is a directory', 'rss', 'export').items() if k != 'step'}
+        self.assertGreater(self.row(self.key)['fulltext_tries'], 0)
+        run = self._run([disk], finished='2000-01-01 08:00:00')
         self._fill_by_hand()
-        with reg.db() as c:
-            c.execute('UPDATE feed_items SET fulltext_tries=0 WHERE key=?', (self.key,))
-        run = self._run([self._legacy()], finished='2000-01-01 08:00:00')
         pipeline_capture.mark_runs([run])
-        self.assertEqual((['Yes, and'], ['Yes, and']), titles(run))
+        reasons = [f['reason'] for f in run['stages']['export']['failures']]
+        self.assertEqual(['[Errno 21] Is a directory'], reasons)
+        self.assertEqual(([False], [False]), self.drops(run))
 
     def test_new_records_say_which_step_they_came_from(self):
         self.assertEqual('fulltext', self.mine['step'])
