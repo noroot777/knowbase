@@ -55,7 +55,7 @@ from kb.config import PRIMARY_SOURCE_NAMES, VAULT_ROOT
 from kb.daily_carry import STAMP, commit_lock, mark_carried, parse_ts, release
 from kb.daily_gain import material_sig, pending  # noqa: F401  (搬出去的两个口径,
 # `daily.pending` / `daily.material_sig` 这类既有写法照旧可用;见 daily_gain 的说明)
-from kb.daily_excerpt import from_chunks as _excerpt_from_chunks
+from kb.daily_excerpt import excerpt as _excerpt
 from kb.daily_materials import material_view
 from kb.daily_prompt import PROMPT, late_section
 from kb.daily_carry import UNCARRIED as _UNCARRIED
@@ -191,9 +191,9 @@ def _enrich(conn, row, when: datetime | None, late: bool) -> dict:
     doc['topics'] = [t[0].split('/', 1)[-1] for t in conn.execute(
         "SELECT tag FROM doc_tags WHERE path=? AND tag LIKE 'topic/%'", (doc['path'],))]
     # 没提取过的文档没有 summary(提取失败、或者刚索引完还没轮到它)。拿正文开头
-    # 顶上,总比把这条从日报里整个漏掉强 —— 标记噪音先剥掉(见 `daily_excerpt`)。
+    # 顶上,总比把这条从日报里整个漏掉强 —— 带着 HTML 的先剥掉(见 `daily_excerpt`)。
     doc['excerpt'] = ((doc['summary'] or '').strip()
-                      or _excerpt_from_chunks(conn, doc['path'], EXCERPT))[:EXCERPT]
+                      or _excerpt(conn, VAULT_ROOT, doc['path'], EXCERPT))[:EXCERPT]
     return doc
 
 
