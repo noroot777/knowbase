@@ -134,8 +134,11 @@
       「已经在知识库里了」的话,人搜不到,扩展又一颗按钮都不给。
     - **收件桶不是 X 专属的**:那一侧只认地址本身就是这条推文的(`spot`:X 的域名 + `/status/<id>`),
       `other.example/status/<同一串数字>` 不算;`social` 那一类本身就是平台身份,照旧按路径认。
-    - **知情留下**:先手动收了一条推文、后来才订阅那个账号,同步照旧会在 `social` 再投一份(`x_intake_store.existing`
-      只认 `social`)。那是手动收录与同步之间既有的口径,不在这一块里改。
+    - **知情留下(仓库主人拍板,不做跨来源的原子去重)**:收件桶和「大V观点」各存各的,没有「同一条推文只收一次」
+      的共同约束,所以两种时序照旧会各留一份 —— 手动收录联网抓取的那几秒里同步恰好发现了它;先手动收了、
+      下一轮同步才看到它(`x_intake_store.existing` 只认 `social`)。上面那两道检查管的是「同步已经攥着」的静态情形。
+      根治要让同步的投递环节也认收件桶,改动落在 X 同步那一层;仓库主人的判断是扩展里收的多半是没订阅账号的长文,
+      这两种撞车的代价(检索里两份)不值得动同步层。
     回归 `tests/test_x_article_capture.py` 的 `test_a_post_nobody_is_waiting_for_is_handed_to_the_manual_grab`、
     `..._stored_only_once_the_rest_of_the_chain_ran`、`test_another_site_with_the_same_status_tail_is_not_this_post`、
     `test_a_post_the_sync_still_holds_is_not_collected_a_second_time`。
