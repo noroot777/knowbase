@@ -512,7 +512,8 @@ class CaptureHereTests(CaptureCase):
         self.assertFalse(score('https://lab.example.org/b/amp', '', 'https://lab.example.org/a/amp', ''))
         self.assertTrue(score('https://x.example/1', '新一代模型的工作笔记 - 实验室', 'https://y.example/2',
                               '新一代模型的工作笔记'))
-        self.assertFalse(score('https://x.example/1', 'Changelog', 'https://y.example/2', 'Changelog'),
-                         '短标题到处都是')
+        for short in ('Changelog', 'Release notes', '周报'):
+            self.assertFalse(score('https://x.example/1', f'{short} | Lab', 'https://y.example/2', short),
+                             f'短标题「{short}」到处都是')
         self.assertFalse(score('https://x.example/1', 'Example Lab', 'https://y.example/2',
                                'Example Lab: Notes on the new model'), '不许拿这一页的标题去包含库里那条')

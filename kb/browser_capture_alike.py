@@ -29,8 +29,14 @@ _MIN_SLUG = 3
 _GENERIC_SLUGS = frozenset(('index', 'amp', 'default', 'home', 'main', 'page', 'post', 'posts',
                             'article', 'articles', 'blog', 'news', 'story', 'p', 'view', 'detail'))
 _EXTENSION = re.compile(r'\.(?:s?html?|php|aspx?|jsp)$')
-#: 标题要多长才算数(去掉空白与标点之后的字数)。短标题(「Changelog」「周报」)全站到处都是。
-_MIN_TITLE = 8
+#: 标题要多长才算数(去掉空白与标点之后,按 `_weight` 计)。短标题(「Changelog」「Release notes」
+#: 「周报」)全站到处都是。**按字数一刀切不行**:九个拉丁字母是一个词,九个汉字已经是一句具体的标题,
+#: 所以宽字符(汉字、假名、谚文)记两份。
+_MIN_TITLE = 14
+
+
+def _weight(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in ('W', 'F') else 1 for ch in text)
 
 
 def _host(url: str) -> str:
@@ -58,7 +64,7 @@ def score(page: str, title: str, item_url: str, item_title: str) -> int:
     slug = _slug(page)
     same = 2 if slug and _host(page) == _host(item_url) and slug == _slug(item_url) else 0
     mine = _plain(item_title)
-    return same + (1 if len(mine) >= _MIN_TITLE and mine in _plain(title) else 0)
+    return same + (1 if _weight(mine) >= _MIN_TITLE and mine in _plain(title) else 0)
 
 
 def alike(conn, page: str, title: str, owed_sql: str, check) -> list[dict]:
