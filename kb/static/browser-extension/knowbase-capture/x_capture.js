@@ -81,7 +81,11 @@
 
   async function collect() {
     if (busy || !answer) return;
-    if (['absent', 'unfinished'].includes(answer.situation) && answer.grab_url) return grab();
+    if (['absent', 'unfinished'].includes(answer.situation)) {
+      if (answer.grab_url) return grab();
+      // 只有比扩展旧的服务会这样答(那时 `absent` 还不给收录地址):按钮露着、点了却没动静,人只会以为采不了。
+      return tools.status('知识库服务还是旧版本，重启 kb-web（./kb.sh restart）后点「重新确认」', true);
+    }
     if (answer.situation !== 'fill') return;
     busy = true;
     render();
