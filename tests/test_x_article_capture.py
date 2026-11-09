@@ -120,7 +120,7 @@ class ListTests(CaptureBase):
         self.assertEqual(('unfinished', 'https://x.com/Alice/status/7'), (state['situation'], state['grab_url']))
         self.assertIn('还没导出成笔记文件', state['detail'])
         done = dict(content_ok=True, exported=True, stored=True, indexed=True, done=True)
-        with patch.object(x_article_capture.grab_store, 'known', lambda url: done):
+        with patch.object(x_article_capture.grab_store, 'known', lambda url, timeout=None: done):
             self.assertEqual('stored', self.here('https://x.com/alice/status/7').json()['situation'])
 
     def test_another_site_with_the_same_status_tail_is_not_this_post(self):
