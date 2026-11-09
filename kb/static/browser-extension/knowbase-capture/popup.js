@@ -60,7 +60,8 @@
       element(name).disabled = value || !situation;
     for (const name of ['connect', 'refresh', 'close-tab']) element(name).disabled = value;
     // 「改用它」有几颗要看服务端交回几个待办,所以从那张列表上现读,不记一份名单。
-    for (const button of element('elsewhere-list').querySelectorAll('button')) button.disabled = value;
+    for (const list of ['alike', 'elsewhere-list'])
+      for (const button of element(list).querySelectorAll('button')) button.disabled = value;
     flushFocus();
   }
 
@@ -186,8 +187,9 @@
     if (globalThis.knowbaseXArticle?.claims(here.url)) return globalThis.knowbaseXArticle.show(here, {call, status});
     globalThis.knowbaseXArticle?.release();
     if (chosenFor !== here.url) chosen = chosenFor = '';
+    //: 标题只用来在「这一页不在库里」时找像它的那几条(服务端 `browser_capture_alike`),不参与准入。
     situation = await api('/here', {method: 'POST', signal,
-                                    body: JSON.stringify({url: here.url, intent_id: chosen})});
+                                    body: JSON.stringify({url: here.url, intent_id: chosen, title: here.title})});
     //: **一旦服务端明确说这一页还有事没做完,就把许可就地撤掉 —— 撤销落在凭据上,
     //: 不是只落在这一答上。** `situation` 每问一次就换一份、问失败时是 `null`,所以
     //: 只靠「此刻那一答在不在白名单里」判的话,**那个「不允许」活不过下一次刷新**:
@@ -335,7 +337,12 @@
     if (landed && close.hidden) { close.hidden = false; wantFocus = 'close-tab'; flushFocus(); }
     else if (!landed) { close.hidden = true; if (wantFocus === 'close-tab') wantFocus = ''; }
     if (plan) {
-      element('act').textContent = plan.act;
+      //: **库里有像这一页的、在等正文的那几条时,「采集」退成次要的那一颗。** 两种情形按网址问都是
+      //: 「不在库里」,下一步却相反:真没有就收成新的一条;库里那篇只是换了地址,收就是同一篇两行、
+      //: 原来那条照旧缺正文。候选摆在它上面、每行一颗主按钮,这一颗改说它真正做的事。
+      const asking = !!(situation.alike && situation.alike.length);
+      element('act').textContent = asking ? '都不是，收成新的一条' : plan.act;
+      element('act').className = asking ? 'secondary' : '';
       // 名字一律先写上,**不管这一刻露不露面**:失败那条路上只改 `hidden`,它要是
       // 还指望那时候补名字,放出来的就是一颗没有字的按钮。
       element('act-page').textContent = '改用这一页的正文';
@@ -357,26 +364,39 @@
   //: 每行自己那颗按钮在这里当场绑上:这些行每次重画都是新元素,**按 id 绑一次**的
   //: 写法重画之后点下去什么都不会发生。标题和网址一律 `textContent` —— 它们来自
   //: 订阅源,拿 innerHTML 拼等于把源站的字当标记送进弹窗这个有 `chrome.*` 的上下文。
+  //:
+  //: 待办只覆盖「人先去过采集抽屉」的那一半;他直接在换了地址的页面上点扩展时,服务端另交
+  //: `alike`(库里在等正文、又像这一页的那几条)。那一块摆在标题下面、按钮上面,每行一颗主按钮
+  //: —— 这一档先要回答的是「是不是它」,不是「收不收」。
   function renderElsewhere() {
-    const others = (situation && situation.elsewhere) || [];
+    const alike = (situation && situation.alike) || [];
+    const mine = new Set(alike.map(one => one.key));
+    // 同一条已经作为「像这一页」摆在上面了,页底就不再摆一次。
+    const others = ((situation && situation.elsewhere) || []).filter(other => !mine.has(other.key));
+    element('alike').hidden = !alike.length;
+    element('alike').replaceChildren(...alike.map(one => pick(one, one.url, '就是这一篇', true)));
     element('elsewhere').hidden = !others.length;
-    element('elsewhere-list').replaceChildren(...others.map(other => {
-      const row = document.createElement('li');
-      const title = document.createElement('p');
-      title.className = 't';
-      title.textContent = other.title;
-      const address = document.createElement('p');
-      address.className = 'url';
-      address.textContent = plainUrl(other.page_url);
-      const adopt = document.createElement('button');
-      adopt.className = 'secondary';
-      adopt.type = 'button';
-      adopt.disabled = busy;
-      adopt.textContent = '这一页就是这一篇，改用它';
-      adopt.addEventListener('click', () => adoptHere(other.key));
-      row.append(title, address, adopt);
-      return row;
-    }));
+    element('elsewhere-list').replaceChildren(
+      ...others.map(other => pick(other, other.page_url, '这一页就是这一篇，改用它', false)));
+  }
+
+  //: 一行候选:标题、它在库里(或待办里)的地址、一颗认领它的按钮。两处共用 —— 认领都是 `adoptHere`。
+  function pick(other, address, label, primary) {
+    const row = document.createElement('li');
+    const title = document.createElement('p');
+    title.className = 't';
+    title.textContent = other.title;
+    const where = document.createElement('p');
+    where.className = 'url';
+    where.textContent = plainUrl(address);
+    const adopt = document.createElement('button');
+    adopt.className = primary ? '' : 'secondary';
+    adopt.type = 'button';
+    adopt.disabled = busy;
+    adopt.textContent = label;
+    adopt.addEventListener('click', () => adoptHere(other.key));
+    row.append(title, where, adopt);
+    return row;
   }
 
   // 在那个标签上读一次正文。**补正文和收录共用**:同一个提取器、同一句错误话术。

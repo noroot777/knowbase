@@ -29,7 +29,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 
-from kb.feeds import registry as reg, x_article, x_post
+from kb.feeds import grab_store, registry as reg, x_article, x_post
 from kb.feeds import x_intake_store as store
 from kb.maintenance import LockBusy
 
@@ -63,7 +63,7 @@ def _locks_are_retryable(detail: str):
 
 # 人此刻站着的那一页:`/<handle>/article/<推文 id>`(长文页)或 `/<handle>/status/<推文 id>`(推文页)。
 # 只认推文 id —— handle 大小写不敏感、改名后旧地址照样跳得到(口径同 `x_article._spot`)。
-_PAGE = re.compile(r'^https://(?:www\.|mobile\.)?(?:x|twitter)\.com/[A-Za-z0-9_]{1,20}/(article|status)/(\d+)(?:[/?#]|$)')
+_PAGE = re.compile(r'^https://(?:www\.|mobile\.)?(?:x|twitter)\.com/([A-Za-z0-9_]{1,20})/(article|status)/(\d+)(?:[/?#]|$)')
 
 # 还在等长文的候选:状态 pending、还在它那条订阅的五天窗口里(口径同 `x_intake_store.pending`,
 # 只是**不看退避** —— 人手动补的这一下不该等自动重试的冷却)。这一句只看上一轮同步留下的进度,
@@ -84,7 +84,7 @@ def _current(conn) -> dict:
 def spot(url: str) -> tuple[str, str]:
     """一个地址落在哪一篇上。返回 (`article`/`status`, 推文 id);认不出来是 ('', '')。"""
     m = _PAGE.match((url or '').strip())
-    return (m.group(1), m.group(2)) if m else ('', '')
+    return (m.group(2), m.group(3)) if m else ('', '')
 
 
 def _owes(entry: dict) -> bool:
@@ -120,27 +120,37 @@ def owed(source_id: int | None = None, end: float | None = None) -> list[dict]:
 
 
 def _stored(conn, ident: str) -> bool:
-    return conn.execute("SELECT 1 FROM feed_items WHERE kind='social' AND url LIKE ? LIMIT 1",
-                        (f'%/status/{ident}',)).fetchone() is not None
+    # 两条路收进来的推文都算:「大V观点」同步进来的(`social`),和手动收录的(`inbox`,
+    # 扩展在 `absent` 那一档给的「采集」正是它)。只问前者的话,刚收下的那一条再问一次照旧
+    # 答「不在知识库里」,那颗「采集」又露出来。
+    return conn.execute("SELECT 1 FROM feed_items WHERE kind IN ('social', ?) AND url LIKE ? LIMIT 1",
+                        (grab_store.KIND, f'%/status/{ident}')).fetchone() is not None
 
 
 def here(url: str) -> dict:
     """人站在这一页上,扩展问「这一页能做什么」。一问一答,只读。
 
     `situation`:`fill` = 这一篇正等着,读这一页就行;`open_article` = 站在推文页上,
-    要先点开那篇长文;`stored` = 这一条已经入库了;`absent` = 知识库没在等这一篇;
+    要先点开那篇长文;`stored` = 这一条已经入库了;`absent` = 库里没有、也没在等它 ——
+    带上 `grab_url`(这条推文的地址,长文页也换成它所属的推文),扩展拿它走手动收录;
     `other` = 这一页不是推文也不是长文。
+
+    `absent` 和 `fill` / `open_article` 的分界是**推文 id**,不是地址:同一条推文从
+    长文页、推文页、`twitter.com` 进来都认得出它在等,所以那一档不会被收成第二条。
     """
-    kind, ident = spot(url)
-    if not ident:
+    m = _PAGE.match((url or '').strip())
+    if not m:
         return dict(situation='other', detail='这一页不是 X 的推文或长文。', post=None)
+    handle, kind, ident = m.groups()
     end = _deadline()
     post = next((one for one in owed(end=end) if one['post_id'] == ident), None)
     if post is None:
         with _locks_are_retryable('同步正在写库，稍后再试一次。'), reg.read_db(timeout=_left(end)) as conn:
             stored = _stored(conn, ident)
-        return dict(situation='stored' if stored else 'absent', post=None,
-                    detail='这一条已经在知识库里了。' if stored else '知识库没在等这一篇长文的正文。')
+        if stored:
+            return dict(situation='stored', post=None, detail='这一条已经在知识库里了。')
+        return dict(situation='absent', post=None, grab_url=f'https://x.com/{handle}/status/{ident}',
+                    detail='这条推文还不在知识库里。')
     if kind == 'status':
         return dict(situation='open_article', post=post,
                     detail='这条推文的长文还缺正文。点开推文里的那篇长文，在长文页上再点一次扩展。')

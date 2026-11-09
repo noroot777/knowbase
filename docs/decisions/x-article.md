@@ -121,6 +121,12 @@
   - **列表、「这一页能不能补」、交回时挑哪条订阅写,三处过同一份判据**(`_WAITING` 再加 `_current`:关联的身份
     得是那条订阅**现在**的身份)。订阅每编辑一次身份就换一版(带着 `rev`),下一轮同步之前旧关联和旧进度都还在;
     只看 SQL 的话扩展一直说「可以补」,交回时才被 `finish` 拒掉。
+  - **库里没有、也没在等的那一条(`absent`)交给手动收录**:答复带上 `grab_url`(这条推文的地址,长文页也换成
+    它所属的推文),扩展拿它走 `/api/grab` —— 和知识库里「手动收录」同一个入口,扩展不自己拼地址。「在等」和
+    「没有」的分界是**推文 id**(`owed` 按 id 认),所以在等长文的那一条从推文页、长文页、`twitter.com` 进来都
+    不会被收成第二条。**「已经在库里」要认两条路收进来的**(`social` 和收件桶 `inbox`):只认前者的话,刚收下
+    的那一条再问照旧答「不在知识库里」,「采集」又露出来。回归 `tests/test_x_article_capture.py` 的
+    `test_a_post_nobody_is_waiting_for_is_handed_to_the_manual_grab`。
 - 回包结构判定和块级零件在 `x_article_shape.py`、地址识别在
   `x_article_links.py`(起点判据再往下拆进 `x_article_nest.py`),**只因为行数**。
   `API`/`PAGE_WAIT`/`BROWSER_FALLBACK`/`MAX_CHARS` 一个都没搬(它们被 `patch.object` 改过);搬过去的名字一律原样再

@@ -40,10 +40,13 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 summary { color:var(--brand); cursor:pointer; }
 .url { overflow-wrap:anywhere; font-size:11px; color:var(--muted); }
 .t { font-weight:600; font-size:13px; margin:0 0 4px; line-height:1.5; }
-#elsewhere-list { list-style:none; margin:0; padding:0; }
-#elsewhere-list li { padding:10px 0; border-top:1px solid var(--line); }
-#elsewhere-list li:first-child { padding-top:0; border-top:0; }
-#elsewhere-list button { margin-top:8px; }
+/* 候选两处同一种行:「像是这一页」那几条(`#alike`,标题和网址下面、按钮上面 —— 那一档该先回答的
+   是「是不是它」),和指着别处的待办(`#elsewhere-list`,页底)。 */
+.picks { list-style:none; margin:0; padding:0; }
+.picks li { padding:10px 0; border-top:1px solid var(--line); }
+.picks li:first-child { padding-top:0; border-top:0; }
+.picks button { margin-top:8px; }
+#alike { margin:12px 0 16px; padding:12px 0 0 12px; border-left:2px solid var(--brand); }
 #here-state, #x-state { margin:0 0 6px; }
 #status { color:var(--brand); }
 #status:empty { display:none; }

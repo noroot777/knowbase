@@ -160,6 +160,9 @@ class HereRequest(BaseModel):
     #: **这不是个可选的优化** —— 丢掉它,下一问就只能按创建时间在同页的几个待办里
     #: 代选,而选错那一下是把这一页的正文写进另一篇(见 `capture.here`)。
     intent_id: str = Field(default='', max_length=100)
+    #: 标签的标题。只拿来在「这一页不在库里」时找**像它**的那几条候选(`browser_capture_alike`),
+    #: 不参与任何准入。
+    title: str = Field(default='', max_length=1000)
 
 
 @router.post('/api/browser-capture/here', dependencies=[Depends(extension_access)])
@@ -176,7 +179,7 @@ def here(body: HereRequest):
     之间,那个身份要一路不掉** —— 中间任何一次按别的规则重选,写进去的就可能是另
     一篇,而那不可恢复。
     """
-    return invoke(capture.here, body.url, body.intent_id)
+    return invoke(capture.here, body.url, body.intent_id, body.title)
 
 
 @router.post('/api/browser-capture/here/adopt', dependencies=[Depends(extension_access)])

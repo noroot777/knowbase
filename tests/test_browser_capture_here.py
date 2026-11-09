@@ -452,3 +452,67 @@ class CaptureHereTests(CaptureCase):
                            else {'key': self.key, 'page_url': 'https://e.org/post'})
                 self.assertEqual(401, self.here(auth=False, path=path, payload=payload).status_code)
                 self.assertEqual(200, self.here(path=path, payload=payload).status_code)
+
+    def test_a_moved_article_still_waiting_for_its_body_is_offered_not_adopted(self):
+        """按网址问不到时,「真不在库里」和「库里在等正文、只是换了地址」要分开交。
+
+        两种情形下一步相反:前者收成新的一条;后者收就是同一篇两行、原来那条照旧缺正文。
+        待办(`elsewhere`)只覆盖「人先去过采集抽屉」的那一半 —— 他直接在换了地址的页面上点
+        扩展时一个待办都没有,所以服务端按相像程度另交 `alike`。
+        **判据落在库里哪一行变了**:认领之后写进去的是原来那一条,而不是多出一行。
+        **只交候选,不认亲**:`situation` 照旧 `absent`、一个待办都不建,认领要人点。
+        """
+        moved = self.put(url='https://lab.example.org/index/model-notes',
+                         title='Notes on the new model family')
+        landed = 'https://lab.example.org/zh-Hans-CN/index/model-notes'
+        state = self.here(landed).json()
+        self.assertEqual('absent', state['situation'], '像不等于是,不许自动认亲')
+        self.assertIsNone(state['intent'])
+        self.assertEqual([], capture.pending(), '只是问一下,一个待办都不建')
+        self.assertEqual([moved], [one['key'] for one in state['alike']])
+        self.assertNotEqual('这一页还不在知识库里。', state['detail'], '两种情形不许说同一句话')
+
+        # 标题那一路:换了域名、末段也变了,只剩标题认得出来(浏览器标签是「标题 | 站点名」)
+        by_title = self.here(payload={'url': 'https://news.example.com/a/9123',
+                                      'title': 'Notes on the New Model Family | Example News'}).json()
+        self.assertEqual([moved], [one['key'] for one in by_title['alike']])
+
+        # 反过来钉两边:真不在库里的那一页照旧是那一句、没有候选;正文已经齐了的不算「在等」
+        other = self.here('https://lab.example.org/zh-Hans-CN/index/other-thing').json()
+        self.assertEqual(([], '这一页还不在知识库里。'), (other['alike'], other['detail']))
+        settled = self.put(url='https://lab.example.org/index/settled-story', title='Settled')
+        with reg.db() as conn:
+            conn.execute('UPDATE feed_items SET fulltext_at=? WHERE key=?', (reg.now(), settled))
+        self.assertEqual([], self.here('https://lab.example.org/fr/index/settled-story').json()['alike'])
+
+        # 人点一下认领 → 那一问是 fill → 写进去的是原来那一条
+        adopted = self.here(path='/here/adopt', payload={'key': moved, 'page_url': landed}).json()
+        filled = self.here(payload={'url': landed, 'intent_id': adopted['id']}).json()
+        self.assertEqual(('fill', moved), (filled['situation'], filled['item']['key']))
+        saved = self.upload(filled['intent'], page_url=landed)
+        self.assertEqual(200, saved.status_code, saved.text)
+        self.assertEqual(BODY, self.row(moved)['body'])
+        with reg.db() as conn:
+            rows = conn.execute("SELECT COUNT(*) FROM feed_items WHERE url LIKE 'https://lab.example.org/%'"
+                                ).fetchone()[0]
+        self.assertEqual(2, rows, '库里没有多出一行同一篇')
+
+    def test_what_counts_as_looking_like_this_page(self):
+        """相像的口径:同站同末段,或者库里那条的标题整个出现在这一页的标题里。
+
+        **反过来钉住那几种会把全站都认成一篇的写法**:站点通用的末段(同站所有 AMP 页都叫
+        `amp`)、短标题、拿这一页的标题(常常只是站点名)去包含库里那条。
+        """
+        from kb.browser_capture_alike import score
+        page = 'https://www.lab.example.org/zh/index/model-notes.html'
+        self.assertTrue(score(page, '', 'https://lab.example.org/index/model-notes', ''), '同站同末段')
+        self.assertFalse(score(page, '', 'https://other.example.org/index/model-notes', ''),
+                         '末段相同但不同站,光凭末段不算')
+        self.assertFalse(score('https://lab.example.org/zh/post', '', 'https://lab.example.org/post', ''))
+        self.assertFalse(score('https://lab.example.org/b/amp', '', 'https://lab.example.org/a/amp', ''))
+        self.assertTrue(score('https://x.example/1', '新一代模型的工作笔记 - 实验室', 'https://y.example/2',
+                              '新一代模型的工作笔记'))
+        self.assertFalse(score('https://x.example/1', 'Changelog', 'https://y.example/2', 'Changelog'),
+                         '短标题到处都是')
+        self.assertFalse(score('https://x.example/1', 'Example Lab', 'https://y.example/2',
+                               'Example Lab: Notes on the new model'), '不许拿这一页的标题去包含库里那条')

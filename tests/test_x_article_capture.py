@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb import browser_capture
 from kb.collectors import FetchScope
-from kb.feeds import registry as reg, sync, x_article, x_channels
+from kb.feeds import grab, registry as reg, sync, x_article, x_channels
 from kb.feeds import x_article_capture, x_intake_store as store
 from kb.feeds.x_article_js import SOURCE
 from kb.web import browser_capture_api, x_article_capture_api
@@ -95,6 +95,21 @@ class ListTests(CaptureBase):
         self.assertEqual('absent', self.here('https://x.com/alice/article/7').json()['situation'])
         self.assertEqual('other', self.here('https://x.com/alice').json()['situation'])
         self.assertEqual('stored', self.here('https://x.com/alice/status/5').json()['situation'])
+
+    def test_a_post_nobody_is_waiting_for_is_handed_to_the_manual_grab(self):
+        """库里没有、也没在等的那一条:给手动收录的地址(长文页也换成它所属的推文),收下之后答 `stored`。
+
+        扩展在这一档摆「采集」,交的就是 `grab_url`。**判据落在收下之后那一问**:只认同步进来的
+        (`social`)的话,刚收进收件桶(`inbox`)的那一条再问还是「不在知识库里」,那颗按钮又露出来。
+        反过来钉一边:在等长文的那一条不给这个地址(下一步是读页补正文,不是另收一条)。
+        """
+        absent = self.here('https://twitter.com/Alice/article/7?s=20').json()
+        self.assertEqual(('absent', 'https://x.com/Alice/status/7'), (absent['situation'], absent['grab_url']))
+        self.assertNotIn('grab_url', self.here(ARTICLE).json())
+        self.assertNotIn('grab_url', self.here(STATUS).json())
+        grab.save({'url': 'https://x.com/Alice/status/7', 'title': '收下的推文', 'body': '推文正文',
+                   'author': 'Alice', 'published': '', 'content_kind': 'post'})
+        self.assertEqual('stored', self.here('https://x.com/alice/article/7').json()['situation'])
 
     def test_the_extension_endpoints_need_the_pairing_key(self):
         """反过来钉一边:带着密钥照旧放行(否则「一律拒」也能让这条绿)。"""

@@ -20,6 +20,7 @@ from kb.source_types import link_body_refusal, link_body_sql, permits_link_body
 #: 网址那两件事(规范形、这一页在库里可能长什么样)住在 `browser_capture_url` ——
 #: 纯函数、不碰库,分出去是因为本文件撞了 700 行那条上限(CLAUDE.md)。
 #: **原样再导出一次,判据还是一份**:调用方照旧写 `capture.page_url(...)`。
+from kb.browser_capture_alike import alike as _alike
 from kb.browser_capture_url import _page_aliases, page_url
 
 TTL = 900
@@ -205,7 +206,7 @@ def grab_owing(stored_url: str) -> str:
 _OWED = f"({fulltext._eligible()} AND fulltext_at='')"
 
 
-def here(url: str, intent_id: str = '') -> dict:
+def here(url: str, intent_id: str = '', title: str = '') -> dict:
     """人**正站在哪一页** → 这一页此刻能做什么。一问一答。
 
     **这条路存在的理由是把决定搬到人所在的地方。** 「这一页是哪一条、写不写得了」
@@ -252,14 +253,14 @@ def here(url: str, intent_id: str = '') -> dict:
         bound = sorted((one for one in _pending() if one['page_url'] == page),
                        key=lambda one: one['created_at'])
 
-        def answered(situation: str, detail: str,
-                     item: dict | None = None, intent: dict | None = None) -> dict:
+        def answered(situation: str, detail: str, item: dict | None = None,
+                     intent: dict | None = None, alike: list | None = None) -> dict:
             # **`elsewhere` 一律在最后算**(下面那个 `_create` 会把同一条目上指着
             # 别处的旧待办标成 `superseded`,先算就把刚作废的那个摆出来了),而且
             # **排掉的只有这一答用的那一个** —— 同一页上另一个条目的待办必须摆出
             # 来,`undecided` 那一档正是靠它把候选交出去的。
             return dict(ok=True, page_url=page, situation=situation, detail=detail,
-                        item=public(item) if item else None, intent=intent,
+                        item=public(item) if item else None, intent=intent, alike=alike or [],
                         elsewhere=[other for other in _pending()
                                    if other['id'] != (intent['id'] if intent else None)])
 
@@ -312,6 +313,7 @@ def here(url: str, intent_id: str = '') -> dict:
                                 '点一下你要补的那一篇。')
             picked = bound[0] if bound else None
 
+        alike = []
         with reg.db() as conn:
             if picked:
                 row = conn.execute(columns + ' WHERE key=?', (picked['key'],)).fetchone()
@@ -320,8 +322,17 @@ def here(url: str, intent_id: str = '') -> dict:
                 slots = ','.join('?' for name in aliases)
                 row = conn.execute(columns + f' WHERE url IN ({slots})'
                                    ' ORDER BY rowid LIMIT 1', aliases).fetchone()
+                # 按网址问不到时,「真不在库里」和「库里在等正文、只是地址变了」要分开说:
+                # 后者按「采集」走就把同一篇收成第二行(`browser_capture_alike` 的 docstring)。
+                # **只交候选,situation 照旧 `absent`**,认领要人点 `adopt`。
+                if not row:
+                    alike = _alike(conn, page, title, _OWED, _checked_target)
         item = dict(row) if row else None
         if not item:
+            if alike:
+                return answered('absent', '这一页的地址不在知识库里，但'
+                                + ('下面这一篇' if len(alike) == 1 else f'下面 {len(alike)} 篇')
+                                + '正等着正文，像是它。', alike=alike)
             return answered('absent', '这一页还不在知识库里。')
         try:
             _checked_target(item)

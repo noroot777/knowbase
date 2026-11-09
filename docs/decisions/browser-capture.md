@@ -153,6 +153,22 @@
   源站的字当标记送进弹窗这个有 `chrome.*` 的上下文。`setBusy` 也从那张列表上现读按钮,不
   另记一份名单。回归 `tests/grab_from_page_gate.mjs` ⑦(**点的是第二行那一颗**)。
 
+- **像是库里那一篇:按网址问不到时,「真不在库里」和「库里在等正文、只是地址变了」分开交。**
+  两种情形按网址问一模一样,下一步却相反:前者收成新的一条;后者收就是同一篇两行、原来那条照旧缺正文、
+  各导出一篇 md。`elsewhere`(待办)只覆盖「人先去过采集抽屉」那一半 —— 他看到一篇好文章直接点扩展时
+  一个待办都没有。所以 `absent` 那一档另交 `alike`(`kb/browser_capture_alike.py`):**正等着正文**
+  (`_OWED`)、过得了 `_checked_target`、又像这一页的那几条,最多三条。
+  - **像的口径**:同站(忽略 `www.`)且路径末段相同(去扩展名、太短或站点通用词如 `amp`/`index`/`post`
+    不算),或者库里那条的标题(≥8 个字母数字)整个出现在这一页标题里。**方向只许这一个** —— 反过来包含
+    就是拿站点名(标签标题常常只有它)去匹配一切。标题由扩展交 `tab.title`,只用于这一步、不参与任何准入。
+  - **只交候选,不认亲**:`situation` 照旧 `absent`、一个待办都不建、那句话改说「像是它」。认错的后果是
+    这一页的正文写进另一篇,不可恢复;列错一条的代价是人点「都不是」。认领走 `/here/adopt`(同 `elsewhere`)。
+  - **界面**:候选摆在标题和网址下面、按钮上面,每行一颗主按钮「就是这一篇」;「采集」退成次要那一颗,
+    改叫「都不是，收成新的一条」;同一条不在页底 `elsewhere` 再摆一次。没有候选时「采集」照旧是主按钮。
+  回归 `tests/test_browser_capture_here.py` 的 `test_a_moved_article_still_waiting_for_its_body_is_offered_not_adopted`
+  (**判据落在库里那一条被补上、没有多出一行**,并反过来钉真不在库里与正文已齐那两头)、
+  `test_what_counts_as_looking_like_this_page`,以及 `tests/grab_from_page_gate.mjs` ⑧b。
+
 - **抽屉每次打开是一代,异步写动作回来之前先问自己「我还是不是这一代」。**
   `stopCapture()` 里那个 `++loadVersion` 只作废得了在途的 `refresh`;「发起 / 取消 /
   改址 / 继续处理」这些写动作 `await` 完回来还要读 `itemKey`、写 `actionError`、调

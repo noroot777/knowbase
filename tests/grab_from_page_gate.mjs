@@ -10,7 +10,8 @@
  * 就摆几条**(站点按浏览器语言跳转那一类,只说一句「不在库里」会让人收录出第二行同一
  * 篇文章),逐行那颗「改用它」交的是这一页的地址和**那一行**的条目,**而他点中的那个
  * 身份要带进后面每一问**(丢了就会被按创建时间代选成另一篇)、而且**只对他点的那一页
- * 有效**,服务端说不出是哪一篇时一颗采集按钮都不给;⑨配对密钥用一次不依赖当前标签的调用验;
+ * 有效**,服务端说不出是哪一篇时一颗采集按钮都不给;⑧b 库里有像这一页、在等正文的那几条
+ * (`alike`)时它们摆在按钮上面当主按钮,「采集」退成「都不是，收成新的一条」;⑨配对密钥用一次不依赖当前标签的调用验;
  * ⑪结构上不许按失败文案分流,预览那一支也不许回来。
  *
  * **「关掉这一页」那一颗单独一份:`tests/popup_close_tab_gate.mjs`**(两份共用
@@ -238,6 +239,38 @@ assert.deepEqual(calls, [], '这一档的按钮按下去不许做任何事');
 here = {...here, elsewhere: []};
 await element('refresh').click();
 assert.equal(element('elsewhere').hidden, true);
+
+// ⑧b 库里有**像这一页、正等着正文**的那几条(`alike`,地址变了的那一类):按网址问也是「不在库里」,
+//     下一步却相反 —— 收就是同一篇两行。候选摆在按钮上面、每行一颗**主**按钮;「采集」退成次要的
+//     那一颗、改说它真正做的事;同一条不在页底再摆一次。
+here = {ok: true, situation: 'absent', page_url: PAGE, item: null, intent: null,
+        detail: '这一页的地址不在知识库里，但下面这一篇正等着正文，像是它。',
+        alike: [{key: 'k5', title: '像的那一篇', url: 'https://example.org/en/posts/hello'}],
+        elsewhere: [{id: 'i5', key: 'k5', title: '像的那一篇', page_url: 'https://example.org/en/posts/hello'},
+                    {id: 'i6', key: 'k6', title: '别处那一篇', page_url: 'https://example.org/other'}]};
+await element('refresh').click();
+assert.equal(element('alike').hidden, false, '像这一页的那几条要摆出来');
+const claims = element('alike').querySelectorAll('button');
+assert.deepEqual(claims.map(one => [one.textContent, one.className]), [['就是这一篇', '']],
+  '认领那一颗是这一档的主按钮');
+assert.deepEqual(element('alike').children.map(row => row.children[1].textContent),
+  ['https://example.org/en/posts/hello'], '摆的是它在库里的地址,和这一页的地址对照着看');
+assert.deepEqual([element('act').textContent, element('act').className], ['都不是，收成新的一条', 'secondary']);
+assert.deepEqual(element('elsewhere-list').children.map(row => row.children[0].textContent), ['别处那一篇'],
+  '上面摆过的那一条页底不再摆');
+calls.length = 0;
+await claims[0].click();
+assert.deepEqual(calls.find(c => c.path === '/api/browser-capture/here/adopt').sent, {key: 'k5', page_url: PAGE},
+  '认领交的是那一条和这一页的地址');
+calls.length = 0;
+grabReply = GRABBED;
+await element('act').click();
+assert.deepEqual(calls.find(c => c.path === '/api/grab').sent, {url: PAGE}, '「都不是」才收成新的一条');
+// 反过来钉一边:没有候选时那颗照旧是主按钮、叫「采集」
+here = {...here, detail: '这一页还不在知识库里。', alike: [], elsewhere: []};
+await element('refresh').click();
+assert.equal(element('alike').hidden, true);
+assert.deepEqual([element('act').textContent, element('act').className], ['采集', '']);
 
 // ⑨ 配对密钥用一次**不依赖当前标签**的调用验:人在扩展管理页或知识库页面上
 //    配对时 `currentTab()` 先拒,拿 `/here` 验等于一个字都没验、还被当成连上了

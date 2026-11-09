@@ -26,7 +26,11 @@
     // 推文内容来自 X,一律 textContent(拿 innerHTML 拼等于把源站的字当标记送进这个有 chrome.* 的上下文)。
     element('x-post').textContent = post ? [post.author, post.published, post.text].filter(Boolean).join(' · ') : '';
     element('x-post').hidden = !post;
-    element('x-act').hidden = !(answer && answer.situation === 'fill');
+    // 两档各有各的出路,都由服务端那一答定:`fill` 读这一页补进那条在等的推文;`absent`(库里没有、
+    // 也没在等它)交给手动收录。**按推文 id 分档,不按地址** —— 判据在 `x_article_capture.here`。
+    const situation = answer && answer.situation;
+    element('x-act').hidden = !(situation === 'fill' || situation === 'absent');
+    element('x-act').textContent = situation === 'absent' ? '采集' : '采集这篇长文';
     element('x-act').disabled = busy;
     element('x-refresh').disabled = busy;
   }
@@ -60,8 +64,23 @@
     return tab;
   }
 
+  //: `absent` 那一档:这条推文库里没有、也没在等,收成一条新的(和知识库里「手动收录」同一个入口)。
+  //: 交的是服务端给的 `grab_url` —— 长文页也已经换成了它所属的推文,扩展不自己拼地址。
+  async function grab() {
+    busy = true;
+    render();
+    try {
+      const result = await tools.call('/api/grab', {method: 'POST', body: JSON.stringify({url: answer.grab_url})});
+      try { await ask(await currentTab()); } catch { /* 已经收下了,刷新失败不改变这件事 */ }
+      tools.status(result.detail || '已收下');
+    } catch (error) { tools.status(error.message, true); }
+    finally { busy = false; render(); }
+  }
+
   async function collect() {
-    if (busy || !answer || answer.situation !== 'fill') return;
+    if (busy || !answer) return;
+    if (answer.situation === 'absent' && answer.grab_url) return grab();
+    if (answer.situation !== 'fill') return;
     busy = true;
     render();
     try {
