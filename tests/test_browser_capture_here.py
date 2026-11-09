@@ -477,6 +477,13 @@ class CaptureHereTests(CaptureCase):
                                       'title': 'Notes on the New Model Family | Example News'}).json()
         self.assertEqual([moved], [one['key'] for one in by_title['alike']])
 
+        # 标签标题过长(浏览器给的,长度不由我们定):**这一问照样答**,截掉的尾巴不影响前面认出来的那篇。
+        # 按长度拒成 422 的话,扩展停在「正在确认」、一颗按钮都没有。
+        long = self.here(payload={'url': 'https://news.example.com/a/9123',
+                                  'title': 'Notes on the New Model Family | ' + '长' * 2000})
+        self.assertEqual(200, long.status_code, long.text)
+        self.assertEqual([moved], [one['key'] for one in long.json()['alike']])
+
         # 反过来钉两边:真不在库里的那一页照旧是那一句、没有候选;正文已经齐了的不算「在等」
         other = self.here('https://lab.example.org/zh-Hans-CN/index/other-thing').json()
         self.assertEqual(([], '这一页还不在知识库里。'), (other['alike'], other['detail']))

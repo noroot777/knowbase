@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from kb import browser_capture as capture, pipeline
 
@@ -161,8 +161,15 @@ class HereRequest(BaseModel):
     #: 代选,而选错那一下是把这一页的正文写进另一篇(见 `capture.here`)。
     intent_id: str = Field(default='', max_length=100)
     #: 标签的标题。只拿来在「这一页不在库里」时找**像它**的那几条候选(`browser_capture_alike`),
-    #: 不参与任何准入。
-    title: str = Field(default='', max_length=1000)
+    #: 不参与任何准入。**超长就截,不拒**:它是浏览器给的、长度不由我们定,而这一问是扩展打开时
+    #: 的全部依据 —— 按 `max_length` 拒成 422 的话,标签标题过千字的那一页连「能做什么」都问不出来,
+    #: 弹窗停在「正在确认」、一颗按钮都没有。一千字之后的部分对「像不像」没有分量。
+    title: str = ''
+
+    @field_validator('title', mode='before')
+    @classmethod
+    def _clip_title(cls, value):
+        return value[:1000] if isinstance(value, str) else value
 
 
 @router.post('/api/browser-capture/here', dependencies=[Depends(extension_access)])
