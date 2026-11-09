@@ -121,12 +121,24 @@
   - **列表、「这一页能不能补」、交回时挑哪条订阅写,三处过同一份判据**(`_WAITING` 再加 `_current`:关联的身份
     得是那条订阅**现在**的身份)。订阅每编辑一次身份就换一版(带着 `rev`),下一轮同步之前旧关联和旧进度都还在;
     只看 SQL 的话扩展一直说「可以补」,交回时才被 `finish` 拒掉。
-  - **库里没有、也没在等的那一条(`absent`)交给手动收录**:答复带上 `grab_url`(这条推文的地址,长文页也换成
-    它所属的推文),扩展拿它走 `/api/grab` —— 和知识库里「手动收录」同一个入口,扩展不自己拼地址。「在等」和
-    「没有」的分界是**推文 id**(`owed` 按 id 认),所以在等长文的那一条从推文页、长文页、`twitter.com` 进来都
-    不会被收成第二条。**「已经在库里」要认两条路收进来的**(`social` 和收件桶 `inbox`):只认前者的话,刚收下
-    的那一条再问照旧答「不在知识库里」,「采集」又露出来。回归 `tests/test_x_article_capture.py` 的
-    `test_a_post_nobody_is_waiting_for_is_handed_to_the_manual_grab`。
+  - **库里没有、同步也没在收的那一条(`absent`)交给手动收录**:答复带上 `grab_url`(这条推文的地址,长文页也
+    换成它所属的推文),扩展拿它走 `/api/grab` —— 和知识库里「手动收录」同一个入口,扩展不自己拼地址。各档的分界
+    是**推文 id**,不是地址。
+    - **「没在等长文」不等于「同步没在收」**:`owed` 只认在等长文的那一撮,长推展开(`pending`、等的不是长文)、
+      正文齐了还没投递的(`ready`)下一轮照样投进 `social`;这时手动收录落进收件桶,两类的键不同、`put_items` 的
+      `DO NOTHING` 挡不住,同一条推文成了两行。所以另有一问 `syncing`(`_SYNCING` + `_current`),答 `syncing`
+      一颗按钮都不给;**手动收录那个入口(`grab_api.grab_link`)过同一份**,拒成 409,网页上粘链接那一路一样。
+      过期了(下一轮不会投)就不算攥着。
+    - **收件桶里有这一行只说明暂存下来了**:走没走完导出和索引由 `grab_store.known` / `owing` 一份口径答,没走完答
+      `unfinished`、带库里那一行的地址,扩展给「继续收录」,重投落进 `/api/grab` 的重复那一档补上欠的那一步。说成
+      「已经在知识库里了」的话,人搜不到,扩展又一颗按钮都不给。
+    - **收件桶不是 X 专属的**:那一侧只认地址本身就是这条推文的(`spot`:X 的域名 + `/status/<id>`),
+      `other.example/status/<同一串数字>` 不算;`social` 那一类本身就是平台身份,照旧按路径认。
+    - **知情留下**:先手动收了一条推文、后来才订阅那个账号,同步照旧会在 `social` 再投一份(`x_intake_store.existing`
+      只认 `social`)。那是手动收录与同步之间既有的口径,不在这一块里改。
+    回归 `tests/test_x_article_capture.py` 的 `test_a_post_nobody_is_waiting_for_is_handed_to_the_manual_grab`、
+    `..._stored_only_once_the_rest_of_the_chain_ran`、`test_another_site_with_the_same_status_tail_is_not_this_post`、
+    `test_a_post_the_sync_still_holds_is_not_collected_a_second_time`。
 - 回包结构判定和块级零件在 `x_article_shape.py`、地址识别在
   `x_article_links.py`(起点判据再往下拆进 `x_article_nest.py`),**只因为行数**。
   `API`/`PAGE_WAIT`/`BROWSER_FALLBACK`/`MAX_CHARS` 一个都没搬(它们被 `patch.object` 改过);搬过去的名字一律原样再

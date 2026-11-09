@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field
 
 from kb import pipeline
-from kb.feeds import grab
+from kb.feeds import grab, x_article_capture
 from kb.web.browser_capture_api import extension_access
 from kb.feeds.registry import KINDS
 from kb.source_types import SOURCE_TYPES, permits_origin_body
@@ -330,6 +330,17 @@ def grab_link(body: GrabRequest):
         # 提示 —— 真正防重复的是 `put_items` 的 `DO NOTHING`(见 `grab.known`)。
         if seen := grab.known(url):
             return _duplicate(url, seen, refetch=body.refetch)
+        # **「大V观点」的同步还攥着这条推文时不另收一份**:它下一轮会投进 `social`,而这里落的是
+        # 收件桶,两类的键不同(`put_items` 那道 `DO NOTHING` 挡不住),同一条推文就成了两行。
+        # 判据只有 `x_article_capture.syncing` 一份,扩展那一问也过它。
+        post = x_article_capture.spot(url)[1]
+        try:
+            held = bool(post) and x_article_capture.syncing(post)
+        except ValueError as busy:              # 等锁没等到:问不着就不收,让人过会儿再点
+            raise HTTPException(409, str(busy)) from None
+        if held:
+            raise HTTPException(409, '这条推文「大V观点」的同步已经在收了，下一次同步这个账号时入库；'
+                                     '现在再收会成两份。')
         entry = grab.grab(url)
     except grab.GrabError as e:
         raise HTTPException(400, str(e)) from None

@@ -19,6 +19,7 @@
   let busy = false;
 
   const claims = url => PAGE.test(url || '');
+  const LABELS = {fill: '采集这篇长文', absent: '采集', unfinished: '继续收录'};
 
   function render() {
     const post = answer && answer.post;
@@ -26,11 +27,12 @@
     // 推文内容来自 X,一律 textContent(拿 innerHTML 拼等于把源站的字当标记送进这个有 chrome.* 的上下文)。
     element('x-post').textContent = post ? [post.author, post.published, post.text].filter(Boolean).join(' · ') : '';
     element('x-post').hidden = !post;
-    // 两档各有各的出路,都由服务端那一答定:`fill` 读这一页补进那条在等的推文;`absent`(库里没有、
-    // 也没在等它)交给手动收录。**按推文 id 分档,不按地址** —— 判据在 `x_article_capture.here`。
+    // 三档有出路,都由服务端那一答定:`fill` 读这一页补进那条在等的推文;`absent`(库里没有、同步也没在
+    // 收)交给手动收录;`unfinished`(收下了、还没走完导出和索引)重投一次,补上欠的那一步。`syncing`
+    // 一颗都不给 —— 同步下一轮就投,现在再收是两份。**按推文 id 分档,不按地址**(`x_article_capture.here`)。
     const situation = answer && answer.situation;
-    element('x-act').hidden = !(situation === 'fill' || situation === 'absent');
-    element('x-act').textContent = situation === 'absent' ? '采集' : '采集这篇长文';
+    element('x-act').hidden = !Object.hasOwn(LABELS, situation || '');
+    element('x-act').textContent = LABELS[situation] || '';
     element('x-act').disabled = busy;
     element('x-refresh').disabled = busy;
   }
@@ -64,8 +66,8 @@
     return tab;
   }
 
-  //: `absent` 那一档:这条推文库里没有、也没在等,收成一条新的(和知识库里「手动收录」同一个入口)。
-  //: 交的是服务端给的 `grab_url` —— 长文页也已经换成了它所属的推文,扩展不自己拼地址。
+  //: `absent` / `unfinished` 两档:交服务端给的 `grab_url` 给手动收录那个入口(`/api/grab`)。前者收成
+  //: 一条新的;后者那一条已经在收件桶里,重投落进它的重复那一档、补上欠的导出或索引。扩展不自己拼地址。
   async function grab() {
     busy = true;
     render();
@@ -79,7 +81,7 @@
 
   async function collect() {
     if (busy || !answer) return;
-    if (answer.situation === 'absent' && answer.grab_url) return grab();
+    if (['absent', 'unfinished'].includes(answer.situation) && answer.grab_url) return grab();
     if (answer.situation !== 'fill') return;
     busy = true;
     render();

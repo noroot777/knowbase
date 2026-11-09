@@ -26,10 +26,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from kb import browser_capture
 from kb.collectors import FetchScope
-from kb.feeds import grab, registry as reg, sync, x_article, x_channels
+from kb.feeds import grab, registry as reg, sync, x_article, x_channels, x_post
 from kb.feeds import x_article_capture, x_intake_store as store
 from kb.feeds.x_article_js import SOURCE
-from kb.web import browser_capture_api, x_article_capture_api
+from kb.web import browser_capture_api, grab_api, x_article_capture_api
 from tests.test_x_guest import GuestBase, status
 
 ARTICLE = 'https://x.com/alice/article/6'
@@ -97,19 +97,72 @@ class ListTests(CaptureBase):
         self.assertEqual('stored', self.here('https://x.com/alice/status/5').json()['situation'])
 
     def test_a_post_nobody_is_waiting_for_is_handed_to_the_manual_grab(self):
-        """库里没有、也没在等的那一条:给手动收录的地址(长文页也换成它所属的推文),收下之后答 `stored`。
+        """库里没有、同步也没在收的那一条:给手动收录的地址(长文页也换成它所属的推文)。
 
-        扩展在这一档摆「采集」,交的就是 `grab_url`。**判据落在收下之后那一问**:只认同步进来的
-        (`social`)的话,刚收进收件桶(`inbox`)的那一条再问还是「不在知识库里」,那颗按钮又露出来。
-        反过来钉一边:在等长文的那一条不给这个地址(下一步是读页补正文,不是另收一条)。
+        扩展在这一档摆「采集」,交的就是 `grab_url`。反过来钉一边:在等长文的那一条不给这个地址
+        (下一步是读页补正文,不是另收一条)。
         """
         absent = self.here('https://twitter.com/Alice/article/7?s=20').json()
         self.assertEqual(('absent', 'https://x.com/Alice/status/7'), (absent['situation'], absent['grab_url']))
         self.assertNotIn('grab_url', self.here(ARTICLE).json())
         self.assertNotIn('grab_url', self.here(STATUS).json())
+
+    def test_a_manually_grabbed_post_is_stored_only_once_the_rest_of_the_chain_ran(self):
+        """收件桶里有这一行,只说明**暂存下来了**;导出、索引走没走完由 `grab_store` 一份口径答。
+
+        **判据落在那一问的档位和出口上**:没走完时答 `unfinished`、带上库里那一行的地址(扩展拿它重投,
+        `/api/grab` 的重复那一档补上欠的那一步),话里说欠哪一步;说成「已经在知识库里了」的话,
+        人搜不到、扩展又一颗按钮都不给,后半条链永远没人补。反过来钉一边:走完了照旧答 `stored`。
+        """
         grab.save({'url': 'https://x.com/Alice/status/7', 'title': '收下的推文', 'body': '推文正文',
                    'author': 'Alice', 'published': '', 'content_kind': 'post'})
-        self.assertEqual('stored', self.here('https://x.com/alice/article/7').json()['situation'])
+        state = self.here('https://x.com/alice/article/7').json()
+        self.assertEqual(('unfinished', 'https://x.com/Alice/status/7'), (state['situation'], state['grab_url']))
+        self.assertIn('还没导出成笔记文件', state['detail'])
+        done = dict(content_ok=True, exported=True, stored=True, indexed=True, done=True)
+        with patch.object(x_article_capture.grab_store, 'known', lambda url: done):
+            self.assertEqual('stored', self.here('https://x.com/alice/status/7').json()['situation'])
+
+    def test_another_site_with_the_same_status_tail_is_not_this_post(self):
+        """收件桶什么站点都收:`https://other.example/status/<同一串数字>` 不是这条推文。
+
+        只比地址尾巴的话,扩展说「已经在知识库里了」、把「采集」藏掉,而这条推文一次都没收过。
+        """
+        grab.save({'url': 'https://other.example/status/7', 'title': '别处的页面', 'body': '别处的正文',
+                   'author': '', 'published': '', 'content_kind': 'content'})
+        self.assertEqual('absent', self.here('https://x.com/alice/status/7').json()['situation'])
+
+    def test_a_post_the_sync_still_holds_is_not_collected_a_second_time(self):
+        """同步还攥着的推文不另收一份 —— 不只是在等长文的那一撮。
+
+        长推展开那一种(`pending`,等的不是长文)、正文齐了还没投递的(`ready`),下一轮同步都会投进
+        「大V观点」;这时手动收录落进收件桶,两类的键不同,同一条推文就成了两行。**判据落在库里**:
+        扩展那一问不给 `grab_url`,手动收录那个入口拒掉、收件桶里一行都没有。
+        反过来钉一边:候选已经过期(下一轮不会投)时照旧给「采集」。
+        """
+        with reg.db() as c:
+            entry = json.loads(c.execute("SELECT entry FROM x_intake_candidates WHERE post_id='6'").fetchone()[0])
+            entry[x_post.HINT] = entry['url']
+            c.execute("UPDATE x_intake_candidates SET entry=? WHERE post_id='6'", (json.dumps(entry, ensure_ascii=False),))
+        state = self.here(STATUS).json()
+        self.assertEqual('syncing', state['situation'], '等的不是长文,也是同步攥着的')
+        self.assertNotIn('grab_url', state)
+        app = FastAPI()
+        app.include_router(grab_api.router)
+        manual = TestClient(app, base_url='http://127.0.0.1', client=('127.0.0.1', 54321),
+                            headers={'Sec-Fetch-Site': 'same-origin'})
+        with patch.object(grab, 'grab', side_effect=AssertionError('不该去抓')):
+            refused = manual.post('/api/grab', json={'url': STATUS})
+        self.assertEqual(409, refused.status_code, refused.text)
+        with reg.db() as c:
+            self.assertEqual([], c.execute("SELECT url FROM feed_items WHERE kind='inbox'").fetchall())
+
+        with reg.db() as c:
+            c.execute("UPDATE x_intake_candidates SET state='ready' WHERE post_id='6'")
+        self.assertEqual('syncing', self.here(ARTICLE).json()['situation'], '正文齐了、还没投递')
+        with reg.db() as c:
+            c.execute("UPDATE x_intake_candidates SET state='expired' WHERE post_id='6'")
+        self.assertEqual('absent', self.here(STATUS).json()['situation'], '下一轮不会投了,就该给采集')
 
     def test_the_extension_endpoints_need_the_pairing_key(self):
         """反过来钉一边:带着密钥照旧放行(否则「一律拒」也能让这条绿)。"""

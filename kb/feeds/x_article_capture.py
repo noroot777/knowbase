@@ -119,24 +119,53 @@ def owed(source_id: int | None = None, end: float | None = None) -> list[dict]:
     return out
 
 
-def _stored(conn, ident: str) -> bool:
-    # 两条路收进来的推文都算:「大V观点」同步进来的(`social`),和手动收录的(`inbox`,
-    # 扩展在 `absent` 那一档给的「采集」正是它)。只问前者的话,刚收下的那一条再问一次照旧
-    # 答「不在知识库里」,那颗「采集」又露出来。
-    return conn.execute("SELECT 1 FROM feed_items WHERE kind IN ('social', ?) AND url LIKE ? LIMIT 1",
-                        (grab_store.KIND, f'%/status/{ident}')).fetchone() is not None
+#: 同步**还攥着**这条推文:候选落在某条现存订阅名下,而那条订阅的下一轮会把它投进库里 ——
+#: 在等正文的(`pending`,长文、长推展开都算,还在窗口里)、等版本化回填的(`repair`)、正文齐了
+#: 还没投递的(`ready` 且这条关联没交付)。`owed` 只认其中「在等长文」那一小撮,拿它的「没有」当
+#: 「没人在收」,手动收录一份、下一轮同步再投一份,同一条推文就是两行(收件桶和「大V观点」各一)。
+#: 「那条订阅现在还是不是这个身份」照旧由 `_current` 再筛一道。
+_SYNCING = '''SELECT l.source_id,l.identity FROM x_intake_candidates p JOIN x_intake_links l USING(post_id)
+    JOIN x_intake_sources s ON s.source_id=l.source_id AND s.identity=l.identity
+    WHERE p.post_id=? AND (p.state='ready' AND l.delivered=0
+        OR p.state IN ('pending','repair') AND p.published>=s.floor)'''
+
+
+def syncing(ident: str, end: float | None = None) -> bool:
+    """同步是不是还攥着这条推文(`_SYNCING`)。扩展那一问和手动收录的入口(`/api/grab`)共用这一份。"""
+    end = _deadline() if end is None else end
+    with _locks_are_retryable('同步正在写库，稍后再试一次。'), store.read_db(timeout=_left(end)) as conn:
+        rows = conn.execute(_SYNCING, (ident,)).fetchall()
+        return bool(rows) and any((row['source_id'], row['identity']) in _current(conn) for row in rows)
+
+
+def _kept(conn, ident: str) -> tuple[bool, str]:
+    """库里收着这条推文的那几行:(「大V观点」有没有, 收件桶里那一行的地址)。
+
+    两条路收进来的都算 —— 只问前者的话,刚手动收下的那一条再问照旧答「不在知识库里」。
+    **收件桶不是 X 专属的**:什么站点都往里收,所以那一侧只认地址本身就是这条推文的(`spot`,
+    X 的域名 + `/status/<id>`),`https://other.example/status/<同一串数字>` 不算。`social` 那一类
+    本身就是平台身份,照旧按路径认(规范化之前收进来的镜像地址也认得)。
+    """
+    rows = conn.execute("SELECT kind, url FROM feed_items WHERE kind IN ('social', ?) AND url LIKE ?",
+                        (grab_store.KIND, f'%/status/{ident}')).fetchall()
+    social = any(row['kind'] == 'social' for row in rows)
+    inbox = next((row['url'] for row in rows
+                  if row['kind'] == grab_store.KIND and spot(row['url']) == ('status', ident)), '')
+    return social, inbox
 
 
 def here(url: str) -> dict:
     """人站在这一页上,扩展问「这一页能做什么」。一问一答,只读。
 
     `situation`:`fill` = 这一篇正等着,读这一页就行;`open_article` = 站在推文页上,
-    要先点开那篇长文;`stored` = 这一条已经入库了;`absent` = 库里没有、也没在等它 ——
-    带上 `grab_url`(这条推文的地址,长文页也换成它所属的推文),扩展拿它走手动收录;
+    要先点开那篇长文;`stored` = 这一条已经入库、后半条链也走完了;`unfinished` = 手动收录
+    收下了、还没走完导出和索引(带 `grab_url`,扩展拿它重投一次,`/api/grab` 的重复那一档负责
+    补上欠的那一步);`syncing` = 同步还攥着它,下一轮入库,这里什么都不给;`absent` = 库里没有、
+    同步也没在收 —— 带上 `grab_url`(长文页也换成它所属的推文),扩展拿它走手动收录;
     `other` = 这一页不是推文也不是长文。
 
-    `absent` 和 `fill` / `open_article` 的分界是**推文 id**,不是地址:同一条推文从
-    长文页、推文页、`twitter.com` 进来都认得出它在等,所以那一档不会被收成第二条。
+    各档的分界是**推文 id**,不是地址:同一条推文从长文页、推文页、`twitter.com` 进来都认得出来,
+    所以不会被收成第二条。
     """
     m = _PAGE.match((url or '').strip())
     if not m:
@@ -146,9 +175,20 @@ def here(url: str) -> dict:
     post = next((one for one in owed(end=end) if one['post_id'] == ident), None)
     if post is None:
         with _locks_are_retryable('同步正在写库，稍后再试一次。'), reg.read_db(timeout=_left(end)) as conn:
-            stored = _stored(conn, ident)
-        if stored:
+            social, inbox = _kept(conn, ident)
+        if social:
             return dict(situation='stored', post=None, detail='这一条已经在知识库里了。')
+        if inbox:
+            # 「feed_items 里有这一行」只说明暂存下来了;走没走完、欠哪一步只有 `grab_store` 一份口径。
+            with _locks_are_retryable('同步正在写库，稍后再试一次。'):
+                owing = grab_store.owing(grab_store.known(inbox))
+            if not owing:
+                return dict(situation='stored', post=None, detail='这一条已经在知识库里了。')
+            return dict(situation='unfinished', post=None, grab_url=inbox,
+                        detail=f'这条推文收过了，只是{owing}。')
+        if syncing(ident, end):
+            return dict(situation='syncing', post=None,
+                        detail='这条推文同步已经在收了，下一次同步这个账号时入库。')
         return dict(situation='absent', post=None, grab_url=f'https://x.com/{handle}/status/{ident}',
                     detail='这条推文还不在知识库里。')
     if kind == 'status':
