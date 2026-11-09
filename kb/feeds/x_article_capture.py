@@ -181,7 +181,7 @@ def here(url: str) -> dict:
         if inbox:
             # 「feed_items 里有这一行」只说明暂存下来了;走没走完、欠哪一步只有 `grab_store` 一份口径。
             with _locks_are_retryable('同步正在写库，稍后再试一次。'):
-                owing = grab_store.owing(grab_store.known(inbox))
+                owing = grab_store.owing(grab_store.known(inbox, timeout=_left(end)))
             if not owing:
                 return dict(situation='stored', post=None, detail='这一条已经在知识库里了。')
             return dict(situation='unfinished', post=None, grab_url=inbox,

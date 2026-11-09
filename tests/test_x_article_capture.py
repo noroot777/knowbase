@@ -286,6 +286,9 @@ class FeedsDbHeldTests(CaptureBase):
         super().setUp()
         from tests.test_x_intake_lock_wait import hold_sqlite_until
         self.before = self.candidate()['entry']
+        # 手动收下、还没走完导出索引的那一条:问它要多问一句「欠哪一步」,那一句也得守同一份时限。
+        grab.save({'url': 'https://x.com/alice/status/7', 'title': '收下的推文', 'body': '推文正文',
+                   'author': 'alice', 'published': '', 'content_kind': 'post'})
         limit = patch.object(x_article_capture, '_LOCK_WAIT', 0.5)
         limit.start(); self.addCleanup(limit.stop)
         hold_sqlite_until(self)
@@ -303,6 +306,8 @@ class FeedsDbHeldTests(CaptureBase):
         self.assertEqual((200, 'fill'), (r.status_code, r.json()['situation']))
         r = self.timed(lambda: self.here('https://x.com/alice/status/5'))
         self.assertEqual((200, 'stored'), (r.status_code, r.json()['situation']))
+        r = self.timed(lambda: self.here('https://x.com/alice/status/7'))
+        self.assertEqual((200, 'unfinished'), (r.status_code, r.json()['situation']))
 
     def test_handing_in_is_refused_within_the_budget_and_writes_nothing(self):
         r = self.timed(self.save)

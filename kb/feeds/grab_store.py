@@ -154,7 +154,7 @@ def _stored(path: str) -> bool:
         return False
 
 
-def known(url: str) -> dict | None:
+def known(url: str, timeout: float | None = None) -> dict | None:
     """这条地址是不是已经在库里了。返回那一条或 None。
 
     返回里把**三件事各自的事实**都交出去,`done` 是它们的合:
@@ -185,8 +185,12 @@ def known(url: str) -> dict | None:
     kb.db 里、不在这张表上,所以一篇真能直接读到正文的绿泡泡文章(`classify` 不
     再按域名拒它)这里答不出「收过了」,它会在收件桶里再落一份 —— 代价和取舍写在
     `classify` 的注释里。
+
+    `timeout` 给了就**只读**地问、最多等这么久(`reg.read_db`):自己有一份总时限的调用方(扩展问
+    「这一页能做什么」,`x_article_capture.here`)用它 —— 默认那条 `reg.db()` 开库要先过写锁、
+    缺省等 30 秒,同步正写库时光读一下状态就把那一份时限吃穿了。不给就照旧。
     """
-    with reg.db() as c:
+    with (reg.db() if timeout is None else reg.read_db(timeout=timeout)) as c:
         row = c.execute('SELECT key,kind,title,author,published,path,url,body,content_kind,'
                         # `content_rev` 跟着交出去:快照要能回答「我读到的是哪一版」,
                         # 不然显式重抓那条链提交时只比得了指纹(见 `work_version`)。
