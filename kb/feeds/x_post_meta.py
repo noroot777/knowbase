@@ -83,6 +83,19 @@ def eligibility(entry: dict) -> tuple[str, str]:
     return 'unclassified_legacy', ''
 
 
+def long_read(entry: dict) -> bool:
+    """这一条推文并进过长文正文 —— 面板按文章显示它(标题、Markdown 正文),不按短观点。
+
+    判据只看 `kind`,不验指纹:认错成长文只是多显示一行派生标题,认漏了就是那篇长文的标题
+    在面板上整个不见(正文开头的配图 Markdown 原样露在列表里)。
+    """
+    try:
+        meta = json.loads(entry.get(FIELD) or '{}')
+    except (TypeError, ValueError):
+        return False
+    return isinstance(meta, dict) and meta.get('kind') == 'article'
+
+
 def same_post(stored: dict, observed: dict) -> bool:
     """Same body version of one post, whichever path derived its title.
 

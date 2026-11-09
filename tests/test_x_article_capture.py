@@ -184,6 +184,17 @@ class SaveTests(CaptureBase):
         self.assertEqual('stored', self.here(ARTICLE).json()['situation'])
         self.assertEqual([], self.web.get('/api/x-article-capture/owed').json()['items'])
 
+    def test_the_panel_shows_a_stored_article_as_an_article_not_a_short_post(self):
+        """长文入库时也记成推文(`content_kind='post'`)。面板只认 `long_read`:按短观点显示的话标题整个不见。
+        反过来钉一边:同一个账号的普通推文照旧是短观点。"""
+        self.assertEqual(200, self.save().status_code)
+        self.collect()
+        rows = {r['url']: r for r in reg.items('social', self.source['id'])['items']}
+        self.assertEqual(('post', True, '长文标题'), (rows[STATUS]['content_kind'], rows[STATUS]['long_read'],
+                                                      rows[STATUS]['title']))
+        self.assertEqual(('post', False), (rows['https://x.com/alice/status/5']['content_kind'],
+                                           rows['https://x.com/alice/status/5']['long_read']))
+
     def test_a_page_that_does_not_prove_it_is_that_article_writes_nothing(self):
         """每一种拒绝都是 409、候选原样、下一轮库里照旧没有它。"""
         before = self.candidate()['entry']

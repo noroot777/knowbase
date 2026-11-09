@@ -5,8 +5,15 @@ function sourceItemReadable(item) {
   return !item.translating && !item.fetching;
 }
 
+// 短观点:不出标题、正文按纯文本铺。X 长文入库时也记成推文(`content_kind='post'`),可它有真标题、
+// 正文是 Markdown —— 按短观点显示,标题整个不见、配图那行 `![](…)` 原样露在列表里。
+// 是不是长文由服务端答(`long_read`,判据在 `kb/feeds/x_post_meta.long_read`)。
+function sourceItemPost(item) {
+  return item.content_kind === 'post' && !item.long_read;
+}
+
 function sourceItemKind(item) {
-  return item.fetching || item.refetching ? '链接条目' : item.content_kind === 'post' ? '社交观点'
+  return item.fetching || item.refetching ? '链接条目' : sourceItemPost(item) ? '社交观点'
     : item.content_kind === 'summary' ? '订阅摘要' : '订阅正文';
 }
 
@@ -23,7 +30,7 @@ function sourceItemStatus(item) {
 
 function renderSourceEntry(item) {
   const text = sourceText(item), readable = sourceItemReadable(item);
-  const post = item.content_kind === 'post', key = esc(item.key);
+  const post = sourceItemPost(item), key = esc(item.key);
   const author = item.author || '未知作者', status = sourceItemStatus(item);
   const title = text.translating ? '外文内容，正在等翻译' : text.title;
   // 这一截摊的是**真正的正文**(短观点往往整条都在这儿),所以它能收藏
@@ -146,7 +153,7 @@ function renderSourceReader() {
   const item = sourceReaderItem;
   if (!item) return;
   const text = sourceText(item), original = sourceReaderOriginal;
-  const post = item.content_kind === 'post', author = item.author || '未知作者';
+  const post = sourceItemPost(item), author = item.author || '未知作者';
   const readable = sourceRows.filter(sourceItemReadable);
   const position = readable.findIndex(row => row.key === item.key);
   $('source-reader-avatar').textContent = author.slice(0, 1);

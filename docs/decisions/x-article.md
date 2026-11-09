@@ -142,6 +142,11 @@
     回归 `tests/test_x_article_capture.py` 的 `test_a_post_nobody_is_waiting_for_is_handed_to_the_manual_grab`、
     `..._stored_only_once_the_rest_of_the_chain_ran`、`test_another_site_with_the_same_status_tail_is_not_this_post`、
     `test_a_post_the_sync_still_holds_is_not_collected_a_second_time`。
+- **并进过长文的推文,面板按文章显示**(标题 + Markdown 正文)。入库时它照旧是 `content_kind='post'`(两条路的库里那行
+  必须一样,不改),所以面板不能凭 `content_kind` 判:「我的订阅」只认条目接口带的 `long_read`
+  (`x_post_meta.long_read`:`x_post_meta` 的 `kind == 'article'`,不验指纹 —— 认错只多一行派生标题,认漏是长文标题整个
+  不见、`![](…)` 原样露在列表里),前端只走 `source_reader.js` 的 `sourceItemPost` 那一处。没有 `x_post_meta` 的老条目
+  认不出来,照旧按短观点显示。回归 `test_the_panel_shows_a_stored_article_as_an_article_not_a_short_post`。
 - 回包结构判定和块级零件在 `x_article_shape.py`、地址识别在
   `x_article_links.py`(起点判据再往下拆进 `x_article_nest.py`),**只因为行数**。
   `API`/`PAGE_WAIT`/`BROWSER_FALLBACK`/`MAX_CHARS` 一个都没搬(它们被 `patch.object` 改过);搬过去的名字一律原样再

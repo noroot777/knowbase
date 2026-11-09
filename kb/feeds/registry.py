@@ -617,7 +617,7 @@ def items(kind: str, source_id: int | None = None, offset: int = 0, limit: int =
     # 中文"——页脚这么写而标题明明是英文,是三轮审查里同一处谎报的最后一块
     # (第 3 轮实测)。"完成"的判据前后端必须是同一个:正文有译文、而且标题
     # (只要原标题不空)也有译文。
-    from kb.feeds import fulltext, translate
+    from kb.feeds import fulltext, translate, x_post_meta
     queued, qargs = translate.queued_sql()
     holding = translate.available()
     # **正文还没补抓回来**(见 `kb.feeds.fulltext`)。它排在翻译之前,所以这一档
@@ -672,6 +672,7 @@ def items(kind: str, source_id: int | None = None, offset: int = 0, limit: int =
         d['partial'] = state == 3
         d['fetching'] = state == 4
         d['refetching'] = state == 5
+        d['long_read'] = x_post_meta.long_read(d)
         out.append(d)
     # 「译不动的有几条」**不跟搜索词走,只跟选中的订阅走**(见
     # `translate._retry_where`):它是面板上那颗重试按钮的射程说明,而按钮的
