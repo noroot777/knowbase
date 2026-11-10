@@ -14,15 +14,11 @@
 </p>
 
 ---
-<!-- 介绍片的成片、预览图和整份工程都在素材库 noroot777/materials 的 knowbase/promo 下,不进本仓库:
-     放进来的话每个 clone 都要多下二十多 MB。 -->
-<p align="center">
-  <a href="https://noroot777.github.io/materials/knowbase/promo/renders/knowbase-promo.mp4"><img src="https://raw.githubusercontent.com/noroot777/materials/main/knowbase/promo/renders/promo.webp" width="680" alt="Knowbase 43 秒介绍片" /></a>
-</p>
+<!-- 下面那条地址是 43 秒的介绍片:GitHub 只给「拖进评论框传上去的附件」出播放器,而且地址得单独占一行。
+     整份工程和成片在素材库 noroot777/materials 的 knowbase/promo 下,不进本仓库(放进来每个 clone 要多下
+     二十多 MB)。重渲之后跑那边的 tools/github_upload.sh、重传一次,把这条地址换掉。 -->
 
-<p align="center">
-  <a href="https://noroot777.github.io/materials/knowbase/promo/renders/knowbase-promo.mp4">带配乐的完整版（43 秒）</a>
-</p>
+https://github.com/user-attachments/assets/27adb3f1-2f83-4de2-95f3-dee7d6669836
 
 <p align="center">
   <img src="docs/screenshots/outline.png" width="680" />
