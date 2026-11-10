@@ -17,11 +17,11 @@
 <!-- 介绍片的成片、预览图和整份工程都在素材库 noroot777/materials 的 knowbase/promo 下,不进本仓库:
      放进来的话每个 clone 都要多下二十多 MB。 -->
 <p align="center">
-  <a href="https://github.com/noroot777/materials/blob/main/knowbase/promo/renders/knowbase-promo.mp4"><img src="https://raw.githubusercontent.com/noroot777/materials/main/knowbase/promo/renders/promo.webp" width="680" alt="Knowbase 43 秒介绍片" /></a>
+  <a href="https://noroot777.github.io/materials/knowbase/promo/renders/knowbase-promo.mp4"><img src="https://raw.githubusercontent.com/noroot777/materials/main/knowbase/promo/renders/promo.webp" width="680" alt="Knowbase 43 秒介绍片" /></a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/noroot777/materials/blob/main/knowbase/promo/renders/knowbase-promo.mp4">带配乐的完整版（43 秒）</a>
+  <a href="https://noroot777.github.io/materials/knowbase/promo/renders/knowbase-promo.mp4">带配乐的完整版（43 秒）</a>
 </p>
 
 <p align="center">
