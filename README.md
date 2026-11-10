@@ -16,9 +16,10 @@
 ---
 <!-- 下面那条地址是 43 秒的介绍片:GitHub 只给「拖进评论框传上去的附件」出播放器,而且地址得单独占一行。
      整份工程和成片在素材库 noroot777/materials 的 knowbase/promo 下,不进本仓库(放进来每个 clone 要多下
-     二十多 MB)。重渲之后跑那边的 tools/github_upload.sh、重传一次,把这条地址换掉。 -->
+     二十多 MB)。重渲之后跑那边的 tools/github_upload.sh、重传一次,把这条地址换掉。
+     没点播放之前露出来的是视频的第 0 帧(播放器没有设封面的地方),那一帧也是那个脚本换上去的。 -->
 
-https://github.com/user-attachments/assets/27adb3f1-2f83-4de2-95f3-dee7d6669836
+https://github.com/user-attachments/assets/d8942b15-747d-46f7-a225-a40cd2ae9175
 
 <p align="center">
   <img src="docs/screenshots/outline.png" width="680" />
